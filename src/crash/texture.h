@@ -10,7 +10,12 @@ typedef struct {
   uint32_t texture_id;
 } SubstTexture;
 
-SubstTexture *subst_texture_png_load(char *file_path);
+typedef struct {
+  bool use_smoothing;
+} SubstTextureOptions;
+
+SubstTexture *subst_texture_png_load(char *file_path,
+                                     SubstTextureOptions *options);
 void subst_texture_png_save(const char *file_path,
                             const unsigned char *image_data,
                             const uint32_t width, const uint32_t height);

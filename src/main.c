@@ -26,8 +26,8 @@ int main(int argc, char **argv) {
                           subst_graphics_window_clear_msc, true);
   mesche_vm_define_native(&vm, module, "window-swap-buffers",
                           subst_graphics_window_swap_buffers_msc, true);
-  mesche_vm_define_native(&vm, module, "texture-load", subst_texture_load_msc,
-                          true);
+  mesche_vm_define_native(&vm, module, "texture-load-internal",
+                          subst_texture_load_msc, true);
   mesche_vm_define_native(&vm, module, "texture-draw", subst_texture_draw_msc,
                           true);
 

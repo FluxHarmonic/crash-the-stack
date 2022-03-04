@@ -10,7 +10,8 @@
 #include "log.h"
 #include "texture.h"
 
-SubstTexture *subst_texture_png_load(char *file_path) {
+SubstTexture *subst_texture_png_load(char *file_path,
+                                     SubstTextureOptions *options) {
   FILE *png;
   int ret = 0;
   int fmt = SPNG_FMT_PNG;
@@ -60,13 +61,16 @@ SubstTexture *subst_texture_png_load(char *file_path) {
   // Create the texture in video memory
   glGenTextures(1, &texture_id);
   glBindTexture(GL_TEXTURE_2D, texture_id);
-  /* glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, */
-  /*                 GL_NEAREST); // GL_NEAREST = no smoothing */
-  /* glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST); */
-  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
-                  GL_LINEAR_MIPMAP_LINEAR);
-  glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
-                  GL_LINEAR_MIPMAP_LINEAR);
+  if (options && options->use_smoothing == false) {
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_NEAREST); // GL_NEAREST = no smoothing
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  } else {
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER,
+                    GL_LINEAR_MIPMAP_LINEAR);
+  }
 
   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, header.width, header.height, 0,
                GL_RGBA, GL_UNSIGNED_BYTE, image_bytes);
@@ -138,20 +142,14 @@ void subst_texture_png_save(const char *file_path,
   fclose(out_file);
 }
 
-Value subst_texture_func_image_load_internal(MescheMemory *mem, int arg_count,
-                                             Value *args) {
-  if (arg_count != 1) {
-    subst_log("Function requires 1 parameter.");
+Value subst_texture_load_msc(MescheMemory *mem, int arg_count, Value *args) {
+  if (arg_count != 2) {
+    subst_log("Function requires 2 parameters.");
   }
 
-  char *file_path = AS_CSTRING(args[0]);
-  SubstTexture *texture = subst_texture_png_load(file_path);
-
-  return OBJECT_VAL(mesche_object_make_pointer((VM *)mem, texture, true));
-}
-
-Value subst_texture_load_msc(MescheMemory *mem, int arg_count, Value *args) {
   ObjectString *file_path = AS_STRING(args[0]);
-  SubstTexture *texture = subst_texture_png_load(file_path->chars);
+  SubstTextureOptions options = {.use_smoothing = !IS_NIL(args[1])};
+  SubstTexture *texture = subst_texture_png_load(file_path->chars, &options);
+
   return OBJECT_VAL(mesche_object_make_pointer((VM *)mem, texture, true));
 }

@@ -127,6 +127,10 @@ SubstWindow *subst_graphics_window_create(int width, int height,
   *window->width = width;
   *window->height = height;
 
+  // Set up the default view matrix
+  glm_mat4_identity(&window->context.view_matrix);
+  /* glm_scale(&window->context.view_matrix, (vec3){1.0f, 1.0f, 1.f}); */
+
   // Set the "user pointer" of the GLFW window to our window
   glfwSetWindowUserPointer(glfwWindow, window);
 
@@ -281,6 +285,15 @@ void subst_graphics_draw_rect_fill(SubstRenderContext *context, float x,
 
   // Draw all 6 indices in the element buffer
   glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+}
+
+void subst_graphics_draw_args_init(SubstDrawArgs *args, float scale) {
+  args->shader_program = 0;
+  if (scale != 0) {
+    args->scale_x = scale;
+    args->scale_y = scale;
+    args->flags |= SubstDrawScaled;
+  }
 }
 
 void subst_graphics_draw_args_scale(SubstDrawArgs *args, float scale_x,
@@ -737,7 +750,7 @@ Value subst_texture_draw_msc(MescheMemory *mem, int arg_count, Value *args) {
   int y = AS_NUMBER(args[3]);
 
   SubstDrawArgs draw_args;
-  subst_graphics_draw_args_scale(&draw_args, 3.0, 3.0);
+  subst_graphics_draw_args_init(&draw_args, 2.0);
   subst_graphics_draw_texture_ex(&window->context, texture, x, y, &draw_args);
 
   return T_VAL;
