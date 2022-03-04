@@ -14,22 +14,18 @@ int main(int argc, char **argv) {
   mesche_vm_register_core_modules(&vm);
 
   // Register some API functions with Mesche
-  ObjectModule *module =
-      mesche_module_resolve_by_name_string(&vm, "substratic graphics");
-  mesche_vm_define_native(&vm, module, "window-create",
-                          subst_graphics_window_create_msc, true);
-  mesche_vm_define_native(&vm, module, "window-show",
-                          subst_graphics_window_show_msc, true);
-  mesche_vm_define_native(&vm, module, "window-needs-close?",
-                          subst_graphics_window_needs_close_p_msc, true);
-  mesche_vm_define_native(&vm, module, "window-clear",
-                          subst_graphics_window_clear_msc, true);
-  mesche_vm_define_native(&vm, module, "window-swap-buffers",
-                          subst_graphics_window_swap_buffers_msc, true);
-  mesche_vm_define_native(&vm, module, "texture-load-internal",
-                          subst_texture_load_msc, true);
-  mesche_vm_define_native(&vm, module, "texture-draw", subst_texture_draw_msc,
-                          true);
+  MescheNativeFuncDetails func_table[] = {
+      {"window-create", subst_graphics_window_create_msc, true},
+      {"window-create", subst_graphics_window_create_msc, true},
+      {"window-show", subst_graphics_window_show_msc, true},
+      {"window-needs-close?", subst_graphics_window_needs_close_p_msc, true},
+      {"window-clear", subst_graphics_window_clear_msc, true},
+      {"window-swap-buffers", subst_graphics_window_swap_buffers_msc, true},
+      {"texture-load-internal", subst_texture_load_msc, true},
+      {"texture-draw", subst_texture_draw_msc, true},
+      {NULL, NULL, false}};
+
+  mesche_vm_define_native_funcs(&vm, "substratic graphics", func_table);
 
   // Evaluate the init script
   mesche_vm_load_file(&vm, "src/main.msc");
