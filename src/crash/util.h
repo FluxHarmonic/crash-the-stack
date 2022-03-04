@@ -1,6 +1,8 @@
 #ifndef __subst_util_h
 #define __subst_util_h
 
+#include <stdlib.h>
+
 #include "log.h"
 
 #define PANIC(message, ...)                                                    \

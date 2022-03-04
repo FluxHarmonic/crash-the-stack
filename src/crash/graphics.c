@@ -154,6 +154,22 @@ SubstWindow *subst_graphics_window_create(int width, int height,
 void subst_graphics_window_show(SubstWindow *window) {
   if (window && window->glfwWindow) {
     glfwShowWindow(window->glfwWindow);
+
+    // TODO: Is there a more appropriate place for these?
+
+    // Set the swap interval to prevent tearing
+    glfwSwapInterval(1);
+
+    // Enable blending
+    glEnable(GL_BLEND);
+    glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
+    glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
+
+    // Enable textures
+    glEnable(GL_TEXTURE_2D);
+
+    // Enable multisampling (anti-aliasing)
+    /* glEnable(GL_MULTISAMPLE); */
   }
 }
 
@@ -380,7 +396,7 @@ void subst_graphics_draw_texture_ex(SubstRenderContext *context,
 
     glEnableVertexAttribArray(1);
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
-                          (2 * sizeof(float)));
+                          (const void *)(2 * sizeof(float)));
   } else {
     glBindVertexArray(rect_vertex_array);
   }
@@ -478,148 +494,6 @@ void subst_graphics_save_to_png(SubstWindow *window,
   // Clean up the memory
   free(image_bytes);
   free(screen_bytes);
-}
-
-void subst_graphics_render_test(SubstRenderContext *context) {
-  static SubstTexture *logo = NULL;
-  /* static SubstFont jost_font = NULL; */
-
-  static SubstDrawArgs draw_args;
-  float x, y, scale, amt = 0.f;
-
-  if (!logo) {
-    logo = subst_texture_png_load("assets/subst_icon.png");
-  }
-
-  // Load a font
-  /* if (!jost_font) { */
-  /*   char *font_name = "Jost SemiBold"; */
-  /*   char *font_path = subst_font_resolve_path(font_name); */
-  /*   subst_log("Resolved font path: %s\n", font_path); */
-  /*   if (!font_path) { */
-  /*     subst_log("Could not find a file for font: %s\n", font_name); */
-  /*   } else { */
-  /*     // Load the font and free the allocation font path */
-  /*     jost_font = subst_font_load_file(font_path, 100); */
-  /*     free(font_path); */
-  /*     font_path = NULL; */
-  /*   } */
-  /* } */
-
-  x = 100 + (sin(glfwGetTime() * 7.f) * 100.f);
-  y = 100 + (cos(glfwGetTime() * 7.f) * 100.f);
-
-  // TODO: Render some stuff
-  subst_graphics_draw_rect_fill(context, x, y, 500, 400,
-                                (vec4){1.0, 0.0, 0.0, 1.0});
-  subst_graphics_draw_rect_fill(context, 300, 300, 500, 400,
-                                (vec4){0.f, 1.f, 0.f, 0.5f});
-
-  // Apply transforms before rendering
-  amt = sin(glfwGetTime() * 5.f);
-  scale = 1.0 + amt * 0.3;
-  subst_graphics_draw_args_scale(&draw_args, scale, scale);
-  subst_graphics_draw_args_rotate(&draw_args, amt * 0.1 * 180);
-
-  // Render a texture
-  subst_graphics_draw_texture_ex(context, logo, 950, 350, &draw_args);
-
-  // Draw some text if the font got loaded
-  /* if (jost_font) { */
-  /*   subst_font_draw_text(context, jost_font, "February 3, 2022", 20, 20); */
-  /* } */
-}
-
-void subst_graphics_loop_start(SubstWindow *window, MescheRepl *repl) {
-  float amt, scale;
-  /* Scene *current_scene = NULL; */
-  SubstRenderContext *context = &window->context;
-  GLFWwindow *glfwWindow = window->glfwWindow;
-
-  // TODO: Is this the best place for this?
-  // Register a key callback for input handling
-  /* glfwSetKeyCallback(window, key_callback); */
-
-  // Initialize the viewport
-  subst_graphics_window_size_update(window, *window->width, *window->height);
-
-  // Set the swap interval to prevent tearing
-  glfwSwapInterval(1);
-
-  // Enable blending
-  glEnable(GL_BLEND);
-  glBlendEquationSeparate(GL_FUNC_ADD, GL_FUNC_ADD);
-  glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ONE, GL_ZERO);
-
-  // Enable textures
-  glEnable(GL_TEXTURE_2D);
-
-  // Enable multisampling (anti-aliasing)
-  glEnable(GL_MULTISAMPLE);
-
-  while (!glfwWindowShouldClose(glfwWindow)) {
-    // Poll for events for this frame
-    glfwPollEvents();
-
-    // Read from the REPL asynchronously
-    if (repl != NULL) {
-      mesche_repl_poll(repl);
-    }
-
-    // Clear the screen
-    glClearColor(0.0, 0.0, 0.0, 1.0);
-    glClear(GL_COLOR_BUFFER_BIT);
-
-    // Translate the scene preview to the appropriate position, factoring in the
-    // scaled size of the scene
-    float scale = 1.0f;
-    glm_mat4_identity(context->view_matrix);
-    /* glm_translate(context->view_matrix, (vec3){(*window->width / 2) - (1280
-     * / 2.f), */
-    /*                                            (*window->height / 2) - (720
-     * / 2.f), 0.f}); */
-    glm_scale(context->view_matrix, (vec3){scale, scale, 1.f});
-
-    // Draw the preview area rect
-    /* subst_graphics_draw_rect_fill(context, -1.f, -1.f, 1280 + 1.f, 720 + 1.f,
-     * (vec4) { 1.0, 1.0, 0.0, 1.0 }); */
-
-    // Should we switch to a new scene?
-    /* if (next_scene) { */
-    /*   // Resize the window to fit the scene */
-    /*   subst_graphics_window_size_set(window, next_scene->width, */
-    /*                                  next_scene->height); */
-
-    /*   // Set the current scene to be rendered */
-    /*   current_scene = next_scene; */
-    /*   next_scene = NULL; */
-    /* } */
-
-    // Render the scene
-    /* if (current_scene) { */
-    /*   subst_scene_render(context, current_scene); */
-    /* } */
-
-    // Swap the render buffers
-    glfwSwapBuffers(glfwWindow);
-
-    // Render the screen to a file if requested and the window isn't waiting for
-    // resize
-    if (output_image_path[0] != '\0' && !window->is_resizing) {
-      subst_log("Saving image to path: %s\n", output_image_path);
-      subst_graphics_save_to_png(window, output_image_path);
-      output_image_path[0] = '\0';
-    }
-
-    // If the there's no reason to keep the loop open, exit immediately
-    if (!repl) {
-      break;
-    }
-  }
-
-  subst_log("Render loop is exiting...\n");
-
-  return;
 }
 
 int subst_graphics_init() {
@@ -730,16 +604,6 @@ Value subst_graphics_func_render_to_file(MescheMemory *mem, int arg_count,
   char *file_path = AS_CSTRING(args[0]);
   subst_log("Received request to save image: %s\n", file_path);
   memcpy(output_image_path, file_path, strlen(file_path));
-}
-
-Value subst_graphics_func_graphics_scene_set(MescheMemory *mem, int arg_count,
-                                             Value *args) {
-  if (arg_count != 1) {
-    subst_log("Function requires a scene to set.");
-  }
-
-  /* ObjectPointer *scene_ptr = AS_POINTER(args[0]); */
-  /* next_scene = (Scene *)scene_ptr->ptr; */
 }
 
 Value subst_texture_draw_msc(MescheMemory *mem, int arg_count, Value *args) {
