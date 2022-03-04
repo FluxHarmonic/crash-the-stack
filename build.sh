@@ -66,6 +66,7 @@ do
 
     if [[ $input_file -nt $output_file ]]; then
         echo "Compiling $i..."
+        mkdir -p `dirname "$OUTPUT_DIR/${i}"`
         $CC -c $DEBUG_FLAGS "$SOURCE_DIR/$i" -o "$OUTPUT_DIR/${i%.c}.o" $CFLAGS
         [ $? -eq 1 ] && exit 1
     else
