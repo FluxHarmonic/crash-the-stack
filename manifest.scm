@@ -1,5 +1,5 @@
 (specifications->manifest
- '(;; C/C++
+ '( ;; C/C++
    "bash"
    "coreutils"
    "gcc-toolchain"
@@ -8,6 +8,13 @@
    "gdb"
    "cmake"
    "zlib"
+
+   ;; Command line tools
+   "git"
+   "tar"
+   "wget"
+   "gzip"
+   "openssh"
 
    ;; OpenGL and GLFW
    "mesa"
