@@ -1,14 +1,78 @@
 (define-module (crash-the-stack main)
-  (import (substratic window)
+  (import (mesche array)
+          (substratic entity)
+          (substratic window)
           (substratic texture)
-          (substratic renderer)))
+          (substratic renderer)
+          (substratic system)
+          ;; (substratic systems renderable)
+          ))
 
 (define window (window-create 1280 720 "Crash The Stack"))
 (define renderer (renderer-create window))
 (define tile-sprite (texture-load "assets/images/tile2.png" :smoothing nil))
 
+(define-record-type physical-component
+  (fields entity-id x y width height scale rotation))
+
+(define physical-component-array (make-array))
+
+(define-record-type renderable-component
+  (fields entity-id texture))
+
+(define renderable-component-array (make-array))
+
+(define (renderable-update) :export
+  ;; Render the tile!
+  ;; (display "Renderable component count: ")
+  ;; (display (array-length renderable-component-array))
+  ;; (display "\n")
+
+  (let render ((i 0))
+    (if (not (equal? i (array-length renderable-component-array)))
+        (let ((item (array-nth renderable-component-array i)))
+          (display "Rendering entity ")
+          (display (renderable-component-entity-id item))
+          (display "\n")
+          (renderer-draw-texture renderer (renderable-component-texture item) 100 100)
+          (render (+ i 1)))
+        nil)))
+
+(define renderable-system
+  (make-system :updater renderable-update)
+  :export)
+
+;; TODO: Investigate why locals have trouble being used as parameters to record constructors
+(define (make-tile x y texture)
+  (let ((texture-height texture)
+        (entity (entity-create))
+        (width (texture-width texture))
+        (height (texture-height texture))
+        (tex texture))
+    (array-push physical-component-array
+                (make-physical-component :entity-id (entity-id entity)
+                                         :x 500
+                                         :y 500
+                                         :width width
+                                         :height height))
+
+    (array-push renderable-component-array
+                (make-renderable-component :entity-id (entity-id entity)
+                                           :texture tex))
+    entity))
+
+;; Define our first entity and create some components
+(make-tile 200 200 tile-sprite)
+(make-tile 300 300 tile-sprite)
+(make-tile 400 400 tile-sprite)
+(make-tile 500 500 tile-sprite)
+(make-tile 600 600 tile-sprite)
+
 ;; Show the window
 (window-show window)
+
+(define active-systems (make-array))
+(array-push active-systems renderable-system)
 
 (define (game-loop)
   (if (window-needs-close? window)
@@ -17,8 +81,16 @@
         ;; Clear the screen
         (renderer-clear renderer 43 4 82)
 
-        ;; Render the tile!
-        (renderer-draw-texture renderer tile-sprite 100 100)
+        (let execute-systems ((i 0))
+          (if (not (equal? i (array-length active-systems)))
+              (begin
+                ;; Call this system's updater
+                ((system-updater (array-nth active-systems i)))
+                (execute-systems (+ i 1)))
+              ;; TODO: Else case should not be necessary!
+              nil))
+
+        ;; ((system-updater renderable-system))
 
         ;; Flip the buffers
         (renderer-swap-buffers renderer)
