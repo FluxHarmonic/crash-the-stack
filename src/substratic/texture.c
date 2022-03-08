@@ -142,6 +142,14 @@ void subst_texture_png_save(const char *file_path,
   fclose(out_file);
 }
 
+void subst_texture_module_init(VM *vm) {
+  mesche_vm_define_native_funcs(
+      vm, "substratic texture",
+      &(MescheNativeFuncDetails[]){
+          {"texture-load-internal", subst_texture_load_msc, true},
+          {NULL, NULL, false}});
+}
+
 Value subst_texture_load_msc(MescheMemory *mem, int arg_count, Value *args) {
   if (arg_count != 2) {
     subst_log("Function requires 2 parameters.");

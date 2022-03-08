@@ -1,8 +1,9 @@
 #include <mesche.h>
 #include <stdio.h>
 
-#include "crash/graphics.h"
-#include "crash/texture.h"
+#include "substratic/renderer.h"
+#include "substratic/texture.h"
+#include "substratic/window.h"
 
 int main(int argc, char **argv) {
   VM vm;
@@ -13,19 +14,10 @@ int main(int argc, char **argv) {
   mesche_vm_load_path_add(&vm, "./src/");
   mesche_vm_register_core_modules(&vm);
 
-  // Register some API functions with Mesche
-  MescheNativeFuncDetails func_table[] = {
-      {"window-create", subst_graphics_window_create_msc, true},
-      {"window-create", subst_graphics_window_create_msc, true},
-      {"window-show", subst_graphics_window_show_msc, true},
-      {"window-needs-close?", subst_graphics_window_needs_close_p_msc, true},
-      {"window-clear", subst_graphics_window_clear_msc, true},
-      {"window-swap-buffers", subst_graphics_window_swap_buffers_msc, true},
-      {"texture-load-internal", subst_texture_load_msc, true},
-      {"texture-draw", subst_texture_draw_msc, true},
-      {NULL, NULL, false}};
-
-  mesche_vm_define_native_funcs(&vm, "substratic graphics", func_table);
+  // Initialize Substratic modules in Mesche
+  subst_window_module_init(&vm);
+  subst_texture_module_init(&vm);
+  subst_renderer_module_init(&vm);
 
   // Evaluate the init script
   mesche_vm_load_file(&vm, "src/main.msc");

@@ -22,6 +22,7 @@ void subst_texture_png_save(const char *file_path,
 Value subst_texture_func_image_load_internal(MescheMemory *mem, int arg_count,
                                              Value *args);
 
+void subst_texture_module_init(VM *vm);
 Value subst_texture_load_msc(MescheMemory *mem, int arg_count, Value *args);
 
 #endif

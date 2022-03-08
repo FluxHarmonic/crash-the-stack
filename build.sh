@@ -43,10 +43,12 @@ cd ..
 # Build the CLI
 source_files=(
     "main.c"
-    "crash/log.c"
-    "crash/file.c"
-    "crash/graphics.c"
-    "crash/texture.c"
+    "substratic/log.c"
+    "substratic/file.c"
+    "substratic/renderer.c"
+    "substratic/shader.c"
+    "substratic/texture.c"
+    "substratic/window.c"
     "vendor/glad/src/glad.c"
     "vendor/spng/spng.c"
 )
