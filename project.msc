@@ -1,0 +1,82 @@
+(define-module (flux-harmonic crash-the-stack)
+  (import (mesche fs)
+          (mesche list)
+          (mesche string)
+          (mesche process)
+          (mesche build)))
+
+;; (config "debug"
+;;         (build-config :compiler "gcc"))
+
+;; (config "release"
+;;         (build-config :compiler "musl/bin/x86_64-linux-musl-gcc -static"))
+
+(define (git-clone repo-url local-path)
+  (process-start (string-append "git clone "
+                                repo-url
+                                " "
+                                local-path)))
+
+(define (download-url url local-path)
+  (process-start (string-append "wget "
+                                url
+                                " "
+                                " -O "
+                                local-path)))
+
+(define (unpack-tar-gz archive-path output-path)
+  (process-start (string-append "tar -zxvf "
+                                archive-path
+                                " -C "
+                                output-path)))
+
+(define (download-musl local-path)
+  (directory-create local-path)
+  (download-url "https://musl.cc/x86_64-linux-musl-native.tgz" "musl.tar.gz")
+  (unpack-tar-gz "musl.tar.gz" local-path)
+  ;; TODO: Use a library function for this
+  (process-start "rm musl.tar.gz"))
+
+(project :name "Crash The Stack"
+         :url "https://github.com/FluxHarmonic/crash-the-stack"
+         :version "0.0.1"
+         :description "A hacker-theme Mahjongg game.")
+
+(target "deps"
+        (lambda (config)
+          (directory-create "./deps")
+          (if (not (path-exists? "./deps/compiler"))
+              (git-clone "https://github.com/mesche-lang/compiler" "./deps/compiler"))
+          ;; (if (not (file-exists? "./deps/substratic"))
+          ;;     (git-clone "https://github.com/substratic/engine" "./deps/substratic"))
+          (if (not (path-exists? "./musl"))
+              (download-musl "./musl"))))
+
+;; TODO: Shell out to pkg-config instead
+(define glfw-cflags
+  "-I/gnu/store/fbwjgybdnc5rfv13iy2vjzbsx8dkc8ng-glfw-3.3.4/include -I/gnu/store/in9a705nl7k6hql7hn2f4hic2dhxk8mq-libx11-1.7.3.1/include -I/gnu/store/msb7kyg7f0bzbxp4f1s5kdiymb5gblwc-libxcb-1.14/include -I/gnu/store/9k6slxs8ynz46h85bcy3zk2mx0nn8rpf-libxau-1.0.9/include -I/gnu/store/dfzp4rhkzqqagx3djn2kcnaflz1m8446-libxdmcp-1.1.3/include -I/gnu/store/vfak5v1d0hjgq6p845r809vrf4kplsnz-xorgproto-2021.5/include")
+(define glfw-libs "-L/gnu/store/fbwjgybdnc5rfv13iy2vjzbsx8dkc8ng-glfw-3.3.4/lib -lglfw -L/gnu/store/iq8br1kmi7zd847lh6cx3p0l1hwfg64b-mesa-21.3.2/lib -lGL")
+
+(target "main"
+        (lambda (config)
+          ;; Build the Mesche compiler
+          (build-target "deps")
+          (build-project "deps/compiler/project.msc" :target "lib")
+          (build-project "src/substratic/project.msc" :target "lib")
+
+          ;; Build and link CLI source files
+          (link-program "bin/crash-the-stack"
+                        (append (compile-files (list "main.c")
+                                               :src-path "./src"
+                                               :out-path "./bin"
+                                               :c-flags (string-append  "-I ./compiler/include "
+                                                                        "-I ./src/ "
+                                                                        "-I ./src/substratic/src/spng/ "
+                                                                        "-I ./src/substratic/src/cglm/ "
+                                                                        "-I ./src/substratic/src/glad/include "
+                                                                        glfw-cflags))
+                                (list "./deps/compiler/bin/libmesche.a"
+                                      "./src/substratic/bin/libsubstratic.a"))
+                        :c-libs (string-append "-lm -ldl -lz " glfw-libs))))
+
+(target-default "main")
