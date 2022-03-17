@@ -4,7 +4,7 @@
 CC=gcc
 SOURCE_DIR=src
 OUTPUT_DIR=bin
-CFLAGS="-I ./compiler/include -I ./src/vendor/spng/ -I ./src/vendor/cglm/ -I ./src/vendor/glad/include $(pkg-config --cflags glfw3)"
+CFLAGS="-I ./compiler/include -I ./src/substratic/src/spng/ -I ./src/substratic/src/cglm/ -I ./src/substratic/src/glad/include $(pkg-config --cflags glfw3)"
 LIBS="-lm $(pkg-config --libs glfw3) $(pkg-config --libs gl) -ldl -lz"
 DEBUG_FLAGS="-O0 -g -ggdb -DDEBUG -fsanitize=address"
 
@@ -43,14 +43,14 @@ cd ..
 # Build the CLI
 source_files=(
     "main.c"
-    "substratic/log.c"
-    "substratic/file.c"
-    "substratic/renderer.c"
-    "substratic/shader.c"
-    "substratic/texture.c"
-    "substratic/window.c"
-    "vendor/glad/src/glad.c"
-    "vendor/spng/spng.c"
+    "substratic/src/log.c"
+    "substratic/src/file.c"
+    "substratic/src/renderer.c"
+    "substratic/src/shader.c"
+    "substratic/src/texture.c"
+    "substratic/src/window.c"
+    "substratic/src/glad/src/glad.c"
+    "substratic/src/spng/spng.c"
 )
 
 object_files=()
