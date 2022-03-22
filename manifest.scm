@@ -15,6 +15,7 @@
    "wget"
    "gzip"
    "openssh"
+   "nss-certs"
 
    ;; OpenGL and GLFW
    "mesa"
