@@ -1,16 +1,16 @@
 #include <mesche.h>
 #include <stdio.h>
 
-#include "substratic/src/renderer.h"
-#include "substratic/src/texture.h"
-#include "substratic/src/window.h"
+#include "engine/src/renderer.h"
+#include "engine/src/texture.h"
+#include "engine/src/window.h"
 
 int main(int argc, char **argv) {
   VM vm;
   mesche_vm_init(&vm, argc, argv);
 
   // Set up load paths and load core modules
-  mesche_vm_load_path_add(&vm, "./src/substratic/modules");
+  mesche_vm_load_path_add(&vm, "./deps/substratic/engine/modules");
   mesche_vm_register_core_modules(&vm);
 
   // Initialize Substratic modules in Mesche

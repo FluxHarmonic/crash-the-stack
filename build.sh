@@ -2,9 +2,9 @@
 
 #CC="musl/bin/x86_64-linux-musl-gcc -static"
 CC=gcc
-SOURCE_DIR=src
+SOURCE_DIR=./
 OUTPUT_DIR=bin
-CFLAGS="-I ./compiler/include -I ./src/substratic/src/spng/ -I ./src/substratic/src/cglm/ -I ./src/substratic/src/glad/include $(pkg-config --cflags glfw3)"
+CFLAGS="-I ./compiler/include -I ./deps/substratic/ -I ./deps/substratic/engine/src/spng/ -I ./deps/substratic/engine/src/cglm/ -I ./deps/substratic/engine/src/glad/include $(pkg-config --cflags glfw3)"
 LIBS="-lm $(pkg-config --libs glfw3) $(pkg-config --libs gl) -ldl -lz"
 DEBUG_FLAGS="-O0 -g -ggdb -DDEBUG -fsanitize=address"
 
@@ -14,6 +14,13 @@ DEBUG_FLAGS="-O0 -g -ggdb -DDEBUG -fsanitize=address"
 if [ ! -d "./compiler" ]; then
   echo -e "Cloning Mesche Compiler repo...\n"
   git clone https://github.com/mesche-lang/compiler compiler
+fi
+
+# Ensure that the compiler library is cloned
+if [ ! -d "./deps/substratic/engine" ]; then
+  echo -e "Cloning Substratic Engine repo...\n"
+  mkdir -p ./deps/substratic
+  git clone https://github.com/substratic/engine ./deps/substratic/engine
 fi
 
 # Also pull down musl-c
@@ -42,15 +49,15 @@ cd ..
 
 # Build the CLI
 source_files=(
-    "main.c"
-    "substratic/src/log.c"
-    "substratic/src/file.c"
-    "substratic/src/renderer.c"
-    "substratic/src/shader.c"
-    "substratic/src/texture.c"
-    "substratic/src/window.c"
-    "substratic/src/glad/src/glad.c"
-    "substratic/src/spng/spng.c"
+    "src/main.c"
+    "deps/substratic/engine/src/log.c"
+    "deps/substratic/engine/src/file.c"
+    "deps/substratic/engine/src/renderer.c"
+    "deps/substratic/engine/src/shader.c"
+    "deps/substratic/engine/src/texture.c"
+    "deps/substratic/engine/src/window.c"
+    "deps/substratic/engine/src/glad/src/glad.c"
+    "deps/substratic/engine/src/spng/spng.c"
 )
 
 object_files=()
