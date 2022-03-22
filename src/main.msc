@@ -1,6 +1,7 @@
 (define-module (crash-the-stack main)
   (import (mesche array)
           (mesche math)
+          (mesche list)
           (substratic window)
           (substratic texture)
           (substratic renderer)))
@@ -63,31 +64,126 @@
                                           :centered t)
             (render (+ i 1)))))))
 
+(define (array-find-free-index array)
+  (let next-index ((index (rand-int (array-length array))))
+    ;; Check if the index is free
+    (let ((at-index (array-nth array index)))
+      (if at-index
+          (next-index (rand-int (array-length array)))
+          index))))
+
+(define (randomize-faces tile-count num-faces)
+  (let next-face ((face-array (make-array tile-count))
+                  (remaining-count (/ tile-count 2)))
+    (if (> remaining-count 0)
+        ;; Pick one face, place it at two random indices
+        (let ((face (rand-int num-faces)))
+          (array-nth-set! face-array (array-find-free-index face-array) face)
+          (array-nth-set! face-array (array-find-free-index face-array) face)
+          (next-face face-array (- remaining-count 1)))
+        face-array)))
+
+(define (make-stack tile-positions num-faces)
+  (let next-tile ((tile-array (make-array))
+                  (tiles tile-positions)
+                  (faces (randomize-faces 20 num-faces))
+                  (face-index 0))
+    (if (pair? tiles)
+        (begin
+          (array-push tile-array
+                      (make-tile :x (car (car tiles))
+                                 :y (car (cdr (car tiles)))
+                                 :layer (car (cdr (cdr (car tiles))))
+                                 :face (array-nth faces face-index)))
+          (next-tile tile-array (cdr tiles) faces (+ face-index 1)))
+        tile-array)))
+
 ;; Define our first entity and create some components
-(define tiles (make-array))
-(array-push tiles (make-tile :x  1.5 :y -1.5 :face 0 :layer 0))
-(array-push tiles (make-tile :x  0.5 :y -1.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -0.5 :y -1.5 :face 2 :layer 0))
-(array-push tiles (make-tile :x -1.5 :y -1.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  1.5 :y -0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  0.5 :y -0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -0.5 :y -0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -1.5 :y -0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  1.5 :y 0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  0.5 :y 0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -0.5 :y 0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -1.5 :y 0.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  1.5 :y 1.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x  0.5 :y 1.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -0.5 :y 1.5 :face 1 :layer 0))
-(array-push tiles (make-tile :x -1.5 :y 1.5 :face 1 :layer 0))
+(define tile-positions
+  '((1.5 -1.5 0)
+    (0.5 -1.5 0)
+    (-0.5 -1.5 0)
+    (-1.5 -1.5 0)
+    (1.5 -0.5 0)
+    (0.5 -0.5 0)
+    (-0.5 -0.5 0)
+    (-1.5 -0.5 0)
+    (1.5 0.5 0)
+    (0.5 0.5 0)
+    (-0.5 0.5 0)
+    (-1.5 0.5 0)
+    (1.5 1.5 0)
+    (0.5 1.5 0)
+    (-0.5 1.5 0)
+    (-1.5 1.5 0)
 
-(array-push tiles (make-tile :x  0.5 :y -0.5 :face 1 :layer 1))
-(array-push tiles (make-tile :x -0.5 :y -0.5 :face 1 :layer 1))
-(array-push tiles (make-tile :x  0.5 :y 0.5 :face 1 :layer 1))
-(array-push tiles (make-tile :x -0.5 :y 0.5 :face 1 :layer 1))
+    (0.5 -0.5 1)
+    (-0.5 -0.5 1)
+    (0.5 0.5 1)
+    (-0.5 0.5 1)))
 
-(array-push tiles (make-tile :x 0 :y 0 :face 1 :layer 2))
+(define tiles (make-stack tile-positions 3))
+
+(define (tile-nth tile-array tile-index)
+  (if (and (> tile-index 0)
+           (< tile-index (array-length tile-array)))
+      (array-nth tile-array tile-index)))
+
+;; To look left:
+;; - Keep looking at indices before the current index to check for a specific position
+;; - For example, at position (-1, 0), keep looping left until we find (-2, 0) or not
+
+;; Alejandro's idea:
+;; - Store nested lists, for each layer, nest a list of tiles (columns) for each row
+;; - The first row will give you the y position of the row
+;; - The left-most row element will automatically be free
+
+(define (tile-playable? tile-array tile-index)
+  (let ((left-tile (tile-nth tile-array (- tile-index 1)))
+        (right-tile (tile-nth tile-array (- tile-index 1))))
+    t))
+
+(define (build-tile-lists tile-array)
+  (let next-tile ((tile-index 0)
+                  (layers '())
+                  (layer '())
+                  (layer-index 0)
+                  (row '()))
+    (if (< tile-index (array-length tile-array))
+        (let ((tile (array-nth tile-array tile-index)))
+          ;; Compare against the previous tile's x/y position and layer
+          (set! row (cons tile row))
+          (display row)
+          (display "\n")
+          (next-tile (+ tile-index 1)
+                     layers
+                     layer
+                     layer-index
+                     row))
+        layers)))
+
+(define (calculate-playable-tiles tile-array)
+  (let next-tile ((tile-index 0)
+                  (playable '()))
+    (if (< tile-index (array-length tile-array))
+        (next-tile (+ tile-index 1) (cons tile-index playable))
+        playable)))
+
+;; (display "PLAYABLE TILES: ")
+;; (display (calculate-playable-tiles tiles))
+(build-tile-lists tiles)
+(display "\n")
+
+;; (array-push tiles (make-tile :x 0 :y 0 :face 1 :layer 2))
+
+;; Create an array of the same length as the tiles array
+;; Generate length / 2 entries for a random tile face index
+;; Randomize the tile list
+;; When creating tiles, just pick the frontmost or first remainign tile
+
+(display "TILE COUNT: ")
+(display (array-length tiles))
+(display "\n")
 
 ;; Show the window
 (window-show window)
