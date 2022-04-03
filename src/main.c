@@ -17,20 +17,20 @@ int main(int argc, char **argv) {
   char *program_dir = mesche_fs_file_directory(strdup(program_path));
 
   // Add the main modules path
-  char *tmp_path = mesche_cstring_join(program_dir, strlen(program_dir),
 #ifdef DEV_BUILD
-                                       "/../../modules", 14,
+  char *tmp_path = mesche_cstring_join(program_dir, strlen(program_dir),
+                                       "/../../modules", 14, NULL);
+  char *modules_path = mesche_fs_resolve_path(tmp_path);
 #else
-                                       "/modules", 8,
+  char *tmp_path = mesche_cstring_join(program_dir, strlen(program_dir),
+                                       "/modules", 8, NULL);
+  char *modules_path = strdup(tmp_path);
 #endif
-                                       NULL);
 
   printf("Tmp path: %s\n", tmp_path);
-
-  // Register the main module path
-  char *modules_path = mesche_fs_resolve_path(tmp_path);
   printf("Module path: %s\n", modules_path);
 
+  // Register the main module path
   free(tmp_path);
   mesche_vm_load_path_add(&vm, modules_path);
 
@@ -38,6 +38,7 @@ int main(int argc, char **argv) {
   tmp_path = mesche_cstring_join(modules_path, strlen(modules_path),
                                  "/main.msc", 9, NULL);
   char *main_file_path = mesche_fs_resolve_path(tmp_path);
+  free(tmp_path);
 
   // Add the Substratic module path for dev builds
 #ifdef DEV_BUILD
@@ -48,6 +49,7 @@ int main(int argc, char **argv) {
   char *subst_modules_path = mesche_fs_resolve_path(tmp_path);
   mesche_vm_load_path_add(&vm, subst_modules_path);
   free(subst_modules_path);
+  free(tmp_path);
 #endif
 
   // Register core Mesche modules
@@ -63,7 +65,6 @@ int main(int argc, char **argv) {
   mesche_vm_free(&vm);
 
   // Free temporary strings
-  free(tmp_path);
   free(main_file_path);
   free(modules_path);
   free(program_dir);
