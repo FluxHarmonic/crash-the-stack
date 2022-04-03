@@ -35,10 +35,8 @@ int main(int argc, char **argv) {
   mesche_vm_load_path_add(&vm, modules_path);
 
   // Resolve the main file path
-  tmp_path = mesche_cstring_join(modules_path, strlen(modules_path),
-                                 "/main.msc", 9, NULL);
-  char *main_file_path = mesche_fs_resolve_path(tmp_path);
-  free(tmp_path);
+  char *main_file_path = mesche_cstring_join(modules_path, strlen(modules_path),
+                                             "/main.msc", 9, NULL);
 
   // Add the Substratic module path for dev builds
 #ifdef DEV_BUILD
