@@ -6,6 +6,10 @@ int main(int argc, char **argv) {
   VM vm;
   mesche_vm_init(&vm, argc, argv);
 
+#ifdef DEV_BUILD
+  printf("DEV BUILD\n");
+#endif
+
   // Set up the compiler's load path relative to the program path
   char cwd[500];
   char *program_path = mesche_process_executable_path();
