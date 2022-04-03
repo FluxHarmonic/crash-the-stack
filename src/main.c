@@ -25,6 +25,8 @@ int main(int argc, char **argv) {
 #endif
                                        NULL);
 
+  printf("Tmp path: %s\n", tmp_path);
+
   // Register the main module path
   char *modules_path = mesche_fs_resolve_path(tmp_path);
   printf("Module path: %s\n", modules_path);
