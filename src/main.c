@@ -9,6 +9,7 @@ int main(int argc, char **argv) {
   // Set up the compiler's load path relative to the program path
   char cwd[500];
   char *program_path = mesche_process_executable_path();
+  printf("Program path: %s\n", program_path);
   char *program_dir = mesche_fs_file_directory(strdup(program_path));
 
   // Add the main modules path
