@@ -1,0 +1,242 @@
+;;; (crash stack rules) - Mahjongg solitaire, the rules and nothing else.
+;;;
+;;; A board is a snapshot: which slots of a layout still hold a tile, which
+;;; face each tile shows, an occlusion grid that answers "what tile sits at
+;;; this cell" in one lookup, the selected tile, and a history of earlier
+;;; snapshots for undo. Boards are immutable by convention: every operation
+;;; copies and returns a new board, the way blackICE's rules do, so undo is a
+;;; pop and a bad move can never half-apply.
+;;;
+;;; The one rule of the game (GNOME Mahjongg's create_tiles, in half-units):
+;;; a tile is PLAYABLE when it is free on its left or on its right (no tile on
+;;; the same layer two half-units over, within one half-unit up or down) AND
+;;; nothing covers it (no tile on any higher layer within one half-unit in
+;;; either direction). Two playable tiles with the same face MATCH and leave
+;;; the board together.
+;;;
+;;; board-select is the only entry point the input layer uses: every click,
+;;; cursor, coordinate or glyph key ends there. Faces are integers 0..35;
+;;; #f is a blank face, which only the generator sees.
+;;;
+;;; No rendering, windowing or platform import may appear here; the gate
+;;; test/test-imports.sgl asserts it.
+
+(define-library (crash stack rules)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math)
+          (crash stack layout))
+
+  (export board board?
+          board-layout board-faces board-present board-occ
+          board-selected board-history board-solution board-rng
+          board-new board-copy
+          tile-present? tile-face tile-count
+          board-tile-count board-cleared?
+          blocked-left? blocked-right? covered? playable?
+          playable-slots faces-match? legal-matches
+          board-select board-remove-pair board-undo
+          board-canonical board-equal?
+          snapshot
+          ;; Field setters, for the generator working on its own private copy.
+          ;; Everything else treats a board as immutable.
+          set-board-faces! set-board-selected! set-board-history!
+          set-board-solution! set-board-rng!)
+
+  (begin
+    (define-struct board
+      (layout default: #f)
+      (faces default: (vector) mutable: #t)     ; slot -> 0..35, or #f (blank)
+      (present default: (vector) mutable: #t)   ; slot -> #t while the tile is on the board
+      (occ default: (vector) mutable: #t)       ; cell -> slot or #f; see layout-cell-index
+      (selected default: #f mutable: #t)        ; slot or #f
+      (history default: '() mutable: #t)        ; earlier snapshots, newest first
+      (solution default: '() mutable: #t)       ; ((a . b) ...) in removal order
+      (rng default: 1 mutable: #t))             ; prng state carried for shuffles
+
+    ;; --- construction --------------------------------------------------------
+
+    ;; The occlusion grid derived from present: the thing playable? reads.
+    (define (build-occ lay present)
+      (let ((occ (make-vector (layout-cell-count lay) #f)))
+        (let loop ((id 0))
+          (when (< id (layout-slot-count lay))
+            (when (vector-ref present id)
+              (let ((s (layout-slot lay id)))
+                (vector-set! occ (layout-cell-index lay (slot-layer s) (slot-hx s) (slot-hy s))
+                             id)))
+            (loop (+ id 1))))
+        occ))
+
+    ;; A full board over a layout with the given faces vector (one entry per
+    ;; slot). present may be given to start from a partial board.
+    (define (board-new lay faces . rest)
+      (let ((present (if (null? rest)
+                         (make-vector (layout-slot-count lay) #t)
+                         (car rest))))
+        (board layout: lay
+               faces: faces
+               present: present
+               occ: (build-occ lay present))))
+
+    (define (board-copy b)
+      (board layout: (board-layout b)
+             faces: (vector-copy (board-faces b))
+             present: (vector-copy (board-present b))
+             occ: (vector-copy (board-occ b))
+             selected: (board-selected b)
+             history: (board-history b)
+             solution: (board-solution b)
+             rng: (board-rng b)))
+
+    ;; A copy with no history of its own, for the history stack.
+    (define (snapshot b)
+      (let ((s (board-copy b)))
+        (set-board-history! s '())
+        s))
+
+    ;; --- queries -------------------------------------------------------------
+
+    (define (tile-present? b id)
+      (vector-ref (board-present b) id))
+
+    (define (tile-face b id)
+      (vector-ref (board-faces b) id))
+
+    (define (tile-count b)
+      (let ((present (board-present b)))
+        (let loop ((id 0) (n 0))
+          (if (= id (vector-length present))
+              n
+              (loop (+ id 1) (if (vector-ref present id) (+ n 1) n))))))
+
+    (define board-tile-count tile-count)
+
+    (define (board-cleared? b)
+      (= 0 (tile-count b)))
+
+    ;; The slot at a cell, or #f when the cell is empty or off the grid.
+    (define (occ-ref b layer hx hy)
+      (let ((i (layout-cell-index (board-layout b) layer hx hy)))
+        (and i (vector-ref (board-occ b) i))))
+
+    ;; Is any of these grid cells occupied? The cell lists come from the
+    ;; layout's precomputed neighbourhoods (crash stack layout), so each
+    ;; question is a handful of vector-refs on the live occlusion grid.
+    (define (any-occupied? b cells)
+      (let ((occ (board-occ b)))
+        (let loop ((cells cells))
+          (cond ((null? cells) #f)
+                ((vector-ref occ (car cells)) #t)
+                (else (loop (cdr cells)))))))
+
+    (define (neighbourhood-for b id)
+      (layout-neighbourhood (board-layout b) id))
+
+    ;; A tile two half-units to the side on the same layer, overlapping this
+    ;; tile's vertical extent, blocks that side.
+    (define (blocked-left? b id)
+      (any-occupied? b (neighbourhood-left (neighbourhood-for b id))))
+
+    (define (blocked-right? b id)
+      (any-occupied? b (neighbourhood-right (neighbourhood-for b id))))
+
+    ;; Any tile on any higher layer within one half-unit of this tile's centre
+    ;; covers it. GNOME checks every layer above, not only the next one, and so
+    ;; does this; the 2020 stack.scm checked layer+1 only. Both agree on
+    ;; every well-formed layout.
+    (define (covered? b id)
+      (any-occupied? b (neighbourhood-above (neighbourhood-for b id))))
+
+    (define (playable? b id)
+      (and (tile-present? b id)
+           (not (and (blocked-left? b id) (blocked-right? b id)))
+           (not (covered? b id))))
+
+    ;; Ascending slot ids of every playable tile.
+    (define (playable-slots b)
+      (let loop ((id (- (layout-slot-count (board-layout b)) 1)) (acc '()))
+        (if (< id 0)
+            acc
+            (loop (- id 1) (if (playable? b id) (cons id acc) acc)))))
+
+    (define (faces-match? b a c)
+      (let ((fa (tile-face b a)) (fc (tile-face b c)))
+        (and fa fc (= fa fc))))
+
+    ;; Every pair (a . c), a < c, of playable tiles with the same face.
+    (define (legal-matches b)
+      (let loop ((slots (playable-slots b)) (acc '()))
+        (if (null? slots)
+            (reverse acc)
+            (loop (cdr slots)
+                  (fold (lambda (acc c)
+                          (if (faces-match? b (car slots) c)
+                              (cons (cons (car slots) c) acc)
+                              acc))
+                        acc
+                        (cdr slots))))))
+
+    ;; --- moves ---------------------------------------------------------------
+
+    ;; Remove two tiles, no questions asked, and push the old board onto the
+    ;; history. This is the primitive; it does NOT check that the pair is a
+    ;; legal match. Callers are board-select, which checks, and the generator,
+    ;; which is constructing legality. Anything else should go through
+    ;; board-select.
+    (define (board-remove-pair b a c)
+      (let ((nx (board-copy b))
+            (lay (board-layout b)))
+        (for-each (lambda (id)
+                    (let ((s (layout-slot lay id)))
+                      (vector-set! (board-present nx) id #f)
+                      (vector-set! (board-occ nx)
+                                   (layout-cell-index lay (slot-layer s) (slot-hx s) (slot-hy s))
+                                   #f)))
+                  (list a c))
+        (set-board-selected! nx #f)
+        (set-board-history! nx (cons (snapshot b) (board-history b)))
+        nx))
+
+    (define (with-selected b id)
+      (let ((nx (board-copy b)))
+        (set-board-selected! nx id)
+        nx))
+
+    ;; The entry point. Picking a tile that is not playable changes nothing.
+    ;; Otherwise: nothing selected -> select it; the selected tile again ->
+    ;; deselect; a matching tile -> both leave; any other tile -> it becomes
+    ;; the selection (the mismatch shake is P1's).
+    (define (board-select b id)
+      (let ((sel (board-selected b)))
+        (cond ((not (playable? b id)) b)
+              ((not sel) (with-selected b id))
+              ((= sel id) (with-selected b #f))
+              ((faces-match? b sel id) (board-remove-pair b sel id))
+              (else (with-selected b id)))))
+
+    ;; Back to the previous snapshot; selection cleared. A board with no
+    ;; history is returned as it is.
+    (define (board-undo b)
+      (let ((h (board-history b)))
+        (if (null? h)
+            b
+            (let ((prev (board-copy (car h))))
+              (set-board-history! prev (cdr h))
+              (set-board-selected! prev #f)
+              prev))))
+
+    ;; --- structural equality -------------------------------------------------
+
+    ;; equal? on two structs is identity in Sigil, so the gates compare this:
+    ;; a plain datum of everything that makes two boards the same position.
+    ;; History and rng are deliberately left out; solution too (it is the
+    ;; generator's record, not part of the position).
+    (define (board-canonical b)
+      (list (vector->list (board-present b))
+            (vector->list (board-faces b))
+            (vector->list (board-occ b))
+            (board-selected b)))
+
+    (define (board-equal? a b)
+      (equal? (board-canonical a) (board-canonical b)))))

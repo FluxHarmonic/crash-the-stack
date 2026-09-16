@@ -1,0 +1,202 @@
+;;; (crash stack generate) - Boards that can always be cleared.
+;;;
+;;; GNOME Mahjongg's choose_tile_pairs, which is why GNOME boards never
+;;; dead-end unless you make a bad choice: start from a full board of blank
+;;; tiles, repeatedly pick a random pair of playable tiles and take them off,
+;;; and when nothing is left assign faces to the pairs in the order they were
+;;; taken. Playing that order back clears the board, so it is recorded as the
+;;; board's solution. When a branch runs out of pairs the generator puts the
+;;; last pair back and tries the next one (the backtrack, which sabotage S1
+;;; removes). If every pair at the top fails, the layout cannot be cleared
+;;; under any face assignment and generate answers #f rather than emitting
+;;; an unsolvable board; GNOME assigns faces anyway in that case, we refuse.
+;;;
+;;; Faces: with n slots there are n/2 pairs and pair i gets face i mod 36,
+;;; shuffled, so the Turtle's 72 pairs are 36 faces four tiles each. reshuffle
+;;; runs the same search over the tiles still on a board with the faces they
+;;; still carry (every face count is even, because pairs leave together).
+;;;
+;;; The random stream is the board's own MINSTD state (crash stack prng);
+;;; one seed, one board, on every machine and every Sigil.
+
+(define-library (crash stack generate)
+  (import (sigil core)
+          (sigil struct)
+          (crash stack layout)
+          (crash stack rules)
+          (crash stack prng))
+
+  (export generate generate/stats reshuffle FACE-COUNT
+          replay-solution)
+
+  (begin
+    (define FACE-COUNT 36)
+
+    ;; Fisher-Yates over a vector, consuming the prng. Returns the new state.
+    (define (shuffle! vec rng)
+      (let loop ((i 0) (rng rng))
+        (if (>= i (- (vector-length vec) 1))
+            rng
+            (let* ((rng (prng-next rng))
+                   (j (+ i (prng-index rng (- (vector-length vec) i))))
+                   (tmp (vector-ref vec i)))
+              (vector-set! vec i (vector-ref vec j))
+              (vector-set! vec j tmp)
+              (loop (+ i 1) rng)))))
+
+    ;; Every unordered pair of playable tiles as a vector of (a . c).
+    (define (playable-pairs b)
+      (let loop ((slots (playable-slots b)) (acc '()))
+        (if (null? slots)
+            (list->vector (reverse acc))
+            (loop (cdr slots)
+                  (fold (lambda (acc c) (cons (cons (car slots) c) acc))
+                        acc
+                        (cdr slots))))))
+
+    ;; The search. Works on one private mutable board so a backtrack is two
+    ;; vector-set!s, and hands a fresh immutable board back.
+    ;; face-list: the faces to hand out, one per pair, in search order.
+    ;; Returns (cons board-or-#f backtracks).
+    (define (search start face-list rng)
+      (let* ((work (board-copy start))
+             (lay (board-layout work))
+             (present (board-present work))
+             (occ (board-occ work))
+             (faces (board-faces work))
+             (rng rng)
+             (backtracks 0)
+             (solution '()))
+        (define (cell id)
+          (let ((s (layout-slot lay id)))
+            (layout-cell-index lay (slot-layer s) (slot-hx s) (slot-hy s))))
+        (define (set-tile! id on?)
+          (vector-set! present id on?)
+          (vector-set! occ (cell id) (and on? id)))
+        (define (choose faces-left)
+          (if (null? faces-left)
+              #t
+              (let* ((pairs (playable-pairs work))
+                     (n (vector-length pairs)))
+                (if (= n 0)
+                    #f
+                    (begin
+                      (set! rng (prng-next rng))
+                      (let ((start (prng-index rng n)))
+                        (let loop ((i 0))
+                          (if (= i n)
+                              #f
+                              (let* ((pair (vector-ref pairs (modulo (+ start i) n)))
+                                     (a (car pair))
+                                     (c (cdr pair)))
+                                (set-tile! a #f)
+                                (set-tile! c #f)
+                                (if (choose (cdr faces-left))
+                                    (begin
+                                      (set-tile! a #t)
+                                      (set-tile! c #t)
+                                      (vector-set! faces a (car faces-left))
+                                      (vector-set! faces c (car faces-left))
+                                      (set! solution (cons pair solution))
+                                      #t)
+                                    (begin
+                                      (set-tile! a #t)
+                                      (set-tile! c #t)
+                                      (set! backtracks (+ backtracks 1))
+                                      (loop (+ i 1)))))))))))))
+        (if (choose face-list)
+            (begin
+              (set-board-selected! work #f)
+              (set-board-solution! work solution)
+              (set-board-rng! work rng)
+              (cons work backtracks))
+            (cons #f backtracks))))
+
+    ;; n / 2 for an even n, without reaching for division.
+    (define (half n)
+      (let loop ((k 0) (n n))
+        (if (< n 2) k (loop (+ k 1) (- n 2)))))
+
+    ;; Pair i of n gets face (i mod 36); shuffled by the prng.
+    (define (dealt-faces pair-count rng)
+      (let ((v (make-vector pair-count 0)))
+        (let loop ((i 0))
+          (when (< i pair-count)
+            (vector-set! v i (modulo i FACE-COUNT))
+            (loop (+ i 1))))
+        (let ((rng (shuffle! v rng)))
+          (cons (vector->list v) rng))))
+
+    ;; A solvable board over the layout for this seed, with the number of
+    ;; backtracks the search needed; (cons #f backtracks) when the layout
+    ;; cannot be cleared. An odd slot count cannot be paired and is refused.
+    (define (generate/stats lay seed)
+      (let ((n (layout-slot-count lay)))
+        (if (odd? n)
+            (cons #f 0)
+            (let* ((rng (prng-seed seed))
+                   (dealt (dealt-faces (half n) rng))
+                   (blank (board-new lay (make-vector n #f))))
+              (set-board-rng! blank (cdr dealt))
+              (search blank (car dealt) (cdr dealt))))))
+
+    (define (generate lay seed)
+      (car (generate/stats lay seed)))
+
+    ;; Shuffle the tiles still on the board into a clearable arrangement:
+    ;; count the remaining faces, hand out each face count/2 times, and search
+    ;; again over the present tiles. Pushes the old board onto history, so
+    ;; undo takes the shuffle back. When the remaining tiles cannot be cleared
+    ;; under any assignment, the board comes back unchanged.
+    (define (reshuffle b)
+      (let* ((n (layout-slot-count (board-layout b)))
+             (counts (make-vector FACE-COUNT 0)))
+        (let loop ((id 0))
+          (when (< id n)
+            (when (tile-present? b id)
+              (let ((f (tile-face b id)))
+                (vector-set! counts f (+ 1 (vector-ref counts f)))))
+            (loop (+ id 1))))
+        (let ((faces (let loop ((f (- FACE-COUNT 1)) (acc '()))
+                       (if (< f 0)
+                           acc
+                           (loop (- f 1)
+                                 (let rep ((k (half (vector-ref counts f))) (acc acc))
+                                   (if (<= k 0) acc (rep (- k 1) (cons f acc)))))))))
+          (let* ((v (list->vector faces))
+                 (rng (shuffle! v (prng-next (board-rng b))))
+                 (blank (board-copy b)))
+            ;; Blank only the tiles still on the board; a removed tile keeps its
+            ;; face so the position stays comparable.
+            (let loop ((id 0))
+              (when (< id n)
+                (when (tile-present? b id) (vector-set! (board-faces blank) id #f))
+                (loop (+ id 1))))
+            (set-board-history! blank '())
+            (let ((result (car (search blank (vector->list v) rng))))
+              (if result
+                  (begin
+                    (set-board-history! result (cons (snapshot b) (board-history b)))
+                    result)
+                  b))))))
+
+    ;; Play a recorded solution back through board-select, the same door the
+    ;; player uses. Answers #t when every pair was a legal match at its turn
+    ;; and the board is empty at the end; otherwise the 1-based index of the
+    ;; first pair that was not, or 'not-cleared if all pairs passed but tiles
+    ;; remain.
+    (define (replay-solution b pairs)
+      (let loop ((pairs pairs) (b b) (i 1))
+        (cond ((null? pairs)
+               (if (board-cleared? b) #t 'not-cleared))
+              (else
+               (let* ((a (car (car pairs)))
+                      (c (cdr (car pairs)))
+                      (after (board-select (board-select b a) c)))
+                 (if (and (tile-present? b a) (tile-present? b c)
+                          (playable? b a) (playable? b c)
+                          (faces-match? b a c)
+                          (not (tile-present? after a))
+                          (not (tile-present? after c)))
+                     (loop (cdr pairs) after (+ i 1))
+                     i))))))))

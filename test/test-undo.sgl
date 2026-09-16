@@ -1,0 +1,85 @@
+;;; Gate leg 3 - undo restores the whole position.
+;;;
+;;; From a generated board, twenty legal matches then twenty undos; the result
+;;; is structurally equal to the original, and the occlusion grid is compared
+;;; on its own so a partial restore names the grid.
+
+(import (sigil test)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack generate)
+        (crash stack turtle))
+
+(define (play-solution b n)
+  (let loop ((pairs (board-solution b)) (b b) (i 0))
+    (if (or (= i n) (null? pairs))
+        b
+        (loop (cdr pairs)
+              (board-select (board-select b (car (car pairs))) (cdr (car pairs)))
+              (+ i 1)))))
+
+(define (undo-n b n)
+  (if (= n 0) b (undo-n (board-undo b) (- n 1))))
+
+(test-group "undo: twenty matches, twenty undos"
+  (let* ((original (generate (turtle-layout) 7))
+         (played (play-solution original 20))
+         (restored (undo-n played 20)))
+    (test "twenty matches removed forty tiles"
+      (assert-equal 104 (board-tile-count played)))
+    (test "history is twenty deep"
+      (assert-equal 20 (length (board-history played))))
+    (test "tiles are back"
+      (assert-equal (vector->list (board-present original))
+                    (vector->list (board-present restored))))
+    (test "faces are unchanged"
+      (assert-equal (vector->list (board-faces original))
+                    (vector->list (board-faces restored))))
+    (test "the occlusion grid is back, cell for cell"
+      (assert-equal (vector->list (board-occ original))
+                    (vector->list (board-occ restored))))
+    (test "playable set is back"
+      (assert-equal (playable-slots original) (playable-slots restored)))
+    (test "structurally equal to the original"
+      (assert-true (board-equal? original restored)))
+    (test "history is empty again"
+      (assert-equal '() (board-history restored)))
+    (test "undo on an empty history is the identity"
+      (assert-true (board-equal? restored (board-undo restored))))))
+
+(test-group "undo: selection and shuffle"
+  (let* ((b (generate (turtle-layout) 7))
+         (pair (car (board-solution b)))
+         (selected (board-select b (car pair))))
+    (test "selecting does not push history"
+      (assert-equal 0 (length (board-history selected))))
+    (test "undo after a match clears the selection"
+      (assert-false (board-selected (board-undo (board-select selected (cdr pair))))))
+    (test "shuffle pushes history and undo takes it back"
+      (let ((shuffled (reshuffle b)))
+        (assert-equal 1 (length (board-history shuffled)))
+        (assert-true (board-equal? b (board-undo shuffled)))))
+    (test "shuffle keeps the tile set and the face multiset"
+      (let ((shuffled (reshuffle b)))
+        (assert-equal (vector->list (board-present b)) (vector->list (board-present shuffled)))
+        (assert-equal (vector->list (board-occ b)) (vector->list (board-occ shuffled)))
+        (let ((count (lambda (bb)
+                       (let ((v (make-vector FACE-COUNT 0)))
+                         (vector-for-each (lambda (f) (vector-set! v f (+ 1 (vector-ref v f))))
+                                          (board-faces bb))
+                         (vector->list v)))))
+          (assert-equal (count b) (count shuffled)))))
+    (test "shuffle's new solution replays"
+      (let ((shuffled (reshuffle (play-solution b 10))))
+        (assert-equal #t (replay-solution shuffled (board-solution shuffled)))))
+    (test "shuffle on a partial board keeps the removed tiles' faces"
+      (let* ((played (play-solution b 10))
+             (shuffled (reshuffle played)))
+        (assert-equal 124 (board-tile-count shuffled))
+        (assert-true (every (lambda (id) (or (tile-present? played id)
+                                             (= (tile-face played id) (tile-face shuffled id))))
+                            (iota 144)))))
+    (test "shuffle actually moved faces (seed 7, ten pairs in)"
+      (let ((played (play-solution b 10)))
+        (assert-false (equal? (vector->list (board-faces played))
+                              (vector->list (board-faces (reshuffle played)))))))))

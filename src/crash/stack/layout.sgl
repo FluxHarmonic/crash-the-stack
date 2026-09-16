@@ -1,0 +1,177 @@
+;;; (crash stack layout) - Where the tiles of a stack sit.
+;;;
+;;; A layout is the static shape of a board: one slot per tile position, on a
+;;; grid of half-tile units. A tile is two half-units wide and two tall, and a
+;;; slot names the tile's CENTRE as (layer hx hy), so a tile at hx covers the
+;;; half-columns hx-1 and hx, and its left-hand neighbour on the same layer is
+;;; at hx-2. Half-unit integers are what let a layout put a tile astride two
+;;; others (the Turtle's apex, its end tiles) without any float in a key.
+;;;
+;;; The file format is the 2020 Crash The Stack one: (stack LAYER ...) where
+;;; each LAYER is a list of (x . y) in whole-tile units, y growing downward,
+;;; layers listed bottom-up. sexp->layout turns those into half-unit integers.
+;;;
+;;; Nothing here knows what a face or a game is; see (crash stack rules).
+
+(define-library (crash stack layout)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math))
+
+  (export slot slot? slot-layer slot-hx slot-hy
+          layout layout? layout-slots layout-layer-count
+          layout-min-hx layout-max-hx layout-min-hy layout-max-hy
+          layout-slot-count layout-slot layout-layer-counts
+          layout-cell-count layout-cell-index
+          slots->layout sexp->layout
+          neighbourhood neighbourhood-left neighbourhood-right neighbourhood-above
+          layout-neighbourhood
+          insertion-sort)
+
+  (begin
+    (define-struct slot
+      (layer default: 0)
+      (hx default: 0)
+      (hy default: 0))
+
+    ;; slots: a vector of slot, in file order (layer by layer); the vector
+    ;; index is the slot's id everywhere else in the game.
+    (define-struct layout
+      (slots default: (vector))
+      (layer-count default: 0)
+      (min-hx default: 0)
+      (max-hx default: 0)
+      (min-hy default: 0)
+      (max-hy default: 0)
+      (neighbourhoods default: (vector) mutable: #t))
+
+    (define (layout-slot-count l)
+      (vector-length (layout-slots l)))
+
+    (define (layout-slot l id)
+      (vector-ref (layout-slots l) id))
+
+    ;; Tiles per layer, bottom layer first: the Turtle answers (87 36 16 4 1).
+    (define (layout-layer-counts l)
+      (let ((counts (make-vector (layout-layer-count l) 0)))
+        (vector-for-each
+          (lambda (s)
+            (vector-set! counts (slot-layer s)
+                         (+ 1 (vector-ref counts (slot-layer s)))))
+          (layout-slots l))
+        (vector->list counts)))
+
+    ;; The occlusion grid is one cell per (layer, hx, hy) inside the layout's
+    ;; bounds, flattened. layout-cell-index answers #f outside the bounds so a
+    ;; neighbour lookup at the edge needs no special case.
+    (define (layout-width l)  (+ 1 (- (layout-max-hx l) (layout-min-hx l))))
+    (define (layout-height l) (+ 1 (- (layout-max-hy l) (layout-min-hy l))))
+
+    (define (layout-cell-count l)
+      (* (layout-layer-count l) (layout-width l) (layout-height l)))
+
+    (define (layout-cell-index l layer hx hy)
+      (and (>= layer 0) (< layer (layout-layer-count l))
+           (>= hx (layout-min-hx l)) (<= hx (layout-max-hx l))
+           (>= hy (layout-min-hy l)) (<= hy (layout-max-hy l))
+           (+ (* (+ (* layer (layout-width l))
+                    (- hx (layout-min-hx l)))
+                 (layout-height l))
+              (- hy (layout-min-hy l)))))
+
+    (define (finish-layout l)
+      (set-layout-neighbourhoods! l (compute-neighbourhoods l))
+      l)
+
+    ;; Build a layout from a list of slots; layer-count is one more than the
+    ;; highest layer present. An empty slot list gives a 0x0 layout.
+    (define (slots->layout slots)
+      (if (null? slots)
+          (layout slots: (vector) layer-count: 0 neighbourhoods: (vector))
+          (let loop ((rest (cdr slots))
+                     (layers (+ 1 (slot-layer (car slots))))
+                     (min-hx (slot-hx (car slots))) (max-hx (slot-hx (car slots)))
+                     (min-hy (slot-hy (car slots))) (max-hy (slot-hy (car slots))))
+            (if (null? rest)
+                (finish-layout
+                 (layout slots: (list->vector slots)
+                        layer-count: layers
+                        min-hx: min-hx max-hx: max-hx
+                         min-hy: min-hy max-hy: max-hy))
+                (let ((s (car rest)))
+                  (loop (cdr rest)
+                        (max layers (+ 1 (slot-layer s)))
+                        (min min-hx (slot-hx s)) (max max-hx (slot-hx s))
+                        (min min-hy (slot-hy s)) (max max-hy (slot-hy s))))))))
+
+    ;; Whole-tile coordinate (a float or integer such as 5.5 or -3) to
+    ;; half-units. Rounding absorbs float noise; the result is an exact integer.
+    (define (coord->half x)
+      (exact (round (* 2 x))))
+
+    ;; (stack ((x . y) ...) ...) -> layout. Raises on any other head symbol.
+    (define (sexp->layout form)
+      (unless (and (pair? form) (eq? (car form) 'stack))
+        (error "sexp->layout: expected (stack layer ...)" form))
+      (let loop ((layers (cdr form)) (layer 0) (acc '()))
+        (if (null? layers)
+            (slots->layout (reverse acc))
+            (loop (cdr layers)
+                  (+ layer 1)
+                  (fold (lambda (acc pos)
+                          (cons (slot layer: layer
+                                      hx: (coord->half (car pos))
+                                      hy: (coord->half (cdr pos)))
+                                acc))
+                        acc
+                        (car layers))))))
+
+    ;; --- neighbourhoods -------------------------------------------------------
+    ;;
+    ;; Which cells of the occlusion grid decide a slot's playability never
+    ;; change, so they are computed once per layout: for each slot, the cell
+    ;; indices two half-units to the left (three cells: dy -1, 0, +1), the same
+    ;; to the right, and every cell on every higher layer within one half-unit
+    ;; of the centre (GNOME's rule; the 2020 code looked one layer up only).
+    ;; Off-grid cells are dropped. playable? in (crash stack rules) then reads
+    ;; the live grid at these indices and nothing else.
+
+    (define-struct neighbourhood
+      (left default: '())
+      (right default: '())
+      (above default: '()))
+
+    (define (cells-at l layer hx hys)
+      (filter (lambda (i) i)
+              (map (lambda (hy) (layout-cell-index l layer hx hy)) hys)))
+
+    (define (neighbourhood-of l s)
+      (let* ((layer (slot-layer s)) (hx (slot-hx s)) (hy (slot-hy s))
+             (hys (list (- hy 1) hy (+ hy 1))))
+        (neighbourhood
+          left: (cells-at l layer (- hx 2) hys)
+          right: (cells-at l layer (+ hx 2) hys)
+          above: (let loop ((layer (+ layer 1)) (acc '()))
+                   (if (>= layer (layout-layer-count l))
+                       acc
+                       (loop (+ layer 1)
+                             (append (cells-at l layer (- hx 1) hys)
+                                     (cells-at l layer hx hys)
+                                     (cells-at l layer (+ hx 1) hys)
+                                     acc)))))))
+
+    (define (compute-neighbourhoods l)
+      (vector-map (lambda (s) (neighbourhood-of l s)) (layout-slots l)))
+
+    (define (layout-neighbourhood l id)
+      (vector-ref (layout-neighbourhoods l) id))
+
+    ;; A stable insertion sort: less? decides, ties keep input order. Lists in
+    ;; this game are a few hundred long at most, so no merge sort is needed and
+    ;; the rules modules stay on (sigil core) alone.
+    (define (insertion-sort less? lst)
+      (define (insert x sorted)
+        (cond ((null? sorted) (list x))
+              ((less? x (car sorted)) (cons x sorted))
+              (else (cons (car sorted) (insert x (cdr sorted))))))
+      (fold (lambda (acc x) (insert x acc)) '() lst))))
