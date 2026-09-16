@@ -1,0 +1,232 @@
+;;; (crash render) - Drawing the table.
+;;;
+;;; Takes a session, a geometry and (optionally) the test-tile texture, and
+;;; draws one frame with sigil-graphics primitives: a copper-bar background,
+;;; each tile as a flat face over a darker side face offset per layer, the
+;;; glyph in its suit colour from the bitmap font, the selection and the
+;;; keyboard highlight, the coordinate labels when that model is active, and
+;;; the HUD. Nothing here reads input or a platform; the shell decides what
+;;; texture to hand in (native: load-image from assets/; web: from memory).
+;;;
+;;; Palette: at most 32 colours, all named here, for the Amiga feel and so
+;;; David can retune the look in one place (design decision 7).
+
+(define-library (crash render)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math)
+          (sigil graphics)
+          (crash stack layout)
+          (crash stack rules)
+          (crash geometry)
+          (crash input)
+          (crash font))
+
+  (export draw-session
+          TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
+
+  (begin
+    ;; --- palette ------------------------------------------------------------
+    ;; (r g b) in 0..1. Sixteen used; sixteen in hand.
+
+    (define C-BG        '(0.05 0.04 0.10))
+    (define C-BAR-A     '(0.09 0.07 0.18))
+    (define C-BAR-B     '(0.13 0.09 0.24))
+    (define C-BAR-C     '(0.18 0.11 0.30))
+    (define C-FACE      '(0.86 0.88 0.90))
+    (define C-FACE-EDGE '(0.98 0.99 1.00))
+    (define C-SIDE      '(0.42 0.44 0.52))
+    (define C-SIDE-DARK '(0.24 0.25 0.32))
+    (define C-SELECTED  '(0.30 0.95 0.85))
+    (define C-HIGHLIGHT '(1.00 0.35 0.85))
+    (define C-TEXT      '(0.80 0.90 1.00))
+    (define C-TEXT-DIM  '(0.45 0.50 0.65))
+    (define C-SUIT-0    '(0.10 0.45 0.85))   ; digits 0-8
+    (define C-SUIT-1    '(0.80 0.20 0.25))   ; 9-h
+    (define C-SUIT-2    '(0.10 0.55 0.30))   ; i-q
+    (define C-SUIT-3    '(0.55 0.25 0.70))   ; r-z
+    (define C-LABEL-LIT '(1.00 0.80 0.20))
+
+    (define (colour! c) (set-color (car c) (cadr c) (caddr c) 1.0))
+
+    (define (suit-colour face)
+      (cond ((< face 9) C-SUIT-0)
+            ((< face 18) C-SUIT-1)
+            ((< face 27) C-SUIT-2)
+            (else C-SUIT-3)))
+
+    ;; --- test tile texture layout -------------------------------------------
+    ;; assets/test-tile.png is a strip of TEST-TILE-FRAMES frames, each
+    ;; TEST-TILE-W x TEST-TILE-H: frame 0 the blank block (side face included
+    ;; in the art), frames 1.. the hand-drawn glyph faces for faces 0, 1, 2.
+
+    (define TEST-TILE-W 32)
+    (define TEST-TILE-H 44)
+    (define TEST-TILE-FRAMES 4)
+
+    ;; --- background -----------------------------------------------------------
+
+    (define (draw-background g)
+      (let ((vw (geometry-vw g)) (vh (geometry-vh g)))
+        (colour! C-BG)
+        (draw-filled-rect 0 0 vw vh)
+        ;; copper bars: three tones stepping through the board area
+        (let loop ((y 0) (i 0))
+          (when (< y (- vh (geometry-hud-h g)))
+            (colour! (case (modulo i 3) ((0) C-BAR-A) ((1) C-BAR-B) (else C-BAR-C)))
+            (draw-filled-rect 0 y vw 6)
+            (loop (+ y 12) (+ i 1))))))
+
+    ;; --- tiles ----------------------------------------------------------------
+
+    (define (glyph-scale g)
+      (max 1 (exact (floor (/ (- (geometry-tile-w g) 6) GLYPH-W)))))
+
+    (define (draw-glyph-on g face x y w h dark?)
+      (let* ((scale (glyph-scale g))
+             (gw (* scale GLYPH-W))
+             (gh (* scale GLYPH-H))
+             (text (string (string-ref FACE-KEYS face))))
+        (colour! (if dark? C-BG (suit-colour face)))
+        (draw-text text
+                   (+ x (exact (floor (/ (- w gw) 2))))
+                   (+ y (exact (floor (/ (- h gh) 2))))
+                   scale)))
+
+    (define (draw-tile-primitives g b id x y w h selected? highlighted?)
+      (let ((side (geometry-side g))
+            (face (tile-face b id)))
+        ;; side faces: left and bottom, one layer offset deep
+        (colour! C-SIDE-DARK)
+        (draw-filled-rect (- x side) (+ y side) w h)
+        (colour! C-SIDE)
+        (draw-filled-rect (- x side) y side h)
+        ;; the face, with a lighter top-left edge
+        (colour! (if selected? C-SELECTED C-FACE))
+        (draw-filled-rect x y w h)
+        (colour! (if selected? C-SELECTED C-FACE-EDGE))
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x y 1 h)
+        (when face (draw-glyph-on g face x y w h selected?))
+        (when highlighted?
+          (colour! C-HIGHLIGHT)
+          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
+          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))))
+
+    ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
+    ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
+    ;; directions sit side by side on one board.
+    (define (draw-tile-texture g b id tex x y w h selected? highlighted?)
+      (let* ((side (geometry-side g))
+             (face (tile-face b id))
+             (frame (if (and face (< face (- TEST-TILE-FRAMES 1))) (+ face 1) 0)))
+        (if selected?
+            (set-color 0.5 1.0 0.95 1.0)
+            (set-color 1.0 1.0 1.0 1.0))
+        (draw-texture-region tex (- x side) y (+ w side) (+ h side)
+                             (* frame TEST-TILE-W) 0 TEST-TILE-W TEST-TILE-H)
+        (when (and face (= frame 0))
+          (draw-glyph-on g face x y w h selected?))
+        (when highlighted?
+          (colour! C-HIGHLIGHT)
+          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
+          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))))
+
+    (define (draw-tiles s g tex)
+      (let* ((b (session-board s))
+             (selected (board-selected b))
+             (highlight (and (memq (session-model s) '(cursor glyph))
+                             (session-highlight s))))
+        (for-each
+          (lambda (id)
+            (when (tile-present? b id)
+              (let* ((r (slot-rect g id))
+                     (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+                     (selected? (eqv? selected id))
+                     (highlighted? (eqv? highlight id)))
+                (if (and tex (eq? (session-render-mode s) 'texture))
+                    (draw-tile-texture g b id tex x y w h selected? highlighted?)
+                    (draw-tile-primitives g b id x y w h selected? highlighted?)))))
+          (geometry-draw-order g))))
+
+    ;; --- coordinate labels (model b) -----------------------------------------
+
+    (define (playable-hxs b)
+      (map (lambda (id) (slot-hx (layout-slot (board-layout b) id))) (playable-slots b)))
+
+    (define (playable-hys b)
+      (map (lambda (id) (slot-hy (layout-slot (board-layout b) id))) (playable-slots b)))
+
+    (define (draw-labels s g)
+      (let* ((b (session-board s))
+             (pending (or (session-pending s) (cons #f #f)))
+             (lit-x (playable-hxs b))
+             (lit-y (playable-hys b))
+             (scale 2)
+             (half-w (exact (floor (/ (geometry-tile-w g) 2))))
+             (half-h (exact (floor (/ (geometry-tile-h g) 2))))
+             (top (- (geometry-origin-y g) 16))
+             (left (- (geometry-origin-x g) 16)))
+        (let loop ((i 0))
+          (when (< i (vector-length (geometry-columns g)))
+            (let ((hx (vector-ref (geometry-columns g) i)))
+              (colour! (cond ((eqv? (car pending) i) C-HIGHLIGHT)
+                             ((memv hx lit-x) C-LABEL-LIT)
+                             (else C-TEXT-DIM)))
+              (draw-text (string (column-label i))
+                         (+ (column-x g hx) half-w -5) top scale))
+            (loop (+ i 1))))
+        (let loop ((i 0))
+          (when (< i (vector-length (geometry-rows g)))
+            (let ((hy (vector-ref (geometry-rows g) i)))
+              (colour! (cond ((eqv? (cdr pending) i) C-HIGHLIGHT)
+                             ((memv hy lit-y) C-LABEL-LIT)
+                             (else C-TEXT-DIM)))
+              (draw-text (string (row-label i))
+                         left (+ (row-y g hy) half-h -7) scale))
+            (loop (+ i 1))))))
+
+    ;; --- HUD ------------------------------------------------------------------
+
+    (define (draw-hud s g)
+      (let* ((b (session-board s))
+             (vw (geometry-vw g))
+             (vh (geometry-vh g))
+             (top (- vh (geometry-hud-h g)))
+             (left (string-append "TILES " (number->string (board-tile-count b))))
+             (right (string-append "SEED " (number->string (session-seed s)))))
+        (colour! C-BG)
+        (draw-filled-rect 0 top vw (geometry-hud-h g))
+        (colour! C-TEXT-DIM)
+        (draw-filled-rect 0 top vw 1)
+        (colour! C-TEXT)
+        (draw-text left 8 (+ top 6) 2)
+        (draw-text (string-append "KEYS " (model-name (session-model s)))
+                   (exact (floor (/ (- vw (text-width "KEYS CURSOR" 2)) 2))) (+ top 6) 2)
+        (draw-text right (- vw 8 (text-width right 2)) (+ top 6) 2)
+        (colour! C-TEXT-DIM)
+        (draw-text "TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^N NEXT  ^T TILE  ESC QUIT"
+                   8 (+ top 24) 1)
+        (let ((message (cond ((board-cleared? b) "STACK CRASHED")
+                             ((null? (legal-matches b)) "NO MOVES LEFT - ^S SHUFFLE")
+                             (else (session-message s)))))
+          (unless (string=? message "")
+            (colour! C-SELECTED)
+            (let ((w (text-width message 3)))
+              (colour! C-BG)
+              (draw-filled-rect (- (exact (floor (/ (- vw w) 2))) 8) (- (exact (floor (/ top 2))) 16) (+ w 16) 36)
+              (colour! C-SELECTED)
+              (draw-text message (exact (floor (/ (- vw w) 2))) (- (exact (floor (/ top 2))) 10) 3))))))
+
+    ;; --- one frame ------------------------------------------------------------
+
+    (define (draw-session s g tex)
+      (draw-background g)
+      (draw-tiles s g tex)
+      (when (eq? (session-model s) 'coords)
+        (draw-labels s g))
+      (draw-hud s g))))

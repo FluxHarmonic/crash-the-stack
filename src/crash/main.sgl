@@ -1,0 +1,104 @@
+;;; (crash main) - The native shell.
+;;;
+;;; Opens a window with sigil-app, sets the 640x400 virtual viewport, and
+;;; each frame: polls the keys and the mouse into an input-frame (mouse in
+;;; virtual coordinates), steps the session, draws it. Everything game-shaped
+;;; lives in the modules this imports; the web shell (P0b) replaces only this
+;;; file.
+;;;
+;;;   crash-the-stack [--seed N] [--texture] [--keys cursor|coords|glyph]
+;;;
+;;; The window opens at exactly twice the virtual size so the letterboxed
+;;; viewport scales by an integer at start (sigil-graphics scales by a float
+;;; min(w/vw, h/vh); 2x is exact).
+
+(define-library (crash main)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math)
+          (sigil process)
+          (sigil app)
+          (sigil graphics)
+          (crash stack layout)
+          (crash stack turtle)
+          (crash stack rules)
+          (crash geometry)
+          (crash input)
+          (crash render))
+
+  (export main)
+
+  (begin
+    (define VW 640)
+    (define VH 400)
+    (define WINDOW-W 1280)
+    (define WINDOW-H 800)
+    (define TEST-TILE-PATH "assets/test-tile.png")
+
+    ;; Every key sigil-app can report that the game listens to. Digit keys
+    ;; are symbols named "0".."9", which the reader cannot spell, hence the
+    ;; string->symbol.
+    (define FACE-KEY-SYMBOLS
+      (map (lambda (c) (string->symbol (string c))) (string->list FACE-KEYS)))
+    (define OTHER-KEYS '(space return tab backspace left right up down))
+    (define ALL-KEYS (append FACE-KEY-SYMBOLS OTHER-KEYS))
+    (define MODIFIERS '(ctrl shift))
+
+    ;; Window pixel -> virtual pixel, undoing the centred letterbox scale.
+    (define (window->virtual x y)
+      (let* ((fw (frame-width)) (fh (frame-height))
+             (scale (min (/ fw VW) (/ fh VH)))
+             (ox (/ (- fw (* VW scale)) 2))
+             (oy (/ (- fh (* VH scale)) 2)))
+        (cons (/ (- x ox) scale) (/ (- y oy) scale))))
+
+    (define (poll-frame)
+      (make-input-frame
+        (filter key-pressed? ALL-KEYS)
+        (filter key-down? MODIFIERS)
+        (and (mouse-pressed? 'left) (window->virtual (mouse-x) (mouse-y)))))
+
+    (define (load-test-tile)
+      (let ((img (load-image TEST-TILE-PATH)))
+        (if img
+            (let ((tex (load-texture img)))
+              (image-free! img)
+              tex)
+            (begin
+              (display "test tile not found: ") (display TEST-TILE-PATH) (newline)
+              #f))))
+
+    (define (arg-value args flag default)
+      (cond ((null? args) default)
+            ((and (string=? (car args) flag) (pair? (cdr args))) (cadr args))
+            (else (arg-value (cdr args) flag default))))
+
+    (define (game-loop seed texture-first? model)
+      (lambda ()
+        (gfx-setup)
+        (set-viewport VW VH)
+        (set-letterbox-color 0.0 0.0 0.0)
+        (let* ((lay (turtle-layout))
+               (geom (make-geometry lay VW VH))
+               (tex (load-test-tile)))
+          (let loop ((s (let ((s (session-with-model (session-new lay seed) model)))
+                          (if texture-first?
+                              (session-step s (make-input-frame '(t) '(ctrl) #f) geom)
+                              s))))
+            (wait-frame)
+            (let ((s (session-step s (poll-frame) geom)))
+              (begin-frame)
+              (draw-session s geom tex)
+              (end-frame)
+              (cond ((key-pressed? 'escape) (request-quit))
+                    ((quit-requested?) #t)
+                    (else (loop s))))))
+        (gfx-shutdown)))
+
+    (define (main . _args)
+      (let* ((args (cdr (command-line)))
+             (seed (or (string->number (arg-value args "--seed" "1")) 1))
+             (texture-first? (and (member "--texture" args) #t))
+             (model (string->symbol (arg-value args "--keys" "cursor"))))
+        (run-game "Crash The Stack" WINDOW-W WINDOW-H (game-loop seed texture-first? model))
+        0))))
