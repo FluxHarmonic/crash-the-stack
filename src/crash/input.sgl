@@ -37,8 +37,7 @@
 ;;; letter is a tag key. (Escape is the shell's: it quits.)
 
 (define-library (crash input)
-  (import (sigil core)
-          (sigil struct)
+  (import (sigil struct)
           (sigil math)
           (crash stack layout)
           (crash stack rules)
@@ -53,7 +52,7 @@
           session-typed session-hint session-hint-armed session-hints session-cursor-shown
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
-          session-step session-pick session-with session-with-model
+          session-step session-pick session-with-model
           MODELS model-name next-model
           key->face face->key FACE-KEYS)
 
@@ -70,22 +69,22 @@
     (define (make-input-frame pressed held click)
       (input-frame pressed: pressed held: held click: click))
 
-    ;; Fields are mutable only so session-with can fill a fresh copy; a
-    ;; session is otherwise treated as immutable, like a board.
+    ;; A session is immutable: a change is a copy-construction, (session s
+    ;; field: value ...), which Sigil's define-struct provides (David, 2026-09-17).
     (define-struct session
-      (board default: #f mutable: #t)
-      (model default: 'hint mutable: #t)              ; hint | cursor
-      (highlight default: #f mutable: #t)             ; slot the cursor model points at
-      (cursor-shown default: #f mutable: #t)          ; ring visible: set by an arrow, cleared by a pick
-      (labels default: '() mutable: #t)               ; hint tags ((slot . "ab") ...), recomputed when the board changes
-      (labels-shown default: #t mutable: #t)          ; space toggles
-      (typed default: "" mutable: #t)                 ; tag letters typed so far
-      (hint default: #f mutable: #t)                  ; priced hint: the ringed slot, or #f
-      (hint-armed default: #f mutable: #t)            ; ctrl+h pressed, face key awaited
-      (hints default: 0 mutable: #t)                  ; priced hints used this board
-      (render-mode default: 'primitives mutable: #t)  ; primitives | texture
-      (seed default: 1 mutable: #t)
-      (message default: "" mutable: #t))
+      (board default: #f)
+      (model default: 'hint)              ; hint | cursor
+      (highlight default: #f)             ; slot the cursor model points at
+      (cursor-shown default: #f)          ; ring visible: set by an arrow, cleared by a pick
+      (labels default: '())               ; hint tags ((slot . "ab") ...), recomputed when the board changes
+      (labels-shown default: #t)          ; space toggles
+      (typed default: "")                 ; tag letters typed so far
+      (hint default: #f)                  ; priced hint: the ringed slot, or #f
+      (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
+      (hints default: 0)                  ; priced hints used this board
+      (render-mode default: 'primitives)  ; primitives | texture
+      (seed default: 1)
+      (message default: ""))
 
     (define MODELS '(hint cursor))
 
@@ -117,39 +116,6 @@
 
     ;; --- helpers ------------------------------------------------------------
 
-    (define (session-with s . fields)
-      (let ((nx (session board: (session-board s)
-                         model: (session-model s)
-                         highlight: (session-highlight s)
-                         cursor-shown: (session-cursor-shown s)
-                         labels: (session-labels s)
-                         labels-shown: (session-labels-shown s)
-                         typed: (session-typed s)
-                         hint: (session-hint s)
-                         hint-armed: (session-hint-armed s)
-                         hints: (session-hints s)
-                         render-mode: (session-render-mode s)
-                         seed: (session-seed s)
-                         message: (session-message s))))
-        (let loop ((fields fields))
-          (unless (null? fields)
-            (case (car fields)
-              ((board) (set-session-board! nx (cadr fields)))
-              ((model) (set-session-model! nx (cadr fields)))
-              ((highlight) (set-session-highlight! nx (cadr fields)))
-              ((cursor-shown) (set-session-cursor-shown! nx (cadr fields)))
-              ((labels) (set-session-labels! nx (cadr fields)))
-              ((labels-shown) (set-session-labels-shown! nx (cadr fields)))
-              ((typed) (set-session-typed! nx (cadr fields)))
-              ((hint) (set-session-hint! nx (cadr fields)))
-              ((hint-armed) (set-session-hint-armed! nx (cadr fields)))
-              ((hints) (set-session-hints! nx (cadr fields)))
-              ((render-mode) (set-session-render-mode! nx (cadr fields)))
-              ((seed) (set-session-seed! nx (cadr fields)))
-              ((message) (set-session-message! nx (cadr fields))))
-            (loop (cddr fields))))
-        nx))
-
     (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
     (define (held? f key) (and (memq key (input-frame-held f)) #t))
 
@@ -175,11 +141,13 @@
       (let* ((b (session-board s))
              (h (session-highlight s))
              (playable (playable-slots b)))
-        (cond ((null? playable) (session-with s 'highlight #f))
+        (cond ((null? playable) (session s highlight: #f))
               ((and h (playable? b h)) s)
-              ((not h) (session-with s 'highlight (car playable)))
-              (else (session-with s 'highlight
-                                  (argmin (lambda (id) (slot-distance s h id)) playable))))))
+              ((not h) (session s highlight: (car playable)))
+              (else
+               (session s highlight: (argmin (lambda (id)
+                                               (slot-distance s h id))
+                                             playable))))))
 
     ;; --- hint tags -----------------------------------------------------------
     ;;
@@ -200,12 +168,17 @@
       (if (= len 1)
           (string (hint-char i))
           (let ((n (string-length HINT-ALPHABET)))
-            (string (hint-char (let loop ((q 0) (r i)) (if (< r n) q (loop (+ q 1) (- r n)))))
+            (string (hint-char (let loop ((q 0) (r i))
+                                 (if (< r n)
+                                     q
+                                     (loop (+ q 1) (- r n)))))
                     (hint-char (modulo i n))))))
 
     ;; Uncovered present tiles, top row first, left to right.
     (define (uncovered-slots b)
-      (filter (lambda (id) (and (tile-present? b id) (not (covered? b id))))
+      (filter (lambda (id)
+                (and (tile-present? b id)
+                     (not (covered? b id))))
               (layout-reading-order (board-layout b))))
 
     ;; ((slot . "tag") ...) for a board.
@@ -215,7 +188,11 @@
         (let loop ((slots slots) (i 0) (acc '()))
           (if (null? slots)
               (reverse acc)
-              (loop (cdr slots) (+ i 1) (cons (cons (car slots) (hint-label i len)) acc))))))
+              (loop (cdr slots)
+                    (+ i 1)
+                    (cons (cons (car slots)
+                                (hint-label i len))
+                          acc))))))
 
     ;; The session's cached tags.
     (define (hint-labels s) (session-labels s))
@@ -238,16 +215,25 @@
     ;; home, and the per-pick state.
     (define (session-on-board s b)
       (home-highlight
-        (session-with s 'board b 'labels (compute-hint-labels b)
-                      'hint #f 'typed "" 'message "" 'cursor-shown #f)))
+        (session s
+                 board: b
+                 labels: (compute-hint-labels b)
+                 hint: #f
+                 typed: ""
+                 message: ""
+                 cursor-shown: #f)))
 
     ;; A layout no face assignment can clear (the generator answered #f) still
     ;; gets a board to look at, all faces 0, and a message saying why.
     (define (session-new lay seed)
       (let* ((b (generate lay seed))
+             (blank (lambda ()
+                      (board-new lay (make-vector (layout-slot-count lay) 0))))
              (s (session-on-board (session seed: seed)
-                                  (or b (board-new lay (make-vector (layout-slot-count lay) 0))))))
-        (if b s (session-with s 'message "NO SOLVABLE DEAL FOR THIS LAYOUT"))))
+                                  (or b (blank)))))
+        (if b
+            s
+            (session s message: "NO SOLVABLE DEAL FOR THIS LAYOUT"))))
 
     ;; --- picking ------------------------------------------------------------
 
@@ -256,12 +242,12 @@
     (define (session-pick s id)
       (if (not (playable? (session-board s) id))
           s
-          (session-with (session-on-board s (board-select (session-board s) id))
-                        'highlight id)))
+          (session (session-on-board s (board-select (session-board s) id))
+                        highlight: id)))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
     (define (session-with-model s model)
-      (if (memq model MODELS) (session-with s 'model model) s))
+      (if (memq model MODELS) (session s model: model) s))
 
     ;; --- the cursor model ---------------------------------------------------
 
@@ -308,7 +294,7 @@
       (let ((h (session-highlight s)))
         (if (not h)
             (home-highlight s)
-            (session-with s 'highlight
+            (session s highlight:
                           (case dir
                             ((right) (cursor-step-reading s h #t))
                             ((left) (cursor-step-reading s h #f))
@@ -319,7 +305,7 @@
         ;; The ring shows only once an arrow has been pressed since the last
         ;; pick: the highlight homes silently after a match so nothing looks
         ;; pre-chosen (David, 2026-09-16).
-        (cond (dir (session-with (cursor-move s dir) 'cursor-shown #t))
+        (cond (dir (session (cursor-move s dir) cursor-shown: #t))
               ((and (pressed? f 'space) (session-highlight s))
                (session-pick s (session-highlight s)))
               (else s))))
@@ -341,11 +327,15 @@
               (cond ((eq? key 'space)
                      (loop (cdr keys)
                            (if (> (string-length typed) 0)
-                               (session-with s 'typed "")
-                               (session-with s 'labels-shown (not (session-labels-shown s))))))
-                    ((and (eq? key 'backspace) (> (string-length typed) 0))
+                               (session s typed: "")
+                               (session s labels-shown:
+                                        (not (session-labels-shown s))))))
+                    ((and (eq? key 'backspace)
+                          (> (string-length typed) 0))
                      (loop (cdr keys)
-                           (session-with s 'typed (substring typed 0 (- (string-length typed) 1)))))
+                           (session s typed: (substring typed
+                                                        0
+                                                        (- (string-length typed) 1)))))
                     ((not (label-key? key)) (loop (cdr keys) s))
                     ((not (session-labels-shown s)) (loop (cdr keys) s))
                     (else
@@ -353,10 +343,13 @@
                             (len (hint-label-length (length labels)))
                             (typed (string-append typed (symbol->string key))))
                        (if (< (string-length typed) len)
-                           (loop (cdr keys) (session-with s 'typed typed))
+                           (loop (cdr keys) (session s typed: typed))
                            (let ((id (label->slot labels typed)))
                              (loop (cdr keys)
-                                   (session-with (if id (session-pick s id) s) 'typed "")))))))))))
+                                   (session (if id
+                                                (session-pick s id)
+                                                s)
+                                            typed: "")))))))))))
 
     ;; --- the priced hint (prototype; P1 attaches the trace cost) -------------
     ;;
@@ -366,17 +359,21 @@
     ;; the model in use or the mouse.
     (define (hint-jump s face)
       (let* ((b (session-board s))
-             (matching (filter (lambda (id) (eqv? (tile-face b id) face)) (playable-slots b)))
+             (matching (filter (lambda (id)
+                                 (eqv? (tile-face b id) face))
+                               (playable-slots b)))
              (h (session-hint s))
              (target (cond ((null? matching) #f)
                            ((and h (memv h matching))
                             (let ((after (cdr (memv h matching))))
-                              (if (null? after) (car matching) (car after))))
+                              (if (null? after)
+                                  (car matching)
+                                  (car after))))
                            (else (car matching)))))
-        (session-with s 'hint-armed #f
-                      'hint target
-                      'hints (+ 1 (session-hints s))
-                      'message (if target "" "NO FREE TILE OF THAT FACE"))))
+        (session s hint-armed: #f
+                      hint: target
+                      hints: (+ 1 (session-hints s))
+                      message: (if target "" "NO FREE TILE OF THAT FACE"))))
 
     (define (step-armed-hint s f)
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
@@ -393,16 +390,17 @@
 
     ;; Backspace belongs to the hint model while a tag is half-typed.
     (define (typing? s)
-      (and (eq? (session-model s) 'hint) (> (string-length (session-typed s)) 0)))
+      (and (eq? (session-model s) 'hint)
+           (> (string-length (session-typed s)) 0)))
 
     (define (step-commands s f)
       (let ((b (session-board s))
             (ctrl (held? f 'ctrl)))
         (cond ((pressed? f 'tab)
-               (session-with s 'model (next-model (session-model s)) 'typed ""))
+               (session s model: (next-model (session-model s)) typed: ""))
               ((pressed? f 'return)
                (let ((sel (board-selected b)))
-                 (if sel (session-pick s sel) (session-with s 'typed ""))))
+                 (if sel (session-pick s sel) (session s typed: ""))))
               ((or (and (pressed? f 'backspace) (not (typing? s)))
                    (and ctrl (pressed? f 'z)))
                (session-on-board s (board-undo b)))
@@ -410,15 +408,16 @@
                (session-on-board s (reshuffle b)))
               ((and ctrl (pressed? f 'n))
                (let ((seed (+ 1 (session-seed s))))
-                 (session-with (session-new (board-layout b) seed)
-                               'model (session-model s)
-                               'labels-shown (session-labels-shown s)
-                               'render-mode (session-render-mode s))))
+                 (session (session-new (board-layout b) seed)
+                               model: (session-model s)
+                               labels-shown: (session-labels-shown s)
+                               render-mode: (session-render-mode s))))
               ((and ctrl (pressed? f 'h))
-               (session-with s 'hint-armed #t 'message "HINT: PRESS A FACE KEY"))
+               (session s hint-armed: #t message: "HINT: PRESS A FACE KEY"))
               ((and ctrl (pressed? f 't))
-               (session-with s 'render-mode
-                             (if (eq? (session-render-mode s) 'primitives) 'texture 'primitives)))
+               (session s render-mode: (if (eq? (session-render-mode s) 'primitives)
+                                           'texture
+                                           'primitives)))
               (else #f))))
 
     ;; --- one frame ----------------------------------------------------------

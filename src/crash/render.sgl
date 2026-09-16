@@ -3,17 +3,16 @@
 ;;; Takes a session, a geometry and (optionally) the test-tile texture, and
 ;;; draws one frame with sigil-graphics primitives: a copper-bar background,
 ;;; each tile as a flat face over a darker side face offset per layer, the
-;;; glyph in its suit colour from the bitmap font, the selection and the
+;;; glyph in its suit color from the bitmap font, the selection and the
 ;;; keyboard highlight, the coordinate labels when that model is active, and
 ;;; the HUD. Nothing here reads input or a platform; the shell decides what
 ;;; texture to hand in (native: load-image from assets/; web: from memory).
 ;;;
-;;; Palette: at most 32 colours, all named here, for the Amiga feel and so
+;;; Palette: at most 32 colors, all named here, for the Amiga feel and so
 ;;; David can retune the look in one place (design decision 7).
 
 (define-library (crash render)
-  (import (sigil core)
-          (sigil struct)
+  (import (sigil struct)
           (sigil math)
           (sigil graphics)
           (crash stack layout)
@@ -46,10 +45,17 @@
     (define C-SUIT-2    '(0.10 0.55 0.30))   ; i-q
     (define C-SUIT-3    '(0.55 0.25 0.70))   ; r-z
     (define C-LABEL-LIT '(1.00 0.80 0.20))
+    ;; Tints for the test-tile texture: white leaves the art as drawn.
+    (define C-TEX-PLAIN     '(1.00 1.00 1.00))
+    (define C-TEX-SELECTED  '(0.50 1.00 0.95))
 
-    (define (colour! c) (set-color (car c) (cadr c) (caddr c) 1.0))
+    (define (color! c)
+      (set-color (car c)
+                 (cadr c)
+                 (caddr c)
+                 1.0))
 
-    (define (suit-colour face)
+    (define (suit-color face)
       (cond ((< face 9) C-SUIT-0)
             ((< face 18) C-SUIT-1)
             ((< face 27) C-SUIT-2)
@@ -67,13 +73,17 @@
     ;; --- background -----------------------------------------------------------
 
     (define (draw-background g)
-      (let ((vw (geometry-vw g)) (vh (geometry-vh g)))
-        (colour! C-BG)
+      (let ((vw (geometry-vw g))
+            (vh (geometry-vh g)))
+        (color! C-BG)
         (draw-filled-rect 0 0 vw vh)
         ;; copper bars: three tones stepping through the board area
         (let loop ((y 0) (i 0))
           (when (< y (- vh (geometry-hud-h g)))
-            (colour! (case (modulo i 3) ((0) C-BAR-A) ((1) C-BAR-B) (else C-BAR-C)))
+            (color! (case (modulo i 3)
+                       ((0) C-BAR-A)
+                       ((1) C-BAR-B)
+                       (else C-BAR-C)))
             (draw-filled-rect 0 y vw 6)
             (loop (+ y 12) (+ i 1))))))
 
@@ -87,7 +97,7 @@
              (gw (* scale GLYPH-W))
              (gh (* scale GLYPH-H))
              (text (string (string-ref FACE-KEYS face))))
-        (colour! (if dark? C-BG (suit-colour face)))
+        (color! (if dark? C-BG (suit-color face)))
         (draw-text text
                    (+ x (exact (floor (/ (- w gw) 2))))
                    (+ y (exact (floor (/ (- h gh) 2))))
@@ -97,7 +107,7 @@
     ;; bottom, one layer offset deep), then its face. With half-row offsets a
     ;; single draw order cannot be right for both: the Turtle's end tile at
     ;; y=0 straddles the rows at -0.5 and 0.5, and whichever order the sort
-    ;; picks, one neighbour's side strip paints over the other's face (David
+    ;; picks, one neighbor's side strip paints over the other's face (David
     ;; saw the dark strip on the tile beside each end tile, 2026-09-16).
     ;; Drawing every side in a layer before any face makes each face cover
     ;; every side strip that overlaps it, which is what a stack looks like.
@@ -105,17 +115,17 @@
     (define (draw-sides-primitives g x y w h)
       (let ((side (geometry-side g)))
         ;; the bottom strip runs the full width plus the side so the corner is filled
-        (colour! C-SIDE-DARK)
+        (color! C-SIDE-DARK)
         (draw-filled-rect (- x side) (+ y h) (+ w side) side)
-        (colour! C-SIDE)
+        (color! C-SIDE)
         (draw-filled-rect (- x side) y side h)))
 
     (define (draw-face-primitives g b id x y w h selected?)
       (let ((face (tile-face b id)))
         ;; the face, with a lighter top-left edge
-        (colour! (if selected? C-SELECTED C-FACE))
+        (color! (if selected? C-SELECTED C-FACE))
         (draw-filled-rect x y w h)
-        (colour! (if selected? C-SELECTED C-FACE-EDGE))
+        (color! (if selected? C-SELECTED C-FACE-EDGE))
         (draw-filled-rect x y w 1)
         (draw-filled-rect x y 1 h)
         (when face (draw-glyph-on g face x y w h selected?))))
@@ -131,31 +141,39 @@
 
     (define (tile-frame b id)
       (let ((face (tile-face b id)))
-        (if (and face (< face (- TEST-TILE-FRAMES 1))) (+ face 1) 0)))
+        (if (and face (< face (- TEST-TILE-FRAMES 1)))
+            (+ face 1)
+            0)))
 
     (define (draw-sides-texture g b id tex x y w h selected?)
       (let ((side (geometry-side g))
             (frame (tile-frame b id)))
-        (if selected? (set-color 0.5 1.0 0.95 1.0) (set-color 1.0 1.0 1.0 1.0))
-        (draw-texture-region tex (- x side) y (+ w side) (+ h side)
-                             (* frame TEST-TILE-W) 0 TEST-TILE-W TEST-TILE-H)))
+        (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
+        (draw-texture-region tex
+                             (- x side) y
+                             (+ w side) (+ h side)
+                             (* frame TEST-TILE-W) 0
+                             TEST-TILE-W TEST-TILE-H)))
 
     (define (draw-face-texture g b id tex x y w h selected?)
       (let ((face (tile-face b id))
             (frame (tile-frame b id)))
-        (if selected? (set-color 0.5 1.0 0.95 1.0) (set-color 1.0 1.0 1.0 1.0))
-        (draw-texture-region tex x y w h
+        (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
+        (draw-texture-region tex
+                             x y
+                             w h
                              (+ (* frame TEST-TILE-W) TEST-TILE-SIDE) 0
-                             (- TEST-TILE-W TEST-TILE-SIDE) (- TEST-TILE-H TEST-TILE-SIDE))
+                             (- TEST-TILE-W TEST-TILE-SIDE)
+                             (- TEST-TILE-H TEST-TILE-SIDE))
         (when (and face (= frame 0))
           (draw-glyph-on g face x y w h selected?))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
-    ;; hint in yellow. Drawn after every tile so no neighbour paints over it.
-    (define (draw-ring g id colour)
+    ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
+    (define (draw-ring g id color)
       (let* ((r (slot-rect g id))
              (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-        (colour! colour)
+        (color! color)
         (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
@@ -201,7 +219,7 @@
     ;; --- hint labels (model c) -------------------------------------------------
     ;;
     ;; Shown only while the session says so (space toggles them): a small dark
-    ;; tag in the 3x5 set, centred on the tile's top edge so the glyph stays
+    ;; tag in the 3x5 set, centered on the tile's top edge so the glyph stays
     ;; readable under it; the letters typed so far are drawn lit.
 
     (define (draw-hint-labels s g)
@@ -216,14 +234,20 @@
                    (y (- (cadr r) 3))
                    (prefix? (and (> (string-length typed) 0)
                                  (<= (string-length typed) (string-length label))
-                                 (string=? typed (substring label 0 (string-length typed))))))
-              (colour! C-BG)
+                                 (string=? typed
+                                           (substring label 0 (string-length typed))))))
+              (color! C-BG)
               (draw-filled-rect x y w 7)
-              (colour! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
+              (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
               (draw-text-mini label (+ x 2) (+ y 1) 1)))
           (session-labels s))))
 
     ;; --- HUD ------------------------------------------------------------------
+
+    (define HINT-KEYS-LINE
+      "TYPE A TAG  SPACE TAGS ON/OFF  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+    (define CURSOR-KEYS-LINE
+      "ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
 
     (define (draw-hud s g)
       (let* ((b (session-board s))
@@ -232,42 +256,55 @@
              (top (- vh (geometry-hud-h g)))
              (left (string-append "TILES " (number->string (board-tile-count b))))
              (right (string-append "SEED " (number->string (session-seed s)))))
-        (colour! C-BG)
+        (color! C-BG)
         (draw-filled-rect 0 top vw (geometry-hud-h g))
-        (colour! C-TEXT-DIM)
+        (color! C-TEXT-DIM)
         (draw-filled-rect 0 top vw 1)
-        (colour! C-TEXT)
+        (color! C-TEXT)
         (draw-text left 8 (+ top 6) 2)
         (draw-text (string-append "KEYS " (model-name (session-model s)))
-                   (exact (floor (/ (- vw (text-width "KEYS CURSOR" 2)) 2))) (+ top 6) 2)
+                   (exact (floor (/ (- vw (text-width "KEYS CURSOR" 2)) 2)))
+                   (+ top 6)
+                   2)
         (draw-text right (- vw 8 (text-width right 2)) (+ top 6) 2)
         (when (> (session-hints s) 0)
-          (colour! C-LABEL-LIT)
+          (color! C-LABEL-LIT)
           (let ((hints (string-append "HINTS " (number->string (session-hints s)))))
-            (draw-text hints (- vw 8 (text-width right 2) 24 (text-width hints 2)) (+ top 6) 2)))
+            (draw-text hints
+                       (- vw 8 (text-width right 2) 24 (text-width hints 2))
+                       (+ top 6)
+                       2)))
         (when (> (string-length (session-typed s)) 0)
-          (colour! C-HIGHLIGHT)
-          (draw-text (string-append "> " (session-typed s)) (+ 8 (text-width "TILES 144" 2) 24) (+ top 6) 2))
-        (colour! C-TEXT-DIM)
+          (color! C-HIGHLIGHT)
+          (draw-text (string-append "> " (session-typed s))
+                     (+ 8 (text-width "TILES 144" 2) 24)
+                     (+ top 6)
+                     2))
+        (color! C-TEXT-DIM)
         (draw-text (if (eq? (session-model s) 'hint)
-                       "TYPE A TAG  SPACE TAGS ON/OFF  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE"
-                       "ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+                       HINT-KEYS-LINE
+                       CURSOR-KEYS-LINE)
                    8 (+ top 24) 1)
-        (let ((message (cond ((board-cleared? b) "STACK CRASHED")
-                             ((null? (legal-matches b)) "NO MOVES LEFT - ^S SHUFFLE")
-                             (else (session-message s)))))
+        (let ((message (cond ((board-cleared? b)
+                              "STACK CRASHED")
+                             ((null? (legal-matches b))
+                              "NO MOVES LEFT - ^S SHUFFLE")
+                             (else
+                              (session-message s)))))
           (unless (string=? message "")
-            (colour! C-SELECTED)
-            (let ((w (text-width message 3)))
-              (colour! C-BG)
-              (draw-filled-rect (- (exact (floor (/ (- vw w) 2))) 8) (- (exact (floor (/ top 2))) 16) (+ w 16) 36)
-              (colour! C-SELECTED)
-              (draw-text message (exact (floor (/ (- vw w) 2))) (- (exact (floor (/ top 2))) 10) 3))))))
+            (color! C-SELECTED)
+            (let* ((w (text-width message 3))
+                   (x (exact (floor (/ (- vw w) 2))))
+                   (y (exact (floor (/ top 2)))))
+              (color! C-BG)
+              (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
+              (color! C-SELECTED)
+              (draw-text message x (- y 10) 3))))))
 
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.
     (define (draw-frame-ms ms)
       (let ((text (string-append "MS " (number->string (exact (round ms))))))
-        (colour! C-LABEL-LIT)
+        (color! C-LABEL-LIT)
         (draw-text text (- 640 8 (text-width text 2)) 6 2)))
 
     ;; --- one frame ------------------------------------------------------------

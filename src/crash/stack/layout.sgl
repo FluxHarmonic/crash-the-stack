@@ -3,7 +3,7 @@
 ;;; A layout is the static shape of a board: one slot per tile position, on a
 ;;; grid of half-tile units. A tile is two half-units wide and two tall, and a
 ;;; slot names the tile's CENTRE as (layer hx hy), so a tile at hx spans the
-;;; half-units hx-1 to hx+1, and its left-hand neighbour on the same layer is
+;;; half-units hx-1 to hx+1, and its left-hand neighbor on the same layer is
 ;;; at hx-2. Half-unit integers are what let a layout put a tile astride two
 ;;; others (the Turtle's apex, its end tiles) without any float in a key.
 ;;;
@@ -14,8 +14,8 @@
 ;;; Nothing here knows what a face or a game is; see (crash stack rules).
 
 (define-library (crash stack layout)
-  (import (sigil core)
-          (sigil struct)
+  (import (sigil struct)
+          (sigil list)
           (sigil math))
 
   (export slot slot? slot-layer slot-hx slot-hy
@@ -24,9 +24,9 @@
           layout-slot-count layout-slot layout-layer-counts
           layout-cell-count layout-cell-index
           slots->layout sexp->layout
-          neighbourhood neighbourhood-left neighbourhood-right neighbourhood-above
-          layout-neighbourhood layout-reading-order
-          half insertion-sort)
+          neighborhood neighborhood-left neighborhood-right neighborhood-above
+          layout-neighborhood layout-reading-order
+          half)
 
   (begin
     (define-struct slot
@@ -43,7 +43,7 @@
       (max-hx default: 0)
       (min-hy default: 0)
       (max-hy default: 0)
-      (neighbourhoods default: (vector) mutable: #t)
+      (neighborhoods default: (vector) mutable: #t)
       (reading-order default: (quote ()) mutable: #t))  ; slot ids, top row first, left to right
 
     (define (layout-slot-count l)
@@ -64,7 +64,7 @@
 
     ;; The occlusion grid is one cell per (layer, hx, hy) inside the layout's
     ;; bounds, flattened. layout-cell-index answers #f outside the bounds so a
-    ;; neighbour lookup at the edge needs no special case.
+    ;; neighbor lookup at the edge needs no special case.
     (define (layout-width l)  (+ 1 (- (layout-max-hx l) (layout-min-hx l))))
     (define (layout-height l) (+ 1 (- (layout-max-hy l) (layout-min-hy l))))
 
@@ -81,7 +81,7 @@
               (- hy (layout-min-hy l)))))
 
     (define (finish-layout l)
-      (set-layout-neighbourhoods! l (compute-neighbourhoods l))
+      (set-layout-neighborhoods! l (compute-neighborhoods l))
       (set-layout-reading-order! l (compute-reading-order l))
       l)
 
@@ -89,11 +89,13 @@
     ;; highest layer present. An empty slot list gives a 0x0 layout.
     (define (slots->layout slots)
       (if (null? slots)
-          (layout slots: (vector) layer-count: 0 neighbourhoods: (vector))
+          (layout slots: (vector) layer-count: 0 neighborhoods: (vector))
           (let loop ((rest (cdr slots))
                      (layers (+ 1 (slot-layer (car slots))))
-                     (min-hx (slot-hx (car slots))) (max-hx (slot-hx (car slots)))
-                     (min-hy (slot-hy (car slots))) (max-hy (slot-hy (car slots))))
+                     (min-hx (slot-hx (car slots)))
+                     (max-hx (slot-hx (car slots)))
+                     (min-hy (slot-hy (car slots)))
+                     (max-hy (slot-hy (car slots))))
             (if (null? rest)
                 (finish-layout
                  (layout slots: (list->vector slots)
@@ -128,7 +130,7 @@
                         acc
                         (car layers))))))
 
-    ;; --- neighbourhoods -------------------------------------------------------
+    ;; --- neighborhoods -------------------------------------------------------
     ;;
     ;; Which cells of the occlusion grid decide a slot's playability never
     ;; change, so they are computed once per layout: for each slot, the cell
@@ -138,7 +140,7 @@
     ;; Off-grid cells are dropped. playable? in (crash stack rules) then reads
     ;; the live grid at these indices and nothing else.
 
-    (define-struct neighbourhood
+    (define-struct neighborhood
       (left default: '())
       (right default: '())
       (above default: '()))
@@ -147,10 +149,10 @@
       (filter (lambda (i) i)
               (map (lambda (hy) (layout-cell-index l layer hx hy)) hys)))
 
-    (define (neighbourhood-of l s)
+    (define (neighborhood-of l s)
       (let* ((layer (slot-layer s)) (hx (slot-hx s)) (hy (slot-hy s))
              (hys (list (- hy 1) hy (+ hy 1))))
-        (neighbourhood
+        (neighborhood
           left: (cells-at l layer (- hx 2) hys)
           right: (cells-at l layer (+ hx 2) hys)
           above: (let loop ((layer (+ layer 1)) (acc '()))
@@ -166,18 +168,18 @@
     ;; right within a row (hx ascending), lower layer first on a tie. The
     ;; cursor model walks the playable subset of this.
     (define (compute-reading-order l)
-      (insertion-sort (lambda (a b)
+      (list-sort (lambda (a b)
                         (let ((sa (layout-slot l a)) (sb (layout-slot l b)))
                           (or (< (slot-hy sa) (slot-hy sb))
                               (and (= (slot-hy sa) (slot-hy sb))
                                    (< (slot-hx sa) (slot-hx sb))))))
                       (iota (layout-slot-count l))))
 
-    (define (compute-neighbourhoods l)
-      (vector-map (lambda (s) (neighbourhood-of l s)) (layout-slots l)))
+    (define (compute-neighborhoods l)
+      (vector-map (lambda (s) (neighborhood-of l s)) (layout-slots l)))
 
-    (define (layout-neighbourhood l id)
-      (vector-ref (layout-neighbourhoods l) id))
+    (define (layout-neighborhood l id)
+      (vector-ref (layout-neighborhoods l) id))
 
     ;; --- small helpers the rest of the family shares ----------------------------
 
@@ -185,14 +187,4 @@
     ;; exact in Sigil).
     (define (half n)
       (let loop ((k 0) (n n))
-        (if (< n 2) k (loop (+ k 1) (- n 2)))))
-
-    ;; A stable insertion sort: less? decides, ties keep input order. Lists in
-    ;; this game are a few hundred long at most, so no merge sort is needed and
-    ;; the rules modules stay on (sigil core) alone.
-    (define (insertion-sort less? lst)
-      (define (insert x sorted)
-        (cond ((null? sorted) (list x))
-              ((less? x (car sorted)) (cons x sorted))
-              (else (cons (car sorted) (insert x (cdr sorted))))))
-      (fold (lambda (acc x) (insert x acc)) '() lst))))
+        (if (< n 2) k (loop (+ k 1) (- n 2)))))))
