@@ -14,14 +14,24 @@
 ;;;                space picks the highlighted tile.
 ;;;   coords  (b)  the board edges carry column letters and row digits; a
 ;;;                letter then a digit (either order) picks that tile.
-;;;   glyph   (c)  a tile's glyph IS its key (0-9 a-z); pressing it cycles
-;;;                the highlight through playable tiles of that face; return
-;;;                picks the highlighted tile.
+;;;   hint    (c)  every uncovered tile wears a one- or two-letter label, the
+;;;                way qutebrowser labels links; type the label you see to
+;;;                pick that tile. Labels go on every uncovered tile, not
+;;;                only the playable ones, so typing one tells you exactly
+;;;                what clicking it would: whether THAT tile is free.
+;;;                (David, 2026-09-16, replacing the glyph model.)
+;;;
+;;; The glyph model (press a face key, the highlight jumps to a free tile of
+;;; that face) was cut because one keystroke searched the whole board for a
+;;; free K and its partner: GNOME's hint, made free. It survives as the
+;;; PRICED HINT prototype: ctrl+h then a face key rings a free tile of that
+;;; face and counts one hint; P1 attaches the trace cost. Until then the HUD
+;;; shows the count so the price is at least visible.
 ;;;
 ;;; Always: tab cycles the model, backspace or ctrl+z undoes, ctrl+s
 ;;; shuffles, ctrl+n deals the next seed, ctrl+t toggles the test-tile
-;;; renderer. Commands take ctrl because in the glyph model every letter and
-;;; digit is a tile key. (Escape is the shell's: it quits.)
+;;; renderer, ctrl+h asks for a hint. Commands take ctrl because in the hint
+;;; model every letter is a label key. (Escape is the shell's: it quits.)
 
 (define-library (crash input)
   (import (sigil core)
@@ -37,6 +47,8 @@
           session session? session-new
           session-board session-model session-highlight session-pending
           session-render-mode session-seed session-message
+          session-typed session-hint session-hint-armed session-hints session-cursor-shown
+          hint-labels uncovered-slots HINT-ALPHABET
           session-step session-pick session-with session-with-model
           MODELS model-name next-model
           key->face face->key FACE-KEYS)
@@ -58,20 +70,25 @@
     ;; session is otherwise treated as immutable, like a board.
     (define-struct session
       (board default: #f mutable: #t)
-      (model default: 'cursor mutable: #t)            ; cursor | coords | glyph
-      (highlight default: #f mutable: #t)             ; slot the cursor/glyph models point at
+      (model default: 'cursor mutable: #t)            ; cursor | coords | hint
+      (highlight default: #f mutable: #t)             ; slot the cursor model points at
       (pending default: #f mutable: #t)               ; coords: (col . row) with one half still #f
       (render-mode default: 'primitives mutable: #t)  ; primitives | texture
       (seed default: 1 mutable: #t)
-      (message default: "" mutable: #t))
+      (message default: "" mutable: #t)
+      (typed default: "" mutable: #t)                ; hint model: label letters typed so far
+      (hint default: #f mutable: #t)                  ; priced hint: the ringed slot, or #f
+      (hint-armed default: #f mutable: #t)            ; ctrl+h pressed, face key awaited
+      (hints default: 0 mutable: #t)                  ; priced hints used this board
+      (cursor-shown default: #f mutable: #t))         ; ring visible: set by an arrow, cleared by a pick
 
-    (define MODELS '(cursor coords glyph))
+    (define MODELS '(cursor coords hint))
 
     (define (model-name m)
       (case m
         ((cursor) "CURSOR")
         ((coords) "COORDS")
-        ((glyph) "GLYPH")
+        ((hint) "HINT")
         (else "?")))
 
     (define (next-model m)
@@ -103,7 +120,12 @@
                          pending: (session-pending s)
                          render-mode: (session-render-mode s)
                          seed: (session-seed s)
-                         message: (session-message s))))
+                         message: (session-message s)
+                         typed: (session-typed s)
+                         hint: (session-hint s)
+                         hint-armed: (session-hint-armed s)
+                         hints: (session-hints s)
+                         cursor-shown: (session-cursor-shown s))))
         (let loop ((fields fields))
           (unless (null? fields)
             (case (car fields)
@@ -113,7 +135,12 @@
               ((pending) (set-session-pending! nx (cadr fields)))
               ((render-mode) (set-session-render-mode! nx (cadr fields)))
               ((seed) (set-session-seed! nx (cadr fields)))
-              ((message) (set-session-message! nx (cadr fields))))
+              ((message) (set-session-message! nx (cadr fields)))
+              ((typed) (set-session-typed! nx (cadr fields)))
+              ((hint) (set-session-hint! nx (cadr fields)))
+              ((hint-armed) (set-session-hint-armed! nx (cadr fields)))
+              ((hints) (set-session-hints! nx (cadr fields)))
+              ((cursor-shown) (set-session-cursor-shown! nx (cadr fields))))
             (loop (cddr fields))))
         nx))
 
@@ -167,14 +194,15 @@
       (if (not (playable? (session-board s) id))
           s
           (let ((b (board-select (session-board s) id)))
-            (home-highlight (session-with s 'board b 'pending #f 'highlight id)))))
+            (home-highlight (session-with s 'board b 'pending #f 'highlight id
+                                          'hint #f 'typed "" 'message "" 'cursor-shown #f)))))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
     (define (session-with-model s model)
       (if (memq model MODELS) (session-with s 'model model) s))
 
     (define (session-new-board s b)
-      (home-highlight (session-with s 'board b 'pending #f)))
+      (home-highlight (session-with s 'board b 'pending #f 'hint #f 'typed "" 'message "")))
 
     ;; --- the models ---------------------------------------------------------
 
@@ -229,7 +257,10 @@
 
     (define (step-cursor s f)
       (let ((dir (direction-of f)))
-        (cond (dir (cursor-move s dir))
+        ;; The ring shows only once an arrow has been pressed since the last
+        ;; pick: the highlight homes silently after a match so nothing looks
+        ;; pre-chosen (David, 2026-09-16).
+        (cond (dir (session-with (cursor-move s dir) 'cursor-shown #t))
               ((and (pressed? f 'space) (session-highlight s))
                (session-pick s (session-highlight s)))
               (else s))))
@@ -256,27 +287,98 @@
                                  (session-with s 'pending #f)))))
                     (else (loop (cdr keys) (session-with s 'pending (cons col* row*)))))))))
 
-    ;; Playable tiles showing this face, ascending; the highlight moves to
-    ;; the one after its current position, wrapping.
-    (define (glyph-cycle s face)
-      (let* ((b (session-board s))
-             (matching (filter (lambda (id) (eqv? (tile-face b id) face)) (playable-slots b)))
-             (h (session-highlight s)))
-        (cond ((null? matching) s)
-              ((and h (memv h matching))
-               (let ((after (cdr (memv h matching))))
-                 (session-with s 'highlight (if (null? after) (car matching) (car after)))))
-              (else (session-with s 'highlight (car matching))))))
+    ;; --- the hint model ------------------------------------------------------
+    ;;
+    ;; Labels are assigned over the uncovered present tiles in reading order,
+    ;; one letter each while there are at most 26 of them, two letters
+    ;; otherwise (home-row letters first, so the common labels sit under the
+    ;; fingers). They are recomputed from the board every frame, so they shift
+    ;; only when a tile leaves. Digits are not labels.
 
-    (define (step-glyph s f)
+    (define HINT-ALPHABET "asdfghjklqwertyuiopzxcvbnm")
+
+    (define (hint-char i) (string-ref HINT-ALPHABET i))
+
+    (define (hint-label-length count)
+      (if (<= count (string-length HINT-ALPHABET)) 1 2))
+
+    (define (hint-label i len)
+      (if (= len 1)
+          (string (hint-char i))
+          (let ((n (string-length HINT-ALPHABET)))
+            (string (hint-char (let loop ((q 0) (r i)) (if (< r n) q (loop (+ q 1) (- r n)))))
+                    (hint-char (modulo i n))))))
+
+    ;; Uncovered present tiles, top row first, left to right.
+    (define (uncovered-slots b)
+      (filter (lambda (id) (and (tile-present? b id) (not (covered? b id))))
+              (layout-reading-order (board-layout b))))
+
+    ;; ((slot . "label") ...) for the current board.
+    (define (hint-labels s)
+      (let* ((b (session-board s))
+             (slots (uncovered-slots b))
+             (len (hint-label-length (length slots))))
+        (let loop ((slots slots) (i 0) (acc '()))
+          (if (null? slots)
+              (reverse acc)
+              (loop (cdr slots) (+ i 1) (cons (cons (car slots) (hint-label i len)) acc))))))
+
+    (define (label-key? key)
+      (let ((name (symbol->string key)))
+        (and (= (string-length name) 1)
+             (let loop ((i 0))
+               (cond ((= i (string-length HINT-ALPHABET)) #f)
+                     ((char=? (hint-char i) (string-ref name 0)) #t)
+                     (else (loop (+ i 1))))))))
+
+    (define (label->slot labels text)
+      (let ((entry (find (lambda (e) (string=? (cdr e) text)) labels)))
+        (and entry (car entry))))
+
+    ;; Each label letter extends what has been typed; a complete label picks
+    ;; its tile (a blocked tile's label does nothing, like a click on it) and
+    ;; the typed text clears either way. A letter outside the alphabet clears.
+    (define (step-hint s f)
       (let loop ((keys (input-frame-pressed f)) (s s))
         (if (null? keys)
             s
-            (let ((face (key->face (car keys))))
-              (cond (face (loop (cdr keys) (glyph-cycle s face)))
-                    ((and (eq? (car keys) 'return) (session-highlight s))
-                     (loop (cdr keys) (session-pick s (session-highlight s))))
-                    (else (loop (cdr keys) s)))))))
+            (let ((key (car keys)))
+              (cond ((not (label-key? key))
+                     (loop (cdr keys) (if (member key '(space return)) (session-with s 'typed "") s)))
+                    (else
+                     (let* ((labels (hint-labels s))
+                            (len (hint-label-length (length labels)))
+                            (typed (string-append (session-typed s) (symbol->string key))))
+                       (if (< (string-length typed) len)
+                           (loop (cdr keys) (session-with s 'typed typed))
+                           (let ((id (label->slot labels typed)))
+                             (loop (cdr keys)
+                                   (session-with (if id (session-pick s id) s) 'typed "")))))))))))
+
+    ;; --- the priced hint (prototype; P1 attaches the trace cost) -------------
+    ;;
+    ;; ctrl+h arms it; the next face key rings the first playable tile of
+    ;; that face after the current hint ring (wrapping), and the hint count
+    ;; goes up by one. The ring is only a pointer: picking still goes through
+    ;; the model in use or the mouse.
+    (define (hint-jump s face)
+      (let* ((b (session-board s))
+             (matching (filter (lambda (id) (eqv? (tile-face b id) face)) (playable-slots b)))
+             (h (session-hint s))
+             (target (cond ((null? matching) #f)
+                           ((and h (memv h matching))
+                            (let ((after (cdr (memv h matching))))
+                              (if (null? after) (car matching) (car after))))
+                           (else (car matching)))))
+        (session-with s 'hint-armed #f
+                      'hint target
+                      'hints (+ 1 (session-hints s))
+                      'message (if target "" "NO FREE TILE OF THAT FACE"))))
+
+    (define (step-armed-hint s f)
+      (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
+        (if face (hint-jump s face) s)))
 
     (define (step-pointer s f g)
       (let ((click (input-frame-click f)))
@@ -291,7 +393,7 @@
       (let ((b (session-board s))
             (ctrl (held? f 'ctrl)))
         (cond ((pressed? f 'tab)
-               (session-with s 'model (next-model (session-model s)) 'pending #f))
+               (session-with s 'model (next-model (session-model s)) 'pending #f 'typed ""))
               ((or (pressed? f 'backspace) (and ctrl (pressed? f 'z)))
                (session-new-board s (board-undo b)))
               ((and ctrl (pressed? f 's))
@@ -301,6 +403,8 @@
                  (session-with (session-new (board-layout b) seed)
                                'model (session-model s)
                                'render-mode (session-render-mode s))))
+              ((and ctrl (pressed? f 'h))
+               (session-with s 'hint-armed #t 'message "HINT: PRESS A FACE KEY"))
               ((and ctrl (pressed? f 't))
                (session-with s 'render-mode
                              (if (eq? (session-render-mode s) 'primitives) 'texture 'primitives)))
@@ -309,12 +413,14 @@
     ;; --- one frame ----------------------------------------------------------
 
     (define (session-step s f g)
-      (or (step-commands s f)
-          (let ((s (step-pointer s f g)))
-            (if (held? f 'ctrl)
-                s
-                (case (session-model s)
-                  ((cursor) (step-cursor s f))
-                  ((coords) (step-coords s f g))
-                  ((glyph) (step-glyph s f))
-                  (else s))))))))
+      (cond ((step-commands s f) => (lambda (s) s))
+            ((session-hint-armed s) (step-armed-hint s f))
+            (else
+             (let ((s (step-pointer s f g)))
+               (if (held? f 'ctrl)
+                   s
+                   (case (session-model s)
+                     ((cursor) (step-cursor s f))
+                     ((coords) (step-coords s f g))
+                     ((hint) (step-hint s f))
+                     (else s)))))))))

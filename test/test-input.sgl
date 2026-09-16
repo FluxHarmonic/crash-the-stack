@@ -3,7 +3,7 @@
 ;;; One known pair, picked four ways: a pointer click at each tile's centre,
 ;;; the cursor model (a bounded search over arrow presses using the model's
 ;;; own step, which also proves the pair is reachable), the coordinate model
-;;; (the tiles' column letter and row digit), and the glyph model (the face
+;;; (the tiles' column letter and row digit), and the hint model (the label
 ;;; key until the highlight lands, then return). All four must leave the
 ;;; board in the same state after the FIRST pick (one tile selected, nothing
 ;;; removed, no history) and after the second (the pair gone), and the same
@@ -77,15 +77,13 @@
          (row-key (string->symbol (string (row-label row)))))
     (session-step (session-step s (frame (list col-key)) geom) (frame (list row-key)) geom)))
 
-;; Press the face's key until the highlight is the wanted tile (at most as
-;; many times as there are tiles of that face), then return.
-(define (pick-by-glyph s id)
-  (let ((key (face->key (tile-face (session-board s) id))))
-    (let loop ((s s) (n 0))
-      (cond ((> n 4) (error "glyph cycling never reached tile" id))
-            ((eqv? (session-highlight s) id) (session-step s (frame '(return)) geom))
-            (else (loop (session-step s (frame (list key)) geom) (+ n 1)))))))
-
+;; Type the label the hint model puts on the tile, one key per letter.
+(define (pick-by-hint s id)
+  (let ((label (cdr (assv id (hint-labels s)))))
+    (let loop ((chars (string->list label)) (s s))
+      (if (null? chars)
+          s
+          (loop (cdr chars) (session-step s (frame (list (string->symbol (string (car chars))))) geom))))))
 (define (run-path model pick a c)
   (let* ((s0 (fresh model))
          (s1 (pick s0 a))
@@ -108,15 +106,15 @@
         (pointer (run-path 'cursor pick-by-pointer a c))
         (cursor (run-path 'cursor pick-by-cursor a c))
         (coords (run-path 'coords pick-by-coords a c))
-        (glyph (run-path 'glyph pick-by-glyph a c)))
+        (hint (run-path 'hint pick-by-hint a c)))
     (test (string-append name ": pointer, first pick") (assert-equal (car expected) (car pointer)))
     (test (string-append name ": pointer, second pick") (assert-equal (cadr expected) (cadr pointer)))
     (test (string-append name ": cursor, first pick") (assert-equal (car expected) (car cursor)))
     (test (string-append name ": cursor, second pick") (assert-equal (cadr expected) (cadr cursor)))
     (test (string-append name ": coords, first pick") (assert-equal (car expected) (car coords)))
     (test (string-append name ": coords, second pick") (assert-equal (cadr expected) (cadr coords)))
-    (test (string-append name ": glyph, first pick") (assert-equal (car expected) (car glyph)))
-    (test (string-append name ": glyph, second pick") (assert-equal (cadr expected) (cadr glyph)))))
+    (test (string-append name ": hint, first pick") (assert-equal (car expected) (car hint)))
+    (test (string-append name ": hint, second pick") (assert-equal (cadr expected) (cadr hint)))))
 
 (test-group "input parity: a matching pair"
   (let* ((b (generate lay SEED))
@@ -177,20 +175,21 @@
       (assert-equal (canon s) (canon (session-step matched (frame '(backspace)) geom))))
     (test "ctrl+z undoes the match"
       (assert-equal (canon s) (canon (session-step matched (frame '(z) '(ctrl)) geom))))
-    (test "z without ctrl in the glyph model is a face key, not undo"
+    (test "z without ctrl in the hint model is a label key, not undo"
       ;; on a session with something to undo, so the two readings differ
-      (let* ((g (fresh (quote glyph)))
+      (let* ((g (fresh 'hint))
              (gp (car (board-solution (session-board g))))
              (gm (pick-by-pointer (pick-by-pointer g (car gp)) (cdr gp)))
-             (after (session-step gm (frame (quote (z))) geom)))
+             (after (session-step gm (frame '(z)) geom)))
         (assert-equal 142 (board-tile-count (session-board gm)))
         (assert-equal 142 (board-tile-count (session-board after)))
-        (assert-equal 144 (board-tile-count (session-board (session-step gm (frame (quote (z)) (quote (ctrl))) geom))))))
-    (test "tab cycles cursor -> coords -> glyph -> cursor"
+        (assert-equal "z" (session-typed after))
+        (assert-equal 144 (board-tile-count (session-board (session-step gm (frame '(z) '(ctrl)) geom))))))
+    (test "tab cycles cursor -> coords -> hint -> cursor"
       (let* ((s1 (session-step s (frame '(tab)) geom))
              (s2 (session-step s1 (frame '(tab)) geom))
              (s3 (session-step s2 (frame '(tab)) geom)))
-        (assert-equal '(coords glyph cursor)
+        (assert-equal '(coords hint cursor)
                       (list (session-model s1) (session-model s2) (session-model s3)))))
     (test "ctrl+s shuffles and keeps the tile count"
       (let ((sh (session-step matched (frame '(s) '(ctrl)) geom)))
@@ -200,5 +199,78 @@
       (let ((n (session-step s (frame '(n) '(ctrl)) geom)))
         (assert-equal (+ SEED 1) (session-seed n))
         (assert-true (board-equal? (generate lay (+ SEED 1)) (session-board n)))))
+    (test "the cursor ring is hidden after a pick and shown again by an arrow"
+      (let* ((c (fresh 'cursor))
+             (moved (session-step c (frame '(right)) geom))
+             (cp (car (board-solution (session-board c))))
+             (picked (pick-by-pointer moved (car cp)))
+             (moved-again (session-step picked (frame '(left)) geom)))
+        (assert-false (session-cursor-shown c))
+        (assert-true (session-cursor-shown moved))
+        (assert-false (session-cursor-shown picked))
+        (assert-true (and (session-highlight picked) #t))
+        (assert-true (session-cursor-shown moved-again))))
     (test "ctrl+t toggles the renderer"
       (assert-equal 'texture (session-render-mode (session-step s (frame '(t) '(ctrl)) geom))))))
+
+(test-group "hint model: labels and the priced hint"
+  (let* ((s (fresh 'hint))
+         (b (session-board s))
+         (labels (hint-labels s)))
+    (test "every uncovered present tile has a label and no covered tile does"
+      (assert-equal (uncovered-slots b) (map car labels))
+      (assert-true (every (lambda (id) (not (covered? b id))) (map car labels)))
+      (assert-equal 84 (length labels)))
+    (test "labels are distinct"
+      (let loop ((ls (map cdr labels)))
+        (cond ((null? ls) (assert-true #t))
+              ((member (car ls) (cdr ls)) (assert-fail (string-append "duplicate label " (car ls))))
+              (else (loop (cdr ls))))))
+    (test "84 tiles need two-letter labels from the 26-letter alphabet"
+      (assert-true (every (lambda (l) (= 2 (string-length l))) (map cdr labels))))
+    (test "labels are made only of alphabet letters"
+      (assert-true (every (lambda (l) (every (lambda (c) (memv c (string->list HINT-ALPHABET)))
+                                             (string->list l)))
+                          (map cdr labels))))
+    (test "typing a blocked tile's label changes nothing but clears the typed text"
+      (let* ((blocked (find (lambda (id) (and (tile-present? b id) (not (covered? b id))
+                                              (not (playable? b id))))
+                            (iota 144)))
+             (after (pick-by-hint s blocked)))
+        (assert-true (and blocked #t))
+        (assert-equal (canon s) (canon after))
+        (assert-equal "" (session-typed after))))
+    (test "one letter typed shows as the typed prefix"
+      (let ((after (session-step s (frame (list (string->symbol (string (string-ref (cdr (car labels)) 0))))) geom)))
+        (assert-equal 1 (string-length (session-typed after)))))
+    (test "space clears a half-typed label"
+      (let* ((one (session-step s (frame '(a)) geom))
+             (cleared (session-step one (frame '(space)) geom)))
+        (assert-equal "" (session-typed cleared))))
+    (test "labels shift only when a tile leaves: same board, same labels"
+      (assert-equal labels (hint-labels (session-step s (frame '(a)) geom))))
+    (test "the priced hint: ctrl+h then a face key rings a playable tile of that face and counts one"
+      (let* ((pair (car (board-solution b)))
+             (face (tile-face b (car pair)))
+             (armed (session-step s (frame '(h) '(ctrl)) geom))
+             (hinted (session-step armed (frame (list (face->key face))) geom)))
+        (assert-true (session-hint-armed armed))
+        (assert-false (session-hint-armed hinted))
+        (assert-equal 1 (session-hints hinted))
+        (assert-true (and (session-hint hinted) (playable? b (session-hint hinted))))
+        (assert-equal face (tile-face b (session-hint hinted)))
+        (assert-equal (canon s) (canon hinted))))
+    (test "the priced hint on a face with no free tile counts and rings nothing"
+      (let* ((face (find (lambda (f) (not (any (lambda (id) (eqv? (tile-face b id) f)) (playable-slots b))))
+                         (iota FACE-COUNT)))
+             (hinted (session-step (session-step s (frame '(h) '(ctrl)) geom) (frame (list (face->key face))) geom)))
+        (assert-true (and face #t))
+        (assert-equal 1 (session-hints hinted))
+        (assert-false (session-hint hinted))))
+    (test "a pick clears the hint ring"
+      (let* ((pair (car (board-solution b)))
+             (hinted (session-step (session-step s (frame '(h) '(ctrl)) geom)
+                                   (frame (list (face->key (tile-face b (car pair))))) geom))
+             (picked (pick-by-pointer hinted (car pair))))
+        (assert-false (session-hint picked))
+        (assert-equal 1 (session-hints picked))))))

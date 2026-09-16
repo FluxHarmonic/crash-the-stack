@@ -127,10 +127,12 @@
 
     ;; The keyboard highlight ring, drawn after every tile so no neighbour
     ;; paints over it.
-    (define (draw-highlight-ring g id)
+    ;; A ring around a tile: the cursor highlight in magenta, the priced
+    ;; hint in yellow. Drawn after every tile so no neighbour paints over it.
+    (define (draw-ring g id colour)
       (let* ((r (slot-rect g id))
              (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-        (colour! C-HIGHLIGHT)
+        (colour! colour)
         (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
@@ -139,7 +141,8 @@
     (define (draw-tiles s g tex)
       (let* ((b (session-board s))
              (selected (board-selected b))
-             (highlight (and (memq (session-model s) '(cursor glyph))
+             (highlight (and (eq? (session-model s) 'cursor)
+                             (session-cursor-shown s)
                              (session-highlight s)
                              (tile-present? b (session-highlight s))
                              (session-highlight s))))
@@ -153,7 +156,31 @@
                     (draw-tile-texture g b id tex x y w h selected?)
                     (draw-tile-primitives g b id x y w h selected?)))))
           (geometry-draw-order g))
-        (when highlight (draw-highlight-ring g highlight))))
+        (when highlight (draw-ring g highlight C-HIGHLIGHT))
+        (let ((hint (session-hint s)))
+          (when (and hint (tile-present? b hint)) (draw-ring g hint C-LABEL-LIT)))))
+
+    ;; --- hint labels (model c) -------------------------------------------------
+    ;;
+    ;; A small dark tag in the top-left corner of every uncovered tile with its
+    ;; one- or two-letter label; the letters typed so far are drawn lit.
+
+    (define (draw-hint-labels s g)
+      (let ((typed (session-typed s)))
+        (for-each
+          (lambda (entry)
+            (let* ((r (slot-rect g (car entry)))
+                   (label (cdr entry))
+                   (x (+ (car r) 1)) (y (+ (cadr r) 1))
+                   (w (+ 2 (text-width label 1)))
+                   (prefix? (and (> (string-length typed) 0)
+                                 (<= (string-length typed) (string-length label))
+                                 (string=? typed (substring label 0 (string-length typed))))))
+              (colour! C-BG)
+              (draw-filled-rect x y w 9)
+              (colour! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
+              (draw-text label (+ x 1) (+ y 1) 1)))
+          (hint-labels s))))
 
     ;; --- coordinate labels (model b) -----------------------------------------
 
@@ -210,8 +237,15 @@
         (draw-text (string-append "KEYS " (model-name (session-model s)))
                    (exact (floor (/ (- vw (text-width "KEYS CURSOR" 2)) 2))) (+ top 6) 2)
         (draw-text right (- vw 8 (text-width right 2)) (+ top 6) 2)
+        (when (> (session-hints s) 0)
+          (colour! C-LABEL-LIT)
+          (let ((hints (string-append "HINTS " (number->string (session-hints s)))))
+            (draw-text hints (- vw 8 (text-width right 2) 24 (text-width hints 2)) (+ top 6) 2)))
+        (when (> (string-length (session-typed s)) 0)
+          (colour! C-HIGHLIGHT)
+          (draw-text (string-append "> " (session-typed s)) (+ 8 (text-width "TILES 144" 2) 24) (+ top 6) 2))
         (colour! C-TEXT-DIM)
-        (draw-text "TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^N NEXT  ^T TILE  ESC QUIT"
+        (draw-text "TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE  ESC QUIT"
                    8 (+ top 24) 1)
         (let ((message (cond ((board-cleared? b) "STACK CRASHED")
                              ((null? (legal-matches b)) "NO MOVES LEFT - ^S SHUFFLE")
@@ -229,6 +263,8 @@
     (define (draw-session s g tex)
       (draw-background g)
       (draw-tiles s g tex)
+      (when (eq? (session-model s) 'hint)
+        (draw-hint-labels s g))
       (when (eq? (session-model s) 'coords)
         (draw-labels s g))
       (draw-hud s g))))
