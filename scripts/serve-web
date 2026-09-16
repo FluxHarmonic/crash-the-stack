@@ -3,12 +3,14 @@
 #
 #   scripts/serve-web            start in the background, PID in build/web-serve-8770.pid
 #   scripts/serve-web --stop     stop the server started by this script, by that PID
+#   PORT=8771 scripts/serve-web  another port (its own pidfile and log)
 #
 # Binds to the box's WireGuard address only (decision D10: this machine is
 # also on the home LAN, and `sigil serve` defaults to 0.0.0.0, which would
 # expose the dev build there). The address is read from wg0 at run time,
 # never hardcoded; an empty or wildcard address is a refusal, not a
-# fallback. scripts/check-bind confirms what actually got bound.
+# fallback. scripts/check-bind confirms what actually got bound; this
+# script's own messages are not evidence of the bind.
 set -eu
 cd "$(dirname "$0")/.." || exit 1
 
@@ -17,18 +19,36 @@ DIR="${DIR:-build/web}"
 PIDFILE="build/web-serve-$PORT.pid"
 LOGFILE="build/web-serve-$PORT.log"
 
-if [ "${1:-}" = "--stop" ]; then
-  [ -f "$PIDFILE" ] || { echo "serve-web: no $PIDFILE"; exit 1; }
+# The PID in the pidfile, if it is still the server this script started: a
+# sigil process whose cwd is this repo. Prints the PID or nothing.
+live_pid() {
+  [ -f "$PIDFILE" ] || return 0
   pid="$(cat "$PIDFILE")"
-  # Only ever kill the process we started: it must still be a sigil binary
-  # whose cwd is this repo.
   exe="$(readlink "/proc/$pid/exe" 2>/dev/null || true)"
   cwd="$(readlink "/proc/$pid/cwd" 2>/dev/null || true)"
-  case "$exe" in *sigil*) ;; *) echo "serve-web: pid $pid is not sigil ($exe); not killing"; exit 1 ;; esac
-  [ "$cwd" = "$(pwd)" ] || { echo "serve-web: pid $pid cwd is $cwd, not $(pwd); not killing"; exit 1; }
+  case "$exe" in *sigil*) ;; *) return 0 ;; esac
+  [ "$cwd" = "$(pwd)" ] || return 0
+  echo "$pid"
+}
+
+if [ "${1:-}" = "--stop" ]; then
+  [ -f "$PIDFILE" ] || { echo "serve-web: no $PIDFILE"; exit 1; }
+  pid="$(live_pid)"
+  if [ -z "$pid" ]; then
+    echo "serve-web: pid $(cat "$PIDFILE") is not a sigil process in $(pwd); not killing, removing the stale $PIDFILE"
+    rm -f "$PIDFILE"
+    exit 1
+  fi
   kill "$pid" && rm -f "$PIDFILE" && echo "serve-web: stopped $pid"
   exit 0
 fi
+
+pid="$(live_pid)"
+if [ -n "$pid" ]; then
+  echo "serve-web: already running as pid $pid on port $PORT ($PIDFILE); stop it first"
+  exit 1
+fi
+rm -f "$PIDFILE"
 
 HOST="$(ip -4 -o addr show wg0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 case "$HOST" in
@@ -37,5 +57,12 @@ esac
 [ -f "$DIR/index.html" ] || { echo "serve-web: $DIR/index.html missing; build --config web first"; exit 1; }
 
 sigil serve --dir "$DIR" --host "$HOST" --port "$PORT" > "$LOGFILE" 2>&1 &
-echo $! > "$PIDFILE"
-echo "serve-web: pid $(cat "$PIDFILE") on http://$HOST:$PORT/ (log $LOGFILE)"
+pid=$!
+sleep 1
+if ! kill -0 "$pid" 2>/dev/null; then
+  echo "serve-web: sigil serve exited at once; its log:"
+  cat "$LOGFILE"
+  exit 1
+fi
+echo "$pid" > "$PIDFILE"
+echo "serve-web: pid $pid on http://$HOST:$PORT/ (log $LOGFILE); confirm with scripts/check-bind $PORT"

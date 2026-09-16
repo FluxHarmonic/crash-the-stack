@@ -14,15 +14,17 @@
 ;;;
 ;;; What the browser cannot give the game: ctrl chords (the loader drops any
 ;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t), so the page
-;;; carries buttons that send the command names below, and this shell turns
-;;; a name into the native chord for one frame. Escape does nothing here;
-;;; there is no window to close.
+;;; carries buttons that send command names, and this shell turns each
+;;; name into the native key or chord for a frame of its own. Escape does
+;;; nothing here; there is no window to close.
 ;;;
 ;;; Console lines this shell prints (the browser arm in verify.mjs reads them):
 ;;;   crash: seed S pair A AX AY B BX BY   at boot: the first solution pair
 ;;;                                         and its centres in virtual pixels
 ;;;   crash: select N                      a tile was selected
-;;;   crash: deselect                      the selection was cleared
+;;;   crash: deselect                      the selection was cleared by a pick
+;;;   crash: undo tiles N                  an undo put tiles back
+;;;   crash: shuffle                       the board was shuffled
 ;;;   crash: removed A B tiles N           a pair left the board
 
 (define-library (crash web)
@@ -52,7 +54,7 @@
     (define *geom* #f)
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
-    (define *chord* #f)      ; a command button pressed since the last frame: s n t
+    (define *commands* '())  ; button presses waiting for a frame each: ((pressed) . (held))
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
     (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
     (define *texture* #f)    ; the decoded test tile, once ready
@@ -78,19 +80,25 @@
             ((= (string-length k) 1) (string->symbol (string-downcase k)))
             (else (string->symbol k))))
 
-    ;; The command buttons on the page. Each is the chord the native shell
-    ;; reads for the same command; the name reaches us through the loader's
-    ;; data-key path exactly like a key would.
-    (define (command-name->chord name)
-      (cond ((string=? name "shuffle") 's)
-            ((string=? name "next") 'n)
-            ((string=? name "tile") 't)
+    ;; The command buttons on the page. Each name is the key or chord the
+    ;; native shell reads for the same command, as (pressed . held). The name
+    ;; reaches us through the loader's data-key path exactly like a key would
+    ;; (a keydown, then a keyup 120 ms later, which key-up! ignores).
+    (define (command-name->input name)
+      (cond ((string=? name "keys") '((tab) . ()))
+            ((string=? name "undo") '((backspace) . ()))
+            ((string=? name "shuffle") '((s) . (ctrl)))
+            ((string=? name "next") '((n) . (ctrl)))
+            ((string=? name "tile") '((t) . (ctrl)))
             (else #f)))
 
     (define (key-down! k)
-      (let ((chord (command-name->chord k)))
-        (if chord
-            (set! *chord* chord)
+      (let ((command (command-name->input k)))
+        (if command
+            ;; Queued, not merged: each command gets a frame of its own
+            ;; (see web-tick), so two taps 50 ms apart are two commands and
+            ;; a tap on the board in the same frame is not swallowed.
+            (set! *commands* (append *commands* (list command)))
             (let ((sym (dom-key->sym k)))
               ;; A held key repeats keydown in the DOM; only the first counts
               ;; as pressed, matching sigil-app's edge semantics.
@@ -99,8 +107,9 @@
                 (set! *pressed* (cons sym *pressed*)))))))
 
     (define (key-up! k)
-      (let ((sym (dom-key->sym k)))
-        (set! *keys* (filter (lambda (x) (not (eq? x sym))) *keys*))))
+      (unless (command-name->input k)
+        (let ((sym (dom-key->sym k)))
+          (set! *keys* (filter (lambda (x) (not (eq? x sym))) *keys*)))))
 
     ;; --- pointer -------------------------------------------------------------
 
@@ -139,18 +148,26 @@
                              parts))
                  "\n")))
 
+    ;; What changed between two sessions, as one line, or nothing. A new
+    ;; deal is reported by say-first-pair instead (web-tick checks the seed).
     (define (report-change! before after)
       (let ((b0 (session-board before)) (b1 (session-board after)))
-        (let ((n0 (board-tile-count b0)) (n1 (board-tile-count b1)))
-          (cond ((< n1 n0)
+        (let ((n0 (board-tile-count b0)) (n1 (board-tile-count b1))
+              (h0 (length (board-history b0))) (h1 (length (board-history b1))))
+          (cond ((not (= (session-seed before) (session-seed after))) #f)
+                ((< n1 n0)
                  ;; Two tiles left: the selected one and the one just picked.
                  (let ((gone (filter (lambda (id) (and (tile-present? b0 id)
                                                        (not (tile-present? b1 id))))
                                      (iota (layout-slot-count (board-layout b0))))))
                    (apply say "removed" (append gone (list "tiles" n1)))))
+                ((< h1 h0) (say "undo" "tiles" n1))
+                ;; Same tiles, longer history: only a shuffle does that; shorter
+                ;; history is an undo, whatever it put back.
+                ((> h1 h0) (say "shuffle"))
                 ((and (board-selected b1) (not (eqv? (board-selected b0) (board-selected b1))))
                  (say "select" (board-selected b1)))
-                ((and (board-selected b0) (not (board-selected b1)) (= n0 n1))
+                ((and (board-selected b0) (not (board-selected b1)))
                  (say "deselect"))))))
 
     (define (say-first-pair s)
@@ -166,13 +183,23 @@
 
     ;; --- one frame -----------------------------------------------------------
 
+    ;; A queued command is a frame by itself: session-step runs one command
+    ;; and skips the pointer and the keyboard models for that frame, so a
+    ;; key or a tap that arrived alongside a button press would otherwise be
+    ;; lost, and a plain key would read as a ctrl chord. Keys and the tap
+    ;; wait for the next frame instead.
     (define (input-this-frame)
-      (make-input-frame
-        (if *chord* (cons *chord* *pressed*) *pressed*)
-        (if *chord*
-            '(ctrl)
-            (filter (lambda (k) (memq k '(ctrl shift))) *keys*))
-        *click*))
+      (if (pair? *commands*)
+          (let ((command (car *commands*)))
+            (set! *commands* (cdr *commands*))
+            (make-input-frame (car command) (cdr command) #f))
+          (let ((f (make-input-frame
+                     *pressed*
+                     (filter (lambda (k) (memq k '(ctrl shift))) *keys*)
+                     *click*)))
+            (set! *pressed* '())
+            (set! *click* #f)
+            f)))
 
     (define (web-tick)
       (when *session*
@@ -181,9 +208,6 @@
         (let* ((before *session*)
                (after (session-step before (input-this-frame) *geom*)))
           (set! *session* after)
-          (set! *pressed* '())
-          (set! *chord* #f)
-          (set! *click* #f)
           (report-change! before after)
           (when (not (= (session-seed before) (session-seed after)))
             (say-first-pair after))

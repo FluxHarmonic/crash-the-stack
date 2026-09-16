@@ -33,7 +33,8 @@
 //
 // The tap target comes from the game's own boot line, so this arm proves the
 // forwarding path (page -> dispatch -> input-frame -> board-select), not the
-// geometry; test/test-input.sgl covers the geometry natively.
+// geometry; test/test-input.sgl covers hit-testing natively and
+// test/test-viewport.sgl the letterbox inverse.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -102,12 +103,37 @@ const chrome = spawn("google-chrome", [
 ], { stdio: "ignore" });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Stop chrome and the server, remove the profile dir once chrome has exited
+// (removing it while chrome is still writing leaves it behind), then exit.
+let exiting = false;
 function shutdown(code) {
-  try { chrome.kill("SIGTERM"); } catch {}
+  if (exiting) return;
+  exiting = true;
   server.close();
-  try { fs.rmSync(udd, { recursive: true, force: true }); } catch {}
-  setTimeout(() => process.exit(code), 200);
+  // Chrome's helper processes outlive the main one by a moment and keep
+  // writing the profile; retry the removal a few times before giving up.
+  const finish = () => {
+    let tries = 0;
+    const rm = () => {
+      try { fs.rmSync(udd, { recursive: true, force: true }); } catch {}
+      if (fs.existsSync(udd) && ++tries < 10) { setTimeout(rm, 200); return; }
+      process.exit(code);
+    };
+    rm();
+  };
+  if (chrome.exitCode !== null) { finish(); return; }
+  chrome.once("exit", finish);
+  try { chrome.kill("SIGTERM"); } catch { finish(); return; }
+  setTimeout(() => { try { chrome.kill("SIGKILL"); } catch {} }, 3000).unref();
+  setTimeout(finish, 5000).unref();
 }
+// Nothing below may hang the arm: a thrown CDP call, a chrome that dies
+// mid-run, or a wait that never ends all reach shutdown, so the chrome and
+// its CDP port are never leaked for the next run to drive by mistake.
+process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
+process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
+const WHOLE_RUN_MS = 120000;
+setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
 for (let i = 0; i < 80 && !pageWs; i++) {
@@ -242,8 +268,10 @@ if (EXPECT_NO_SELECTION) {
 // highlight through the playable tiles of that face and Enter picks. For
 // each face: key, Enter (a "crash: select" line means a playable tile of
 // that face exists), key, Enter again: either the second playable tile of
-// the face matches ("crash: removed") or the highlight cycled back to the
-// same tile and Enter deselected it; move on to the next face.
+// the face matches ("crash: removed"), or the highlight cycled back to the
+// same tile and Enter deselected it, or a third playable tile of the face
+// took the selection ("select C"); either way move on to the next face,
+// whose first pick replaces any selection left behind.
 async function key(type, k) {
   await evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
 }
@@ -261,9 +289,6 @@ for (const f of FACES) {
   await press(f); await press("Enter");
   const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 1500);
   if (rem) { matched = { face: f, line: rem.m[0], tiles: rem.m[3] }; break; }
-  // one playable tile of this face only: the second Enter re-picked it
-  // (deselect) or did nothing; move on to the next face
-  await press("Escape");
 }
 if (matched && matched.tiles === String(tilesBefore - 2)) pass("keys-match", `glyph model, face ${matched.face}: ${matched.line}`);
 else if (matched) fail("keys-match", `expected tiles ${tilesBefore - 2}, got "${matched.line}"`);

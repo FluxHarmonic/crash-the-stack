@@ -1,0 +1,50 @@
+;;; The letterbox inverse both shells convert their pointer through.
+;;;
+;;; sigil-graphics fits the vw x vh viewport into a fw x fh frame by the
+;;; float scale min(fw/vw, fh/vh) and centres it; frame->virtual undoes
+;;; that. The browser arm cannot exercise the offset terms (its canvas is
+;;; pinned to the viewport's aspect, so the bars are empty), which is why
+;;; the wide and tall frames below are here.
+
+(import (sigil test)
+        (sigil math)
+        (crash geometry))
+
+(define (near? a b) (< (abs (- a b)) 1e-9))
+
+(define (point-near? p x y)
+  (and (near? (car p) x) (near? (cdr p) y)))
+
+(test-group "frame->virtual: an exact 2x window (the native shell's)"
+  (test "the origin" (assert-true (point-near? (frame->virtual 1280 800 640 400 0 0) 0 0)))
+  (test "the far corner" (assert-true (point-near? (frame->virtual 1280 800 640 400 1280 800) 640 400)))
+  (test "a tile centre" (assert-true (point-near? (frame->virtual 1280 800 640 400 928 106) 464 53))))
+
+(test-group "frame->virtual: a wide frame, bars left and right"
+  ;; 2000x1000: scale min(3.125, 2.5) = 2.5, the viewport is 1600 wide, ox = 200
+  (test "the left bar ends where virtual x = 0"
+    (assert-true (point-near? (frame->virtual 2000 1000 640 400 200 0) 0 0)))
+  (test "the far corner of the viewport"
+    (assert-true (point-near? (frame->virtual 2000 1000 640 400 1800 1000) 640 400)))
+  (test "the frame centre is the viewport centre"
+    (assert-true (point-near? (frame->virtual 2000 1000 640 400 1000 500) 320 200)))
+  (test "a point on the bar is left of the viewport"
+    (assert-true (< (car (frame->virtual 2000 1000 640 400 100 500)) 0))))
+
+(test-group "frame->virtual: a tall frame, bars above and below"
+  ;; 1000x1000: scale min(1.5625, 2.5) = 1.5625, the viewport is 625 tall, oy = 187.5
+  (test "the top bar ends where virtual y = 0"
+    (assert-true (point-near? (frame->virtual 1000 1000 640 400 0 187.5) 0 0)))
+  (test "the far corner of the viewport"
+    (assert-true (point-near? (frame->virtual 1000 1000 640 400 1000 812.5) 640 400)))
+  (test "a point on the bar is above the viewport"
+    (assert-true (< (cdr (frame->virtual 1000 1000 640 400 500 100)) 0))))
+
+(test-group "frame->virtual: a phone buffer at a fractional scale"
+  ;; 1170x732 (390 CSS px at dpr 3, 16:10 rounded): scale 1.828125, oy = 73.5 / 2
+  (test "the scale is fractional and the origin still maps"
+    (let ((scale (min (/ 1170 640) (/ 732 400))))
+      (assert-true (and (not (integer? scale))
+                        (point-near? (frame->virtual 1170 732 640 400 0 (/ (- 732 (* 400 scale)) 2)) 0 0)))))
+  (test "the buffer centre is the viewport centre"
+    (assert-true (point-near? (frame->virtual 1170 732 640 400 585 366) 320 200))))
