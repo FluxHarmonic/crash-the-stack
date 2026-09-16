@@ -1,0 +1,218 @@
+;;; (crash web) - The browser shell.
+;;;
+;;; The same game as (crash native), driven the way a browser drives things:
+;;; the generic loader (sigil-web-app.js, from sigil-wasm-runtime) forwards
+;;; DOM keydown/keyup by key name, the page template forwards pointerdown as
+;;; canvas-buffer pixels, and the gles3 app shell dispatches ("frame", ms)
+;;; once per requestAnimationFrame. Every one of those arrives here through
+;;; (crash main)'s sigil-web-dispatch-event, and each frame this shell folds
+;;; what arrived into one input-frame, steps the session, and draws it,
+;;; exactly as the native shell does with sigil-app's polled state.
+;;;
+;;; No coroutine and no wait-frame: delimited continuations do not work under
+;;; native codegen, so the frame loop is inverted (one tick per dispatch).
+;;;
+;;; What the browser cannot give the game: ctrl chords (the loader drops any
+;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t), so the page
+;;; carries buttons that send the command names below, and this shell turns
+;;; a name into the native chord for one frame. Escape does nothing here;
+;;; there is no window to close.
+;;;
+;;; Console lines this shell prints (the browser arm in verify.mjs reads them):
+;;;   crash: seed S pair A AX AY B BX BY   at boot: the first solution pair
+;;;                                         and its centres in virtual pixels
+;;;   crash: select N                      a tile was selected
+;;;   crash: deselect                      the selection was cleared
+;;;   crash: removed A B tiles N           a pair left the board
+
+(define-library (crash web)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math)
+          (sigil string)
+          (sigil graphics)
+          (sigil graphics image)
+          (sigil browser gles3)
+          (crash stack layout)
+          (crash stack turtle)
+          (crash stack rules)
+          (crash geometry)
+          (crash input)
+          (crash render))
+
+  (export web-main web-dispatch)
+
+  (begin
+    (define VW 640)
+    (define VH 400)
+    (define TEST-TILE-URL "assets/test-tile.png")
+
+    ;; --- state between dispatches ------------------------------------------
+    (define *session* #f)
+    (define *geom* #f)
+    (define *keys* '())      ; key symbols currently held (sigil-app's names)
+    (define *pressed* '())   ; keys that went down since the last frame
+    (define *chord* #f)      ; a command button pressed since the last frame: s n t
+    (define *click* #f)      ; (x . y) in virtual pixels, or #f
+    (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
+    (define *texture* #f)    ; the decoded test tile, once ready
+
+    ;; --- keys ----------------------------------------------------------------
+
+    ;; DOM KeyboardEvent.key -> the symbol sigil-app would report, so
+    ;; (crash input) sees one vocabulary on both targets. Anything else
+    ;; becomes a symbol nobody listens to.
+    (define (dom-key->sym k)
+      (cond ((string=? k "ArrowLeft") 'left)
+            ((string=? k "ArrowRight") 'right)
+            ((string=? k "ArrowUp") 'up)
+            ((string=? k "ArrowDown") 'down)
+            ((string=? k " ") 'space)
+            ((string=? k "Enter") 'return)
+            ((string=? k "Backspace") 'backspace)
+            ((string=? k "Tab") 'tab)
+            ((string=? k "Escape") 'escape)
+            ((string=? k "Shift") 'shift)
+            ((string=? k "Control") 'ctrl)
+            ((string=? k "Alt") 'alt)
+            ((= (string-length k) 1) (string->symbol (string-downcase k)))
+            (else (string->symbol k))))
+
+    ;; The command buttons on the page. Each is the chord the native shell
+    ;; reads for the same command; the name reaches us through the loader's
+    ;; data-key path exactly like a key would.
+    (define (command-name->chord name)
+      (cond ((string=? name "shuffle") 's)
+            ((string=? name "next") 'n)
+            ((string=? name "tile") 't)
+            (else #f)))
+
+    (define (key-down! k)
+      (let ((chord (command-name->chord k)))
+        (if chord
+            (set! *chord* chord)
+            (let ((sym (dom-key->sym k)))
+              ;; A held key repeats keydown in the DOM; only the first counts
+              ;; as pressed, matching sigil-app's edge semantics.
+              (unless (memq sym *keys*)
+                (set! *keys* (cons sym *keys*))
+                (set! *pressed* (cons sym *pressed*)))))))
+
+    (define (key-up! k)
+      (let ((sym (dom-key->sym k)))
+        (set! *keys* (filter (lambda (x) (not (eq? x sym))) *keys*))))
+
+    ;; --- pointer -------------------------------------------------------------
+
+    ;; "bx,by" in canvas-buffer pixels (the template's job is the CSS to
+    ;; buffer scale; the letterbox inverse is the same one native uses).
+    (define (pointer-down! payload)
+      (let ((parts (string-split payload ",")))
+        (when (= (length parts) 2)
+          (let ((x (string->number (car parts)))
+                (y (string->number (cadr parts))))
+            (when (and x y)
+              (set! *click* (frame->virtual (gles3-canvas-width) (gles3-canvas-height)
+                                            VW VH x y)))))))
+
+    ;; --- the test tile, fetched by JS, decoded here once it lands ---------
+
+    (define (ensure-texture!)
+      (when (and (not *texture*) (> *tile-fetch* 0) (gles3-image-ready? *tile-fetch*))
+        (let ((img (load-image-from-memory (gles3-image-ptr *tile-fetch*)
+                                           (gles3-image-size *tile-fetch*))))
+          (when img
+            (set! *texture* (load-texture img))
+            (image-free! img)))))
+
+    ;; --- console lines -------------------------------------------------------
+
+    ;; One write per line: the loader's WASI shim logs every fd_write as its
+    ;; own console entry, so a line assembled from several displays would
+    ;; arrive as several entries.
+    (define (say . parts)
+      (display (string-append
+                 "crash:"
+                 (apply string-append
+                        (map (lambda (p)
+                               (string-append " " (if (number? p) (number->string p) (format "~a" p))))
+                             parts))
+                 "\n")))
+
+    (define (report-change! before after)
+      (let ((b0 (session-board before)) (b1 (session-board after)))
+        (let ((n0 (board-tile-count b0)) (n1 (board-tile-count b1)))
+          (cond ((< n1 n0)
+                 ;; Two tiles left: the selected one and the one just picked.
+                 (let ((gone (filter (lambda (id) (and (tile-present? b0 id)
+                                                       (not (tile-present? b1 id))))
+                                     (iota (layout-slot-count (board-layout b0))))))
+                   (apply say "removed" (append gone (list "tiles" n1)))))
+                ((and (board-selected b1) (not (eqv? (board-selected b0) (board-selected b1))))
+                 (say "select" (board-selected b1)))
+                ((and (board-selected b0) (not (board-selected b1)) (= n0 n1))
+                 (say "deselect"))))))
+
+    (define (say-first-pair s)
+      (let ((sol (board-solution (session-board s))))
+        (if (null? sol)
+            (say "seed" (session-seed s) "pair none")
+            (let* ((pair (car sol))
+                   (ca (slot-centre *geom* (car pair)))
+                   (cb (slot-centre *geom* (cdr pair))))
+              (say "seed" (session-seed s)
+                   "pair" (car pair) (car ca) (cdr ca)
+                   (cdr pair) (car cb) (cdr cb))))))
+
+    ;; --- one frame -----------------------------------------------------------
+
+    (define (input-this-frame)
+      (make-input-frame
+        (if *chord* (cons *chord* *pressed*) *pressed*)
+        (if *chord*
+            '(ctrl)
+            (filter (lambda (k) (memq k '(ctrl shift))) *keys*))
+        *click*))
+
+    (define (web-tick)
+      (when *session*
+        (gles3-resize-to-display)
+        (ensure-texture!)
+        (let* ((before *session*)
+               (after (session-step before (input-this-frame) *geom*)))
+          (set! *session* after)
+          (set! *pressed* '())
+          (set! *chord* #f)
+          (set! *click* #f)
+          (report-change! before after)
+          (when (not (= (session-seed before) (session-seed after)))
+            (say-first-pair after))
+          (begin-frame)
+          (draw-session after *geom* *texture*)
+          (end-frame))))
+
+    ;; --- entry ---------------------------------------------------------------
+
+    (define (web-main)
+      (unless (gles3-use-canvas "#stage")
+        (error "crash web: no WebGL2 canvas #stage"))
+      (gles3-resize-to-display)
+      (gfx-setup)
+      (set-viewport VW VH)
+      (set-letterbox-color 0.0 0.0 0.0)
+      (let ((lay (turtle-layout)))
+        (set! *geom* (make-geometry lay VW VH))
+        (set! *session* (session-new lay 1)))
+      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-URL))
+      (say-first-pair *session*)
+      ;; The callback name is only used by the bytecode eval path; native
+      ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
+      (gles3-start-loop "crash-web-tick")
+      0)
+
+    (define (web-dispatch type payload)
+      (cond ((string=? type "frame") (web-tick) 0)
+            ((string=? type "keydown") (key-down! payload) 0)
+            ((string=? type "keyup") (key-up! payload) 0)
+            ((string=? type "pointerdown") (pointer-down! payload) 0)
+            (else 0)))))

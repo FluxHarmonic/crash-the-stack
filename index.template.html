@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#06080f">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Crash The Stack</title>
+  <!-- No favicon request: a 404 here would count as a console error in the browser arm. -->
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <canvas id="stage" width="640" height="400"></canvas>
+    <div id="status" hidden></div>
+    <!-- The command buttons. Each carries data-key, which the generic loader
+         turns into a keydown/keyup pair with that name, so a tap here takes
+         the same path as a key. Tab and Backspace ARE the native keys; the
+         other three are command names (crash web) maps to the ctrl chords
+         the native shell reads, because the loader drops ctrl-modified keys
+         and the browser reserves ctrl+n / ctrl+t for itself. -->
+    <nav class="commands" aria-label="game commands">
+      <button type="button" data-key="Tab">keys</button>
+      <button type="button" data-key="Backspace">undo</button>
+      <button type="button" data-key="shuffle">shuffle</button>
+      <button type="button" data-key="next">next</button>
+      <button type="button" data-key="tile">tile</button>
+    </nav>
+  </main>
+
+  <script>
+  // Pointer forwarding: a tap on the board reaches the game as a
+  // ("pointerdown", "bx,by") dispatch in canvas-buffer pixels, the same
+  // coordinate entry point the native mouse uses ((crash input) hit-tests
+  // it after (crash geometry) undoes the letterbox). The generic loader
+  // forwards keys, clicks-by-id and swipes, but not pointer coordinates,
+  // and it keeps its wasm instance private; so this page catches the
+  // instance where the bridge loader publishes it to every bridge
+  // (SigilWasmBridges.setInstance) and calls the same typed dispatch ABI
+  // the loader uses. Promotion of this into the loader is a finding for
+  // the row, not something this page can do.
+  //
+  // POINTER_FORWARDING is the browser arm's positive control: with it
+  // false, the same synthetic pointerdown must produce no selection.
+  (function () {
+    "use strict";
+    var POINTER_FORWARDING = true;
+
+    var instance = null;
+    var bridges = null;
+    Object.defineProperty(globalThis, "SigilWasmBridges", {
+      configurable: true,
+      enumerable: true,
+      get: function () { return bridges; },
+      set: function (real) {
+        bridges = Object.freeze(Object.assign({}, real, {
+          setInstance: function (manifest, inst) {
+            instance = inst;
+            return real.setInstance(manifest, inst);
+          }
+        }));
+      }
+    });
+
+    var encoder = new TextEncoder();
+    function dispatch(type, payload) {
+      var ex = instance && instance.exports;
+      if (!ex || typeof ex.sigil_wasm_dispatch_event !== "function") return false;
+      function put(s) {
+        var bytes = encoder.encode(s + "\0");
+        var ptr = ex.malloc(bytes.length);
+        new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes);
+        return ptr;
+      }
+      var t = put(type), p = put(payload);
+      var rc = ex.sigil_wasm_dispatch_event(t, p);
+      ex.free(p); ex.free(t);
+      return rc === 0;
+    }
+
+    var canvas = document.getElementById("stage");
+
+    // Event point (CSS pixels) -> canvas buffer pixels. The buffer is
+    // CSS size x devicePixelRatio after the app shell's resize, so this
+    // one factor carries the phone's pixel density. The letterbox inverse
+    // is not here: it is (crash geometry)'s frame->virtual, shared with
+    // the native shell.
+    function bufferPoint(e) {
+      var r = canvas.getBoundingClientRect();
+      var sx = canvas.width / r.width;
+      var sy = canvas.height / r.height;
+      return {
+        x: Math.round((e.clientX - r.left) * sx),
+        y: Math.round((e.clientY - r.top) * sy)
+      };
+    }
+
+    canvas.addEventListener("pointerdown", function (e) {
+      if (!POINTER_FORWARDING) return;
+      var p = bufferPoint(e);
+      dispatch("pointerdown", p.x + "," + p.y);
+      e.preventDefault();
+    });
+
+    // The loader maps a swipe anywhere on the document to an arrow key. On
+    // the board a swipe would then both select (at pointerdown) and move
+    // the keyboard highlight; keep the board to one meaning per gesture by
+    // not letting its touches reach the document-level swipe tracking.
+    ["touchstart", "touchmove", "touchend"].forEach(function (name) {
+      canvas.addEventListener(name, function (e) { e.stopPropagation(); }, { passive: true });
+    });
+
+    // Tab is the keys-model cycle key; without this the browser also moves
+    // focus off the board on every press.
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Tab") e.preventDefault();
+    }, true);
+  })();
+  </script>
+  <!--sigil:app-->
+</body>
+</html>

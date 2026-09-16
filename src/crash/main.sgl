@@ -1,148 +1,31 @@
-;;; (crash main) - The native shell.
+;;; (crash main) - The entry, and the one seam between the two targets.
 ;;;
-;;; Opens a window with sigil-app, sets the 640x400 virtual viewport, and
-;;; each frame: polls the keys and the mouse into an input-frame (mouse in
-;;; virtual coordinates), steps the session, draws it. Everything game-shaped
-;;; lives in the modules this imports; the web shell (P0b) replaces only this
-;;; file.
+;;; Native builds run (crash native): a sigil-app window. Web builds run
+;;; (crash web): one frame per requestAnimationFrame, fed by the browser's
+;;; events. The choice is a cond-expand on the import; the two defines below
+;;; are plain top-level defines whose bodies cond-expand, because a define
+;;; nested inside cond-expand is not registered under native codegen
+;;; (investigations/sigil-native-codegen-cond-expand-define-gap).
 ;;;
-;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys]
-;;;
-;;; --log-keys prints the key symbols sigil-app reports each frame, for
-;;; checking what a physical key arrives as (David saw Enter cycle the
-;;; models like Tab on 2026-09-16; this tells whether it arrives as tab).
-;;;
-;;; The window opens at exactly twice the virtual size so the letterboxed
-;;; viewport scales by an integer at start (sigil-graphics scales by a float
-;;; min(w/vw, h/vh); 2x is exact).
+;;; sigil-web-dispatch-event is what the generic browser loader calls for
+;;; every DOM event and every animation frame; the wasm runtime resolves it
+;;; on the package's entry module, which is why it must live here and not in
+;;; (crash web). On native it is never called.
 
 (define-library (crash main)
-  (import (sigil struct)
-          (sigil math)
-          (sigil process)
-          (sigil app)
-          (sigil graphics)
-          (crash stack layout)
-          (crash stack turtle)
-          (crash stack rules)
-          (crash geometry)
-          (crash input)
-          (crash render))
+  (cond-expand
+    (wasm (import (crash web)))
+    (else (import (crash native))))
 
-  (export main)
+  (export main sigil-web-dispatch-event)
 
   (begin
-    ;; Naming: UPPER-CASE for a constant, *earmuffs* for mutable module state
-    ;; (the sigil-app and Cinder convention; see CLAUDE.md).
-    (define VW 640)
-    (define VH 400)
-    (define WINDOW-W 1280)
-    (define WINDOW-H 800)
-    (define TEST-TILE-PATH "assets/test-tile.png")
+    (define (main . args)
+      (cond-expand
+        (wasm (web-main))
+        (else (apply native-main args))))
 
-    ;; Every key sigil-app can report that the game listens to. Digit keys
-    ;; are symbols named "0".."9", which the reader cannot spell, hence the
-    ;; string->symbol.
-    (define FACE-KEY-SYMBOLS
-      (map (lambda (c)
-             (string->symbol (string c)))
-           (string->list FACE-KEYS)))
-    (define OTHER-KEYS '(space return tab backspace left right up down))
-    (define ALL-KEYS (append FACE-KEY-SYMBOLS OTHER-KEYS))
-    (define MODIFIERS '(ctrl shift))
-
-    ;; Window pixel -> virtual pixel, undoing the centered letterbox scale.
-    (define (window->virtual x y)
-      (let* ((fw (frame-width))
-             (fh (frame-height))
-             (scale (min (/ fw VW)
-                         (/ fh VH)))
-             (ox (/ (- fw (* VW scale)) 2))
-             (oy (/ (- fh (* VH scale)) 2)))
-        (cons (/ (- x ox) scale)
-              (/ (- y oy) scale))))
-
-    (define (poll-frame)
-      (make-input-frame
-        (filter key-pressed? ALL-KEYS)
-        (filter key-down? MODIFIERS)
-        (and (mouse-pressed? 'left)
-             (window->virtual (mouse-x)
-                              (mouse-y)))))
-
-    (define (load-test-tile)
-      (let ((img (load-image TEST-TILE-PATH)))
-        (if img
-            ;; load-image, load-texture, image-free!: a helper for this belongs in
-            ;; sigil-graphics (finding 11 in the evidence note).
-            (let ((tex (load-texture img)))
-              (image-free! img)
-              tex)
-            (begin
-              (display "test tile not found: ") (display TEST-TILE-PATH) (newline)
-              #f))))
-
-    (define (arg-value args flag default)
-      (cond ((null? args) default)
-            ((and (string=? (car args) flag)
-                  (pair? (cdr args)))
-             (cadr args))
-            (else (arg-value (cdr args) flag default))))
-
-    ;; Last frame's wall time in ms, shown in the HUD under --log-keys.
-    (define *frame-ms* 0.0)
-
-    (define (game-loop seed texture-first? model log-keys?)
-      (lambda ()
-        (gfx-setup)
-        (set-viewport VW VH)
-        (set-letterbox-color 0.0 0.0 0.0)
-        (let* ((lay (turtle-layout))
-               (geom (make-geometry lay VW VH))
-               (tex (load-test-tile)))
-          (let loop ((s (let ((s (session-with-model (session-new lay seed) model)))
-                          ;; --texture starts in the test-tile renderer
-                          (if texture-first?
-                              (session s render-mode: 'texture)
-                              s))))
-            (let ((dt (wait-frame)))
-              (when log-keys? (set! *frame-ms* (* 1000.0 dt))))
-            (let* ((f (poll-frame))
-                   (s (session-step s f geom)))
-              (when (and log-keys?
-                         (pair? (input-frame-pressed f)))
-                (display "keys: ")
-                (write (input-frame-pressed f))
-                (display " held: ")
-                (write (input-frame-held f))
-                (newline))
-
-              (begin-frame)
-              (draw-session s geom tex)
-              (when log-keys?
-                (draw-frame-ms *frame-ms*))
-              (end-frame)
-
-              (cond ((key-pressed? 'escape) (request-quit))
-                    ((quit-requested?) #t)
-                    (else (loop s))))))
-        (gfx-shutdown)))
-
-    (define (main . _args)
-      (let* ((args (cdr (command-line)))
-             (seed-arg (string->number (arg-value args "--seed" "1")))
-             ;; seeds are integers; prng-seed folds 0 onto 1, so 0 and 1 deal alike
-             (seed (if (and seed-arg
-                            (exact? seed-arg)
-                            (integer? seed-arg)
-                            (>= seed-arg 0))
-                       seed-arg
-                       1))
-             (texture-first? (and (member "--texture" args) #t))
-             (model (string->symbol (arg-value args "--keys" "hint")))
-             (log-keys? (and (member "--log-keys" args) #t)))
-        (run-game "Crash The Stack"
-                  WINDOW-W
-                  WINDOW-H
-                  (game-loop seed texture-first? model log-keys?))
-        0))))
+    (define (sigil-web-dispatch-event type payload)
+      (cond-expand
+        (wasm (web-dispatch type payload))
+        (else 0)))))

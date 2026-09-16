@@ -1,10 +1,15 @@
 ;;; Crash The Stack - cyberpunk takes on the classics, in Sigil.
 ;;;
-;;; P0a: the Mahjongg table, native only. The rules live under (crash stack ...)
-;;; and import nothing from graphics or windowing (test/test-imports.sgl asserts
-;;; the allowlist); (crash render) draws with sigil-graphics; (crash main) is
-;;; the native shell over sigil-app. Web (P0b) adds its own entry shell and
-;;; reuses everything else unchanged.
+;;; One source tree, two targets. The rules live under (crash stack ...) and
+;;; import nothing from graphics or windowing (test/test-imports.sgl asserts
+;;; the allowlist); (crash render) draws with sigil-graphics on both targets;
+;;; (crash main) is a two-line seam that picks the shell: (crash native) over
+;;; sigil-app for the dev/release configs, (crash web) over the browser's
+;;; requestAnimationFrame for the web config.
+;;;
+;;;   scripts/dev sigil build                            native
+;;;   guix shell binaryen -- scripts/dev sigil build --config web   browser
+;;;   scripts/serve-web                                  host build/web on wg0
 
 (define sigil-repo "codeberg:sigil/sigil")
 (define app-repo "codeberg:sigil/sigil-app")
@@ -38,32 +43,66 @@
       ;; module for when run directly.
       backend: 'native
       bundle?: #t)
-    ;; Reserved for P0b: the web build. Not declared until it is built and
-    ;; tested, so nothing here claims a config that has never run. Shape, from
-    ;; cinder-cadence/examples/web-game/package.sgl:
-    ;;
-    ;; (config
-    ;;   name: 'web
-    ;;   output-dir: "build/web"
-    ;;   toolchain: 'zig
-    ;;   target: "wasm32-wasi"
-    ;;   backend: 'native
-    ;;   debug?: #f
-    ;;   optimize: 2
-    ;;   bundle?: #t
-    ;;   features: '(web wasm graphics))
-    ;;
-    ;; with sigil-wasm-runtime / sigil-wasm-gles3 / sigil-browser added under
-    ;; configs: '(web), and (crash main) excluded in favour of a (crash web) entry.
-    )
+    ;; The browser build: wasm32-wasi through zig, native codegen (no
+    ;; coroutines, no eval-by-name: the shell drives one frame per
+    ;; requestAnimationFrame dispatch). Shape from
+    ;; cinder-cadence/examples/web-game/package.sgl.
+    (config
+      name: 'web
+      output-dir: "build/web"
+      toolchain: 'zig
+      target: "wasm32-wasi"
+      backend: 'native
+      debug?: #f
+      optimize: 2
+      bundle?: #t
+      features: '(web wasm graphics)))
 
   dependencies: (list
     ;; Windowing and input. Native only: its C (sokol_app + X11) cannot build
-    ;; for wasm32-wasi, so it is gated to the native configs now, ahead of P0b.
+    ;; for wasm32-wasi, so it is gated to the native configs.
     (from-git url: app-repo version: "^0.9.0" configs: '(dev release))
     ;; Drawing, both targets (its own web config excludes sigil-app the same way).
-    (from-git url: graphics-repo version: "^0.11.2"))
+    (from-git url: graphics-repo version: "^0.11.2")
+    ;; Web only: the wasm runtime (the generic loader sigil-web-app.js and
+    ;; the sigil_wasm_* entry ABI) and the raw-WebGL2 binding sigil-graphics'
+    ;; sokol backend draws through, plus its (sigil browser gles3) app shell.
+    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22" configs: '(web)))
 
+  ;; Native only. Without the gate the web build compiles the test runner's
+  ;; transitive deps (sigil-package -> sigil-build -> sigil-crypto) for
+  ;; wasm32-wasi and dies in mbedtls (measured 2026-09-16).
   dev-dependencies: (list
-    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22")
-    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22")))
+    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22" configs: '(dev release))
+    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22" configs: '(dev release)))
+
+  ;; One build task for every config. The default task compiles the modules
+  ;; and copies assets; it does not link a browser app, and a task's configs:
+  ;; field is not consulted by sigil-build (0.22), so the web-only steps
+  ;; branch on the target inside one task instead.
+  tasks: (list
+    (task
+      name: 'build
+      description: "Compile the game; on a wasm target also link the browser app"
+      steps: (list
+        (compile-sigil-modules sources: "src/**/*.sgl")
+        (copy-package-docs)
+        ;; assets/ -> build/<config>/assets/, so the web page fetches the
+        ;; test tile from assets/test-tile.png next to the wasm.
+        (link-assets)
+        (lambda (ctx)
+          (if (wasm-target? (context-config ctx))
+              ;; The generated native entry inits the Sigil modules but not
+              ;; sigil-graphics' C module; app-register.c hooks the runtime's
+              ;; weak sigil_wasm_app_register to do that. Without it the sokol
+              ;; C is dead-stripped and the wasm imports no `gl` at all.
+              ((compile-c-sources
+                 sources: (list "src/c/app-register.c")
+                 flags: (with-sigil-c-flags (list "-std=c99")))
+               ctx)
+              ctx))
+        (lambda (ctx)
+          (if (wasm-target? (context-config ctx))
+              ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx)
+              ctx))))))
