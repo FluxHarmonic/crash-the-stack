@@ -18,8 +18,9 @@
 //               frame the game draws, so preserveDrawingBuffer:false is not a problem)
 //   tap-select  a synthetic pointerdown at tile A's centre -> "crash: select A"
 //   tap-match   a second one at its pair B     -> "crash: removed A B tiles 142"
-//   keys-match  Tab,Tab (cursor -> coords -> glyph), face key, Enter, face key,
-//               Enter for the next solution pair -> "crash: removed ... tiles 140"
+//   keys-match  undo (the page button), Tab (cursor -> coords), then the
+//               column letter and row digit of each tile of the same pair,
+//               from the game's "crash: labels" boot line -> "crash: removed A B tiles 142"
 //   console     zero error-level console entries and zero exceptions
 //
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
@@ -262,37 +263,47 @@ if (EXPECT_NO_SELECTION) {
   }
 }
 
-// ---- 6. keys-match (glyph model) -------------------------------------------
-// The boot line names only the first pair, so this arm finds a matchable
-// pair through the model itself: in the glyph model a face key cycles the
-// highlight through the playable tiles of that face and Enter picks. For
-// each face: key, Enter (a "crash: select" line means a playable tile of
-// that face exists), key, Enter again: either the second playable tile of
-// the face matches ("crash: removed"), or the highlight cycled back to the
-// same tile and Enter deselected it, or a third playable tile of the face
-// took the selection ("select C"); either way move on to the next face,
-// whose first pick replaces any selection left behind.
+// ---- 6. keys-match (coords model) --------------------------------------------
+// After the tap-match (or, in the positive-control run, on the full board)
+// the arm undoes nothing and picks a NEW pair by keyboard: the game's second
+// boot line gives the first pair's coordinate labels, so Tab (cursor ->
+// coords), then the column letter and row digit of each tile, must first
+// select A and then remove the pair. In the normal run the pair is already
+// gone, so the arm presses "undo" first (the page button's path), which
+// puts it back and prints "crash: undo tiles 144".
 async function key(type, k) {
   await evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
 }
 async function press(k) { await key("keydown", k); await sleep(40); await key("keyup", k); await sleep(120); }
-await press("Tab"); await press("Tab"); // cursor -> coords -> glyph
-const FACES = "0123456789abcdefghijklmnopqrstuvwxyz";
-let matched = null;
-const tilesBefore = EXPECT_NO_SELECTION ? 144 : 142;
-for (const f of FACES) {
-  mark = consoleLines.length;
-  await press(f); await press("Enter");
-  const sel = await waitLine(/^crash: select (\d+)$/, mark, 800);
-  if (!sel) continue; // no playable tile of this face right now
-  mark = consoleLines.length;
-  await press(f); await press("Enter");
-  const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 1500);
-  if (rem) { matched = { face: f, line: rem.m[0], tiles: rem.m[3] }; break; }
+const labels = await waitLine(/^crash: labels (\d+) ([a-z])(\d) (\d+) ([a-z])(\d)$/, 0, 2000);
+let keysOk = false, keysDetail = "";
+if (!labels) keysDetail = "no \"crash: labels\" boot line";
+else {
+  const [, LA, colA, rowA, LB, colB, rowB] = labels.m;
+  if (!EXPECT_NO_SELECTION) {
+    mark = consoleLines.length;
+    await evalJS(`document.querySelector('[data-key="undo"]').click()`);
+    const undo = await waitLine(/^crash: undo tiles (\d+)$/, mark, 2000);
+    if (!undo) keysDetail = "undo button produced no \"crash: undo\" line";
+  }
+  if (!keysDetail) {
+    await press("Tab"); // cursor -> coords
+    mark = consoleLines.length;
+    await press(colA); await press(rowA);
+    const sel = await waitLine(/^crash: select (\d+)$/, mark, 2000);
+    if (!sel) keysDetail = `no "crash: select" after ${colA}${rowA}`;
+    else if (sel.m[1] !== LA) keysDetail = `expected select ${LA} after ${colA}${rowA}, got select ${sel.m[1]}`;
+    else {
+      mark = consoleLines.length;
+      await press(colB); await press(rowB);
+      const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 2000);
+      if (!rem) keysDetail = `no "crash: removed" after ${colB}${rowB}`;
+      else if (rem.m[3] !== "142") keysDetail = `expected tiles 142, got "${rem.m[0]}"`;
+      else { keysOk = true; keysDetail = `coords model, ${colA}${rowA} then ${colB}${rowB}: ${rem.m[0]}`; }
+    }
+  }
 }
-if (matched && matched.tiles === String(tilesBefore - 2)) pass("keys-match", `glyph model, face ${matched.face}: ${matched.line}`);
-else if (matched) fail("keys-match", `expected tiles ${tilesBefore - 2}, got "${matched.line}"`);
-else fail("keys-match", `no face key produced a match through the glyph model`);
+if (keysOk) pass("keys-match", keysDetail); else fail("keys-match", keysDetail);
 
 // ---- 7. console -------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
