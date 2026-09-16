@@ -1,0 +1,198 @@
+;;; Gate leg 4 - input parity.
+;;;
+;;; One known pair, picked four ways: a pointer click at each tile's centre,
+;;; the cursor model (a bounded search over arrow presses using the model's
+;;; own step, which also proves the pair is reachable), the coordinate model
+;;; (the tiles' column letter and row digit), and the glyph model (the face
+;;; key until the highlight lands, then return). All four must leave the
+;;; board in the same state after the FIRST pick (one tile selected, nothing
+;;; removed, no history) and after the second (the pair gone), and the same
+;;; as two direct board-select calls. A second scenario picks a tile and then
+;;; a playable tile of a different face, where the right answer is a changed
+;;; selection and no removal: a model that bypasses board-select and removes
+;;; directly goes red here.
+
+(import (sigil test)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack generate)
+        (crash stack turtle)
+        (crash geometry)
+        (crash input))
+
+(define SEED 11)
+(define VW 640)
+(define VH 400)
+
+(define lay (turtle-layout))
+(define geom (make-geometry lay VW VH))
+
+(define (frame pressed . rest)
+  (make-input-frame pressed (if (pair? rest) (car rest) '()) (if (> (length rest) 1) (cadr rest) #f)))
+
+(define (click-frame xy) (make-input-frame '() '() xy))
+
+(define (fresh model)
+  (let ((s (session-new lay SEED)))
+    (let loop ((s s))
+      (if (eq? (session-model s) model)
+          s
+          (loop (session-step s (frame '(tab)) geom))))))
+
+(define (canon s) (board-canonical (session-board s)))
+
+;; --- the four ways of picking one tile --------------------------------------
+
+(define (pick-by-pointer s id)
+  (session-step s (click-frame (slot-centre geom id)) geom))
+
+;; Breadth-first over the four arrow keys from the current highlight until
+;; the highlight is id, then space. Fails the test if 40 presses cannot
+;; reach it.
+(define (pick-by-cursor s id)
+  (let loop ((frontier (list s)) (seen (list (session-highlight s))) (depth 0))
+    (cond ((null? frontier) (error "cursor cannot reach tile" id))
+          ((> depth 40) (error "cursor search exceeded 40 presses" id))
+          (else
+           (let ((hit (find (lambda (x) (eqv? (session-highlight x) id)) frontier)))
+             (if hit
+                 (session-step hit (frame '(space)) geom)
+                 (let next ((fr frontier) (out '()) (seen seen))
+                   (if (null? fr)
+                       (loop (reverse out) seen (+ depth 1))
+                       (let step ((dirs '(left right up down)) (out out) (seen seen))
+                         (if (null? dirs)
+                             (next (cdr fr) out seen)
+                             (let* ((x (session-step (car fr) (frame (list (car dirs))) geom))
+                                    (h (session-highlight x)))
+                               (if (memv h seen)
+                                   (step (cdr dirs) out seen)
+                                   (step (cdr dirs) (cons x out) (cons h seen))))))))))))))
+
+(define (pick-by-coords s id)
+  (let* ((slot (layout-slot lay id))
+         (col (let loop ((i 0)) (if (= (vector-ref (geometry-columns geom) i) (slot-hx slot)) i (loop (+ i 1)))))
+         (row (let loop ((i 0)) (if (= (vector-ref (geometry-rows geom) i) (slot-hy slot)) i (loop (+ i 1)))))
+         (col-key (string->symbol (string (column-label col))))
+         (row-key (string->symbol (string (row-label row)))))
+    (session-step (session-step s (frame (list col-key)) geom) (frame (list row-key)) geom)))
+
+;; Press the face's key until the highlight is the wanted tile (at most as
+;; many times as there are tiles of that face), then return.
+(define (pick-by-glyph s id)
+  (let ((key (face->key (tile-face (session-board s) id))))
+    (let loop ((s s) (n 0))
+      (cond ((> n 4) (error "glyph cycling never reached tile" id))
+            ((eqv? (session-highlight s) id) (session-step s (frame '(return)) geom))
+            (else (loop (session-step s (frame (list key)) geom) (+ n 1)))))))
+
+(define (run-path model pick a c)
+  (let* ((s0 (fresh model))
+         (s1 (pick s0 a))
+         (s2 (pick s1 c)))
+    (list (canon s1) (canon s2))))
+
+(define (direct a c)
+  (let* ((b0 (generate lay SEED))
+         (b1 (board-select b0 a))
+         (b2 (board-select b1 c)))
+    (list (board-canonical b1) (board-canonical b2))))
+
+;; A playable tile whose face differs from a's, not a itself.
+(define (other-face-playable b a)
+  (find (lambda (id) (and (not (= id a)) (not (faces-match? b a id))))
+        (playable-slots b)))
+
+(define (check-scenario name a c)
+  (let ((expected (direct a c))
+        (pointer (run-path 'cursor pick-by-pointer a c))
+        (cursor (run-path 'cursor pick-by-cursor a c))
+        (coords (run-path 'coords pick-by-coords a c))
+        (glyph (run-path 'glyph pick-by-glyph a c)))
+    (test (string-append name ": pointer, first pick") (assert-equal (car expected) (car pointer)))
+    (test (string-append name ": pointer, second pick") (assert-equal (cadr expected) (cadr pointer)))
+    (test (string-append name ": cursor, first pick") (assert-equal (car expected) (car cursor)))
+    (test (string-append name ": cursor, second pick") (assert-equal (cadr expected) (cadr cursor)))
+    (test (string-append name ": coords, first pick") (assert-equal (car expected) (car coords)))
+    (test (string-append name ": coords, second pick") (assert-equal (cadr expected) (cadr coords)))
+    (test (string-append name ": glyph, first pick") (assert-equal (car expected) (car glyph)))
+    (test (string-append name ": glyph, second pick") (assert-equal (cadr expected) (cadr glyph)))))
+
+(test-group "input parity: a matching pair"
+  (let* ((b (generate lay SEED))
+         (pair (car (board-solution b)))
+         (a (car pair)) (c (cdr pair)))
+    (test "the pair is a legal match on the fresh board"
+      (assert-true (and (playable? b a) (playable? b c) (faces-match? b a c))))
+    (test "direct selection removes exactly the pair"
+      (let ((b2 (board-select (board-select b a) c)))
+        (assert-equal 142 (board-tile-count b2))
+        (assert-false (tile-present? b2 a))
+        (assert-false (tile-present? b2 c))
+        (assert-false (board-selected b2))
+        (assert-equal 1 (length (board-history b2)))))
+    (test "direct first pick selects and removes nothing"
+      (let ((b1 (board-select b a)))
+        (assert-equal a (board-selected b1))
+        (assert-equal 144 (board-tile-count b1))
+        (assert-equal 0 (length (board-history b1)))))
+    (check-scenario "match" a c)))
+
+(test-group "input parity: a mismatch moves the selection"
+  (let* ((b (generate lay SEED))
+         (a (car (car (board-solution b))))
+         (c (other-face-playable b a)))
+    (test "a non-matching playable tile exists" (assert-true (and c #t)))
+    (test "direct mismatch reselects, removes nothing"
+      (let ((b2 (board-select (board-select b a) c)))
+        (assert-equal c (board-selected b2))
+        (assert-equal 144 (board-tile-count b2))
+        (assert-equal 0 (length (board-history b2)))))
+    (check-scenario "mismatch" a c)))
+
+(test-group "input: the pointer respects the stack"
+  (let* ((s (fresh 'cursor))
+         (b (session-board s))
+         (covered (find (lambda (id) (and (tile-present? b id) (covered? b id))) (iota 144))))
+    (test "a click on a covered tile's centre lands on the tile above it, or nothing playable"
+      (let* ((xy (slot-centre geom covered))
+             (hit (hit-slot geom b (car xy) (cdr xy))))
+        (assert-true (and hit (not (= hit covered))))))
+    (test "a click on a blocked, uncovered tile changes nothing"
+      (let* ((blocked (find (lambda (id) (and (tile-present? b id) (not (covered? b id))
+                                              (blocked-left? b id) (blocked-right? b id)))
+                            (iota 144)))
+             (xy (slot-centre geom blocked))
+             (after (session-step s (click-frame xy) geom)))
+        (assert-equal blocked (hit-slot geom b (car xy) (cdr xy)))
+        (assert-equal (canon s) (canon after))))
+    (test "a click on empty board space changes nothing"
+      (assert-equal (canon s) (canon (session-step s (click-frame (cons 1 1)) geom))))))
+
+(test-group "input: commands"
+  (let* ((s (fresh 'cursor))
+         (pair (car (board-solution (session-board s))))
+         (matched (pick-by-pointer (pick-by-pointer s (car pair)) (cdr pair))))
+    (test "backspace undoes the match"
+      (assert-equal (canon s) (canon (session-step matched (frame '(backspace)) geom))))
+    (test "ctrl+z undoes the match"
+      (assert-equal (canon s) (canon (session-step matched (frame '(z) '(ctrl)) geom))))
+    (test "z without ctrl in the glyph model is a face key, not undo"
+      (let ((g (fresh 'glyph)))
+        (assert-equal (canon g) (canon (session-step g (frame '(z)) geom)))))
+    (test "tab cycles cursor -> coords -> glyph -> cursor"
+      (let* ((s1 (session-step s (frame '(tab)) geom))
+             (s2 (session-step s1 (frame '(tab)) geom))
+             (s3 (session-step s2 (frame '(tab)) geom)))
+        (assert-equal '(coords glyph cursor)
+                      (list (session-model s1) (session-model s2) (session-model s3)))))
+    (test "ctrl+s shuffles and keeps the tile count"
+      (let ((sh (session-step matched (frame '(s) '(ctrl)) geom)))
+        (assert-equal 142 (board-tile-count (session-board sh)))
+        (assert-false (equal? (canon matched) (canon sh)))))
+    (test "ctrl+n deals the next seed"
+      (let ((n (session-step s (frame '(n) '(ctrl)) geom)))
+        (assert-equal (+ SEED 1) (session-seed n))
+        (assert-true (board-equal? (generate lay (+ SEED 1)) (session-board n)))))
+    (test "ctrl+t toggles the renderer"
+      (assert-equal 'texture (session-render-mode (session-step s (frame '(t) '(ctrl)) geom))))))

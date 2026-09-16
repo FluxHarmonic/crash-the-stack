@@ -1,0 +1,289 @@
+;;; (crash input) - A frame of input becomes a move.
+;;;
+;;; The shell (native: (crash main) over sigil-app; web: P0b's entry) hands
+;;; in one input-frame per frame: the keys that went down this frame, the
+;;; modifier keys held, and a pointer click in VIRTUAL coordinates if there
+;;; was one. session-step turns that into a new session. Nothing here reads
+;;; a platform; that is what lets the web shell drive it unchanged.
+;;;
+;;; Every way of picking a tile ends in session-pick, which ends in
+;;; board-select: the mouse (hit-test the topmost tile under the click),
+;;; and the three keyboard models of decision D5 that David tries by feel:
+;;;
+;;;   cursor  (a)  arrows or hjkl move a highlight between playable tiles;
+;;;                space picks the highlighted tile.
+;;;   coords  (b)  the board edges carry column letters and row digits; a
+;;;                letter then a digit (either order) picks that tile.
+;;;   glyph   (c)  a tile's glyph IS its key (0-9 a-z); pressing it cycles
+;;;                the highlight through playable tiles of that face; return
+;;;                picks the highlighted tile.
+;;;
+;;; Always: tab cycles the model, backspace or ctrl+z undoes, ctrl+s
+;;; shuffles, ctrl+n deals the next seed, ctrl+t toggles the test-tile
+;;; renderer. Commands take ctrl because in the glyph model every letter and
+;;; digit is a tile key. (Escape is the shell's: it quits.)
+
+(define-library (crash input)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math)
+          (crash stack layout)
+          (crash stack rules)
+          (crash stack generate)
+          (crash geometry))
+
+  (export input-frame input-frame? make-input-frame
+          input-frame-pressed input-frame-held input-frame-click
+          session session? session-new
+          session-board session-model session-highlight session-pending
+          session-render-mode session-seed session-message
+          session-step session-pick
+          MODELS model-name next-model
+          key->face face->key FACE-KEYS)
+
+  (begin
+    ;; pressed: key symbols that went down this frame (sigil-app's names:
+    ;; a..z, 0..9, space, return, tab, backspace, left right up down).
+    ;; held: modifiers currently down, from '(ctrl shift).
+    ;; click: (x . y) in virtual pixels, or #f.
+    (define-struct input-frame
+      (pressed default: '())
+      (held default: '())
+      (click default: #f))
+
+    (define (make-input-frame pressed held click)
+      (input-frame pressed: pressed held: held click: click))
+
+    ;; Fields are mutable only so session-with can fill a fresh copy; a
+    ;; session is otherwise treated as immutable, like a board.
+    (define-struct session
+      (board default: #f mutable: #t)
+      (model default: 'cursor mutable: #t)            ; cursor | coords | glyph
+      (highlight default: #f mutable: #t)             ; slot the cursor/glyph models point at
+      (pending default: #f mutable: #t)               ; coords: (col . row) with one half still #f
+      (render-mode default: 'primitives mutable: #t)  ; primitives | texture
+      (seed default: 1 mutable: #t)
+      (message default: "" mutable: #t))
+
+    (define MODELS '(cursor coords glyph))
+
+    (define (model-name m)
+      (case m
+        ((cursor) "CURSOR")
+        ((coords) "COORDS")
+        ((glyph) "GLYPH")
+        (else "?")))
+
+    (define (next-model m)
+      (let ((rest (cdr (memq m MODELS))))
+        (if (null? rest) (car MODELS) (car rest))))
+
+    ;; --- faces and keys ------------------------------------------------------
+
+    (define FACE-KEYS "0123456789abcdefghijklmnopqrstuvwxyz")
+
+    ;; 'a -> 10, '0 -> 0 ... or #f for any other key.
+    (define (key->face key)
+      (let ((name (symbol->string key)))
+        (and (= (string-length name) 1)
+             (let loop ((i 0))
+               (cond ((= i (string-length FACE-KEYS)) #f)
+                     ((char=? (string-ref FACE-KEYS i) (string-ref name 0)) i)
+                     (else (loop (+ i 1))))))))
+
+    (define (face->key face)
+      (string->symbol (string (string-ref FACE-KEYS face))))
+
+    ;; --- helpers ------------------------------------------------------------
+
+    (define (session-with s . fields)
+      (let ((nx (session board: (session-board s)
+                         model: (session-model s)
+                         highlight: (session-highlight s)
+                         pending: (session-pending s)
+                         render-mode: (session-render-mode s)
+                         seed: (session-seed s)
+                         message: (session-message s))))
+        (let loop ((fields fields))
+          (unless (null? fields)
+            (case (car fields)
+              ((board) (set-session-board! nx (cadr fields)))
+              ((model) (set-session-model! nx (cadr fields)))
+              ((highlight) (set-session-highlight! nx (cadr fields)))
+              ((pending) (set-session-pending! nx (cadr fields)))
+              ((render-mode) (set-session-render-mode! nx (cadr fields)))
+              ((seed) (set-session-seed! nx (cadr fields)))
+              ((message) (set-session-message! nx (cadr fields))))
+            (loop (cddr fields))))
+        nx))
+
+    (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+    (define (held? f key) (and (memq key (input-frame-held f)) #t))
+
+    (define (slot-of s id) (layout-slot (board-layout (session-board s)) id))
+
+    ;; Manhattan-ish distance in half-units between two slots' centres.
+    (define (slot-distance s a b)
+      (let ((sa (slot-of s a)) (sb (slot-of s b)))
+        (+ (abs (- (slot-hx sa) (slot-hx sb)))
+           (abs (- (slot-hy sa) (slot-hy sb))))))
+
+    (define (argmin score ids)
+      (let loop ((ids ids) (best #f) (best-score #f))
+        (cond ((null? ids) best)
+              (else (let ((sc (score (car ids))))
+                      (if (and sc (or (not best-score) (< sc best-score)))
+                          (loop (cdr ids) (car ids) sc)
+                          (loop (cdr ids) best best-score)))))))
+
+    ;; A highlight that points at a playable tile: keep it if it still is,
+    ;; else the nearest playable to where it was, else the first playable.
+    (define (home-highlight s)
+      (let* ((b (session-board s))
+             (h (session-highlight s))
+             (playable (playable-slots b)))
+        (cond ((null? playable) (session-with s 'highlight #f))
+              ((and h (playable? b h)) s)
+              ((not h) (session-with s 'highlight (car playable)))
+              (else (session-with s 'highlight
+                                  (argmin (lambda (id) (slot-distance s h id)) playable))))))
+
+    ;; --- construction -------------------------------------------------------
+
+    (define (session-new lay seed)
+      (let ((b (generate lay seed)))
+        (home-highlight
+          (session board: b seed: seed
+                   message: (if b "" "NO SOLVABLE DEAL FOR THIS LAYOUT")))))
+
+    ;; --- picking ------------------------------------------------------------
+
+    ;; The one door: every model and the pointer come through here.
+    (define (session-pick s id)
+      (let ((b (board-select (session-board s) id)))
+        (home-highlight (session-with s 'board b 'pending #f 'highlight id))))
+
+    (define (session-new-board s b)
+      (home-highlight (session-with s 'board b 'pending #f)))
+
+    ;; --- the models ---------------------------------------------------------
+
+    (define (direction-of f)
+      (cond ((or (pressed? f 'left) (pressed? f 'h)) 'left)
+            ((or (pressed? f 'right) (pressed? f 'l)) 'right)
+            ((or (pressed? f 'up) (pressed? f 'k)) 'up)
+            ((or (pressed? f 'down) (pressed? f 'j)) 'down)
+            (else #f)))
+
+    ;; Nearest playable tile in a direction: the axis distance plus twice the
+    ;; cross-axis drift, so a tile in the same row wins over a nearer diagonal.
+    (define (cursor-move s dir)
+      (let* ((b (session-board s))
+             (h (session-highlight s)))
+        (if (not h)
+            (home-highlight s)
+            (let* ((sh (slot-of s h))
+                   (score (lambda (id)
+                            (let* ((sc (slot-of s id))
+                                   (dx (- (slot-hx sc) (slot-hx sh)))
+                                   (dy (- (slot-hy sc) (slot-hy sh))))
+                              (case dir
+                                ((left) (and (< dx 0) (+ (- dx) (* 2 (abs dy)))))
+                                ((right) (and (> dx 0) (+ dx (* 2 (abs dy)))))
+                                ((up) (and (< dy 0) (+ (- dy) (* 2 (abs dx)))))
+                                ((down) (and (> dy 0) (+ dy (* 2 (abs dx)))))
+                                (else #f)))))
+                   (target (argmin score (filter (lambda (id) (not (= id h))) (playable-slots b)))))
+              (if target (session-with s 'highlight target) s)))))
+
+    (define (step-cursor s f)
+      (let ((dir (direction-of f)))
+        (cond (dir (cursor-move s dir))
+              ((and (pressed? f 'space) (session-highlight s))
+               (session-pick s (session-highlight s)))
+              (else s))))
+
+    ;; A letter fixes the column, a digit the row; when both are known the
+    ;; tile at that address is picked (or nothing is, if none is playable)
+    ;; and the address clears either way.
+    (define (step-coords s f g)
+      (let loop ((keys (input-frame-pressed f)) (s s))
+        (if (null? keys)
+            s
+            (let* ((key (car keys))
+                   (col (column-of-key g key))
+                   (row (row-of-key g key))
+                   (pending (or (session-pending s) (cons #f #f)))
+                   (col* (or col (car pending)))
+                   (row* (or row (cdr pending))))
+              (cond ((and (not col) (not row)) (loop (cdr keys) s))
+                    ((and col* row*)
+                     (let ((id (slot-at-labels g (session-board s) col* row*)))
+                       (loop (cdr keys)
+                             (if id
+                                 (session-pick s id)
+                                 (session-with s 'pending #f)))))
+                    (else (loop (cdr keys) (session-with s 'pending (cons col* row*)))))))))
+
+    ;; Playable tiles showing this face, ascending; the highlight moves to
+    ;; the one after its current position, wrapping.
+    (define (glyph-cycle s face)
+      (let* ((b (session-board s))
+             (matching (filter (lambda (id) (eqv? (tile-face b id) face)) (playable-slots b)))
+             (h (session-highlight s)))
+        (cond ((null? matching) s)
+              ((and h (memv h matching))
+               (let ((after (cdr (memv h matching))))
+                 (session-with s 'highlight (if (null? after) (car matching) (car after)))))
+              (else (session-with s 'highlight (car matching))))))
+
+    (define (step-glyph s f)
+      (let loop ((keys (input-frame-pressed f)) (s s))
+        (if (null? keys)
+            s
+            (let ((face (key->face (car keys))))
+              (cond (face (loop (cdr keys) (glyph-cycle s face)))
+                    ((and (eq? (car keys) 'return) (session-highlight s))
+                     (loop (cdr keys) (session-pick s (session-highlight s))))
+                    (else (loop (cdr keys) s)))))))
+
+    (define (step-pointer s f g)
+      (let ((click (input-frame-click f)))
+        (if (not click)
+            s
+            (let ((id (hit-slot g (session-board s) (car click) (cdr click))))
+              (if id (session-pick s id) s)))))
+
+    ;; --- commands -----------------------------------------------------------
+
+    (define (step-commands s f)
+      (let ((b (session-board s))
+            (ctrl (held? f 'ctrl)))
+        (cond ((pressed? f 'tab)
+               (session-with s 'model (next-model (session-model s)) 'pending #f))
+              ((or (pressed? f 'backspace) (and ctrl (pressed? f 'z)))
+               (session-new-board s (board-undo b)))
+              ((and ctrl (pressed? f 's))
+               (session-new-board s (reshuffle b)))
+              ((and ctrl (pressed? f 'n))
+               (let ((seed (+ 1 (session-seed s))))
+                 (session-with (session-new (board-layout b) seed)
+                               'model (session-model s)
+                               'render-mode (session-render-mode s))))
+              ((and ctrl (pressed? f 't))
+               (session-with s 'render-mode
+                             (if (eq? (session-render-mode s) 'primitives) 'texture 'primitives)))
+              (else #f))))
+
+    ;; --- one frame ----------------------------------------------------------
+
+    (define (session-step s f g)
+      (or (step-commands s f)
+          (let ((s (step-pointer s f g)))
+            (if (held? f 'ctrl)
+                s
+                (case (session-model s)
+                  ((cursor) (step-cursor s f))
+                  ((coords) (step-coords s f g))
+                  ((glyph) (step-glyph s f))
+                  (else s))))))))
