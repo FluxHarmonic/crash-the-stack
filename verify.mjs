@@ -21,6 +21,10 @@
 //               Enter for the next solution pair -> "crash: removed ... tiles 140"
 //   console     zero error-level console entries and zero exceptions
 //
+// The page is always driven at a devicePixelRatio other than 1 (2 on the
+// desktop run, 3 with --phone), because at 1 the template's CSS-to-buffer
+// factor and its inverse coincide and a wrong factor cannot be seen.
+//
 // --expect-no-selection is the positive control: run against a copy of the
 // build whose page has POINTER_FORWARDING = false, tap-select must observe NO
 // selection line, and keys-match must still remove a pair (so the arm is shown
@@ -131,7 +135,11 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
+// Never run at devicePixelRatio 1: the page's CSS-to-buffer factor is then 1 and
+// its inverse is also 1, so a wrong factor (sabotage S5) is invisible. Measured
+// 2026-09-16: the arm stayed green under S5 until this override existed.
 if (PHONE) await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+else await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 760, deviceScaleFactor: 2, mobile: false });
 
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
