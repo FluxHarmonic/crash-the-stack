@@ -3,22 +3,27 @@
 #
 #   scripts/check-bind [PORT]     default 8770
 #
-# Reads the listening sockets, finds the one on PORT, prints its line, and
-# exits 0 only if its local address equals wg0's IPv4 address. 0.0.0.0, *,
-# [::], the LAN address, or no listener at all are all failures, each named.
+# Reads the listening sockets, prints every line on PORT, and exits 0 only
+# if there is at least one and EVERY one carries wg0's IPv4 address as its
+# local address. 0.0.0.0, *, [::], the LAN address, a second wildcard
+# listener beside a correct one, or no listener at all are all failures,
+# each named. (A listener's own startup message is not evidence of its bind;
+# under sabotage S6 the hosting script still printed the wg0 URL.)
 set -u
 PORT="${1:-8770}"
 WG="$(ip -4 -o addr show wg0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)"
 [ -n "$WG" ] || { echo "FAIL bind: wg0 has no IPv4 address"; exit 1; }
 
-line="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" {print; exit}')"
-[ -n "$line" ] || { echo "FAIL bind: nothing is listening on port $PORT"; exit 1; }
-echo "$line"
-addr="$(echo "$line" | awk '{print $4}' | sed "s/:$PORT\$//")"
-if [ "$addr" = "$WG" ]; then
-  echo "PASS bind: $addr:$PORT is the wg0 address"
-  exit 0
-else
-  echo "FAIL bind: $addr:$PORT is not the wg0 address $WG"
-  exit 1
-fi
+lines="$(ss -ltnp 2>/dev/null | awk -v p=":$PORT" '$4 ~ p"$" {print}')"
+[ -n "$lines" ] || { echo "FAIL bind: nothing is listening on port $PORT"; exit 1; }
+echo "$lines"
+bad=0
+for addr in $(echo "$lines" | awk '{print $4}' | sed "s/:$PORT\$//"); do
+  if [ "$addr" != "$WG" ]; then
+    echo "FAIL bind: $addr:$PORT is not the wg0 address $WG"
+    bad=1
+  fi
+done
+[ "$bad" -eq 0 ] || exit 1
+echo "PASS bind: every listener on $PORT is $WG"
+exit 0

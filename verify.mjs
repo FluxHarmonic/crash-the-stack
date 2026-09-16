@@ -13,7 +13,8 @@
 //   imports     the wasm's import modules are exactly wasi + gl + sigil_wasm_gles3
 //   boot        the game prints its boot line (seed, first solution pair, centres)
 //   render      the board region of the WebGL canvas is drawn: many non-background
-//               pixels in at least three suit colours (read in the same animation
+//               pixels in at least six colour bins: the copper bars alone give two
+//               or three, a board gives ten (read in the same animation
 //               frame the game draws, so preserveDrawingBuffer:false is not a problem)
 //   tap-select  a synthetic pointerdown at tile A's centre -> "crash: select A"
 //   tap-match   a second one at its pair B     -> "crash: removed A B tiles 142"
@@ -192,7 +193,7 @@ const px = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
   }
   resolve({ lit, total, colours: colours.size, w: c.width, h: c.height });
 }))`);
-if (px.lit > px.total * 0.15 && px.colours >= 3) pass("render", `${px.lit}/${px.total} sampled pixels lit, ${px.colours} colour bins, buffer ${px.w}x${px.h}`);
+if (px.lit > px.total * 0.15 && px.colours >= 6) pass("render", `${px.lit}/${px.total} sampled pixels lit, ${px.colours} colour bins, buffer ${px.w}x${px.h}`);
 else fail("render", `lit ${px.lit}/${px.total}, colour bins ${px.colours}, buffer ${px.w}x${px.h}`);
 
 // ---- 4. tap-select ----------------------------------------------------------
