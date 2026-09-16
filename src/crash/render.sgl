@@ -93,15 +93,25 @@
                    (+ y (exact (floor (/ (- h gh) 2))))
                    scale)))
 
-    (define (draw-tile-primitives g b id x y w h selected?)
-      (let ((side (geometry-side g))
-            (face (tile-face b id)))
-        ;; side faces: left and bottom, one layer offset deep; the bottom strip
-        ;; runs the full width plus the side so the corner is filled
+    ;; A tile is drawn in two passes per layer: first its side faces (left and
+    ;; bottom, one layer offset deep), then its face. With half-row offsets a
+    ;; single draw order cannot be right for both: the Turtle's end tile at
+    ;; y=0 straddles the rows at -0.5 and 0.5, and whichever order the sort
+    ;; picks, one neighbour's side strip paints over the other's face (David
+    ;; saw the dark strip on the tile beside each end tile, 2026-09-16).
+    ;; Drawing every side in a layer before any face makes each face cover
+    ;; every side strip that overlaps it, which is what a stack looks like.
+
+    (define (draw-sides-primitives g x y w h)
+      (let ((side (geometry-side g)))
+        ;; the bottom strip runs the full width plus the side so the corner is filled
         (colour! C-SIDE-DARK)
         (draw-filled-rect (- x side) (+ y h) (+ w side) side)
         (colour! C-SIDE)
-        (draw-filled-rect (- x side) y side h)
+        (draw-filled-rect (- x side) y side h)))
+
+    (define (draw-face-primitives g b id x y w h selected?)
+      (let ((face (tile-face b id)))
         ;; the face, with a lighter top-left edge
         (colour! (if selected? C-SELECTED C-FACE))
         (draw-filled-rect x y w h)
@@ -112,21 +122,34 @@
 
     ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
     ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
-    ;; directions sit side by side on one board.
-    (define (draw-tile-texture g b id tex x y w h selected?)
-      (let* ((side (geometry-side g))
-             (face (tile-face b id))
-             (frame (if (and face (< face (- TEST-TILE-FRAMES 1))) (+ face 1) 0)))
-        (if selected?
-            (set-color 0.5 1.0 0.95 1.0)
-            (set-color 1.0 1.0 1.0 1.0))
+    ;; directions sit side by side on one board. The strip's frame carries
+    ;; the side art in its left and bottom cells (TEST-TILE-SIDE of them), so
+    ;; the side pass draws the whole frame and the face pass redraws only the
+    ;; face region over it.
+
+    (define TEST-TILE-SIDE 4)
+
+    (define (tile-frame b id)
+      (let ((face (tile-face b id)))
+        (if (and face (< face (- TEST-TILE-FRAMES 1))) (+ face 1) 0)))
+
+    (define (draw-sides-texture g b id tex x y w h selected?)
+      (let ((side (geometry-side g))
+            (frame (tile-frame b id)))
+        (if selected? (set-color 0.5 1.0 0.95 1.0) (set-color 1.0 1.0 1.0 1.0))
         (draw-texture-region tex (- x side) y (+ w side) (+ h side)
-                             (* frame TEST-TILE-W) 0 TEST-TILE-W TEST-TILE-H)
+                             (* frame TEST-TILE-W) 0 TEST-TILE-W TEST-TILE-H)))
+
+    (define (draw-face-texture g b id tex x y w h selected?)
+      (let ((face (tile-face b id))
+            (frame (tile-frame b id)))
+        (if selected? (set-color 0.5 1.0 0.95 1.0) (set-color 1.0 1.0 1.0 1.0))
+        (draw-texture-region tex x y w h
+                             (+ (* frame TEST-TILE-W) TEST-TILE-SIDE) 0
+                             (- TEST-TILE-W TEST-TILE-SIDE) (- TEST-TILE-H TEST-TILE-SIDE))
         (when (and face (= frame 0))
           (draw-glyph-on g face x y w h selected?))))
 
-    ;; The keyboard highlight ring, drawn after every tile so no neighbour
-    ;; paints over it.
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbour paints over it.
     (define (draw-ring g id colour)
@@ -140,22 +163,37 @@
 
     (define (draw-tiles s g tex)
       (let* ((b (session-board s))
+             (lay (board-layout b))
              (selected (board-selected b))
+             (textured? (and tex (eq? (session-render-mode s) 'texture)))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
                              (session-highlight s)
                              (tile-present? b (session-highlight s))
-                             (session-highlight s))))
-        (for-each
-          (lambda (id)
-            (when (tile-present? b id)
-              (let* ((r (slot-rect g id))
-                     (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-                     (selected? (eqv? selected id)))
-                (if (and tex (eq? (session-render-mode s) 'texture))
-                    (draw-tile-texture g b id tex x y w h selected?)
-                    (draw-tile-primitives g b id x y w h selected?)))))
-          (geometry-draw-order g))
+                             (session-highlight s)))
+             (each-on-layer
+               (lambda (layer proc)
+                 (for-each
+                   (lambda (id)
+                     (when (and (tile-present? b id)
+                                (= layer (slot-layer (layout-slot lay id))))
+                       (let* ((r (slot-rect g id))
+                              (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+                         (proc id x y w h (eqv? selected id)))))
+                   (geometry-draw-order g)))))
+        (let loop ((layer 0))
+          (when (< layer (layout-layer-count lay))
+            (each-on-layer layer
+                           (lambda (id x y w h selected?)
+                             (if textured?
+                                 (draw-sides-texture g b id tex x y w h selected?)
+                                 (draw-sides-primitives g x y w h))))
+            (each-on-layer layer
+                           (lambda (id x y w h selected?)
+                             (if textured?
+                                 (draw-face-texture g b id tex x y w h selected?)
+                                 (draw-face-primitives g b id x y w h selected?))))
+            (loop (+ layer 1))))
         (when highlight (draw-ring g highlight C-HIGHLIGHT))
         (let ((hint (session-hint s)))
           (when (and hint (tile-present? b hint)) (draw-ring g hint C-LABEL-LIT)))))
