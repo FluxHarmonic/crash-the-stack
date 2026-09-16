@@ -25,7 +25,7 @@
           geometry-columns geometry-rows geometry-draw-order
           make-geometry
           TILE-RATIO LAYER-OFFSET HUD-HEIGHT
-          slot-rect slot-centre rect-contains? hit-slot
+          slot-rect slot-extent slot-centre rect-contains? hit-slot
           column-label row-label column-of-key row-of-key slot-at-labels
           column-x row-y)
 
@@ -79,9 +79,16 @@
                                          (> (slot-hx sa) (slot-hx sb))))))))))
         (insertion-sort less? (iota (layout-slot-count lay)))))
 
+    ;; The coordinate model has 26 letters and 10 digits; a layout past that
+    ;; needs a second labelling scheme, not a silent blank label.
+    (define MAX-COLUMNS 26)
+    (define MAX-ROWS 10)
+
     (define (make-geometry lay vw vh)
       (let* ((layers (layout-layer-count lay))
              (stack-w (* LAYER-OFFSET (max 0 (- layers 1))))
+             ;; spans are even for any layout whose extreme tiles sit on whole
+             ;; columns; an odd span rounds down and centres half a tile off.
              (tiles-across (+ 1 (half (- (layout-max-hx lay) (layout-min-hx lay)))))
              (tiles-down (+ 1 (half (- (layout-max-hy lay) (layout-min-hy lay)))))
              (avail-w (- vw (* 2 GUTTER) stack-w))
@@ -92,20 +99,23 @@
              (board-w (+ (* tile-w tiles-across) stack-w))
              (board-h (+ (* tile-h tiles-down) stack-w))
              (origin-x (+ (exact (floor (/ (- vw board-w) 2))) 0))
-             (origin-y (+ (exact (floor (/ (- vh HUD-HEIGHT board-h) 2))) stack-w)))
+             (origin-y (+ (exact (floor (/ (- vh HUD-HEIGHT board-h) 2))) stack-w))
+             (columns (distinct-sorted lay slot-hx))
+             (rows (distinct-sorted lay slot-hy)))
+        (when (> (vector-length columns) MAX-COLUMNS)
+          (error "make-geometry: more columns than letters" (vector-length columns)))
+        (when (> (vector-length rows) MAX-ROWS)
+          (error "make-geometry: more rows than digits" (vector-length rows)))
         (geometry layout: lay vw: vw vh: vh
                   tile-w: tile-w tile-h: tile-h side: LAYER-OFFSET
                   origin-x: origin-x origin-y: origin-y hud-h: HUD-HEIGHT
-                  columns: (distinct-sorted lay slot-hx)
-                  rows: (distinct-sorted lay slot-hy)
+                  columns: columns
+                  rows: rows
                   draw-order: (compute-draw-order lay))))
 
-    ;; n / 2 for an even n, without division.
-    (define (half n)
-      (let loop ((k 0) (n n))
-        (if (< n 2) k (loop (+ k 1) (- n 2)))))
-
-    ;; The x of a half-column's left edge on layer 0, and the y of a half-row's top.
+    ;; The x of the left edge of a tile centred at hx (origin-x is the left edge
+    ;; of the leftmost tile, centred at min-hx), and likewise the y of the top
+    ;; edge of a tile centred at hy; both on layer 0.
     (define (column-x g hx)
       (+ (geometry-origin-x g)
          (* (- hx (layout-min-hx (geometry-layout g))) (half (geometry-tile-w g)))))
@@ -132,13 +142,21 @@
       (and (>= x (car r)) (< x (+ (car r) (caddr r)))
            (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
 
+    ;; (x y w h) of everything a slot paints: the face plus its side faces, one
+    ;; layer offset to the left and below.
+    (define (slot-extent g id)
+      (let ((r (slot-rect g id)) (side (geometry-side g)))
+        (list (- (car r) side) (cadr r) (+ (caddr r) side) (+ (cadddr r) side))))
+
     ;; The topmost present tile under a point, or #f. Walks the draw order
-    ;; from the last-drawn tile back, so a tile drawn over another wins.
+    ;; from the last-drawn tile back, so a tile drawn over another wins; tests
+    ;; the drawn extent, side faces included, so a click on the visible side of
+    ;; a top tile lands on that tile and not the one it covers.
     (define (hit-slot g b x y)
       (let loop ((ids (reverse (geometry-draw-order g))))
         (cond ((null? ids) #f)
               ((and (tile-present? b (car ids))
-                    (rect-contains? (slot-rect g (car ids)) x y))
+                    (rect-contains? (slot-extent g (car ids)) x y))
                (car ids))
               (else (loop (cdr ids))))))
 

@@ -93,12 +93,13 @@
                    (+ y (exact (floor (/ (- h gh) 2))))
                    scale)))
 
-    (define (draw-tile-primitives g b id x y w h selected? highlighted?)
+    (define (draw-tile-primitives g b id x y w h selected?)
       (let ((side (geometry-side g))
             (face (tile-face b id)))
-        ;; side faces: left and bottom, one layer offset deep
+        ;; side faces: left and bottom, one layer offset deep; the bottom strip
+        ;; runs the full width plus the side so the corner is filled
         (colour! C-SIDE-DARK)
-        (draw-filled-rect (- x side) (+ y side) w h)
+        (draw-filled-rect (- x side) (+ y h) (+ w side) side)
         (colour! C-SIDE)
         (draw-filled-rect (- x side) y side h)
         ;; the face, with a lighter top-left edge
@@ -107,18 +108,12 @@
         (colour! (if selected? C-SELECTED C-FACE-EDGE))
         (draw-filled-rect x y w 1)
         (draw-filled-rect x y 1 h)
-        (when face (draw-glyph-on g face x y w h selected?))
-        (when highlighted?
-          (colour! C-HIGHLIGHT)
-          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
-          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))))
+        (when face (draw-glyph-on g face x y w h selected?))))
 
     ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
     ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
     ;; directions sit side by side on one board.
-    (define (draw-tile-texture g b id tex x y w h selected? highlighted?)
+    (define (draw-tile-texture g b id tex x y w h selected?)
       (let* ((side (geometry-side g))
              (face (tile-face b id))
              (frame (if (and face (< face (- TEST-TILE-FRAMES 1))) (+ face 1) 0)))
@@ -128,30 +123,37 @@
         (draw-texture-region tex (- x side) y (+ w side) (+ h side)
                              (* frame TEST-TILE-W) 0 TEST-TILE-W TEST-TILE-H)
         (when (and face (= frame 0))
-          (draw-glyph-on g face x y w h selected?))
-        (when highlighted?
-          (colour! C-HIGHLIGHT)
-          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
-          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))))
+          (draw-glyph-on g face x y w h selected?))))
+
+    ;; The keyboard highlight ring, drawn after every tile so no neighbour
+    ;; paints over it.
+    (define (draw-highlight-ring g id)
+      (let* ((r (slot-rect g id))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (colour! C-HIGHLIGHT)
+        (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
+        (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
+        (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
+        (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2))))
 
     (define (draw-tiles s g tex)
       (let* ((b (session-board s))
              (selected (board-selected b))
              (highlight (and (memq (session-model s) '(cursor glyph))
+                             (session-highlight s)
+                             (tile-present? b (session-highlight s))
                              (session-highlight s))))
         (for-each
           (lambda (id)
             (when (tile-present? b id)
               (let* ((r (slot-rect g id))
                      (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-                     (selected? (eqv? selected id))
-                     (highlighted? (eqv? highlight id)))
+                     (selected? (eqv? selected id)))
                 (if (and tex (eq? (session-render-mode s) 'texture))
-                    (draw-tile-texture g b id tex x y w h selected? highlighted?)
-                    (draw-tile-primitives g b id x y w h selected? highlighted?)))))
-          (geometry-draw-order g))))
+                    (draw-tile-texture g b id tex x y w h selected?)
+                    (draw-tile-primitives g b id x y w h selected?)))))
+          (geometry-draw-order g))
+        (when highlight (draw-highlight-ring g highlight))))
 
     ;; --- coordinate labels (model b) -----------------------------------------
 

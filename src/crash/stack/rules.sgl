@@ -31,7 +31,7 @@
           board-layout board-faces board-present board-occ
           board-selected board-history board-solution board-rng
           board-new board-copy
-          tile-present? tile-face tile-count
+          tile-present? tile-face
           board-tile-count board-cleared?
           blocked-left? blocked-right? covered? playable?
           playable-slots faces-match? legal-matches
@@ -40,7 +40,7 @@
           snapshot
           ;; Field setters, for the generator working on its own private copy.
           ;; Everything else treats a board as immutable.
-          set-board-faces! set-board-selected! set-board-history!
+          set-board-selected! set-board-history!
           set-board-solution! set-board-rng!)
 
   (begin
@@ -51,7 +51,8 @@
       (occ default: (vector) mutable: #t)       ; cell -> slot or #f; see layout-cell-index
       (selected default: #f mutable: #t)        ; slot or #f
       (history default: '() mutable: #t)        ; earlier snapshots, newest first
-      (solution default: '() mutable: #t)       ; ((a . b) ...) in removal order
+      (solution default: '() mutable: #t)       ; ((a . b) ...) in removal order from the
+                                                ; generated board; stale once the player deviates
       (rng default: 1 mutable: #t))             ; prng state carried for shuffles
 
     ;; --- construction --------------------------------------------------------
@@ -69,14 +70,15 @@
         occ))
 
     ;; A full board over a layout with the given faces vector (one entry per
-    ;; slot). present may be given to start from a partial board.
+    ;; slot). present may be given to start from a partial board. Both vectors
+    ;; are copied, so the caller keeps nothing the board will read.
     (define (board-new lay faces . rest)
       (let ((present (if (null? rest)
                          (make-vector (layout-slot-count lay) #t)
                          (car rest))))
         (board layout: lay
-               faces: faces
-               present: present
+               faces: (vector-copy faces)
+               present: (vector-copy present)
                occ: (build-occ lay present))))
 
     (define (board-copy b)
@@ -103,22 +105,16 @@
     (define (tile-face b id)
       (vector-ref (board-faces b) id))
 
-    (define (tile-count b)
+    (define (board-tile-count b)
       (let ((present (board-present b)))
         (let loop ((id 0) (n 0))
           (if (= id (vector-length present))
               n
               (loop (+ id 1) (if (vector-ref present id) (+ n 1) n))))))
 
-    (define board-tile-count tile-count)
-
     (define (board-cleared? b)
-      (= 0 (tile-count b)))
+      (= 0 (board-tile-count b)))
 
-    ;; The slot at a cell, or #f when the cell is empty or off the grid.
-    (define (occ-ref b layer hx hy)
-      (let ((i (layout-cell-index (board-layout b) layer hx hy)))
-        (and i (vector-ref (board-occ b) i))))
 
     ;; Is any of these grid cells occupied? The cell lists come from the
     ;; layout's precomputed neighbourhoods (crash stack layout), so each
@@ -143,8 +139,9 @@
 
     ;; Any tile on any higher layer within one half-unit of this tile's centre
     ;; covers it. GNOME checks every layer above, not only the next one, and so
-    ;; does this; the 2020 stack.scm checked layer+1 only. Both agree on
-    ;; every well-formed layout.
+    ;; does this; the 2020 stack.scm checked layer+1 only. They differ on a
+    ;; bridge (a tile two layers up resting on two tiles either side of a gap);
+    ;; GNOME says the gap tile is covered, and so do we.
     (define (covered? b id)
       (any-occupied? b (neighbourhood-above (neighbourhood-for b id))))
 

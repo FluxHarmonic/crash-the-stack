@@ -2,11 +2,14 @@
 ;;; bridge. Plan guardrail: "Rules/renderer separation is a gate, not a
 ;;; convention."
 ;;;
-;;; The checker reads each rules module's source, takes its (import ...)
-;;; form, follows (crash ...) imports transitively, and reports every import
-;;; outside the allowlist. The positive control writes a module with a
-;;; planted (sigil graphics) import under /tmp and checks the checker names
-;;; it, so a green here has been shown able to go red.
+;;; The checker reads each rules module's source as data, collects EVERY
+;;; import form in the define-library body (including ones after the export
+;;; list and ones inside cond-expand clauses), strips only/except/prefix/
+;;; rename down to the library name, follows (crash ...) imports transitively
+;;; whether or not they were in the starting set, and reports every import
+;;; outside the allowlist. The positive control is a committed pair of
+;;; modules under test/fixtures/import-control with plants of each kind; the
+;;; test writes nothing.
 
 (import (sigil test)
         (sigil io)
@@ -29,6 +32,8 @@
     (sigil struct)
     (sigil math)))
 
+(define CONTROL-ROOT "test/fixtures/import-control")
+
 (define (module-path root name)
   (let loop ((parts name) (path (string-append root "/src")))
     (if (null? (cdr parts))
@@ -44,21 +49,37 @@
               (string-join (reverse lines) "\n")
               (loop (cons line lines))))))))
 
+;; (only (lib) ...) / (except ...) / (prefix ...) / (rename ...) -> (lib)
+(define (import-set->name set)
+  (if (and (pair? set) (memq (car set) '(only except prefix rename)))
+      (import-set->name (cadr set))
+      set))
+
+;; Every import set anywhere in a library body, cond-expand clauses included.
+(define (collect-imports forms)
+  (let loop ((forms forms) (acc '()))
+    (cond ((null? forms) (reverse acc))
+          ((not (pair? (car forms))) (loop (cdr forms) acc))
+          ((eq? (car (car forms)) 'import)
+           (loop (cdr forms) (append (reverse (map import-set->name (cdr (car forms)))) acc)))
+          ((eq? (car (car forms)) 'cond-expand)
+           (loop (cdr forms)
+                 (append (reverse (collect-imports (apply append (map cdr (cdr (car forms))))))
+                         acc)))
+          (else (loop (cdr forms) acc)))))
+
 ;; The first datum of a module file is its define-library form.
 (define (library-imports path)
   (let ((form (read-expr (read-file-string path))))
     (unless (and (pair? form) (eq? (car form) 'define-library))
       (error "not a define-library form" path))
-    (let ((import-form (find (lambda (x) (and (pair? x) (eq? (car x) 'import))) (cddr form))))
-      (if import-form (cdr import-form) '()))))
+    (collect-imports (cddr form))))
 
 (define (crash-module? name) (and (pair? name) (eq? (car name) 'crash)))
 
-;; Walk from the named modules through every (crash ...) import. Returns a
-;; list of (module . bad-import) for every import outside the allowlist that
-;; is not itself a crash module. A crash module outside the starting set is
-;; reported too, so a rules module cannot smuggle an import through a
-;; helper.
+;; Walk from the named modules through every (crash ...) import, visiting
+;; each module once. Returns (module . bad-import) for every import that is
+;; neither in the allowlist nor a crash module.
 (define (check-modules root modules allowlist)
   (let loop ((todo modules) (seen '()) (bad '()))
     (cond ((null? todo) (reverse bad))
@@ -66,11 +87,9 @@
           (else
            (let* ((name (car todo))
                   (imports (library-imports (module-path root name)))
-                  (violations (filter (lambda (i)
-                                        (not (or (member i allowlist)
-                                                 (and (crash-module? i) (member i modules)))))
+                  (violations (filter (lambda (i) (not (or (member i allowlist) (crash-module? i))))
                                       imports))
-                  (followups (filter (lambda (i) (and (crash-module? i) (member i modules))) imports)))
+                  (followups (filter crash-module? imports)))
              (loop (append (cdr todo) followups)
                    (cons name seen)
                    (append (reverse (map (lambda (v) (cons name v)) violations)) bad)))))))
@@ -80,42 +99,22 @@
     (test "no import outside (sigil core) (sigil struct) (sigil math) and the rules family"
       (assert-equal '() bad))
     (test "the real rules.sgl was read: its import list is the known one"
-      (assert-equal (quote ((sigil core) (sigil struct) (sigil math) (crash stack layout)))
-                    (library-imports (module-path "." (quote (crash stack rules))))))
-    (test "every rules module exists and was read"
+      (assert-equal '((sigil core) (sigil struct) (sigil math) (crash stack layout))
+                    (library-imports (module-path "." '(crash stack rules)))))
+    (test "every rules module exists"
       (assert-true (every (lambda (m) (file-exists? (module-path "." m))) RULES-MODULES)))))
 
-(test-group "positive control: a planted graphics import is caught"
-  (let* ((root "/tmp/crash-import-control")
-         (dir (string-append root "/src/crash/stack")))
-    (unless (directory-exists? root) (make-directory root))
-    (unless (directory-exists? (string-append root "/src")) (make-directory (string-append root "/src")))
-    (unless (directory-exists? (string-append root "/src/crash")) (make-directory (string-append root "/src/crash")))
-    (unless (directory-exists? dir) (make-directory dir))
-    (call-with-output-file (string-append dir "/planted.sgl")
-      (lambda (port)
-        (write-string
-          (string-append
-            ";;; a rules module with a rendering import planted in it\n"
-            "(define-library (crash stack planted)\n"
-            "  (import (sigil core) (sigil graphics) (crash stack helper))\n"
-            "  (export x) (begin (define x 1)))\n")
-          port)))
-    (call-with-output-file (string-append dir "/helper.sgl")
-      (lambda (port)
-        (write-string
-          (string-append
-            "(define-library (crash stack helper)\n"
-            "  (import (sigil core) (sigil app))\n"
-            "  (export y) (begin (define y 2)))\n")
-          port)))
-    (let ((bad (check-modules root '((crash stack planted) (crash stack helper)) ALLOWLIST)))
-      (test "the planted (sigil graphics) import is named against its module"
-        (assert-true (and (member '((crash stack planted) . (sigil graphics)) bad) #t)))
-      (test "the transitive (sigil app) import through the helper is named too"
-        (assert-true (and (member '((crash stack helper) . (sigil app)) bad) #t)))
-      (test "nothing else is reported"
-        (assert-equal 2 (length bad))))
-    (let ((clean (check-modules root '((crash stack helper)) '((sigil core) (sigil app)))))
-      (test "with (sigil app) allowed, the helper is clean (the checker can stand down)"
-        (assert-equal '() clean)))))
+(test-group "positive control: planted imports are caught"
+  (let ((bad (check-modules CONTROL-ROOT '((crash stack planted)) ALLOWLIST)))
+    (test "the planted (sigil graphics) import is named against its module"
+      (assert-true (and (member '((crash stack planted) . (sigil graphics)) bad) #t)))
+    (test "a second import form after the export list is caught"
+      (assert-true (and (member '((crash stack planted) . (sigil random)) bad) #t)))
+    (test "an import inside cond-expand is caught"
+      (assert-true (and (member '((crash stack planted) . (sigil io)) bad) #t)))
+    (test "the helper reached only through planted's import is walked and its (sigil app) named"
+      (assert-true (and (member '((crash stack helper) . (sigil app)) bad) #t)))
+    (test "nothing else is reported"
+      (assert-equal 4 (length bad)))
+    (test "with (sigil app) allowed the helper is clean: the checker can stand down"
+      (assert-equal '() (check-modules CONTROL-ROOT '((crash stack helper)) '((sigil core) (sigil app)))))))

@@ -2,8 +2,8 @@
 ;;;
 ;;; A layout is the static shape of a board: one slot per tile position, on a
 ;;; grid of half-tile units. A tile is two half-units wide and two tall, and a
-;;; slot names the tile's CENTRE as (layer hx hy), so a tile at hx covers the
-;;; half-columns hx-1 and hx, and its left-hand neighbour on the same layer is
+;;; slot names the tile's CENTRE as (layer hx hy), so a tile at hx spans the
+;;; half-units hx-1 to hx+1, and its left-hand neighbour on the same layer is
 ;;; at hx-2. Half-unit integers are what let a layout put a tile astride two
 ;;; others (the Turtle's apex, its end tiles) without any float in a key.
 ;;;
@@ -25,8 +25,8 @@
           layout-cell-count layout-cell-index
           slots->layout sexp->layout
           neighbourhood neighbourhood-left neighbourhood-right neighbourhood-above
-          layout-neighbourhood
-          insertion-sort)
+          layout-neighbourhood layout-reading-order
+          half insertion-sort)
 
   (begin
     (define-struct slot
@@ -43,7 +43,8 @@
       (max-hx default: 0)
       (min-hy default: 0)
       (max-hy default: 0)
-      (neighbourhoods default: (vector) mutable: #t))
+      (neighbourhoods default: (vector) mutable: #t)
+      (reading-order default: (quote ()) mutable: #t))  ; slot ids, top row first, left to right
 
     (define (layout-slot-count l)
       (vector-length (layout-slots l)))
@@ -81,6 +82,7 @@
 
     (define (finish-layout l)
       (set-layout-neighbourhoods! l (compute-neighbourhoods l))
+      (set-layout-reading-order! l (compute-reading-order l))
       l)
 
     ;; Build a layout from a list of slots; layer-count is one more than the
@@ -160,11 +162,30 @@
                                      (cells-at l layer (+ hx 1) hys)
                                      acc)))))))
 
+    ;; Every slot in reading order: top row first (hy ascending), left to
+    ;; right within a row (hx ascending), lower layer first on a tie. The
+    ;; cursor model walks the playable subset of this.
+    (define (compute-reading-order l)
+      (insertion-sort (lambda (a b)
+                        (let ((sa (layout-slot l a)) (sb (layout-slot l b)))
+                          (or (< (slot-hy sa) (slot-hy sb))
+                              (and (= (slot-hy sa) (slot-hy sb))
+                                   (< (slot-hx sa) (slot-hx sb))))))
+                      (iota (layout-slot-count l))))
+
     (define (compute-neighbourhoods l)
       (vector-map (lambda (s) (neighbourhood-of l s)) (layout-slots l)))
 
     (define (layout-neighbourhood l id)
       (vector-ref (layout-neighbourhoods l) id))
+
+    ;; --- small helpers the rest of the family shares ----------------------------
+
+    ;; n / 2 for an even n, without reaching for division (integer / is not
+    ;; exact in Sigil).
+    (define (half n)
+      (let loop ((k 0) (n n))
+        (if (< n 2) k (loop (+ k 1) (- n 2)))))
 
     ;; A stable insertion sort: less? decides, ties keep input order. Lists in
     ;; this game are a few hundred long at most, so no merge sort is needed and

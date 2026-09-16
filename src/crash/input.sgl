@@ -37,7 +37,7 @@
           session session? session-new
           session-board session-model session-highlight session-pending
           session-render-mode session-seed session-message
-          session-step session-pick session-with-model
+          session-step session-pick session-with session-with-model
           MODELS model-name next-model
           key->face face->key FACE-KEYS)
 
@@ -150,22 +150,28 @@
 
     ;; --- construction -------------------------------------------------------
 
+    ;; A layout no face assignment can clear (the generator answered #f) still
+    ;; gets a board to look at, all faces 0, and a message saying why.
     (define (session-new lay seed)
       (let ((b (generate lay seed)))
         (home-highlight
-          (session board: b seed: seed
+          (session board: (or b (board-new lay (make-vector (layout-slot-count lay) 0)))
+                   seed: seed
                    message: (if b "" "NO SOLVABLE DEAL FOR THIS LAYOUT")))))
 
     ;; --- picking ------------------------------------------------------------
 
-    ;; The one door: every model and the pointer come through here.
+    ;; The one door: every model and the pointer come through here. A pick
+    ;; that is not playable changes nothing, the keyboard highlight included.
     (define (session-pick s id)
-      (let ((b (board-select (session-board s) id)))
-        (home-highlight (session-with s 'board b 'pending #f 'highlight id))))
+      (if (not (playable? (session-board s) id))
+          s
+          (let ((b (board-select (session-board s) id)))
+            (home-highlight (session-with s 'board b 'pending #f 'highlight id)))))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
     (define (session-with-model s model)
-      (if (memq model MODELS) (session-with s (quote model) model) s))
+      (if (memq model MODELS) (session-with s 'model model) s))
 
     (define (session-new-board s b)
       (home-highlight (session-with s 'board b 'pending #f)))
@@ -179,26 +185,47 @@
             ((or (pressed? f 'down) (pressed? f 'j)) 'down)
             (else #f)))
 
-    ;; Nearest playable tile in a direction: the axis distance plus twice the
-    ;; cross-axis drift, so a tile in the same row wins over a nearer diagonal.
-    (define (cursor-move s dir)
+    ;; Left and right walk the playable tiles in reading order (top row first,
+    ;; left to right), wrapping at the ends, so pressing right enough times
+    ;; visits every playable tile: reachability by construction, which the
+    ;; gate in test/test-cursor.sgl checks over sample boards. Up and down are
+    ;; spatial shortcuts: the playable tile above or below with the least
+    ;; sideways drift, nearest first (score cross * 1000 + along; half-unit
+    ;; distances never reach 1000); with nothing in that direction the
+    ;; highlight stays. An earlier all-spatial version stranded tiles.
+    (define (cursor-step-reading s h forward?)
       (let* ((b (session-board s))
-             (h (session-highlight s)))
+             (order (filter (lambda (id) (playable? b id))
+                            (layout-reading-order (board-layout b))))
+             (order (if forward? order (reverse order)))
+             (after (memv h order)))
+        (cond ((null? order) h)
+              ((and after (pair? (cdr after))) (cadr after))
+              (else (car order)))))
+
+    (define (cursor-step-vertical s h dir)
+      (let* ((sh (slot-of s h))
+             (score (lambda (id)
+                      (let* ((sc (slot-of s id))
+                             (dx (- (slot-hx sc) (slot-hx sh)))
+                             (dy (- (slot-hy sc) (slot-hy sh))))
+                        (case dir
+                          ((up) (and (< dy 0) (+ (* 1000 (abs dx)) (- dy))))
+                          ((down) (and (> dy 0) (+ (* 1000 (abs dx)) dy)))
+                          (else #f))))))
+        (or (argmin score (filter (lambda (id) (not (= id h)))
+                                  (playable-slots (session-board s))))
+            h)))
+
+    (define (cursor-move s dir)
+      (let ((h (session-highlight s)))
         (if (not h)
             (home-highlight s)
-            (let* ((sh (slot-of s h))
-                   (score (lambda (id)
-                            (let* ((sc (slot-of s id))
-                                   (dx (- (slot-hx sc) (slot-hx sh)))
-                                   (dy (- (slot-hy sc) (slot-hy sh))))
-                              (case dir
-                                ((left) (and (< dx 0) (+ (- dx) (* 2 (abs dy)))))
-                                ((right) (and (> dx 0) (+ dx (* 2 (abs dy)))))
-                                ((up) (and (< dy 0) (+ (- dy) (* 2 (abs dx)))))
-                                ((down) (and (> dy 0) (+ dy (* 2 (abs dx)))))
-                                (else #f)))))
-                   (target (argmin score (filter (lambda (id) (not (= id h))) (playable-slots b)))))
-              (if target (session-with s 'highlight target) s)))))
+            (session-with s 'highlight
+                          (case dir
+                            ((right) (cursor-step-reading s h #t))
+                            ((left) (cursor-step-reading s h #f))
+                            (else (cursor-step-vertical s h dir)))))))
 
     (define (step-cursor s f)
       (let ((dir (direction-of f)))
