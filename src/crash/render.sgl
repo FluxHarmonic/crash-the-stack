@@ -22,7 +22,7 @@
           (crash input)
           (crash font))
 
-  (export draw-session
+  (export draw-session draw-frame-ms
           TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
 
   (begin
@@ -200,8 +200,9 @@
 
     ;; --- hint labels (model c) -------------------------------------------------
     ;;
-    ;; A small dark tag in the top-left corner of every uncovered tile with its
-    ;; one- or two-letter label; the letters typed so far are drawn lit.
+    ;; Shown only while the session says so (space toggles them): a small dark
+    ;; tag in the 3x5 set, centred on the tile's top edge so the glyph stays
+    ;; readable under it; the letters typed so far are drawn lit.
 
     (define (draw-hint-labels s g)
       (let ((typed (session-typed s)))
@@ -209,53 +210,18 @@
           (lambda (entry)
             (let* ((r (slot-rect g (car entry)))
                    (label (cdr entry))
-                   (x (+ (car r) 1)) (y (+ (cadr r) 1))
-                   (w (+ 2 (text-width label 1)))
+                   (tw (text-width-mini label 1))
+                   (w (+ 4 tw))
+                   (x (+ (car r) (exact (floor (/ (- (caddr r) w) 2)))))
+                   (y (- (cadr r) 3))
                    (prefix? (and (> (string-length typed) 0)
                                  (<= (string-length typed) (string-length label))
                                  (string=? typed (substring label 0 (string-length typed))))))
               (colour! C-BG)
-              (draw-filled-rect x y w 9)
+              (draw-filled-rect x y w 7)
               (colour! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-              (draw-text label (+ x 1) (+ y 1) 1)))
-          (hint-labels s))))
-
-    ;; --- coordinate labels (model b) -----------------------------------------
-
-    (define (playable-hxs b)
-      (map (lambda (id) (slot-hx (layout-slot (board-layout b) id))) (playable-slots b)))
-
-    (define (playable-hys b)
-      (map (lambda (id) (slot-hy (layout-slot (board-layout b) id))) (playable-slots b)))
-
-    (define (draw-labels s g)
-      (let* ((b (session-board s))
-             (pending (or (session-pending s) (cons #f #f)))
-             (lit-x (playable-hxs b))
-             (lit-y (playable-hys b))
-             (scale 2)
-             (half-w (exact (floor (/ (geometry-tile-w g) 2))))
-             (half-h (exact (floor (/ (geometry-tile-h g) 2))))
-             (top (- (geometry-origin-y g) 16))
-             (left (- (geometry-origin-x g) 16)))
-        (let loop ((i 0))
-          (when (< i (vector-length (geometry-columns g)))
-            (let ((hx (vector-ref (geometry-columns g) i)))
-              (colour! (cond ((eqv? (car pending) i) C-HIGHLIGHT)
-                             ((memv hx lit-x) C-LABEL-LIT)
-                             (else C-TEXT-DIM)))
-              (draw-text (string (column-label i))
-                         (+ (column-x g hx) half-w -5) top scale))
-            (loop (+ i 1))))
-        (let loop ((i 0))
-          (when (< i (vector-length (geometry-rows g)))
-            (let ((hy (vector-ref (geometry-rows g) i)))
-              (colour! (cond ((eqv? (cdr pending) i) C-HIGHLIGHT)
-                             ((memv hy lit-y) C-LABEL-LIT)
-                             (else C-TEXT-DIM)))
-              (draw-text (string (row-label i))
-                         left (+ (row-y g hy) half-h -7) scale))
-            (loop (+ i 1))))))
+              (draw-text-mini label (+ x 2) (+ y 1) 1)))
+          (session-labels s))))
 
     ;; --- HUD ------------------------------------------------------------------
 
@@ -283,7 +249,9 @@
           (colour! C-HIGHLIGHT)
           (draw-text (string-append "> " (session-typed s)) (+ 8 (text-width "TILES 144" 2) 24) (+ top 6) 2))
         (colour! C-TEXT-DIM)
-        (draw-text "TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE  ESC QUIT"
+        (draw-text (if (eq? (session-model s) 'hint)
+                       "TYPE A TAG  SPACE TAGS ON/OFF  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE"
+                       "ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
                    8 (+ top 24) 1)
         (let ((message (cond ((board-cleared? b) "STACK CRASHED")
                              ((null? (legal-matches b)) "NO MOVES LEFT - ^S SHUFFLE")
@@ -296,13 +264,17 @@
               (colour! C-SELECTED)
               (draw-text message (exact (floor (/ (- vw w) 2))) (- (exact (floor (/ top 2))) 10) 3))))))
 
+    ;; Frame-time readout for --log-keys: last frame in ms, top-right.
+    (define (draw-frame-ms ms)
+      (let ((text (string-append "MS " (number->string (exact (round ms))))))
+        (colour! C-LABEL-LIT)
+        (draw-text text (- 640 8 (text-width text 2)) 6 2)))
+
     ;; --- one frame ------------------------------------------------------------
 
     (define (draw-session s g tex)
       (draw-background g)
       (draw-tiles s g tex)
-      (when (eq? (session-model s) 'hint)
+      (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
         (draw-hint-labels s g))
-      (when (eq? (session-model s) 'coords)
-        (draw-labels s g))
       (draw-hud s g))))

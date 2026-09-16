@@ -22,11 +22,10 @@
           geometry-layout geometry-vw geometry-vh
           geometry-tile-w geometry-tile-h geometry-side
           geometry-origin-x geometry-origin-y geometry-hud-h
-          geometry-columns geometry-rows geometry-draw-order
+          geometry-draw-order
           make-geometry
           TILE-RATIO LAYER-OFFSET HUD-HEIGHT
           slot-rect slot-extent slot-centre rect-contains? hit-slot
-          column-label row-label column-of-key row-of-key slot-at-labels
           column-x row-y)
 
   (begin
@@ -38,7 +37,7 @@
     (define LAYER-OFFSET 3)
     ;; Band at the bottom of the viewport for the tile counter and hints.
     (define HUD-HEIGHT 40)
-    ;; Space around the board for the coordinate labels and breathing room.
+    ;; Space around the board for the tags on the top row and breathing room.
     (define GUTTER 22)
 
     (define-struct geometry
@@ -51,22 +50,11 @@
       (origin-x default: 0)
       (origin-y default: 0)
       (hud-h default: HUD-HEIGHT)
-      (columns default: (vector))     ; distinct hx values, ascending
-      (rows default: (vector))        ; distinct hy values, ascending
       (draw-order default: '()))      ; slot ids, bottom layer first
 
     (define (even-down n)
       (if (odd? n) (- n 1) n))
 
-    ;; Distinct values of (key slot) over the layout, ascending.
-    (define (distinct-sorted lay key)
-      (let loop ((id 0) (acc '()))
-        (if (= id (layout-slot-count lay))
-            (list->vector (insertion-sort < acc))
-            (let ((v (key (layout-slot lay id))))
-              (loop (+ id 1) (if (memv v acc) acc (cons v acc)))))))
-
-    ;; Bottom layer first; within a layer, top row first and right to left,
     ;; so each tile's left and bottom side faces are covered by the tiles
     ;; drawn after it, as a real stack seen from below-left would be.
     (define (compute-draw-order lay)
@@ -78,11 +66,6 @@
                                     (and (= (slot-hy sa) (slot-hy sb))
                                          (> (slot-hx sa) (slot-hx sb))))))))))
         (insertion-sort less? (iota (layout-slot-count lay)))))
-
-    ;; The coordinate model has 26 letters and 10 digits; a layout past that
-    ;; needs a second labelling scheme, not a silent blank label.
-    (define MAX-COLUMNS 26)
-    (define MAX-ROWS 10)
 
     (define (make-geometry lay vw vh)
       (let* ((layers (layout-layer-count lay))
@@ -99,18 +82,10 @@
              (board-w (+ (* tile-w tiles-across) stack-w))
              (board-h (+ (* tile-h tiles-down) stack-w))
              (origin-x (+ (exact (floor (/ (- vw board-w) 2))) 0))
-             (origin-y (+ (exact (floor (/ (- vh HUD-HEIGHT board-h) 2))) stack-w))
-             (columns (distinct-sorted lay slot-hx))
-             (rows (distinct-sorted lay slot-hy)))
-        (when (> (vector-length columns) MAX-COLUMNS)
-          (error "make-geometry: more columns than letters" (vector-length columns)))
-        (when (> (vector-length rows) MAX-ROWS)
-          (error "make-geometry: more rows than digits" (vector-length rows)))
+             (origin-y (+ (exact (floor (/ (- vh HUD-HEIGHT board-h) 2))) stack-w)))
         (geometry layout: lay vw: vw vh: vh
                   tile-w: tile-w tile-h: tile-h side: LAYER-OFFSET
                   origin-x: origin-x origin-y: origin-y hud-h: HUD-HEIGHT
-                  columns: columns
-                  rows: rows
                   draw-order: (compute-draw-order lay))))
 
     ;; The x of the left edge of a tile centred at hx (origin-x is the left edge
@@ -158,40 +133,4 @@
               ((and (tile-present? b (car ids))
                     (rect-contains? (slot-extent g (car ids)) x y))
                (car ids))
-              (else (loop (cdr ids))))))
-
-    ;; --- coordinate labels (keyboard model b) --------------------------------
-    ;;
-    ;; Columns are lettered a.. across the distinct hx values, rows are
-    ;; numbered 0.. down the distinct hy values. Letters go to columns because
-    ;; the Turtle is 15 columns wide and 9 rows tall: digits could not label
-    ;; its columns. (The 2020 note had it the other way round; ruled 2026-09-16.)
-
-    (define (column-label i) (integer->char (+ 97 i)))
-    (define (row-label i) (integer->char (+ 48 i)))
-
-    ;; A key symbol ('a .. 'z) to a column index, or #f.
-    (define (column-of-key g key)
-      (let* ((name (symbol->string key))
-             (c (and (= (string-length name) 1) (string-ref name 0)))
-             (i (and c (char-alphabetic? c) (- (char->integer c) 97))))
-        (and i (>= i 0) (< i (vector-length (geometry-columns g))) i)))
-
-    (define (row-of-key g key)
-      (let* ((name (symbol->string key))
-             (c (and (= (string-length name) 1) (string-ref name 0)))
-             (i (and c (char-numeric? c) (- (char->integer c) 48))))
-        (and i (>= i 0) (< i (vector-length (geometry-rows g))) i)))
-
-    ;; The playable tile at a (column, row) label pair, or #f. Stacked tiles
-    ;; share a label; at most one of them is playable (the rest are covered).
-    (define (slot-at-labels g b col row)
-      (let ((hx (vector-ref (geometry-columns g) col))
-            (hy (vector-ref (geometry-rows g) row))
-            (lay (geometry-layout g)))
-        (let loop ((id 0))
-          (cond ((= id (layout-slot-count lay)) #f)
-                ((let ((s (layout-slot lay id)))
-                   (and (= (slot-hx s) hx) (= (slot-hy s) hy) (playable? b id)))
-                 id)
-                (else (loop (+ id 1)))))))))
+              (else (loop (cdr ids))))))))

@@ -1,10 +1,9 @@
 ;;; Gate leg 4 - input parity.
 ;;;
-;;; One known pair, picked four ways: a pointer click at each tile's centre,
+;;; One known pair, picked three ways: a pointer click at each tile's centre,
 ;;; the cursor model (a bounded search over arrow presses using the model's
-;;; own step, which also proves the pair is reachable), the coordinate model
-;;; (the tiles' column letter and row digit), and the hint model (the label
-;;; key until the highlight lands, then return). All four must leave the
+;;; own step, which also proves the pair is reachable), and the hint model
+;;; (the tag on the tile, typed letter by letter). All three must leave the
 ;;; board in the same state after the FIRST pick (one tile selected, nothing
 ;;; removed, no history) and after the second (the pair gone), and the same
 ;;; as two direct board-select calls. A second scenario picks a tile and then
@@ -69,14 +68,6 @@
                                    (step (cdr dirs) out seen)
                                    (step (cdr dirs) (cons x out) (cons h seen))))))))))))))
 
-(define (pick-by-coords s id)
-  (let* ((slot (layout-slot lay id))
-         (col (let loop ((i 0)) (if (= (vector-ref (geometry-columns geom) i) (slot-hx slot)) i (loop (+ i 1)))))
-         (row (let loop ((i 0)) (if (= (vector-ref (geometry-rows geom) i) (slot-hy slot)) i (loop (+ i 1)))))
-         (col-key (string->symbol (string (column-label col))))
-         (row-key (string->symbol (string (row-label row)))))
-    (session-step (session-step s (frame (list col-key)) geom) (frame (list row-key)) geom)))
-
 ;; Type the label the hint model puts on the tile, one key per letter.
 (define (pick-by-hint s id)
   (let ((label (cdr (assv id (hint-labels s)))))
@@ -105,14 +96,11 @@
   (let ((expected (direct a c))
         (pointer (run-path 'cursor pick-by-pointer a c))
         (cursor (run-path 'cursor pick-by-cursor a c))
-        (coords (run-path 'coords pick-by-coords a c))
         (hint (run-path 'hint pick-by-hint a c)))
     (test (string-append name ": pointer, first pick") (assert-equal (car expected) (car pointer)))
     (test (string-append name ": pointer, second pick") (assert-equal (cadr expected) (cadr pointer)))
     (test (string-append name ": cursor, first pick") (assert-equal (car expected) (car cursor)))
     (test (string-append name ": cursor, second pick") (assert-equal (cadr expected) (cadr cursor)))
-    (test (string-append name ": coords, first pick") (assert-equal (car expected) (car coords)))
-    (test (string-append name ": coords, second pick") (assert-equal (cadr expected) (cadr coords)))
     (test (string-append name ": hint, first pick") (assert-equal (car expected) (car hint)))
     (test (string-append name ": hint, second pick") (assert-equal (cadr expected) (cadr hint)))))
 
@@ -185,12 +173,12 @@
         (assert-equal 142 (board-tile-count (session-board after)))
         (assert-equal "z" (session-typed after))
         (assert-equal 144 (board-tile-count (session-board (session-step gm (frame '(z) '(ctrl)) geom))))))
-    (test "tab cycles cursor -> coords -> hint -> cursor"
-      (let* ((s1 (session-step s (frame '(tab)) geom))
-             (s2 (session-step s1 (frame '(tab)) geom))
-             (s3 (session-step s2 (frame '(tab)) geom)))
-        (assert-equal '(coords hint cursor)
-                      (list (session-model s1) (session-model s2) (session-model s3)))))
+    (test "tab cycles hint -> cursor -> hint"
+      (let* ((h (fresh 'hint))
+             (s1 (session-step h (frame '(tab)) geom))
+             (s2 (session-step s1 (frame '(tab)) geom)))
+        (assert-equal '(hint cursor hint)
+                      (list (session-model h) (session-model s1) (session-model s2)))))
     (test "ctrl+s shuffles and keeps the tile count"
       (let ((sh (session-step matched (frame '(s) '(ctrl)) geom)))
         (assert-equal 142 (board-tile-count (session-board sh)))
@@ -274,3 +262,51 @@
              (picked (pick-by-pointer hinted (car pair))))
         (assert-false (session-hint picked))
         (assert-equal 1 (session-hints picked))))))
+
+(test-group "hint model: showing, hiding, typing, deselecting"
+  (let* ((s (fresh 'hint))
+         (b (session-board s))
+         (pair (car (board-solution b)))
+         (labels (hint-labels s)))
+    (test "hint is the model a new session starts in"
+      (assert-equal 'hint (session-model (session-new lay SEED))))
+    (test "tags are shown by default and space hides and shows them"
+      (let* ((hidden (session-step s (frame '(space)) geom))
+             (shown (session-step hidden (frame '(space)) geom)))
+        (assert-true (session-labels-shown s))
+        (assert-false (session-labels-shown hidden))
+        (assert-true (session-labels-shown shown))))
+    (test "with tags hidden, tag letters do nothing"
+      (let* ((hidden (session-step s (frame '(space)) geom))
+             (after (pick-by-hint hidden (car pair))))
+        (assert-equal (canon s) (canon after))
+        (assert-equal "" (session-typed after))))
+    (test "tags are cached: the same list until the board changes"
+      (assert-true (eq? labels (hint-labels (session-step s (frame (list (string->symbol (string (string-ref (cdr (car labels)) 0))))) geom))))
+      (assert-false (eq? labels (hint-labels (pick-by-hint (pick-by-hint s (car pair)) (cdr pair))))))
+    (test "backspace erases a typed letter, and undoes only when nothing is typed"
+      (let* ((matched (pick-by-hint (pick-by-hint s (car pair)) (cdr pair)))
+             (one (session-step matched (frame '(a)) geom))
+             (erased (session-step one (frame '(backspace)) geom))
+             (undone (session-step erased (frame '(backspace)) geom)))
+        (assert-equal "a" (session-typed one))
+        (assert-equal "" (session-typed erased))
+        (assert-equal 142 (board-tile-count (session-board erased)))
+        (assert-equal 144 (board-tile-count (session-board undone)))))
+    (test "return deselects a selected tile in the hint model"
+      (let* ((selected (pick-by-hint s (car pair)))
+             (cleared (session-step selected (frame '(return)) geom)))
+        (assert-equal (car pair) (board-selected (session-board selected)))
+        (assert-false (board-selected (session-board cleared)))
+        (assert-equal 144 (board-tile-count (session-board cleared)))))
+    (test "return deselects in the cursor model too"
+      (let* ((c (fresh 'cursor))
+             (selected (pick-by-pointer c (car pair)))
+             (cleared (session-step selected (frame '(return)) geom)))
+        (assert-equal (car pair) (board-selected (session-board selected)))
+        (assert-false (board-selected (session-board cleared)))))
+    (test "typing the selected tile's own tag again deselects it"
+      (let* ((selected (pick-by-hint s (car pair)))
+             (cleared (pick-by-hint selected (car pair))))
+        (assert-false (board-selected (session-board cleared)))
+        (assert-equal 144 (board-tile-count (session-board cleared)))))))

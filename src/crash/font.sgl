@@ -13,7 +13,8 @@
           (sigil graphics))
 
   (export GLYPH-W GLYPH-H
-          draw-text text-width)
+          draw-text text-width
+          MINI-W MINI-H draw-text-mini text-width-mini)
 
   (begin
     (define GLYPH-W 5)
@@ -73,20 +74,30 @@
       (let ((entry (assv (char-downcase c) GLYPHS)))
         (and entry (cdr entry))))
 
-    ;; Draw one glyph with its top-left at (x, y), cells scale px square.
+    ;; Draw one glyph with its top-left at (x, y), cells scale px square. Each
+    ;; row is drawn as its runs of lit cells, one rect per run, not one per
+    ;; cell: sokol_gp has a 65536-vertex budget per frame (six per rect) and a
+    ;; board of 144 glyphs plus hint labels blew through it cell by cell
+    ;; ("SGP vertices buffer is full", draws dropped).
     (define (draw-glyph c x y scale)
       (let ((rows (glyph-rows c)))
         (when rows
           (let loop ((rows rows) (r 0))
             (unless (null? rows)
-              (let ((row (car rows)))
-                (let cells ((col 0))
-                  (when (< col GLYPH-W)
-                    (when (char=? (string-ref row col) #\#)
-                      (draw-filled-rect (+ x (* col scale)) (+ y (* r scale)) scale scale))
-                    (cells (+ col 1)))))
+              (let ((row (car rows)) (ry (+ y (* r scale))))
+                (let cells ((col 0) (run-start #f))
+                  (cond ((= col GLYPH-W)
+                         (when run-start
+                           (draw-filled-rect (+ x (* run-start scale)) ry
+                                             (* (- col run-start) scale) scale)))
+                        ((char=? (string-ref row col) #\#)
+                         (cells (+ col 1) (or run-start col)))
+                        (else
+                         (when run-start
+                           (draw-filled-rect (+ x (* run-start scale)) ry
+                                             (* (- col run-start) scale) scale))
+                         (cells (+ col 1) #f)))))
               (loop (cdr rows) (+ r 1)))))))
-
     ;; Draw text left-aligned at (x, y) in the current colour; one cell of
     ;; space between glyphs.
     (define (draw-text text x y scale)
@@ -98,4 +109,70 @@
 
     (define (text-width text scale)
       (let ((n (string-length text)))
-        (if (= n 0) 0 (- (* n scale (+ GLYPH-W 1)) scale))))))
+        (if (= n 0) 0 (- (* n scale (+ GLYPH-W 1)) scale))))
+
+    ;; --- a 3x5 letter set for the hint tags ----------------------------------
+    ;; Half the footprint of the 5x7 set, so a two-letter tag sits on a tile
+    ;; without hiding its glyph. Letters only: tags are letters only.
+
+    (define MINI-W 3)
+    (define MINI-H 5)
+
+    (define MINI-GLYPHS
+      '((#\a ".#." "#.#" "###" "#.#" "#.#")
+        (#\b "##." "#.#" "##." "#.#" "##.")
+        (#\c ".##" "#.." "#.." "#.." ".##")
+        (#\d "##." "#.#" "#.#" "#.#" "##.")
+        (#\e "###" "#.." "##." "#.." "###")
+        (#\f "###" "#.." "##." "#.." "#..")
+        (#\g ".##" "#.." "#.#" "#.#" ".##")
+        (#\h "#.#" "#.#" "###" "#.#" "#.#")
+        (#\i "###" ".#." ".#." ".#." "###")
+        (#\j "..#" "..#" "..#" "#.#" ".#.")
+        (#\k "#.#" "#.#" "##." "#.#" "#.#")
+        (#\l "#.." "#.." "#.." "#.." "###")
+        (#\m "#.#" "###" "#.#" "#.#" "#.#")
+        (#\n "##." "#.#" "#.#" "#.#" "#.#")
+        (#\o ".#." "#.#" "#.#" "#.#" ".#.")
+        (#\p "##." "#.#" "##." "#.." "#..")
+        (#\q ".#." "#.#" "#.#" ".#." "..#")
+        (#\r "##." "#.#" "##." "#.#" "#.#")
+        (#\s ".##" "#.." ".#." "..#" "##.")
+        (#\t "###" ".#." ".#." ".#." ".#.")
+        (#\u "#.#" "#.#" "#.#" "#.#" "###")
+        (#\v "#.#" "#.#" "#.#" "#.#" ".#.")
+        (#\w "#.#" "#.#" "###" "###" "#.#")
+        (#\x "#.#" "#.#" ".#." "#.#" "#.#")
+        (#\y "#.#" "#.#" ".#." ".#." ".#.")
+        (#\z "###" "..#" ".#." "#.." "###")))
+
+    (define (draw-rows rows x y scale width)
+      (let loop ((rows rows) (r 0))
+        (unless (null? rows)
+          (let ((row (car rows)) (ry (+ y (* r scale))))
+            (let cells ((col 0) (run-start #f))
+              (cond ((= col width)
+                     (when run-start
+                       (draw-filled-rect (+ x (* run-start scale)) ry
+                                         (* (- col run-start) scale) scale)))
+                    ((char=? (string-ref row col) #\#)
+                     (cells (+ col 1) (or run-start col)))
+                    (else
+                     (when run-start
+                       (draw-filled-rect (+ x (* run-start scale)) ry
+                                         (* (- col run-start) scale) scale))
+                     (cells (+ col 1) #f)))))
+          (loop (cdr rows) (+ r 1)))))
+
+    ;; Draw a lowercase-letter string in the 3x5 set, one cell between letters.
+    (define (draw-text-mini text x y scale)
+      (let loop ((chars (string->list text)) (x x))
+        (unless (null? chars)
+          (let ((entry (assv (char-downcase (car chars)) MINI-GLYPHS)))
+            (when entry (draw-rows (cdr entry) x y scale MINI-W)))
+          (loop (cdr chars) (+ x (* scale (+ MINI-W 1)))))))
+
+    (define (text-width-mini text scale)
+      (let ((n (string-length text)))
+        (if (= n 0) 0 (- (* n scale (+ MINI-W 1)) scale))))
+))
