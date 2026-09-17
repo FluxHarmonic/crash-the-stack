@@ -25,10 +25,15 @@
 ;;; on the board edges) was "too hard to scan"; hint mode solves the same
 ;;; problem. Glyph (press a face key, the highlight jumps to a free tile of
 ;;; that face) let one keystroke search the whole board for a free K and its
-;;; partner: GNOME's hint, made free. It survives as the PRICED HINT
-;;; prototype: ctrl+h then a face key rings a free tile of that face and
-;;; counts one hint; P1 attaches the trace cost. Until then the HUD shows
-;;; the count so the price is at least visible.
+;;; partner: GNOME's hint, made free. It survives as the PRICED HINT:
+;;; ctrl+h then a face key rings a free tile of that face and costs
+;;; HINT-COST on the trace meter ((crash trace)), like every other hint.
+;;;
+;;; The session carries the trace: the shell hands in the sim ticks each
+;;; frame through session-advance, hints and shuffles charge it here, and
+;;; when it reaches its threshold the ICE locks one free pair on the board.
+;;; ctrl+m, or a tap on the meter, flips between the twist face (the bar)
+;;; and the clean face (GNOME's clock).
 ;;;
 ;;; Always: tab switches model, return deselects, backspace or ctrl+z
 ;;; undoes (backspace erases a typed tag letter first), ctrl+s shuffles,
@@ -50,6 +55,7 @@
           (crash stack layout)
           (crash stack rules)
           (crash stack generate)
+          (crash trace)
           (crash geometry))
 
   (export input-frame input-frame? make-input-frame
@@ -59,6 +65,7 @@
           session-render-mode session-seed session-message
           session-typed session-hint session-hint-partner session-hint-armed
           session-hints session-cursor-shown
+          session-trace session-advance session-with-trace-mode
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
           session-step session-pick session-with-model
@@ -91,12 +98,16 @@
       (hint default: #f)                  ; priced hint: the ringed slot, or #f
       (hint-partner default: #f)          ; the pair hint's second slot, or #f
       (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
-      (hints default: 0)                  ; priced hints used this board
+      (trace default: #f)                 ; the meter, (crash trace)
       (render-mode default: 'primitives)  ; primitives | texture
       (seed default: 1)
       (message default: ""))
 
     (define MODELS '(hint cursor))
+
+    ;; Hints used this board, from the meter.
+    (define (session-hints s)
+      (trace-hints (session-trace s)))
 
     (define (model-name m)
       (case m
@@ -240,7 +251,7 @@
       (let* ((b (generate lay seed))
              (blank (lambda ()
                       (board-new lay (make-vector (layout-slot-count lay) 0))))
-             (s (session-on-board (session seed: seed)
+             (s (session-on-board (session seed: seed trace: (trace-new 'twist))
                                   (or b (blank)))))
         (if b
             s
@@ -384,7 +395,7 @@
         (session s hint-armed: #f
                       hint: target
                       hint-partner: #f
-                      hints: (+ 1 (session-hints s))
+                      trace: (trace-hint (session-trace s))
                       message: (if target "" "NO FREE TILE OF THAT FACE"))))
 
     ;; GNOME's hint: ring a legal pair, the selected tile's partner when
@@ -410,8 +421,43 @@
         (session s hint-armed: #f
                       hint: (and target (car target))
                       hint-partner: (and target (cdr target))
-                      hints: (+ 1 (session-hints s))
+                      trace: (trace-hint (session-trace s))
                       message: (if target "" "NO MOVES LEFT"))))
+
+    ;; --- the trace meter ------------------------------------------------------
+
+    (define (session-with-trace-mode s mode)
+      (session s trace: (trace-with-mode (session-trace s) mode)))
+
+    (define (toggle-trace-mode s)
+      (session-with-trace-mode s (if (eq? (trace-mode (session-trace s)) 'twist)
+                                     'clean
+                                     'twist)))
+
+    ;; A shuffle that changed the board costs SHUFFLE-COST; one the generator
+    ;; refused (nothing clearable) costs nothing and says so.
+    (define (shuffle-command s)
+      (let* ((b (session-board s))
+             (nb (reshuffle b)))
+        (if (eq? nb b)
+            (session s message: "NOTHING TO SHUFFLE")
+            (session (session-on-board s nb)
+                          trace: (trace-shuffle (session-trace s))))))
+
+    ;; The frame's sim ticks reach the meter here. A cleared board is
+    ;; finished: its trace is the score and stops. When the meter reaches
+    ;; LOCK-AT the ICE locks one free pair (once per board, twist mode only).
+    (define (session-advance s ticks)
+      (let ((b (session-board s)))
+        (if (or (board-cleared? b) (= ticks 0))
+            s
+            (let ((tr (trace-add-ticks (session-trace s) ticks)))
+              (if (trace-lock-due? tr)
+                  (let ((locked (trace-lock-pair tr b)))
+                    (session (session-on-board s (car locked))
+                                  trace: (cdr locked)
+                                  message: "ICE: PAIR LOCKED"))
+                  (session s trace: tr))))))
 
     (define (step-armed-hint s f)
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
@@ -443,13 +489,18 @@
                    (and ctrl (pressed? f 'z)))
                (session-on-board s (board-undo b)))
               ((and ctrl (pressed? f 's))
-               (session-on-board s (reshuffle b)))
+               (shuffle-command s))
               ((and ctrl (pressed? f 'n))
                (let ((seed (+ 1 (session-seed s))))
-                 (session (session-new (board-layout b) seed)
-                               model: (session-model s)
-                               labels-shown: (session-labels-shown s)
-                               render-mode: (session-render-mode s))))
+                 (session-with-trace-mode
+                   (session (session-new (board-layout b) seed)
+                                 model: (session-model s)
+                                 labels-shown: (session-labels-shown s)
+                                 render-mode: (session-render-mode s))
+                   (trace-mode (session-trace s)))))
+              ((or (pressed? f 'trace-mode)
+                   (and ctrl (pressed? f 'm)))
+               (toggle-trace-mode s))
               ((or (pressed? f 'pair-hint)
                    (and ctrl (pressed? f 'h) (session-hint-armed s)))
                (hint-pair s))
@@ -471,6 +522,7 @@
         ((shuf) (make-input-frame '(s) '(ctrl) #f))
         ((hint) (make-input-frame '(pair-hint) '() #f))
         ((next) (make-input-frame '(n) '(ctrl) #f))
+        ((mode) (make-input-frame '(trace-mode) '() #f))
         (else #f)))
 
     ;; A click on a control replaces the frame with that control's command

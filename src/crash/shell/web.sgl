@@ -32,8 +32,8 @@
 ;;; Trace lines, printed only when the page was opened with ?trace (the
 ;;; template dispatches ("trace", "on") after boot; verify.mjs relies on
 ;;; them, a player never sees them):
-;;;   crash: seed S pair A AX AY B BX BY   the first solution pair and its
-;;;                                         centers in virtual pixels
+;;;   crash: seed S tiles N pair A AX AY B BX BY   the first solution pair
+;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
 ;;;   crash: control NAME X Y              the centre of each HUD control
 ;;;   crash: select N                      a tile was selected
@@ -41,6 +41,8 @@
 ;;;   crash: undo tiles N                  an undo put tiles back
 ;;;   crash: shuffle                       the board was shuffled
 ;;;   crash: removed A B tiles N           a pair left the board
+;;;   crash: unlock A B                    a locked pair's first match
+;;;   crash: lock A B                      the ICE locked a pair
 
 (define-library (crash shell web)
   (import (sigil struct)
@@ -54,6 +56,7 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash tween)
           (crash fx)
           (crash render)
           (crash shell))
@@ -164,9 +167,19 @@
                                    (iota (layout-slot-count (board-layout b0))))))
                  (apply say "removed" (append gone (list "tiles" n1)))))
               ;; Same tiles, shorter history: an undo, whatever it put back;
-              ;; longer history with the same tiles: only a shuffle does that.
+              ;; longer history with the same tiles: a shuffle (faces moved),
+              ;; a lock (more locked tiles) or an unlock (fewer).
               ((< h1 h0) (say "undo" "tiles" n1))
-              ((> h1 h0) (say "shuffle"))
+              ((and (> h1 h0)
+                    (not (equal? (vector->list (board-faces b0))
+                                 (vector->list (board-faces b1)))))
+               (say "shuffle"))
+              ((> h1 h0)
+               (let ((l0 (board-locked-slots b0))
+                     (l1 (board-locked-slots b1)))
+                 (if (> (length l1) (length l0))
+                     (apply say "lock" (filter (lambda (id) (not (memv id l0))) l1))
+                     (apply say "unlock" (filter (lambda (id) (not (memv id l1))) l0)))))
               ((and (board-selected b1)
                     (not (eqv? (board-selected b0) (board-selected b1))))
                (say "select" (board-selected b1)))
@@ -182,12 +195,13 @@
     (define (say-first-pair s)
       (let ((sol (board-solution (session-board s))))
         (if (null? sol)
-            (say "seed" (session-seed s) "pair none")
+            (say "seed" (session-seed s) "tiles" (board-tile-count (session-board s)) "pair none")
             (let* ((a (car (car sol)))
                    (b (cdr (car sol)))
                    (ca (slot-centre *geom* a))
                    (cb (slot-centre *geom* b)))
               (say "seed" (session-seed s)
+                   "tiles" (board-tile-count (session-board s))
                    "pair" a (car ca) (cdr ca)
                    b (car cb) (cdr cb))
               (say "labels" a (slot-tag s a) b (slot-tag s b))))
@@ -230,8 +244,10 @@
           (say-first-pair *session*)
           (set! *announced* #t))
         (let* ((before *session*)
-               (after (session-step before (input-this-frame) *geom*))
-               (x (fx-observe (fx-frame *fx* dt) before after *geom*)))
+               (x (fx-frame *fx* dt))
+               (after (session-advance (session-step before (input-this-frame) *geom*)
+                                       (clock-steps (fx-clock x))))
+               (x (fx-observe x before after *geom*)))
           (set! *session* after)
           (set! *fx* x)
           (report-change! before after)

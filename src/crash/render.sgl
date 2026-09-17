@@ -22,6 +22,7 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash trace)
           (crash tween)
           (crash fx)
           (crash font))
@@ -50,6 +51,9 @@
     (define C-SUIT-2    '(0.10 0.55 0.30))   ; i-q
     (define C-SUIT-3    '(0.55 0.25 0.70))   ; r-z
     (define C-LABEL-LIT '(1.00 0.80 0.20))
+    (define C-LOCKED    '(0.55 0.30 0.45))   ; a locked tile's face
+    (define C-TRACE     '(0.30 0.95 0.85))   ; the meter, low
+    (define C-TRACE-HOT '(1.00 0.35 0.35))   ; the meter, near the lock
     ;; Tints for the test-tile texture: white leaves the art as drawn.
     (define C-TEX-PLAIN     '(1.00 1.00 1.00))
     (define C-TEX-SELECTED  '(0.50 1.00 0.95))
@@ -143,15 +147,22 @@
         (color! C-SIDE)
         (draw-filled-rect (- x side) y side h)))
 
-    ;; glow: 0..1, how bright the selected face breathes this frame.
-    (define (draw-face-primitives g face x y w h selected? glow)
+    ;; glow: 0..1, how bright the selected face breathes this frame. A
+    ;; locked tile's face is dimmed and barred across the top.
+    (define (draw-face-primitives g face x y w h selected? locked? glow)
       ;; the face, with a lighter top-left edge
-      (color! (if selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)) C-FACE))
+      (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
+                    (locked? C-LOCKED)
+                    (else C-FACE)))
       (draw-filled-rect x y w h)
       (color! (if selected? C-SELECTED C-FACE-EDGE))
       (draw-filled-rect x y w 1)
       (draw-filled-rect x y 1 h)
-      (when face (draw-glyph-on g face x y w h selected?)))
+      (when face (draw-glyph-on g face x y w h selected?))
+      (when locked?
+        (color! C-HIGHLIGHT)
+        (draw-filled-rect x (+ y 3) w 2)
+        (draw-filled-rect x (+ y h -5) w 2)))
 
     ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
     ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
@@ -253,7 +264,8 @@
                            (lambda (id face x y w h selected?)
                              (if textured?
                                  (draw-face-texture g b id face tex x y w h selected?)
-                                 (draw-face-primitives g face x y w h selected? glow))))
+                                 (draw-face-primitives g face x y w h selected?
+                                                       (tile-locked? b id) glow))))
             (loop (+ layer 1))))
         (draw-ghosts g x)
         (draw-particles g x)
@@ -366,7 +378,34 @@
                                (+ x (exact (floor (/ (- w tw) 2))))
                                (+ y 3)
                                2)))
-                (geometry-controls g)))
+                (filter (lambda (c) (not (eq? (car c) 'mode)))
+                        (geometry-controls g))))
+
+    ;; The meter, in the rect (crash geometry) reserves for it. Twist: a
+    ;; bar filling toward the lock, going hot as it nears, with the value;
+    ;; clean: GNOME's clock. Tapping it flips the face ((crash input)).
+    (define (draw-meter g tr)
+      (let* ((r (control-rect g 'mode))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! C-BG)
+        (draw-filled-rect x y w h)
+        (if (eq? (trace-mode tr) 'clean)
+            (let ((text (string-append "TIME " (trace-clock-string tr))))
+              (color! C-TEXT)
+              (draw-text text (+ x 4) (+ y 3) 2))
+            (let* ((frac (trace-fraction tr))
+                   (fill (exact (floor (* (- w 2) frac))))
+                   (text (string-append "TRACE "
+                                        (number->string (exact (floor (trace-value tr)))))))
+              (color! C-TEXT-DIM)
+              (draw-filled-rect x y w 1)
+              (draw-filled-rect x (+ y h -1) w 1)
+              (draw-filled-rect x y 1 h)
+              (draw-filled-rect (+ x w -1) y 1 h)
+              (color! (mix C-TRACE C-TRACE-HOT frac))
+              (draw-filled-rect (+ x 1) (+ y 1) fill (- h 2))
+              (color! (if (trace-locked? tr) C-HIGHLIGHT C-TEXT))
+              (draw-text (if (trace-locked? tr) "LOCKED" text) (+ x 4) (+ y 3) 2)))))
 
     ;; The centred message box: the cleared sequence slides it in and
     ;; fades it up over its first fifth; every other message just sits.
@@ -397,13 +436,7 @@
         (draw-text left 8 (+ top 7) 2)
         (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
         (draw-controls g)
-        (when (> (session-hints s) 0)
-          (color! C-LABEL-LIT)
-          (let ((hints (string-append "HINTS " (number->string (session-hints s)))))
-            (draw-text hints
-                       (- vw 8 (text-width right 2) 24 (text-width hints 2))
-                       (+ top 7)
-                       2)))
+        (draw-meter g (session-trace s))
         (color! C-TEXT-DIM)
         (draw-text (if (eq? (session-model s) 'hint)
                        HINT-KEYS-LINE

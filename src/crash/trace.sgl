@@ -1,0 +1,115 @@
+;;; (crash trace) - The meter that replaces the stopwatch.
+;;;
+;;; GNOME Mahjongg scores a board by elapsed time, adds 30 s for a hint
+;;; and 60 s for a shuffle, and never shows you the penalties land. The
+;;; trace meter is that same number made visible: it climbs with time,
+;;; spikes when you ask for a hint or a shuffle, and at LOCK-AT the ICE
+;;; answers by locking one free pair (a locked pair needs two matches,
+;;; (crash stack rules)). The board never ends; your score is the trace
+;;; you finished with, lower is better.
+;;;
+;;; One number, two faces. TWIST mode draws it as a bar filling toward the
+;;; lock; CLEAN mode draws it as GNOME's clock, mm:ss of the same value,
+;;; and no lock ever fires. David compares the two by flipping the mode;
+;;; the design note's question (does the meter make the game better or
+;;; noisier) is answered against the clean face of the same number.
+;;;
+;;; Time comes in sim ticks from the fixed clock of (crash tween), so the
+;;; meter is deterministic per tick like everything else. This module is
+;;; in the rules family: no platform, no drawing.
+
+(define-library (crash trace)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack rules)
+          (crash stack prng))
+
+  (export trace trace? trace-new
+          trace-ticks trace-hints trace-shuffles trace-locked? trace-mode
+          trace-value trace-clock-string trace-fraction
+          trace-add-ticks trace-hint trace-shuffle trace-with-mode
+          trace-lock-due? trace-lock-pair
+          HINT-COST SHUFFLE-COST LOCK-AT MODES)
+
+  (begin
+    ;; --- the numbers David tunes ------------------------------------------------
+
+    (define TICKS-PER-SECOND 60)
+    (define HINT-COST 30)          ; seconds-equivalent per hint (GNOME's)
+    (define SHUFFLE-COST 60)       ; per shuffle (GNOME's)
+    (define LOCK-AT 180)           ; the ICE locks a pair when the meter reaches this
+
+    (define MODES '(twist clean))
+
+    ;; ticks: sim ticks elapsed while the board was live. locked?: the
+    ;; threshold has been spent (one lock per board). mode: twist | clean.
+    (define-struct trace
+      (ticks default: 0)
+      (hints default: 0)
+      (shuffles default: 0)
+      (locked? default: #f)
+      (mode default: 'twist))
+
+    (define (trace-new mode)
+      (trace mode: (if (memq mode MODES) mode 'twist)))
+
+    ;; --- the number --------------------------------------------------------------
+
+    ;; Seconds-equivalent: elapsed + 30 per hint + 60 per shuffle.
+    (define (trace-value tr)
+      (+ (/ (trace-ticks tr) TICKS-PER-SECOND)
+         (* HINT-COST (trace-hints tr))
+         (* SHUFFLE-COST (trace-shuffles tr))))
+
+    ;; 0..1 of the way to the lock (1 once it has fired).
+    (define (trace-fraction tr)
+      (min 1.0 (/ (trace-value tr) LOCK-AT)))
+
+    (define (two-digits n)
+      (if (< n 10)
+          (string-append "0" (number->string n))
+          (number->string n)))
+
+    ;; The clean face: mm:ss of the value, whole seconds.
+    (define (trace-clock-string tr)
+      (let* ((total (exact (floor (trace-value tr))))
+             (minutes (quotient total 60))
+             (seconds (- total (* minutes 60))))
+        (string-append (two-digits minutes) ":" (two-digits seconds))))
+
+    ;; --- inputs -------------------------------------------------------------------
+
+    (define (trace-add-ticks tr n)
+      (trace tr ticks: (+ (trace-ticks tr) n)))
+
+    (define (trace-hint tr)
+      (trace tr hints: (+ 1 (trace-hints tr))))
+
+    (define (trace-shuffle tr)
+      (trace tr shuffles: (+ 1 (trace-shuffles tr))))
+
+    (define (trace-with-mode tr mode)
+      (if (memq mode MODES) (trace tr mode: mode) tr))
+
+    ;; --- the ICE's answer ----------------------------------------------------------
+
+    ;; The lock fires once, in twist mode, when the value reaches LOCK-AT.
+    (define (trace-lock-due? tr)
+      (and (eq? (trace-mode tr) 'twist)
+           (not (trace-locked? tr))
+           (>= (trace-value tr) LOCK-AT)))
+
+    ;; Lock one legal match chosen by the board's own random stream, and
+    ;; mark the threshold spent. A board with no legal match at that moment
+    ;; locks nothing but the threshold is still spent (there is nothing to
+    ;; punish). Returns (cons board trace).
+    (define (trace-lock-pair tr b)
+      (let ((matches (legal-matches b))
+            (spent (trace tr locked?: #t)))
+        (if (null? matches)
+            (cons b spent)
+            (let* ((rng (prng-next (board-rng b)))
+                   (pair (list-ref matches (prng-index rng (length matches))))
+                   (nx (board-lock-pair b (car pair) (cdr pair))))
+              (set-board-rng! nx rng)
+              (cons nx spent)))))))

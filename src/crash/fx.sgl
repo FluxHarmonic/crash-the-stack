@@ -35,6 +35,7 @@
   (export fx fx? fx-new fx-clock fx-effects
           fx-frame fx-observe fx-idle?
           fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
+          LOCK-TICKS
           effect effect? effect-kind effect-ids effect-tween effect-data
           PULSE-TICKS PULSE-SCALE
           MATCH-TICKS MATCH-LIFT MATCH-SCALE MATCH-PARTICLES
@@ -65,12 +66,14 @@
     (define CLEARED-TICKS 150)     ; the STACK CRASHED sequence
     (define RAIN-DROPS 60)
     (define SETTLE-TICKS 10)       ; tiles an undo brings back scale in
+    (define LOCK-TICKS 30)         ; a freshly locked pair shakes, twice a mismatch's length
 
     (define TAU 6.283185307179586)
 
     ;; --- state ---------------------------------------------------------------
 
     ;; kind: pulse | match | shake | blink | shuffle | cleared | settle.
+    ;; A lock is a longer shake on both tiles.
     ;; ids: the slots it concerns. tween: 0..1 over the effect's life.
     ;; data: kind-specific, documented at each spawn below.
     (define-struct effect
@@ -283,7 +286,17 @@
                            (else x)))
                   (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
                          (spawn-cleared x)
-                         x)))
+                         x))
+                  ;; the ICE locked a pair: both tiles shake
+                  (newly-locked (filter (lambda (id) (not (tile-locked? b0 id)))
+                                        (board-locked-slots b1)))
+                  (x (if (null? newly-locked)
+                         x
+                         (spawn x (effect kind: 'shake
+                                          ids: newly-locked
+                                          tween: (life LOCK-TICKS 'linear)
+                                          data: (max SHAKE-MIN
+                                                     (* SHAKE-FRACTION (geometry-tile-w g))))))))
              x)))))
 
     ;; --- reading the effects back --------------------------------------------
@@ -318,7 +331,7 @@
                          (loop (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
                       ((shake)
                        (let* ((p (progress e alpha))
-                              (seconds (/ (* p SHAKE-TICKS) TICKS-PER-SECOND))
+                              (seconds (/ (* p (tween-ticks (effect-tween e))) TICKS-PER-SECOND))
                               (offset (* (effect-data e) (sin (* TAU SHAKE-HZ seconds)))))
                          (loop (cdr es) (+ dx offset) dy sx sy face #t)))
                       ((shuffle)
