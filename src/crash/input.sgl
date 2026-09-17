@@ -29,11 +29,15 @@
 ;;; ctrl+h then a face key rings a free tile of that face and costs
 ;;; HINT-COST on the trace meter ((crash trace)), like every other hint.
 ;;;
-;;; The session carries the trace: the shell hands in the sim ticks each
-;;; frame through session-advance, hints and shuffles charge it here, and
-;;; when it reaches its threshold the ICE locks one free pair on the board.
-;;; ctrl+m, or a tap on the meter, flips between the twist face (the bar)
-;;; and the clean face (GNOME's clock).
+;;; The session carries the trace ((crash trace): TRACE, COUNTER-HACK,
+;;; SEVERED): the shell hands in the sim ticks each frame through
+;;; session-advance, hints and shuffles charge it here, the counter-hacks
+;;; it fires land on the board here, and a severed connection refuses
+;;; every move and undo until the player asks for the same stack again
+;;; (ctrl+r, or a tap on the left half of the board) or a new one (ctrl+n,
+;;; the NEXT control, the right half). ctrl+m, or a tap on the meter, flips
+;;; between the twist face (the bar) and the clean face (GNOME's clock)
+;;; while the game is still in TRACE.
 ;;;
 ;;; Always: tab switches model, return deselects, backspace or ctrl+z
 ;;; undoes (backspace erases a typed tag letter first), ctrl+s shuffles,
@@ -67,6 +71,7 @@
           session-hints session-cursor-shown
           session-trace session-advance session-with-trace-mode
           session-best session-with-best session-restore
+          session-retry session-next
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
           session-step session-pick session-with-model
@@ -268,14 +273,18 @@
     ;; (David, 2026-09-17).
     (define (session-pick s id)
       (let ((b0 (session-board s)))
-        (if (not (playable? b0 id))
+        (if (or (finished? s) (not (playable? b0 id)))
             s
-            (let* ((b1 (board-select b0 id))
+            (let* ((b1 (auto-break (board-select b0 id)))
                    (unlocked? (and (= (board-tile-count b0) (board-tile-count b1))
                                    (< (length (board-locked-slots b1))
-                                      (length (board-locked-slots b0))))))
+                                      (length (board-locked-slots b0)))))
+                   (tr (if (board-cleared? b1)
+                           (trace-finish (session-trace s))
+                           (session-trace s))))
               (session (session-on-board s b1)
                             highlight: id
+                            trace: tr
                             message: (if unlocked? "LOCK BROKEN: MATCH AGAIN" ""))))))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
@@ -453,46 +462,107 @@
     (define (session-with-trace-mode s mode)
       (session s trace: (trace-with-mode (session-trace s) mode)))
 
+    ;; The flip is refused once a twist game has been traced (and once a
+    ;; clean game's clock has passed TRACE-AT): the game is what it is now.
     (define (toggle-trace-mode s)
-      (session-with-trace-mode s (if (eq? (trace-mode (session-trace s)) 'twist)
-                                     'clean
-                                     'twist)))
+      (if (trace-flip-allowed? (session-trace s))
+          (session-with-trace-mode s (if (eq? (trace-mode (session-trace s)) 'twist)
+                                         'clean
+                                         'twist))
+          (session s message: "TOO LATE TO SWITCH")))
+
+    (define (severed? s)
+      (trace-severed? (session-trace s)))
+
+    (define (finished? s)
+      (memq (trace-phase (session-trace s)) '(severed cleared)))
 
     ;; A shuffle that changed the board costs SHUFFLE-COST; one the generator
     ;; refused (nothing clearable) costs nothing and says so.
     (define (shuffle-command s)
       (let* ((b (session-board s))
              (nb (reshuffle b)))
-        (if (eq? nb b)
-            (session s message: "NOTHING TO SHUFFLE")
-            (session (session-on-board s nb)
-                          trace: (trace-shuffle (session-trace s))))))
+        (cond ((finished? s) s)
+              ((eq? nb b) (session s message: "NOTHING TO SHUFFLE"))
+              (else (session (session-on-board s nb)
+                                  trace: (trace-shuffle (session-trace s)))))))
 
-    ;; The frame's sim ticks reach the meter here. A cleared board is
-    ;; finished: its trace is the score and stops. When the meter reaches
-    ;; LOCK-AT the ICE locks one free pair (once per board, twist mode only).
+    ;; A locked pair the board has thinned to (nothing but locked tiles
+    ;; left) breaks on its own, so the last matches are never refused.
+    (define (auto-break b)
+      (let ((locked (board-locked-slots b)))
+        (if (and (pair? locked)
+                 (= (length locked) (board-tile-count b)))
+            (board-break-locks b)
+            b)))
+
+    ;; The HUD line for what the ICE just did, or the phase that began.
+    (define (event-message events)
+      (let ((last (if (null? events) #f (list-ref events (- (length events) 1)))))
+        (case last
+          ((traced) "TRACED. ICE IS ON YOU.")
+          ((lock) "ICE LOCKED A PAIR")
+          ((shuffle) "ICE RE-DEALT THE STACK")
+          ((nothing) "ICE PROBED AND FOUND NOTHING")
+          ((severed) "CONNECTION SEVERED")
+          (else #f))))
+
+    ;; The frame's sim ticks reach the trace here, one at a time inside
+    ;; trace-advance, which fires the counter-hacks its seconds cover; the
+    ;; board it hands back replaces the session's, with tags and cursor
+    ;; recomputed, and the last event becomes the HUD message.
     (define (session-advance s ticks)
       (let ((b (session-board s)))
-        (if (or (board-cleared? b) (= ticks 0))
+        (if (or (finished? s) (= ticks 0))
             s
-            (let ((tr (trace-add-ticks (session-trace s) ticks)))
-              (if (trace-lock-due? tr)
-                  (let ((locked (trace-lock-pair tr b)))
-                    (session (session-on-board s (car locked))
-                                  trace: (cdr locked)
-                                  message: "ICE: PAIR LOCKED"))
-                  (session s trace: tr))))))
+            (let* ((r (trace-advance (session-trace s) b ticks))
+                   (tr (car r))
+                   (nb (auto-break (cadr r)))
+                   (events (caddr r))
+                   (message (event-message events)))
+              (cond ((and (eq? nb b) (not message))
+                     (session s trace: tr))
+                    ((eq? nb b)
+                     (session s trace: tr message: message))
+                    (else
+                     (session (session-on-board s nb)
+                                   trace: tr
+                                   message: (or message ""))))))))
+
+    ;; The next seed: a fresh deal, settings and mode kept.
+    (define (session-next s)
+      (session-retry (session s seed: (+ 1 (session-seed s)))))
+
+    ;; The same stack again (a severed game's first choice, ctrl+r any
+    ;; time): a fresh deal of this seed, settings kept, in the mode the
+    ;; last game was in.
+    (define (session-retry s)
+      (session-with-trace-mode
+        (session (session-new (board-layout (session-board s)) (session-seed s))
+                      model: (session-model s)
+                      labels-shown: (session-labels-shown s)
+                      render-mode: (session-render-mode s)
+                      best: (session-best s))
+        (trace-mode (session-trace s))))
 
     (define (step-armed-hint s f)
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
         (if face (hint-jump s face) s)))
 
+    ;; On a severed board the two choices are the board area's halves:
+    ;; left, the same stack again; right, a new one.
     (define (step-pointer s f g)
       (let ((click (input-frame-click f)))
-        (if (not click)
-            s
-            (let ((id (hit-slot g (session-board s) (car click) (cdr click))))
-              (if id (session-pick s id) s)))))
+        (cond ((not click) s)
+              ((severed? s)
+               (if (< (cdr click) (- (geometry-vh g) (geometry-hud-h g)))
+                   (if (< (car click) (half (geometry-vw g)))
+                       (session-retry s)
+                       (session-next s))
+                   s))
+              (else
+               (let ((id (hit-slot g (session-board s) (car click) (cdr click))))
+                 (if id (session-pick s id) s))))))
 
     ;; --- commands -----------------------------------------------------------
 
@@ -511,21 +581,19 @@
                  (if sel (session-pick s sel) (session s typed: ""))))
               ((or (and (pressed? f 'backspace) (not (typing? s)))
                    (and ctrl (pressed? f 'z)))
-               (session-on-board s (board-undo b)))
+               (if (finished? s) s (session-on-board s (board-undo b))))
+              ((and ctrl (pressed? f 'r))
+               (session-retry s))
               ((and ctrl (pressed? f 's))
                (shuffle-command s))
               ((and ctrl (pressed? f 'n))
-               (let ((seed (+ 1 (session-seed s))))
-                 (session-with-trace-mode
-                   (session (session-new (board-layout b) seed)
-                                 model: (session-model s)
-                                 labels-shown: (session-labels-shown s)
-                                 render-mode: (session-render-mode s)
-                                 best: (session-best s))
-                   (trace-mode (session-trace s)))))
+               (session-next s))
               ((or (pressed? f 'trace-mode)
                    (and ctrl (pressed? f 'm)))
                (toggle-trace-mode s))
+              ((and (finished? s)
+                    (or (pressed? f 'pair-hint) (and ctrl (pressed? f 'h))))
+               s)
               ((or (pressed? f 'pair-hint)
                    (and ctrl (pressed? f 'h) (session-hint-armed s)))
                (hint-pair s))

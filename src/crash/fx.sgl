@@ -30,12 +30,14 @@
           (crash stack prng)
           (crash geometry)
           (crash input)
+          (crash trace)
           (crash tween))
 
   (export fx fx? fx-new fx-clock fx-effects
           fx-frame fx-observe fx-idle?
           fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
-          LOCK-TICKS
+          fx-glitch fx-ticks
+          LOCK-TICKS GLITCH-TICKS
           effect effect? effect-kind effect-ids effect-tween effect-data
           PULSE-TICKS PULSE-SCALE
           MATCH-TICKS MATCH-LIFT MATCH-SCALE MATCH-PARTICLES
@@ -68,14 +70,16 @@
     (define SETTLE-TICKS 10)       ; tiles an undo brings back scale in
     (define LOCK-TICKS 30)         ; a freshly locked pair shakes, twice a mismatch's length
     (define UNLOCK-TICKS 24)       ; a broken lock: both tiles swell and settle
+    (define GLITCH-TICKS 45)       ; the full-screen glitch when the trace completes
     (define UNLOCK-SCALE 1.22)
 
     (define TAU 6.283185307179586)
 
     ;; --- state ---------------------------------------------------------------
 
-    ;; kind: pulse | match | shake | blink | shuffle | cleared | settle | unlock.
-    ;; A lock is a longer shake on both tiles; an unlock a bigger pulse on both.
+    ;; kind: pulse | match | shake | blink | shuffle | cleared | settle |
+    ;; unlock | glitch. A lock is a longer shake on both tiles; an unlock a
+    ;; bigger pulse on both; the glitch is the trace completing.
     ;; ids: the slots it concerns. tween: 0..1 over the effect's life.
     ;; data: kind-specific, documented at each spawn below.
     (define-struct effect
@@ -295,6 +299,12 @@
                   (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
                          (spawn-cleared x)
                          x))
+                  ;; the trace completed: the ICE is on you
+                  (x (if (and (eq? (trace-phase (session-trace after)) 'counter)
+                              (not (eq? (trace-phase (session-trace before)) 'counter)))
+                         (spawn x (effect kind: 'glitch
+                                          tween: (life GLITCH-TICKS 'linear)))
+                         x))
                   ;; a lock broken (tiles stayed, locks went): both swell
                   (unlocked (filter (lambda (id)
                                       (and (tile-present? b1 id) (not (tile-locked? b1 id))))
@@ -470,6 +480,15 @@
             1.0
             (let ((phase (exact (floor (* (progress e (alpha-of x)) BLINKS)))))
               (if (even? phase) 1.0 0.15)))))
+
+    ;; Progress of the glitch in 0..1, or #f.
+    (define (fx-glitch x)
+      (let ((e (find (lambda (e) (eq? (effect-kind e) 'glitch)) (fx-effects x))))
+        (and e (progress e (alpha-of x)))))
+
+    ;; The clock's tick count, for anything drawn as noise.
+    (define (fx-ticks x)
+      (clock-ticks (fx-clock x)))
 
     ;; Progress of the cleared sequence in 0..1, or #f.
     (define (fx-cleared x)

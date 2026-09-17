@@ -33,7 +33,8 @@
          (s (session-pick (session-pick s (car pair)) (cdr pair)))   ; a match
          (s (session-step s (frame '(pair-hint)) geom))              ; a hint (30)
          (s (session-step s (frame '(s) '(ctrl)) geom))              ; a shuffle (60)
-         (s (session-advance s 5400))                                ; 90 s -> 180: the lock
+         (s (session-advance s 12600))                               ; 210 s -> 300: traced
+         (s (session-advance s 660))                                 ; 11 s: the first ICE
          (s (session-pick s (car (playable-slots (session-board s))))) ; a selection
          (s (session-step s (frame '(tab)) geom))                    ; cursor model
          (s (session-step s (frame '(m) '(ctrl)) geom)))             ; clean face
@@ -47,11 +48,13 @@
          (d (session->datum s)))
     (test "the played session is what the leg says it is"
       (assert-equal 142 (board-tile-count (session-board s)))
-      (assert-equal 2 (length (board-locked-slots (session-board s))))
+      (assert-equal 'counter (trace-phase (session-trace s)))
+      (assert-equal 1 (trace-ice-count (session-trace s)))
       (assert-true (and (board-selected (session-board s)) #t))
       (assert-equal 'cursor (session-model s))
-      (assert-equal 'clean (trace-mode (session-trace s)))
-      (assert-true (trace-locked? (session-trace s))))
+      ;; the flip to clean was refused: the game is already under the ICE
+      (assert-equal 'twist (trace-mode (session-trace s)))
+      (assert-equal "TOO LATE TO SWITCH" (session-message s)))
     (test "nothing is stored yet"
       (assert-false (store-get "board"))
       (assert-false (store-read-datum "board")))
@@ -76,19 +79,21 @@
         (assert-equal (trace-ticks t0) (trace-ticks t1))
         (assert-equal (trace-hints t0) (trace-hints t1))
         (assert-equal (trace-shuffles t0) (trace-shuffles t1))
-        (assert-equal (trace-locked? t0) (trace-locked? t1))
+        (assert-equal (trace-phase t0) (trace-phase t1))
+        (assert-equal (trace-countdown t0) (trace-countdown t1))
+        (assert-equal (trace-ice-timer t0) (trace-ice-timer t1))
+        (assert-equal (trace-ice-count t0) (trace-ice-count t1))
+        (assert-equal (trace-last-ice t0) (trace-last-ice t1))
         (assert-equal (trace-mode t0) (trace-mode t1))
         (assert-equal (session-seed s) (session-seed r))
         (assert-equal (session-model s) (session-model r))
         (assert-equal (session-labels-shown s) (session-labels-shown r))
         (assert-equal (session-render-mode s) (session-render-mode r))))
-    (test "the restored session plays on: the locked pair still needs two matches"
+    (test "the restored session plays on under the ICE: the countdown keeps running"
       (let* ((r (datum->session (store-read-datum "board")))
-             (l (board-locked-slots (session-board r)))
-             (b (session-board (session-with-model r 'hint)))
-             (once (board-select (board-select (board b selected: #f) (car l)) (cadr l))))
-        (assert-true (tile-present? once (car l)))
-        (assert-false (tile-locked? once (car l)))))
+             (later (session-advance r 60)))
+        (assert-equal (- (trace-countdown (session-trace r)) 60)
+                      (trace-countdown (session-trace later)))))
     (test "history is not saved: the restored session has nothing to undo"
       (let ((r (datum->session (store-read-datum "board"))))
         (assert-equal '() (board-history (session-board r)))))

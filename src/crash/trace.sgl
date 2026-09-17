@@ -1,115 +1,290 @@
-;;; (crash trace) - The meter that replaces the stopwatch.
+;;; (crash trace) - Being traced, in three phases.
 ;;;
 ;;; GNOME Mahjongg scores a board by elapsed time, adds 30 s for a hint
-;;; and 60 s for a shuffle, and never shows you the penalties land. The
-;;; trace meter is that same number made visible: it climbs with time,
-;;; spikes when you ask for a hint or a shuffle, and at LOCK-AT the ICE
-;;; answers by locking one free pair (a locked pair needs two matches,
-;;; (crash stack rules)). The board never ends; your score is the trace
-;;; you finished with, lower is better.
+;;; and 60 s for a shuffle, and never shows you the penalties land. Twist
+;;; mode makes that number the TRACE: a bar filling toward TRACE-AT while
+;;; you try to clear the board first. When it fills you are traced and
+;;; the ICE is on you: COUNTER-HACK, a countdown of SEVER-AT seconds
+;;; during which a counter-hack fires on its own timer (the first after
+;;; ICE-FIRST, then every ICE-INTERVAL), picked with the board's random
+;;; stream from the applicable members of a set: lock a pair (two matches
+;;; to remove; never when it would leave no unlocked legal match), or
+;;; re-deal the remaining tiles (the solvable generator, so the board
+;;; stays winnable). Hints and shuffles now eat into the countdown. When
+;;; it reaches zero the connection is SEVERED: the board is lost, no move
+;;; or undo is accepted, and the player gets the same seed again or a new
+;;; board. Clearing the board wins in any phase; the score is GNOME's
+;;; number (elapsed + 30 per hint + 60 per shuffle) with a phase tag.
+;;; Ruled by David 2026-09-17 from P1 play (D13 in the phase plan).
 ;;;
-;;; One number, two faces. TWIST mode draws it as a bar filling toward the
-;;; lock; CLEAN mode draws it as GNOME's clock, mm:ss of the same value,
-;;; and no lock ever fires. David compares the two by flipping the mode;
-;;; the design note's question (does the meter make the game better or
-;;; noisier) is answered against the clean face of the same number.
+;;; Clean mode is GNOME's game: the TRACE formula shown as a clock, no
+;;; phases, no fail. The mode may be flipped only while a twist game is
+;;; still in TRACE (and a clean one still below TRACE-AT).
 ;;;
-;;; Time comes in sim ticks from the fixed clock of (crash tween), so the
-;;; meter is deterministic per tick like everything else. This module is
-;;; in the rules family: no platform, no drawing.
+;;; Time comes in sim ticks from the fixed clock of (crash tween), one at
+;;; a time inside trace-advance, so a chunk of ticks fires exactly the
+;;; counter-hacks its seconds cover. The counter-hack set is a list of
+;;; members (name, applicable?, apply); P3's face scramble is one more
+;;; entry and its art. This module is in the rules family: no platform,
+;;; no drawing. The numbers David tunes are the block at the top.
 
 (define-library (crash trace)
   (import (sigil struct)
           (sigil math)
           (crash stack rules)
+          (crash stack generate)
           (crash stack prng))
 
   (export trace trace? trace-new
-          trace-ticks trace-hints trace-shuffles trace-locked? trace-mode
-          trace-value trace-clock-string trace-fraction
-          trace-add-ticks trace-hint trace-shuffle trace-with-mode
-          trace-lock-due? trace-lock-pair
-          HINT-COST SHUFFLE-COST LOCK-AT MODES)
+          trace-mode trace-phase trace-ticks trace-hints trace-shuffles
+          trace-countdown trace-ice-timer trace-ice-count trace-last-ice
+          trace-cleared-in trace-severed?
+          trace-value trace-fraction trace-clock-string
+          trace-countdown-string trace-ice-string
+          trace-add-ticks trace-hint trace-shuffle trace-with-mode trace-flip-allowed?
+          trace-advance trace-finish
+          ice-member ice-member? ice-member-name ice-member-applicable? ice-member-apply
+          ICE-SET ice-applicable
+          TRACE-AT HINT-COST SHUFFLE-COST
+          ICE-FIRST ICE-INTERVAL SEVER-AT HINT-SEVER-COST SHUFFLE-SEVER-COST
+          SCRAMBLE-COUNT MODES PHASES)
 
   (begin
-    ;; --- the numbers David tunes ------------------------------------------------
+    ;; --- the numbers David tunes (seconds unless said otherwise) --------------
+
+    (define TRACE-AT 300)            ; the trace completes here: COUNTER-HACK begins
+    (define HINT-COST 30)            ; on the trace, per hint (GNOME's)
+    (define SHUFFLE-COST 60)         ; on the trace, per shuffle (GNOME's)
+    (define ICE-FIRST 10)            ; after the trace completes, the first counter-hack
+    (define ICE-INTERVAL 30)         ; then one every this often
+    (define SEVER-AT 360)            ; the countdown: the connection is cut at zero
+    (define HINT-SEVER-COST 15)      ; off the countdown, per hint
+    (define SHUFFLE-SEVER-COST 30)   ; off the countdown, per shuffle
+    (define SCRAMBLE-COUNT 6)        ; P3's face scramble: free tiles it hits
 
     (define TICKS-PER-SECOND 60)
-    (define HINT-COST 30)          ; seconds-equivalent per hint (GNOME's)
-    (define SHUFFLE-COST 60)       ; per shuffle (GNOME's)
-    (define LOCK-AT 180)           ; the ICE locks a pair when the meter reaches this
-
     (define MODES '(twist clean))
+    (define PHASES '(trace counter severed cleared))
 
-    ;; ticks: sim ticks elapsed while the board was live. locked?: the
-    ;; threshold has been spent (one lock per board). mode: twist | clean.
+    (define (seconds->ticks s) (* s TICKS-PER-SECOND))
+
+    ;; --- state ---------------------------------------------------------------
+
+    ;; ticks, hints, shuffles: the whole game's, for GNOME's number.
+    ;; countdown: ticks left before the sever (COUNTER-HACK only).
+    ;; ice-timer: ticks until the next counter-hack. ice-count: fired so far.
+    ;; last-ice: the last member's name, or #f. cleared-in: the phase a
+    ;; cleared board was cleared in.
     (define-struct trace
+      (mode default: 'twist)
+      (phase default: 'trace)
       (ticks default: 0)
       (hints default: 0)
       (shuffles default: 0)
-      (locked? default: #f)
-      (mode default: 'twist))
+      (countdown default: 0)
+      (ice-timer default: 0)
+      (ice-count default: 0)
+      (last-ice default: #f)
+      (cleared-in default: #f))
 
     (define (trace-new mode)
       (trace mode: (if (memq mode MODES) mode 'twist)))
 
-    ;; --- the number --------------------------------------------------------------
+    (define (trace-severed? tr)
+      (eq? (trace-phase tr) 'severed))
 
-    ;; Seconds-equivalent: elapsed + 30 per hint + 60 per shuffle.
+    ;; --- the numbers on the HUD --------------------------------------------------
+
+    ;; GNOME's number: elapsed + 30 per hint + 60 per shuffle, all phases.
     (define (trace-value tr)
       (+ (/ (trace-ticks tr) TICKS-PER-SECOND)
          (* HINT-COST (trace-hints tr))
          (* SHUFFLE-COST (trace-shuffles tr))))
 
-    ;; 0..1 of the way to the lock (1 once it has fired).
+    ;; The bar: 0..1 filling toward the trace, then 1..0 counting down.
     (define (trace-fraction tr)
-      (min 1.0 (/ (trace-value tr) LOCK-AT)))
+      (case (trace-phase tr)
+        ((trace) (min 1.0 (/ (trace-value tr) TRACE-AT)))
+        ((counter) (/ (trace-countdown tr) (seconds->ticks SEVER-AT)))
+        ((severed) 0.0)
+        (else (if (eq? (trace-cleared-in tr) 'counter)
+                  (/ (trace-countdown tr) (seconds->ticks SEVER-AT))
+                  (min 1.0 (/ (trace-value tr) TRACE-AT))))))
 
     (define (two-digits n)
       (if (< n 10)
           (string-append "0" (number->string n))
           (number->string n)))
 
-    ;; The clean face: mm:ss of the value, whole seconds.
-    (define (trace-clock-string tr)
-      (let* ((total (exact (floor (trace-value tr))))
+    (define (clock-string seconds)
+      (let* ((total (max 0 (exact (floor seconds))))
              (minutes (quotient total 60))
-             (seconds (- total (* minutes 60))))
-        (string-append (two-digits minutes) ":" (two-digits seconds))))
+             (rest (- total (* minutes 60))))
+        (string-append (number->string minutes) ":" (two-digits rest))))
 
-    ;; --- inputs -------------------------------------------------------------------
+    ;; The clean face and the score: mm:ss of GNOME's number.
+    (define (trace-clock-string tr)
+      (clock-string (trace-value tr)))
+
+    (define (trace-countdown-string tr)
+      (clock-string (/ (trace-countdown tr) TICKS-PER-SECOND)))
+
+    (define (trace-ice-string tr)
+      (clock-string (/ (trace-ice-timer tr) TICKS-PER-SECOND)))
+
+    ;; --- the player's inputs -------------------------------------------------------
 
     (define (trace-add-ticks tr n)
       (trace tr ticks: (+ (trace-ticks tr) n)))
 
+    ;; A hint: on the trace it adds HINT-COST; under the ICE it also takes
+    ;; HINT-SEVER-COST off the countdown.
     (define (trace-hint tr)
-      (trace tr hints: (+ 1 (trace-hints tr))))
+      (charge (trace tr hints: (+ 1 (trace-hints tr))) HINT-SEVER-COST))
 
     (define (trace-shuffle tr)
-      (trace tr shuffles: (+ 1 (trace-shuffles tr))))
+      (charge (trace tr shuffles: (+ 1 (trace-shuffles tr))) SHUFFLE-SEVER-COST))
+
+    (define (charge tr seconds)
+      (if (eq? (trace-phase tr) 'counter)
+          (trace tr countdown: (max 0 (- (trace-countdown tr) (seconds->ticks seconds))))
+          tr))
+
+    ;; The flip between faces is allowed only while the game is still a
+    ;; TRACE game from either side: twist in phase trace, clean below TRACE-AT.
+    (define (trace-flip-allowed? tr)
+      (if (eq? (trace-mode tr) 'twist)
+          (eq? (trace-phase tr) 'trace)
+          (< (trace-value tr) TRACE-AT)))
 
     (define (trace-with-mode tr mode)
-      (if (memq mode MODES) (trace tr mode: mode) tr))
+      (if (and (memq mode MODES) (trace-flip-allowed? tr))
+          (trace tr mode: mode)
+          tr))
 
-    ;; --- the ICE's answer ----------------------------------------------------------
+    ;; --- the counter-hack set ---------------------------------------------------------
 
-    ;; The lock fires once, in twist mode, when the value reaches LOCK-AT.
-    (define (trace-lock-due? tr)
-      (and (eq? (trace-mode tr) 'twist)
-           (not (trace-locked? tr))
-           (>= (trace-value tr) LOCK-AT)))
+    ;; name: a symbol for the HUD and the trace lines. applicable?: board ->
+    ;; bool. apply: board -> board (the board's own rng is advanced inside).
+    (define-struct ice-member
+      (name default: 'none)
+      (applicable? default: #f)
+      (apply default: #f))
 
-    ;; Lock one legal match chosen by the board's own random stream, and
-    ;; mark the threshold spent. A board with no legal match at that moment
-    ;; locks nothing but the threshold is still spent (there is nothing to
-    ;; punish). Returns (cons board trace).
-    (define (trace-lock-pair tr b)
-      (let ((matches (legal-matches b))
-            (spent (trace tr locked?: #t)))
-        (if (null? matches)
-            (cons b spent)
+    ;; Legal matches with neither tile locked.
+    (define (unlocked-matches b)
+      (filter (lambda (m)
+                (not (or (tile-locked? b (car m)) (tile-locked? b (cdr m)))))
+              (legal-matches b)))
+
+    ;; Lock: one unlocked legal pair, chosen by the board's random stream.
+    ;; Not applicable when it would leave no unlocked legal match (David:
+    ;; "if lock comes up while there's only one pair left, a different
+    ;; counter-hack is used").
+    (define (lock-applicable? b)
+      (>= (length (unlocked-matches b)) 2))
+
+    (define (lock-apply b)
+      (let* ((matches (unlocked-matches b))
+             (rng (prng-next (board-rng b)))
+             (pair (list-ref matches (prng-index rng (length matches))))
+             (nx (board-lock-pair b (car pair) (cdr pair))))
+        (set-board-rng! nx rng)
+        nx))
+
+    ;; Forced shuffle: the remaining tiles re-dealt by the solvable
+    ;; generator, so the board stays winnable and the player's read of it
+    ;; is gone. Applicable when at least two pairs remain.
+    (define (shuffle-applicable? b)
+      (>= (board-tile-count b) 4))
+
+    (define (shuffle-apply b)
+      (reshuffle b))
+
+    (define ICE-SET
+      (list (ice-member name: 'lock
+                        applicable?: lock-applicable?
+                        apply: lock-apply)
+            (ice-member name: 'shuffle
+                        applicable?: shuffle-applicable?
+                        apply: shuffle-apply)))
+
+    (define (ice-applicable b)
+      (filter (lambda (m) ((ice-member-applicable? m) b)) ICE-SET))
+
+    ;; One counter-hack: a uniform pick over the applicable members with
+    ;; the board's random stream; none applicable -> the interval passes
+    ;; with no effect. The undo history is cut at the event: a counter-hack
+    ;; the player could undo would have no teeth (ruled 2026-09-17); the
+    ;; player's own moves after it are undoable as usual. Returns
+    ;; (cons board name-or-#f).
+    (define (fire-ice b)
+      (let ((members (ice-applicable b)))
+        (if (null? members)
+            (cons b #f)
             (let* ((rng (prng-next (board-rng b)))
-                   (pair (list-ref matches (prng-index rng (length matches))))
-                   (nx (board-lock-pair b (car pair) (cdr pair))))
-              (set-board-rng! nx rng)
-              (cons nx spent)))))))
+                   (m (list-ref members (prng-index rng (length members))))
+                   (b (board-copy b)))
+              (set-board-rng! b rng)
+              (let ((hit ((ice-member-apply m) b)))
+                (set-board-history! hit '())
+                (set-board-selected! hit #f)
+                (cons hit (ice-member-name m)))))))
+
+    ;; --- the phase machine ----------------------------------------------------------
+
+    ;; The trace and board after n sim ticks. Returns (list trace board
+    ;; events), events being the names of counter-hacks that fired plus
+    ;; 'traced when the trace completed and 'severed when the countdown
+    ;; ran out, oldest first. Nothing moves once the board is cleared or
+    ;; severed, or in clean mode beyond the clock.
+    (define (trace-advance tr b n)
+      (let loop ((k 0) (tr tr) (b b) (events '()))
+        (cond ((= k n) (list tr b (reverse events)))
+              ((memq (trace-phase tr) '(severed cleared)) (list tr b (reverse events)))
+              (else
+               (let ((tr (trace-add-ticks tr 1)))
+                 (cond
+                   ((eq? (trace-mode tr) 'clean)
+                    (loop (+ k 1) tr b events))
+                   ((eq? (trace-phase tr) 'trace)
+                    (if (>= (trace-value tr) TRACE-AT)
+                        (loop (+ k 1)
+                              (trace tr
+                                     phase: 'counter
+                                     countdown: (seconds->ticks SEVER-AT)
+                                     ice-timer: (seconds->ticks ICE-FIRST))
+                              b
+                              (cons 'traced events))
+                        (loop (+ k 1) tr b events)))
+                   (else ; counter
+                    (let ((countdown (- (trace-countdown tr) 1))
+                          (ice-timer (- (trace-ice-timer tr) 1)))
+                      (cond ((<= countdown 0)
+                             (list (trace tr phase: 'severed countdown: 0 ice-timer: 0)
+                                   b
+                                   (reverse (cons 'severed events))))
+                            ((<= ice-timer 0)
+                             (let ((fired (fire-ice b)))
+                               (loop (+ k 1)
+                                     (trace tr
+                                            countdown: countdown
+                                            ice-timer: (seconds->ticks ICE-INTERVAL)
+                                            ice-count: (+ 1 (trace-ice-count tr))
+                                            last-ice: (cdr fired))
+                                     (car fired)
+                                     (cons (or (cdr fired) 'nothing) events))))
+                            (else
+                             (loop (+ k 1)
+                                   (trace tr countdown: countdown ice-timer: ice-timer)
+                                   b
+                                   events)))))))))))
+
+    ;; The board was cleared: the score freezes with the phase it was
+    ;; cleared in (trace or counter; clean games are tagged trace).
+    (define (trace-finish tr)
+      (if (memq (trace-phase tr) '(cleared severed))
+          tr
+          (trace tr
+                 phase: 'cleared
+                 cleared-in: (if (eq? (trace-phase tr) 'counter) 'counter 'trace))))))

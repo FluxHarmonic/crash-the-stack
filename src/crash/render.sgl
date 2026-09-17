@@ -23,6 +23,7 @@
           (crash geometry)
           (crash input)
           (crash trace)
+          (crash stack prng)
           (crash tween)
           (crash fx)
           (crash font))
@@ -353,10 +354,23 @@
       "TAGS: TYPE ONE  SPACE HIDE  ENTER DESELECT  TAB CURSOR  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
     (define CURSOR-KEYS-LINE
       "CURSOR: ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB TAGS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
-    ;; Shown in place of the keys line while a lock is on the board: being
-    ;; traced does not end the game (David, 2026-09-17).
-    (define TRACED-LINE
-      "TRACED: THE ICE LOCKED A PAIR. A LOCKED PAIR NEEDS TWO MATCHES. THE GAME GOES ON.")
+    ;; Row 2 under the ICE and after the sever, in place of the keys line
+    ;; (David, 2026-09-17: make the phase unmistakable, and say that being
+    ;; traced does not end the game).
+    (define (phase-line tr b)
+      (case (trace-phase tr)
+        ((counter)
+         (string-append "TRACED. ICE IS ON YOU. NEXT ICE " (trace-ice-string tr)
+                        ". CONNECTION SEVERS IN " (trace-countdown-string tr) "."
+                        (if (pair? (board-locked-slots b))
+                            " A LOCKED PAIR NEEDS TWO MATCHES."
+                            " CLEAR THE STACK TO WIN.")))
+        ((severed)
+         "CONNECTION SEVERED. TAP THE LEFT HALF FOR THE SAME STACK, THE RIGHT FOR A NEW ONE (^R ^N).")
+        (else
+         (if (pair? (board-locked-slots b))
+             "A LOCKED PAIR NEEDS TWO MATCHES. THE GAME GOES ON."
+             #f))))
 
     (define (control-label name)
       (case name
@@ -388,31 +402,43 @@
                 (filter (lambda (c) (not (eq? (car c) 'mode)))
                         (geometry-controls g))))
 
-    ;; The meter, in the rect (crash geometry) reserves for it. Twist: a
-    ;; bar filling toward the lock, going hot as it nears, with the value;
-    ;; clean: GNOME's clock. Tapping it flips the face ((crash input)).
+    ;; The meter, in the rect (crash geometry) reserves for it. TRACE: a bar
+    ;; filling toward the trace, going hot as it nears, with GNOME's number;
+    ;; COUNTER-HACK: the bar counts down to the sever, hot; SEVERED: empty;
+    ;; CLEARED: the score. Clean: GNOME's clock. Tapping it flips the face
+    ;; while the game is still in TRACE ((crash input)).
     (define (draw-meter g tr)
       (let* ((r (control-rect g 'mode))
-             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (phase (trace-phase tr))
+             (clean? (eq? (trace-mode tr) 'clean)))
         (color! C-BG)
         (draw-filled-rect x y w h)
-        (if (eq? (trace-mode tr) 'clean)
+        (if (and clean? (not (eq? phase 'cleared)))
             (let ((text (string-append "TIME " (trace-clock-string tr))))
               (color! C-TEXT)
               (draw-text text (+ x 4) (+ y 3) 2))
             (let* ((frac (trace-fraction tr))
                    (fill (exact (floor (* (- w 2) frac))))
-                   (text (string-append "TRACE "
-                                        (number->string (exact (floor (trace-value tr)))))))
+                   (text (case phase
+                           ((trace) (string-append "TRACE "
+                                                   (number->string (exact (floor (trace-value tr))))))
+                           ((counter) (string-append "SEVER " (trace-countdown-string tr)))
+                           ((severed) "SEVERED")
+                           (else (string-append "CRASHED " (trace-clock-string tr)))))
+                   (bar (case phase
+                          ((trace) (mix C-TRACE C-TRACE-HOT frac))
+                          ((counter) C-TRACE-HOT)
+                          (else C-TRACE))))
               (color! C-TEXT-DIM)
               (draw-filled-rect x y w 1)
               (draw-filled-rect x (+ y h -1) w 1)
               (draw-filled-rect x y 1 h)
               (draw-filled-rect (+ x w -1) y 1 h)
-              (color! (mix C-TRACE C-TRACE-HOT frac))
+              (color! bar)
               (draw-filled-rect (+ x 1) (+ y 1) fill (- h 2))
-              (color! (if (trace-locked? tr) C-HIGHLIGHT C-TEXT))
-              (draw-text (if (trace-locked? tr) "LOCKED" text) (+ x 4) (+ y 3) 2)))))
+              (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
+              (draw-text text (+ x 4) (+ y 3) 2)))))
 
     ;; The centred message box: the cleared sequence slides it in and
     ;; fades it up over its first fifth; every other message just sits.
@@ -444,30 +470,99 @@
         (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
         (draw-controls g)
         (draw-meter g (session-trace s))
-        (if (pair? (board-locked-slots b))
-            (begin
-              (color! C-HIGHLIGHT)
-              (draw-text TRACED-LINE 8 (+ top 32) 1))
-            (begin
-              (color! C-TEXT-DIM)
-              (draw-text (if (eq? (session-model s) 'hint)
-                             HINT-KEYS-LINE
-                             CURSOR-KEYS-LINE)
-                         8 (+ top 32) 1)))
+        (let ((line (phase-line (session-trace s) b)))
+          (if line
+              (begin
+                (color! C-HIGHLIGHT)
+                (draw-text line 8 (+ top 32) 1))
+              (begin
+                (color! C-TEXT-DIM)
+                (draw-text (if (eq? (session-model s) 'hint)
+                               HINT-KEYS-LINE
+                               CURSOR-KEYS-LINE)
+                           8 (+ top 32) 1))))
         (when (> (string-length (session-typed s)) 0)
           (color! C-HIGHLIGHT)
           (draw-text (string-append "> " (session-typed s))
                      (- vw 8 (text-width right 2) 24 (text-width (string-append "> " (session-typed s)) 2))
                      (+ top 7)
                      2))
-        (let ((message (cond ((board-cleared? b)
-                              "STACK CRASHED")
-                             ((null? (legal-matches b))
-                              "NO MOVES LEFT - SHUFFLE")
-                             (else
-                              (session-message s)))))
+        (let* ((tr (session-trace s))
+               (message (cond ((board-cleared? b)
+                               (string-append "STACK CRASHED " (trace-clock-string tr)
+                                              (cond ((eq? (trace-mode tr) 'clean) "")
+                                                    ((eq? (trace-cleared-in tr) 'counter) " UNDER ICE")
+                                                    (else " BEFORE TRACE"))))
+                              ((trace-severed? tr) "")
+                              ((null? (legal-matches b))
+                               "NO MOVES LEFT - SHUFFLE")
+                              (else
+                               (session-message s)))))
           (unless (string=? message "")
             (draw-message g message top (and (board-cleared? b) cleared))))))
+
+    ;; --- the trace's screens -------------------------------------------------
+
+    ;; The glitch when the trace completes: horizontal slices of the board in
+    ;; the hot colours, thinning out as it passes, from the board's own
+    ;; random stream seeded by the tick so it flickers.
+    (define (draw-glitch g x p)
+      (let* ((vw (geometry-vw g))
+             (top (- (geometry-vh g) (geometry-hud-h g)))
+             (n (exact (floor (* 24 (- 1.0 p)))))
+             (a (* 0.7 (- 1.0 p))))
+        (let loop ((k 0) (rng (prng-seed (+ 13 (fx-ticks x)))))
+          (when (< k n)
+            (let* ((r1 (prng-next rng))
+                   (r2 (prng-next r1))
+                   (r3 (prng-next r2))
+                   (y (prng-index r1 top))
+                   (h (+ 2 (prng-index r2 6)))
+                   (dx (- (prng-index r3 40) 20)))
+              (color-alpha! (if (even? k) C-TRACE-HOT C-SELECTED) a)
+              (draw-filled-rect dx y vw h)
+              (loop (+ k 1) r3))))))
+
+    ;; The severed connection: static over the board and the two choices.
+    (define (draw-severed g x)
+      (let* ((vw (geometry-vw g))
+             (top (- (geometry-vh g) (geometry-hud-h g)))
+             (half-w (half vw)))
+        (color-alpha! C-BG 0.75)
+        (draw-filled-rect 0 0 vw top)
+        (let loop ((k 0) (rng (prng-seed (+ 17 (fx-ticks x)))))
+          (when (< k 160)
+            (let* ((r1 (prng-next rng))
+                   (r2 (prng-next r1))
+                   (r3 (prng-next r2)))
+              (color-alpha! C-TEXT-DIM (+ 0.15 (* 0.5 (/ (prng-index r3 100) 100.0))))
+              (draw-filled-rect (prng-index r1 vw) (prng-index r2 top) 3 2)
+              (loop (+ k 1) r3))))
+        (let* ((title "CONNECTION SEVERED")
+               (tw (text-width title 3)))
+          (color! C-TRACE-HOT)
+          (draw-text title (exact (floor (/ (- vw tw) 2))) (- (half top) 40) 3))
+        (for-each (lambda (choice)
+                    (let* ((label (car choice))
+                           (cx (cdr choice))
+                           (w 200)
+                           (h 40)
+                           (bx (- cx (half w)))
+                           (by (+ (half top) 10)))
+                      (color! C-BAR-C)
+                      (draw-filled-rect bx by w h)
+                      (color! C-SELECTED)
+                      (draw-filled-rect bx by w 1)
+                      (draw-filled-rect bx (+ by h -1) w 1)
+                      (draw-filled-rect bx by 1 h)
+                      (draw-filled-rect (+ bx w -1) by 1 h)
+                      (color! C-TEXT)
+                      (draw-text label
+                                 (- cx (half (text-width label 2)))
+                                 (+ by 13)
+                                 2)))
+                  (list (cons "SAME STACK" (half half-w))
+                        (cons "NEW STACK" (+ half-w (half half-w)))))))
 
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.
     (define (draw-frame-ms ms)
@@ -479,9 +574,12 @@
 
     ;; x: the frame's effects from (crash fx), already advanced.
     (define (draw-session s g tex x)
-      (let ((cleared (fx-cleared x)))
+      (let ((cleared (fx-cleared x))
+            (glitch (fx-glitch x)))
         (draw-background g (if cleared (* cleared 400.0) 0.0))
         (draw-tiles s g tex x)
         (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
           (draw-hint-labels s g))
+        (when glitch (draw-glitch g x glitch))
+        (when (trace-severed? (session-trace s)) (draw-severed g x))
         (draw-hud s g x)))))

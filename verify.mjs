@@ -23,11 +23,14 @@
 //               "crash: control undo X Y" boot line gives), then the hint-mode
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
-//   lock        three taps on the SHUF control spike the meter to LOCK-AT
-//               (3 x 60) -> "crash: shuffle" three times, then "crash: lock A B"
+//   traced      five taps on the SHUF control fill the trace (5 x 60 = TRACE-AT)
+//               -> "crash: shuffle" five times, "crash: trace ... counter 0",
+//               and within ICE-FIRST + 5 s the first counter-hack:
+//               "crash: trace ... counter 1" with "crash: lock A B" or a sixth
+//               "crash: shuffle" (gate leg 2 on the product)
 //   reload      the page is reloaded (fresh navigation, same origin) and the
 //               game boots from localStorage: "crash: restored tiles 142 ...
-//               locked A B" with the pair the lock named (gate leg 4, web)
+//               phase counter ice 1 locked ..." (gate leg 4, web)
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -70,7 +73,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "lock", "reload", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "traced", "reload", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -327,18 +330,21 @@ if (keysOk) pass("keys-match", keysDetail);
 else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6));
 else fail("keys-match", keysDetail);
 
-// ---- 7. lock: the trace meter's ICE, through the SHUF control ---------------
-// Each shuffle costs 60 on the meter and LOCK-AT is 180, so the third tap
-// takes the value past the threshold and the next frame locks one legal
-// pair ("crash: lock A B", a and b both present). With forwarding off the
-// control cannot be tapped, so the positive-control run skips this.
+// ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
+// Each shuffle costs 60 on the trace and TRACE-AT is 300, so the fifth tap
+// completes the trace ("crash: trace V H 5 counter 0"); the first
+// counter-hack fires ICE-FIRST (10 s) later: "crash: trace ... counter 1"
+// with either "crash: lock A B" or one more "crash: shuffle". With
+// forwarding off the control cannot be tapped, so the positive-control run
+// skips this.
+let iceLock = null;
 {
   const ctl = await waitLine(/^crash: control shuf (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
-  if (EXPECT_NO_SELECTION) skip("lock", "controls are not tappable with forwarding off");
-  else if (!ctl) fail("lock", "no \"crash: control shuf\" boot line");
+  if (EXPECT_NO_SELECTION) skip("traced", "controls are not tappable with forwarding off");
+  else if (!ctl) fail("traced", "no \"crash: control shuf\" boot line");
   else {
     let detail = "";
-    for (let i = 0; i < 3 && !detail; i++) {
+    for (let i = 0; i < 5 && !detail; i++) {
       mark = consoleLines.length;
       await tap(ctl.m[1], ctl.m[2]);
       const sh = await waitLine(/^crash: shuffle$/, mark, 2000);
@@ -346,11 +352,22 @@ else fail("keys-match", keysDetail);
       await sleep(150);
     }
     if (!detail) {
-      const lock = await waitLine(/^crash: lock (\d+) (\d+)$/, mark, 3000);
-      if (!lock) detail = "three shuffles produced no \"crash: lock\" line";
-      else pass("lock", lock.m[0]);
+      const traced = await waitLine(/^crash: trace (\d+) (\d+) 5 counter 0$/, 0, 3000);
+      if (!traced) detail = "five shuffles did not complete the trace (no \"crash: trace V H 5 counter 0\" line)";
+      else {
+        mark = traced.index + 1;
+        const ice = await waitLine(/^crash: trace (\d+) (\d+) (\d+) counter 1$/, mark, 16000);
+        if (!ice) detail = "no counter-hack within 16 s of the trace completing";
+        else {
+          const lock = consoleLines.slice(mark, ice.index + 3).map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
+          const shuffles = consoleLines.slice(mark, ice.index + 3).filter((l) => l === "crash: shuffle").length;
+          if (lock) { iceLock = [lock[1], lock[2]]; pass("traced", `traced after 5 shuffles; ICE 1 locked ${lock[1]} ${lock[2]}`); }
+          else if (shuffles) pass("traced", "traced after 5 shuffles; ICE 1 re-dealt the stack");
+          else detail = `ICE 1 fired (${ice.m[0]}) but neither a lock nor a shuffle line followed`;
+        }
+      }
     }
-    if (detail) fail("lock", detail);
+    if (detail) fail("traced", detail);
   }
 }
 
@@ -359,19 +376,21 @@ else fail("keys-match", keysDetail);
 // boot line said tiles 144). After the taps above the board has 142 tiles,
 // three shuffles and one locked pair; a reload must restore exactly that.
 {
-  const lockLine = consoleLines.map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
+  const tracedOk = results.some((r) => r[0] === "traced" && r[1] === "PASS");
   if (EXPECT_NO_SELECTION) skip("reload", "nothing was changed to restore with forwarding off");
-  else if (!lockLine) skip("reload", "no lock landed to restore");
+  else if (!tracedOk) skip("reload", "the traced sub-arm did not reach a state to restore");
   else {
     mark = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
-    const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) locked ((?:\d+ ?)*)$/, mark, 20000);
+    const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
     if (!restored) fail("reload", `no "crash: restored" line within 20 s of the reload`);
     else {
-      const want = [lockLine[1], lockLine[2]].sort((a, b) => a - b).join(" ");
-      const got = restored.m[3].trim().split(/\s+/).sort((a, b) => a - b).join(" ");
+      const got = restored.m[5].trim().split(/\s+/).filter(Boolean).sort((a, b) => a - b).join(" ");
+      const want = iceLock ? iceLock.slice().sort((a, b) => a - b).join(" ") : "";
       if (restored.m[1] !== "142") fail("reload", `expected tiles 142 after the reload, got ${restored.m[0]}`);
-      else if (got !== want) fail("reload", `expected locked ${want}, got ${restored.m[0]}`);
+      else if (restored.m[3] !== "counter") fail("reload", `expected phase counter after the reload, got ${restored.m[0]}`);
+      else if (parseInt(restored.m[4], 10) < 1) fail("reload", `expected at least one counter-hack restored, got ${restored.m[0]}`);
+      else if (iceLock && got !== want) fail("reload", `expected locked ${want}, got ${restored.m[0]}`);
       else pass("reload", restored.m[0]);
     }
   }

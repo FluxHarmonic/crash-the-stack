@@ -43,10 +43,12 @@
 ;;;   crash: removed A B tiles N           a pair left the board
 ;;;   crash: unlock A B                    a locked pair's first match
 ;;;   crash: lock A B                      the ICE locked a pair
-;;;   crash: trace V H S L                 the meter after a hint, a shuffle or
-;;;                                         the lock: value, hints, shuffles, locked?
-;;;   crash: restored tiles N trace V locked A B ...   a saved board came back
-;;;                                         at boot (verify.mjs's reload sub-arm)
+;;;   crash: trace V H S PHASE ICE         the meter after a hint, a shuffle, a
+;;;                                         phase change or a counter-hack: value,
+;;;                                         hints, shuffles, phase, counter-hacks fired
+;;;   crash: restored tiles N trace V phase P ice K locked A B ...   a saved
+;;;                                         board came back at boot (verify.mjs's
+;;;                                         reload sub-arm)
 ;;;
 ;;; The board is saved to localStorage after every change ((crash store),
 ;;; (crash shell)) and restored at boot; ?fresh deals seed 1 instead.
@@ -167,12 +169,14 @@
             (t1 (session-trace after)))
         (when (or (not (= (trace-hints t0) (trace-hints t1)))
                   (not (= (trace-shuffles t0) (trace-shuffles t1)))
-                  (not (eq? (trace-locked? t0) (trace-locked? t1))))
+                  (not (eq? (trace-phase t0) (trace-phase t1)))
+                  (not (= (trace-ice-count t0) (trace-ice-count t1))))
           (say "trace"
                (exact (floor (trace-value t1)))
                (trace-hints t1)
                (trace-shuffles t1)
-               (if (trace-locked? t1) 1 0)))))
+               (trace-phase t1)
+               (trace-ice-count t1)))))
 
     ;; What changed between two sessions, as one line, or nothing. A new
     ;; deal is reported by say-first-pair instead (web-tick checks the seed).
@@ -184,8 +188,17 @@
              (n0 (board-tile-count b0))
              (n1 (board-tile-count b1))
              (h0 (length (board-history b0)))
-             (h1 (length (board-history b1))))
+             (h1 (length (board-history b1)))
+             (t0 (session-trace before))
+             (t1 (session-trace after)))
         (cond ((not (= (session-seed before) (session-seed after))) #f)
+              ;; a counter-hack: it cut the history, so it is read off the
+              ;; trace, not the board
+              ((not (= (trace-ice-count t0) (trace-ice-count t1)))
+               (case (trace-last-ice t1)
+                 ((lock) (report-lock! b0 b1))
+                 ((shuffle) (say "shuffle"))
+                 (else (say "ice" "nothing"))))
               ((< n1 n0)
                ;; Two tiles left: the selected one and the one just picked.
                (let ((gone (filter (lambda (id)
@@ -281,6 +294,8 @@
               (apply say "restored"
                      "tiles" (board-tile-count b)
                      "trace" (exact (floor (trace-value (session-trace *session*))))
+                     "phase" (trace-phase (session-trace *session*))
+                     "ice" (trace-ice-count (session-trace *session*))
                      "locked" (board-locked-slots b))))
           (set! *announced* #t))
         (let* ((before *session*)

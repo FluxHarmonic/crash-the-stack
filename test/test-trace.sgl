@@ -1,12 +1,27 @@
-;;; Gate leg 2 - the trace meter and the lock.
+;;; Gate leg 2 - the trace's three phases (ruling D13, 2026-09-17).
 ;;;
-;;; A scripted sequence of time, a hint and a shuffle is fed through the
-;;; session the way the shells feed it (session-advance for the ticks, the
-;;; command key frames for the rest). The meter must reach LOCK-AT at the
-;;; recorded step and not before; the ICE must then lock exactly one legal
-;;; pair; that pair must survive one match (unlocked, both present) and
-;;; leave on the second; clean mode must report the same sequence as
-;;; elapsed + 30 + 60 on GNOME's clock and never lock.
+;;; Scripted tick sequences on fixed seeds, fed through the session the way
+;;; the shells feed it (session-advance for the ticks, the command key
+;;; frames for hints and shuffles), assert:
+;;;   (a) the phase flips to COUNTER-HACK on the exact step the value
+;;;       reaches TRACE-AT, not before;
+;;;   (b) the first counter-hack fires at ICE-FIRST and the next at each
+;;;       ICE-INTERVAL, the pick is deterministic per seed, and a board with
+;;;       one legal match never receives a lock (a different member fires,
+;;;       or the interval passes);
+;;;   (c) a locked pair auto-breaks when the board thins to it;
+;;;   (d) a forced shuffle keeps the tile count and leaves a board whose
+;;;       recorded solution replays to empty;
+;;;   (e) hint and shuffle add to the trace in TRACE and subtract from the
+;;;       countdown in COUNTER-HACK by the pinned amounts;
+;;;   (f) the countdown reaching zero yields severed, after which a pick and
+;;;       undo are refused;
+;;;   (g) clearing during COUNTER-HACK yields cleared with the phase tag and
+;;;       stops both timers;
+;;;   (h) the same script in clean mode changes no phase and reports the
+;;;       clock string.
+;;; Plus the lock's own rule (a locked pair is matched twice), which S2
+;;; reddens.
 
 (import (sigil test)
         (sigil math)
@@ -14,6 +29,7 @@
         (crash stack rules)
         (crash stack generate)
         (crash stack turtle)
+        (crash stack fixtures)
         (crash geometry)
         (crash input)
         (crash trace))
@@ -21,6 +37,7 @@
 (define SEED 5)
 (define lay (turtle-layout))
 (define geom (make-geometry lay 640 400))
+(define TPS 60)
 
 (define (frame pressed . rest)
   (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
@@ -39,13 +56,6 @@
     ((shuffle) (session-step s (frame '(s) '(ctrl)) geom))
     (else (error "unknown step" step))))
 
-;; The script: values after each step are 60, 90, 150, 170, 190; LOCK-AT
-;; is 180, so the meter crosses during step 5 and nowhere earlier.
-(define SCRIPT '((ticks 3600) (hint) (shuffle) (ticks 1200) (ticks 1200)))
-(define EXPECTED-VALUES '(60 90 150 170 190))
-(define LOCK-STEP 5)
-
-;; Run the script, collecting the session after every step.
 (define (run s script)
   (let loop ((script script) (s s) (acc '()))
     (if (null? script)
@@ -53,135 +63,296 @@
         (let ((s (apply-step s (car script))))
           (loop (cdr script) s (cons s acc))))))
 
-(define (value-of s) (trace-value (session-trace s)))
+(define (last-of l) (list-ref l (- (length l) 1)))
+(define (first-n l n) (if (or (= n 0) (null? l)) '() (cons (car l) (first-n (cdr l) (- n 1)))))
+(define (tr-of s) (session-trace s))
+(define (value-of s) (trace-value (tr-of s)))
+(define (phase-of s) (trace-phase (tr-of s)))
 (define (locked-of s) (board-locked-slots (session-board s)))
 
-(test-group "trace: the scripted sequence reaches the lock at the recorded step"
-  (let* ((states (run (session-new lay SEED) SCRIPT))
-         (at-lock (list-ref states (- LOCK-STEP 1))))
-    (test "the constants are GNOME's clock penalties"
+;; The trace script: 150 s, a hint (180), a shuffle (240), 59.98 s more
+;; (299.98), then the tick that makes it 300 = TRACE-AT.
+(define TRACE-SCRIPT '((ticks 9000) (hint) (shuffle) (ticks 3599) (ticks 1)))
+(define TRACE-VALUES '(150 180 240 299.98333333 300))
+
+;; A session in COUNTER-HACK over a hand-built board, with the ICE timer
+;; about to fire; for the fixtures below.
+(define (under-ice b ice-ticks)
+  (session-restore 1
+                   b
+                   (trace mode: 'twist
+                          phase: 'counter
+                          ticks: (* TPS TRACE-AT)
+                          countdown: (* TPS SEVER-AT)
+                          ice-timer: ice-ticks)
+                   'hint
+                   #t
+                   'primitives))
+
+;; The tower-3 fixture (slots: base, three flats, middle, top) with faces
+;; chosen so exactly one legal match exists among the four playable tiles
+;; (the flats and the top): the third flat and the top share face 2; the
+;; other faces pair only with a covered column tile.
+(define (one-match-board rng)
+  (let ((b (board-new (tower-3-layout) (vector 0 0 1 2 1 2))))
+    (set-board-rng! b rng)
+    b))
+
+;; Two flat pairs: four tiles in a row, all playable.
+(define (two-pairs-board)
+  (board-new (sexp->layout '(stack ((0 . 0) (3 . 0) (6 . 0) (9 . 0))))
+             (vector 0 0 1 1)))
+
+(test-group "trace: (a) the phase flips on the exact step the value reaches TRACE-AT"
+  (let ((states (run (session-new lay SEED) TRACE-SCRIPT)))
+    (test "the constants are the ruling's"
+      (assert-equal 300 TRACE-AT)
       (assert-equal 30 HINT-COST)
-      (assert-equal 60 SHUFFLE-COST))
-    (test "the meter after each step is elapsed + 30 per hint + 60 per shuffle"
-      (let loop ((states states) (expected EXPECTED-VALUES))
+      (assert-equal 60 SHUFFLE-COST)
+      (assert-equal 10 ICE-FIRST)
+      (assert-equal 30 ICE-INTERVAL)
+      (assert-equal 360 SEVER-AT)
+      (assert-equal 15 HINT-SEVER-COST)
+      (assert-equal 30 SHUFFLE-SEVER-COST))
+    (test "the value after each step is elapsed + 30 per hint + 60 per shuffle"
+      (let loop ((states states) (expected TRACE-VALUES))
         (unless (null? states)
-          (unless (close? (value-of (car states)) (car expected))
+          (unless (< (abs (- (value-of (car states)) (car expected))) 1e-4)
             (error "trace value" (value-of (car states)) "expected" (car expected)))
           (loop (cdr states) (cdr expected))))
       (assert-true #t))
-    (test "no pair is locked before the recorded step"
-      (for-each (lambda (i)
-                  (let ((s (list-ref states i)))
-                    (assert-equal '() (locked-of s))
-                    (assert-false (trace-locked? (session-trace s)))))
-                (iota (- LOCK-STEP 1)))
+    (test "every step before the last is still TRACE"
+      (for-each (lambda (s) (assert-equal 'trace (phase-of s)))
+                (first-n states 4))
       (assert-true #t))
-    (test "at the recorded step exactly two tiles are locked and the threshold is spent"
-      (assert-equal 2 (length (locked-of at-lock)))
-      (assert-true (trace-locked? (session-trace at-lock)))
-      (assert-equal "ICE: PAIR LOCKED" (session-message at-lock)))
-    (test "the locked pair is a legal match"
-      (let* ((b (session-board at-lock))
-             (l (locked-of at-lock))
-             (a (car l)) (c (cadr l)))
-        (assert-true (playable? b a))
-        (assert-true (playable? b c))
-        (assert-true (faces-match? b a c))
-        (assert-true (and (member (cons a c) (legal-matches b)) #t))))
-    (test "the lock pushed history, so undo takes it back"
-      (let ((b (session-board at-lock)))
-        (assert-equal '() (board-locked-slots (board-undo b)))))
-    (test "more time after the lock locks nothing else"
-      (let ((later (session-advance at-lock 6000)))
-        (assert-equal (locked-of at-lock) (locked-of later))
-        (assert-true (close? 290 (value-of later)))))))
+    (test "the last step is COUNTER-HACK with the countdown and the ICE timer armed"
+      (let ((tr (tr-of (last-of states))))
+        (assert-equal 'counter (trace-phase tr))
+        (assert-equal (* TPS SEVER-AT) (trace-countdown tr))
+        (assert-equal (* TPS ICE-FIRST) (trace-ice-timer tr))
+        (assert-equal 0 (trace-ice-count tr))
+        (assert-equal "TRACED. ICE IS ON YOU." (session-message (last-of states)))))))
 
-(test-group "trace: a locked pair is matched twice"
-  (let* ((at-lock (list-ref (run (session-new lay SEED) SCRIPT) (- LOCK-STEP 1)))
-         (b (session-board at-lock))
-         (l (locked-of at-lock))
-         (a (car l)) (c (cadr l))
-         (h0 (length (board-history b)))
-         (once (board-select (board-select b a) c))
-         (twice (board-select (board-select once a) c)))
-    (test "one match leaves both present, unlocked, unselected, with history +1"
-      (assert-true (tile-present? once a))
-      (assert-true (tile-present? once c))
-      (assert-false (tile-locked? once a))
-      (assert-false (tile-locked? once c))
-      (assert-false (board-selected once))
-      (assert-equal (+ h0 1) (length (board-history once)))
-      (assert-equal (board-tile-count b) (board-tile-count once)))
-    (test "undoing the first match re-locks the pair"
-      (let ((back (board-undo once)))
-        (assert-true (tile-locked? back a))
-        (assert-true (tile-locked? back c))))
-    (test "the second match removes both"
-      (assert-false (tile-present? twice a))
-      (assert-false (tile-present? twice c))
-      (assert-equal (- (board-tile-count b) 2) (board-tile-count twice)))
-    (test "a locked tile still selects, so a partner can be picked"
-      (assert-equal a (board-selected (board-select b a))))
-    (test "an unlocked pair on the same board leaves in one match"
-      (let* ((free (find (lambda (m)
-                           (and (not (memv (car m) l)) (not (memv (cdr m) l))))
-                         (legal-matches b)))
-             (gone (board-select (board-select b (car free)) (cdr free))))
-        (assert-false (tile-present? gone (car free)))
-        (assert-false (tile-present? gone (cdr free)))))
-    (test "the session's pointer path goes through the same rule"
-      (let* ((s1 (session-pick at-lock a))
-             (s2 (session-pick s1 c)))
-        (assert-true (tile-present? (session-board s2) a))
-        (assert-false (tile-locked? (session-board s2) a))))))
+(test-group "trace: (b) counter-hacks fire on the ICE timer, deterministically"
+  (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+         (before-first (session-advance traced (- (* TPS ICE-FIRST) 1)))
+         (first (session-advance before-first 1))
+         (before-second (session-advance first (- (* TPS ICE-INTERVAL) 1)))
+         (second (session-advance before-second 1)))
+    (test "nothing fires before ICE-FIRST"
+      (assert-equal 0 (trace-ice-count (tr-of before-first)))
+      (assert-true (board-equal? (session-board traced) (session-board before-first))))
+    (test "the first counter-hack fires at ICE-FIRST and is a member of the set"
+      (assert-equal 1 (trace-ice-count (tr-of first)))
+      (assert-true (and (memq (trace-last-ice (tr-of first)) '(lock shuffle)) #t))
+      (assert-false (board-equal? (session-board traced) (session-board first)))
+      (assert-equal (* TPS ICE-INTERVAL) (trace-ice-timer (tr-of first))))
+    (test "the second fires one ICE-INTERVAL later, not before"
+      (assert-equal 1 (trace-ice-count (tr-of before-second)))
+      (assert-equal 2 (trace-ice-count (tr-of second))))
+    (test "a counter-hack cuts the undo history"
+      (assert-equal '() (board-history (session-board first))))
+    (test "the pick is deterministic per seed"
+      (let* ((again (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+             (first-again (session-advance again (* TPS ICE-FIRST))))
+        (assert-true (board-equal? (session-board first) (session-board first-again)))
+        (assert-equal (trace-last-ice (tr-of first)) (trace-last-ice (tr-of first-again)))))
+    (test "a chunk of ticks fires every counter-hack its seconds cover"
+      (let ((many (session-advance traced (* TPS (+ ICE-FIRST (* 3 ICE-INTERVAL))))))
+        (assert-equal 4 (trace-ice-count (tr-of many)))))
+    (test "a board with one legal match never receives a lock: the shuffle fires instead"
+      (for-each (lambda (rng)
+                  (let* ((s (under-ice (one-match-board rng) 1))
+                         (hit (session-advance s 1)))
+                    (assert-equal 1 (trace-ice-count (tr-of hit)))
+                    (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
+                    (assert-equal '() (locked-of hit))))
+                '(1 2 3 4 5 6 7 8 9 10 11 12))
+      (assert-true #t))
+    (test "the lock member itself refuses a board with one unlocked legal match"
+      (assert-equal '(shuffle)
+                    (map ice-member-name (ice-applicable (one-match-board 1)))))
+    (test "with nothing applicable the interval passes with no effect"
+      (let* ((b (board-new (sexp->layout '(stack ((0 . 0) (3 . 0)))) (vector 4 4)))
+             (s (under-ice b 1))
+             (hit (session-advance s 1)))
+        (assert-equal 1 (trace-ice-count (tr-of hit)))
+        (assert-false (trace-last-ice (tr-of hit)))
+        (assert-true (board-equal? b (session-board hit)))
+        (assert-equal "ICE PROBED AND FOUND NOTHING" (session-message hit))))))
 
-(test-group "trace: clean mode is the same number on GNOME's clock"
-  (let* ((clean (session-with-trace-mode (session-new lay SEED) 'clean))
-         (states (run clean SCRIPT))
-         (last (list-ref states (- (length states) 1))))
-    (test "the clock reads elapsed + 30 + 60 after each step"
-      (assert-equal '("01:00" "01:30" "02:30" "02:50" "03:10")
-                    (map (lambda (s) (trace-clock-string (session-trace s))) states)))
-    (test "the value is the twist value"
-      (assert-true (close? 190 (value-of last))))
-    (test "clean mode never locks"
-      (assert-equal '() (locked-of last))
-      (assert-false (trace-locked? (session-trace last))))
-    (test "flipping to twist past the threshold locks on the next tick"
-      (let ((flipped (session-advance (session-with-trace-mode last 'twist) 1)))
-        (assert-equal 2 (length (locked-of flipped)))))
-    (test "the mode survives the next deal"
-      (let ((next (session-step last (frame '(n) '(ctrl)) geom)))
-        (assert-equal 'clean (trace-mode (session-trace next)))
-        (assert-true (close? 0 (value-of next)))))
-    (test "ctrl+m flips the face without touching the number"
-      (let ((flipped (session-step last (frame '(m) '(ctrl)) geom)))
-        (assert-equal 'twist (trace-mode (session-trace flipped)))
-        (assert-true (close? 190 (value-of flipped)))))))
+(test-group "trace: (c) a locked pair auto-breaks when the board thins to it"
+  (let* ((b (two-pairs-board))
+         (locked (board-lock-pair b 0 1))
+         (s (under-ice locked (* TPS ICE-INTERVAL)))
+         (thinned (session-pick (session-pick s 2) 3)))
+    (test "the fixture starts with one locked pair and one free pair"
+      (assert-equal '(0 1) (board-locked-slots locked))
+      (assert-equal 2 (length (legal-matches locked))))
+    (test "matching the free pair leaves only the locked pair, and the locks break"
+      (assert-equal 2 (board-tile-count (session-board thinned)))
+      (assert-equal '() (locked-of thinned)))
+    (test "one match now clears the board"
+      (let ((done (session-pick (session-pick thinned 0) 1)))
+        (assert-true (board-cleared? (session-board done)))))))
 
-(test-group "trace: what does and does not move the meter"
-  (let ((s (session-new lay SEED)))
-    (test "the fresh meter is zero, twist, unlocked"
-      (assert-true (close? 0 (value-of s)))
-      (assert-equal 'twist (trace-mode (session-trace s)))
-      (assert-false (trace-locked? (session-trace s))))
-    (test "the pair hint costs one hint"
+(test-group "trace: (d) a forced shuffle keeps the tile count and stays winnable"
+  (let* ((s (under-ice (one-match-board 3) 1))
+         (hit (session-advance s 1))
+         (b (session-board hit)))
+    (test "the ICE re-dealt the stack"
+      (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
+      (assert-equal "ICE RE-DEALT THE STACK" (session-message hit)))
+    (test "six tiles before, six after, faces moved"
+      (assert-equal 6 (board-tile-count b))
+      (assert-false (equal? (vector->list (board-faces (one-match-board 3)))
+                            (vector->list (board-faces b)))))
+    (test "the recorded solution replays to empty"
+      (assert-equal #t (replay-solution b (board-solution b))))
+    (test "the re-deal is not undoable"
+      (assert-equal '() (board-history b))
+      (assert-true (board-equal? b (board-undo b))))))
+
+(test-group "trace: (e) what a hint and a shuffle cost in each phase"
+  (let* ((s (session-new lay SEED))
+         (hinted (apply-step s '(hint)))
+         (shuffled (apply-step hinted '(shuffle))))
+    (test "in TRACE a hint adds HINT-COST and a shuffle SHUFFLE-COST to the value"
+      (assert-true (close? 30 (value-of hinted)))
+      (assert-true (close? 90 (value-of shuffled))))
+    (test "the pair hint costs the same as the face-key hint"
       (assert-true (close? 30 (value-of (session-step s (frame '(pair-hint)) geom)))))
+    (test "in COUNTER-HACK they take HINT-SEVER-COST and SHUFFLE-SEVER-COST off the countdown"
+      (let* ((traced (last-of (run s TRACE-SCRIPT)))
+             (c0 (trace-countdown (tr-of traced)))
+             (h (apply-step traced '(hint)))
+             (sh (apply-step h '(shuffle))))
+        (assert-equal (- c0 (* TPS HINT-SEVER-COST)) (trace-countdown (tr-of h)))
+        (assert-equal (- c0 (* TPS HINT-SEVER-COST) (* TPS SHUFFLE-SEVER-COST))
+                      (trace-countdown (tr-of sh)))
+        ;; GNOME's number keeps counting them too
+        (assert-true (close? (+ 300 30 60) (value-of sh)))))
     (test "undo does not refund"
       (let* ((b (session-board s))
              (pair (car (board-solution b)))
              (played (session-advance (session-pick (session-pick s (car pair)) (cdr pair)) 600))
              (undone (session-step played (frame '(backspace)) geom)))
-        (assert-true (close? 10 (value-of undone)))))
-    (test "a cleared board stops the meter"
-      (let* ((b (session-board s))
-             (done (let loop ((pairs (board-solution b)) (s s))
-                     (if (null? pairs)
-                         s
-                         (loop (cdr pairs)
-                               (session-pick (session-pick s (car (car pairs))) (cdr (car pairs))))))))
-        (assert-true (board-cleared? (session-board done)))
-        (assert-true (close? 0 (value-of (session-advance done 6000))))))
-    (test "the fraction saturates at the lock"
-      (assert-true (close? 1.0 (trace-fraction (trace-add-ticks (trace-new 'twist) 100000))))
-      (assert-true (close? 0.5 (trace-fraction (trace-add-ticks (trace-new 'twist) 5400)))))))
+        (assert-true (close? 10 (value-of undone)))))))
+
+(test-group "trace: (f) the countdown reaching zero severs the connection"
+  (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+         (almost (session-advance traced (- (* TPS SEVER-AT) 1)))
+         (severed (session-advance almost 1)))
+    (test "one tick before zero the game is still under the ICE"
+      (assert-equal 'counter (phase-of almost))
+      (assert-equal 1 (trace-countdown (tr-of almost))))
+    (test "at zero the phase is severed"
+      (assert-equal 'severed (phase-of severed))
+      (assert-true (trace-severed? (tr-of severed)))
+      (assert-equal "CONNECTION SEVERED" (session-message severed)))
+    (test "a pick is refused"
+      (let* ((b (session-board severed))
+             (id (car (playable-slots b)))
+             (after (session-pick severed id)))
+        (assert-true (board-equal? b (session-board after)))
+        (assert-false (board-selected (session-board after)))))
+    (test "undo, a hint and a shuffle are refused"
+      (let ((b (session-board severed)))
+        (assert-true (board-equal? b (session-board (session-step severed (frame '(backspace)) geom))))
+        (assert-true (board-equal? b (session-board (session-step severed (frame '(s) '(ctrl)) geom))))
+        (assert-equal 0 (- (trace-hints (tr-of (session-step severed (frame '(pair-hint)) geom)))
+                           (trace-hints (tr-of severed))))))
+    (test "time no longer moves"
+      (let ((later (session-advance severed 6000)))
+        (assert-equal (trace-ticks (tr-of severed)) (trace-ticks (tr-of later)))))
+    (test "the same stack again (ctrl+r) deals the seed afresh in TRACE"
+      (let ((again (session-step severed (frame '(r) '(ctrl)) geom)))
+        (assert-equal SEED (session-seed again))
+        (assert-equal 'trace (phase-of again))
+        (assert-equal 144 (board-tile-count (session-board again)))))
+    (test "a new stack (ctrl+n) deals the next seed"
+      (let ((next (session-step severed (frame '(n) '(ctrl)) geom)))
+        (assert-equal (+ SEED 1) (session-seed next))
+        (assert-equal 'trace (phase-of next))))
+    (test "a tap on the left half of a severed board is the same stack, the right a new one"
+      (let ((left (session-step severed (make-input-frame '() '() (cons 100 150)) geom))
+            (right (session-step severed (make-input-frame '() '() (cons 500 150)) geom)))
+        (assert-equal SEED (session-seed left))
+        (assert-equal (+ SEED 1) (session-seed right))))))
+
+(test-group "trace: (g) clearing under the ICE wins with the phase tag and stops the timers"
+  (let* ((s (under-ice (two-pairs-board) (* TPS ICE-INTERVAL)))
+         (done (session-pick (session-pick (session-pick (session-pick s 0) 1) 2) 3))
+         (tr (tr-of done)))
+    (test "the board is cleared"
+      (assert-true (board-cleared? (session-board done))))
+    (test "the phase is cleared, tagged under ICE"
+      (assert-equal 'cleared (trace-phase tr))
+      (assert-equal 'counter (trace-cleared-in tr)))
+    (test "both timers stop"
+      (let ((later (tr-of (session-advance done 6000))))
+        (assert-equal (trace-countdown tr) (trace-countdown later))
+        (assert-equal (trace-ice-timer tr) (trace-ice-timer later))
+        (assert-equal (trace-ticks tr) (trace-ticks later))))
+    (test "a board cleared before the trace is tagged so"
+      (let* ((b (two-pairs-board))
+             (s (session-restore 1 b (trace-new 'twist) 'hint #t 'primitives))
+             (done (session-pick (session-pick (session-pick (session-pick s 0) 1) 2) 3)))
+        (assert-equal 'cleared (phase-of done))
+        (assert-equal 'trace (trace-cleared-in (tr-of done)))))))
+
+(test-group "trace: (h) clean mode is GNOME's clock and nothing else"
+  (let* ((clean (session-with-trace-mode (session-new lay SEED) 'clean))
+         (states (run clean TRACE-SCRIPT))
+         (last (last-of states))
+         (later (session-advance last (* TPS 400))))
+    (test "the clock reads the same sequence"
+      (assert-equal '("2:30" "3:00" "4:00" "4:59" "5:00")
+                    (map (lambda (s) (trace-clock-string (tr-of s))) states)))
+    (test "no phase changes, at TRACE-AT or long after"
+      (assert-equal 'trace (phase-of last))
+      (assert-equal 'trace (phase-of later))
+      (assert-equal 0 (trace-ice-count (tr-of later)))
+      (assert-equal '() (locked-of later)))
+    (test "the flip to twist is refused once the clock is past TRACE-AT"
+      (let ((flipped (session-step later (frame '(m) '(ctrl)) geom)))
+        (assert-equal 'clean (trace-mode (tr-of flipped)))
+        (assert-equal "TOO LATE TO SWITCH" (session-message flipped))))
+    (test "the flip is allowed while below it, both ways"
+      (let* ((early (session-advance (session-new lay SEED) 600))
+             (to-clean (session-step early (frame '(m) '(ctrl)) geom))
+             (back (session-step to-clean (frame '(m) '(ctrl)) geom)))
+        (assert-equal 'clean (trace-mode (tr-of to-clean)))
+        (assert-equal 'twist (trace-mode (tr-of back)))))
+    (test "the flip to clean is refused once traced"
+      (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+             (flipped (session-step traced (frame '(m) '(ctrl)) geom)))
+        (assert-equal 'twist (trace-mode (tr-of flipped)))
+        (assert-equal 'counter (phase-of flipped))))
+    (test "the mode survives the next deal"
+      (let ((next (session-step last (frame '(n) '(ctrl)) geom)))
+        (assert-equal 'clean (trace-mode (tr-of next)))
+        (assert-true (close? 0 (value-of next)))))))
+
+(test-group "trace: a locked pair is matched twice (the lock's own rule)"
+  (let* ((b (board-lock-pair (two-pairs-board) 0 1))
+         (once (board-select (board-select b 0) 1))
+         (twice (board-select (board-select once 0) 1)))
+    (test "one match leaves both present, unlocked, unselected, with history +1"
+      (assert-true (tile-present? once 0))
+      (assert-true (tile-present? once 1))
+      (assert-false (tile-locked? once 0))
+      (assert-false (board-selected once))
+      (assert-equal 2 (length (board-history once)))
+      (assert-equal 4 (board-tile-count once)))
+    (test "undoing the first match re-locks the pair"
+      (assert-true (tile-locked? (board-undo once) 0)))
+    (test "the second match removes both"
+      (assert-false (tile-present? twice 0))
+      (assert-false (tile-present? twice 1)))
+    (test "the session's pointer path goes through the same rule"
+      (let* ((s (under-ice b (* TPS ICE-INTERVAL)))
+             (s2 (session-pick (session-pick s 0) 1)))
+        (assert-true (tile-present? (session-board s2) 0))
+        (assert-false (tile-locked? (session-board s2) 0))
+        (assert-equal "LOCK BROKEN: MATCH AGAIN" (session-message s2))))))
