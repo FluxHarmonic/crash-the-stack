@@ -16,7 +16,8 @@
 ;;;   - the stock deals DRAW cards (one or three) onto the waste; an empty
 ;;;     stock takes the waste back, in order, and counts a pass;
 ;;;   - the card uncovered on a pile turns face up by itself;
-;;;   - the game is won when the four foundations hold thirteen each.
+;;;   - the game is won when the four foundations hold thirteen each;
+;;;   - Standard or Vegas scoring, Windows' numbers, in the block below.
 ;;;
 ;;; game-select is the one door the input layer uses: every tap, and later
 ;;; every key, names a PLACE and ends here. Places: (pile i depth) with
@@ -39,8 +40,13 @@
   (export game game?
           game-tableau game-foundations game-stock game-waste
           game-draw game-passes game-selected game-history game-moves game-rng
-          game-new game-from-deck
-          PILES FOUNDATIONS DRAW-COUNTS
+          game-scoring game-score
+          game-new game-from-deck game-with-scoring
+          PILES FOUNDATIONS DRAW-COUNTS SCORINGS
+          SCORE-TO-FOUNDATION SCORE-WASTE-TO-TABLEAU SCORE-TURN-OVER
+          SCORE-FROM-FOUNDATION SCORE-RECYCLE-ONE SCORE-RECYCLE-THREE
+          RECYCLE-THREE-FREE
+          VEGAS-BUY-IN VEGAS-PER-CARD VEGAS-PASSES-ONE VEGAS-PASSES-THREE
           pile-card pile-up? game-pile game-foundation
           place-card place-selectable? selection-cards
           valid-pile-move? valid-foundation-move?
@@ -53,6 +59,30 @@
     (define PILES 7)
     (define FOUNDATIONS 4)
     (define DRAW-COUNTS '(1 3))
+    (define SCORINGS '(standard vegas))
+
+    ;; --- Windows Solitaire's scoring, the numbers David rules on ------------
+    ;; Standard, from the table in Wikipedia's "Klondike (solitaire)" (read
+    ;; 2026-09-17): waste or tableau to a foundation 10, waste to the
+    ;; tableau 5, a tableau card turned over 5, foundation to the tableau
+    ;; -15, the waste turned back -100 under draw one, never below 0. The
+    ;; time penalty (-2 per 10 s) and the bonus (700000 / seconds past 30 s)
+    ;; belong to the clock and land with the trace. Recalled, not sourced,
+    ;; for David to confirm: draw three charges -20 per turn of the waste
+    ;; from the fourth pass on. Vegas: 52 to sit down, 5 per card reaching a
+    ;; foundation (and 5 back for a card leaving one), one pass under draw
+    ;; one and three under draw three, the bankroll carried between deals.
+    (define SCORE-TO-FOUNDATION 10)
+    (define SCORE-WASTE-TO-TABLEAU 5)
+    (define SCORE-TURN-OVER 5)
+    (define SCORE-FROM-FOUNDATION -15)
+    (define SCORE-RECYCLE-ONE -100)
+    (define SCORE-RECYCLE-THREE -20)
+    (define RECYCLE-THREE-FREE 3)     ; passes before draw three's turn charges
+    (define VEGAS-BUY-IN 52)
+    (define VEGAS-PER-CARD 5)
+    (define VEGAS-PASSES-ONE 1)
+    (define VEGAS-PASSES-THREE 3)
 
     ;; tableau: PILES lists of (card . up?), top card first.
     ;; foundations: FOUNDATIONS lists of cards, top first.
@@ -68,6 +98,8 @@
       (selected default: #f)
       (history default: '())
       (moves default: 0)
+      (scoring default: 'standard)    ; standard | vegas
+      (score default: 0)
       (rng default: 1))
 
     ;; --- construction --------------------------------------------------------
@@ -107,6 +139,15 @@
 
     (define (game-with-draw g draw)
       (if (memv draw DRAW-COUNTS) (game g draw: draw) g))
+
+    ;; Standard or Vegas, settable while no move has been made (Windows
+    ;; applies the choice to the next game; here the deal is fresh).
+    (define (game-with-scoring g scoring)
+      (if (and (memq scoring SCORINGS) (= 0 (game-moves g)))
+          (game g
+                scoring: scoring
+                score: (if (eq? scoring 'vegas) (- VEGAS-BUY-IN) 0))
+          g))
 
     ;; --- queries -------------------------------------------------------------
 
@@ -252,11 +293,50 @@
         ((pile foundation) (list (car p) (cadr p)))
         (else (list (car p)))))
 
+    ;; What a move scores: the destination, the source, and a pile card
+    ;; turned over by the move (the source pile's new top was face down).
+    (define (move-points g src dst cards)
+      (let* ((vegas? (eq? (game-scoring g) 'vegas))
+             (n (length cards))
+             (turned? (and (eq? (place-kind src) 'pile)
+                           (let ((rest (drop-n (game-pile g (cadr src)) n)))
+                             (and (pair? rest) (not (pile-up? (car rest))))))))
+        (if vegas?
+            (cond ((eq? (place-kind dst) 'foundation) VEGAS-PER-CARD)
+                  ((eq? (place-kind src) 'foundation) (- VEGAS-PER-CARD))
+                  (else 0))
+            (+ (cond ((eq? (place-kind dst) 'foundation) SCORE-TO-FOUNDATION)
+                     ((eq? (place-kind src) 'foundation) SCORE-FROM-FOUNDATION)
+                     ((eq? (place-kind src) 'waste) SCORE-WASTE-TO-TABLEAU)
+                     (else 0))
+               (if turned? SCORE-TURN-OVER 0)))))
+
+    ;; Standard never goes below zero; Vegas is a bankroll and does.
+    (define (add-score g points)
+      (let ((total (+ (game-score g) points)))
+        (game g score: (if (eq? (game-scoring g) 'vegas) total (max 0 total)))))
+
     ;; The move, or #f when it is not legal.
     (define (game-move g src dst)
       (and (move-legal? g src dst)
            (let ((cards (selection-cards g src)))
-             (push-history g (put-on (take-from g src) dst cards)))))
+             (push-history g
+                           (add-score (put-on (take-from g src) dst cards)
+                                      (move-points g src dst cards))))))
+
+    ;; May the waste be turned back into the stock? Always in Standard
+    ;; (at a price); in Vegas only while the passes allowed remain.
+    (define (recycle-allowed? g)
+      (or (eq? (game-scoring g) 'standard)
+          (< (+ 1 (game-passes g))
+             (if (= (game-draw g) 1) VEGAS-PASSES-ONE VEGAS-PASSES-THREE))))
+
+    ;; What turning the waste back costs, given the pass it starts.
+    (define (recycle-points g passes)
+      (cond ((eq? (game-scoring g) 'vegas) 0)
+            ((= (game-draw g) 1) SCORE-RECYCLE-ONE)
+            ((> passes RECYCLE-THREE-FREE) SCORE-RECYCLE-THREE)
+            (else 0)))
 
     ;; Turn DRAW cards from the stock onto the waste, the last drawn on
     ;; top; an empty stock takes the waste back (a pass); nothing to do
@@ -270,11 +350,13 @@
                (if (or (= n 0) (null? stock))
                    (push-history g (game g stock: stock waste: waste))
                    (loop (- n 1) (cdr stock) (cons (car stock) waste)))))
-            ((pair? (game-waste g))
-             (push-history g (game g
-                                   stock: (reverse (game-waste g))
-                                   waste: '()
-                                   passes: (+ 1 (game-passes g)))))
+            ((and (pair? (game-waste g)) (recycle-allowed? g))
+             (let ((passes (+ 1 (game-passes g))))
+               (push-history g (add-score (game g
+                                                stock: (reverse (game-waste g))
+                                                waste: '()
+                                                passes: passes)
+                                          (recycle-points g passes)))))
             (else g)))
 
     ;; Back to the previous snapshot; a game with no history is returned
@@ -413,7 +495,9 @@
             (game-waste g)
             (game-draw g)
             (game-passes g)
-            (game-selected g)))
+            (game-selected g)
+            (game-scoring g)
+            (game-score g)))
 
     (define (game-equal? a b)
       (equal? (game-canonical a) (game-canonical b)))))

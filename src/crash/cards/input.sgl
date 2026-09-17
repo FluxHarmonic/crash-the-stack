@@ -39,18 +39,21 @@
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
-          deal-model deal-labels deal-labels-shown deal-typed deal-auto
+          deal-model deal-labels deal-labels-shown deal-typed deal-auto deal-bank
           deal-step deal-advance deal-undo deal-next deal-toggle-draw deal-with-model
+          deal-toggle-scoring deal-with-bank
           AUTO-TICKS
           deal-places tag-places pile-key->index PILE-KEYS
           CARD-MODELS card-model-name
-          MSG-DEALT MSG-WON MSG-STUCK MSG-AUTO)
+          MSG-DEALT MSG-WON MSG-STUCK MSG-AUTO MSG-TOO-LATE MSG-NO-PASSES)
 
   (begin
     (define MSG-DEALT "JACKED IN. DEAL RUNNING.")
     (define MSG-WON "DECK CRASHED.")
     (define MSG-STUCK "NO MOVES LEFT - UNDO OR NEXT")
     (define MSG-AUTO "AUTO-COMPLETING.")
+    (define MSG-TOO-LATE "TOO LATE TO SWITCH.")
+    (define MSG-NO-PASSES "NO PASSES LEFT.")
 
     (define CARD-MODELS '(tags piles))
 
@@ -77,6 +80,7 @@
       (typed default: "")            ; tag letters typed so far
       (auto default: #f)             ; auto-complete is running: every tableau card is up
       (auto-acc default: 0)          ; ticks toward the next auto-complete step
+      (bank default: 0)              ; the Vegas bankroll carried between deals
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -149,8 +153,12 @@
             (cond ((deal-won? d) (deal d auto-acc: 0))
                   ((< acc AUTO-TICKS) (deal d auto-acc: acc))
                   (else
-                   (loop (with-game d (game-auto-step (deal-game d)))
-                         (- acc AUTO-TICKS)))))))
+                   (let ((g (game-auto-step (deal-game d))))
+                     (if (eq? g (deal-game d))
+                         ;; nothing to play and nothing to draw (Vegas out
+                         ;; of passes): the run stops, the player is back
+                         (deal d auto: #f auto-acc: 0 message: MSG-NO-PASSES)
+                         (loop (with-game d g) (- acc AUTO-TICKS)))))))))
 
     (define (deal-new seed draw)
       (deal (with-game (deal seed: seed) (game-new seed draw))
@@ -180,11 +188,30 @@
     (define (deal-undo d)
       (if (busy? d) d (with-game d (game-undo (deal-game d)))))
 
-    ;; The next seed, the draw count and settings kept.
+    ;; The next seed, the draw count, the scoring and the settings kept; a
+    ;; Vegas deal's result joins the bankroll.
     (define (deal-next d)
-      (deal (deal-new (+ 1 (deal-seed d)) (game-draw (deal-game d)))
-            model: (deal-model d)
-            labels-shown: (deal-labels-shown d)))
+      (let* ((g (deal-game d))
+             (vegas? (eq? (game-scoring g) 'vegas))
+             (fresh (deal-new (+ 1 (deal-seed d)) (game-draw g))))
+        (deal (with-game fresh (game-with-scoring (deal-game fresh) (game-scoring g)))
+              message: MSG-DEALT
+              model: (deal-model d)
+              labels-shown: (deal-labels-shown d)
+              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d)))))
+
+    ;; Standard <-> Vegas, while no move has been made.
+    (define (deal-toggle-scoring d)
+      (let ((g (deal-game d)))
+        (cond ((busy? d) d)
+              ((> (game-moves g) 0) (deal d message: MSG-TOO-LATE))
+              (else
+               (with-game d (game-with-scoring g (if (eq? (game-scoring g) 'vegas)
+                                                      'standard
+                                                      'vegas)))))))
+
+    (define (deal-with-bank d bank)
+      (deal d bank: bank))
 
     ;; One or three: the next draw honors it.
     (define (deal-toggle-draw d)
@@ -194,7 +221,16 @@
             (with-game d (game-with-draw g (if (= (game-draw g) 1) 3 1))))))
 
     (define (pick d place)
-      (if (busy? d) d (with-game d (game-select (deal-game d) place))))
+      (cond ((busy? d) d)
+            (else
+             (let* ((g (deal-game d))
+                    (g1 (game-select g place)))
+               (if (and (eq? g g1)
+                        (eq? (car place) 'stock)
+                        (null? (game-stock g))
+                        (pair? (game-waste g)))
+                   (deal d message: MSG-NO-PASSES)
+                   (with-game d g1))))))
 
     (define (deselect d)
       (let ((g (deal-game d)))
@@ -307,6 +343,7 @@
         ((undo) (deal-undo d))
         ((draw) (deal-toggle-draw d))
         ((next) (deal-next d))
+        ((score) (deal-toggle-scoring d))
         (else d)))
 
     (define (step-pointer d f g)

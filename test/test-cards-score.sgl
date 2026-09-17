@@ -1,0 +1,167 @@
+;;; Gate leg 5 (P2) - scoring.
+;;;
+;;; A scripted line on the fixture deal yields the pinned Standard and
+;;; Vegas totals, derived by hand from Windows Solitaire's table (the
+;;; derivation is in the evidence note); then each rule on its own: the
+;;; recycle charge under draw one, the free passes and the charge under
+;;; draw three, Standard's floor at zero, Vegas's pass limits refusing the
+;;; turn, the bankroll carried into the next deal, undo giving points back.
+
+(import (sigil test)
+        (sigil math)
+        (crash input)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input))
+
+(define geom (make-card-geometry 640 400))
+
+(define (fixture scoring draw)
+  (game-with-scoring (game-from-deck (deck-string->cards FIXTURE-DECK) draw) scoring))
+
+(define (play g line)
+  (fold (lambda (g p) (game-select g p)) g line))
+
+(define (repeat n x)
+  (if (= n 0) '() (cons x (repeat (- n 1) x))))
+
+;; Draw until the stock is out, then one more: the turn of the waste.
+(define (exhaust g)
+  (if (null? (game-stock g)) g (exhaust (game-draw! g))))
+
+(define (turn g) (game-draw! (exhaust g)))
+
+(define (control-center g name)
+  (let ((r (card-control-rect g name)))
+    (cons (+ (car r) (quotient (caddr r) 2))
+          (+ (cadr r) (quotient (cadddr r) 2)))))
+
+;; The line (draw one):
+;;   S2 onto D3 (pile 0 0, pile 2): pile 0 empties  0 (nothing turns over)
+;;   8 draws (S7 SQ S4 D5 D9 C0 H3 CA)             0
+;;   CA up (waste, waste)                            +10 / +5
+;;   3 draws (C7 D8 HK)                              0
+;;   HK to the empty pile 0 (waste, pile 0)          +5  / 0
+;;   D8 onto C9 (waste, pile 3)                      +5  / 0
+;;   C7 onto D8 (waste, pile 3)                      +5  / 0
+;;   CA back onto D2 (foundation 0, pile 5)          -15 / -5
+;;   the run C7 D8 C9 onto D0 (pile 3 2, pile 4):
+;;     S3 turns over                                 +5  / 0
+;; Standard 15, Vegas -52 + 5 - 5 = -52.
+(define LINE
+  (append '((pile 0 0) (pile 2))
+          (repeat 8 '(stock))
+          '((waste) (waste))
+          (repeat 3 '(stock))
+          '((waste) (pile 0)
+            (waste) (pile 3)
+            (waste) (pile 3)
+            (foundation 0) (pile 5)
+            (pile 3 2) (pile 4))))
+
+
+(test-group "leg 5: the scripted line's pinned totals"
+  (let ((s (play (fixture 'standard 1) LINE))
+        (v (play (fixture 'vegas 1) LINE)))
+    (test "the line played as described (both scorings agree on the position)"
+      (assert-equal '("HK") (map card-string (map pile-card (game-pile s 0))))
+      (assert-equal "S3" (card-string (pile-card (car (game-pile s 3)))))
+      (assert-true (pile-up? (car (game-pile s 3))))
+      (assert-equal '("C7" "D8" "C9" "D0") (map card-string (map pile-card (take (game-pile s 4) 4))))
+      (assert-equal "CA" (card-string (pile-card (car (game-pile s 5)))))
+      (assert-equal '() (game-foundation s 0))
+      (assert-equal 18 (game-moves s))
+      (assert-equal (game-canonical (game s scoring: 'vegas score: 0))
+                    (game-canonical (game v score: 0))))
+    (test "Standard: 15"
+      (assert-equal 15 (game-score s)))
+    (test "Vegas: -52"
+      (assert-equal -52 (game-score v)))
+    (test "a fresh Vegas deal starts at -52, Standard at 0"
+      (assert-equal -52 (game-score (fixture 'vegas 1)))
+      (assert-equal 0 (game-score (fixture 'standard 1))))))
+
+(test-group "the rules one by one"
+  (test "waste to foundation: 10, and 5 in Vegas"
+    (let ((line (append (repeat 8 '(stock)) '((waste) (waste)))))
+      (assert-equal 10 (game-score (play (fixture 'standard 1) line)))
+      (assert-equal -47 (game-score (play (fixture 'vegas 1) line)))))
+  (test "tableau to foundation: 10 (S2 from pile 0 onto D3, then nothing; use CA from pile 5 after the line)"
+    (let* ((g (play (fixture 'standard 1) LINE))
+           (g (game-select (game-select g '(pile 5 0)) '(foundation 0))))
+      (assert-equal 25 (game-score g))))
+  (test "a run onto a pile without a turn-over scores nothing"
+    (let ((g (play (fixture 'standard 1) '((pile 0 0) (pile 2)))))
+      (assert-equal 0 (game-score g))))
+  (test "draw one: turning the waste back costs 100, floored at 0"
+    (let* ((g (play (fixture 'standard 1) (repeat 24 '(stock))))
+           (g1 (game-draw! g)))
+      (assert-equal '() (game-stock g))
+      (assert-equal 1 (game-passes g1))
+      (assert-equal 0 (game-score g1)))
+    (let* ((g (play (fixture 'standard 1) LINE))            ; 15 points, 13 cards left in the stock
+           (g (play g (repeat 13 '(stock))))
+           (g1 (game-draw! g)))
+      (assert-equal 15 (game-score g))
+      (assert-equal 0 (game-score g1))))
+  (test "draw three: three free passes, then 20 each"
+    (let* ((g (play (fixture 'standard 1) LINE))            ; 15 points
+           (g (game-with-draw g 3))
+           (g1 (turn g))
+           (g2 (turn g1))
+           (g3 (turn g2))
+           (g4 (turn g3)))
+      (assert-equal '(1 2 3 4) (map game-passes (list g1 g2 g3 g4)))
+      (assert-equal '(15 15 15 0) (map game-score (list g1 g2 g3 g4)))))
+  (test "Vegas draw one: one pass, the turn refused"
+    (let* ((g (play (fixture 'vegas 1) (repeat 24 '(stock))))
+           (g1 (game-draw! g)))
+      (assert-equal '() (game-stock g))
+      (assert-true (eq? g g1))))
+  (test "Vegas draw three: three passes, the third turn refused"
+    (let* ((g (fixture 'vegas 3))
+           (g1 (turn g))
+           (g2 (turn g1))
+           (g3 (turn g2)))
+      (assert-equal 1 (game-passes g1))
+      (assert-equal 2 (game-passes g2))
+      (assert-equal 2 (game-passes g3))
+      (assert-equal '() (game-stock g3))))
+  (test "Vegas: a card leaving a foundation gives its 5 back"
+    (let* ((line (append (repeat 8 '(stock)) '((waste) (waste))))
+           (g (play (fixture 'vegas 1) line))
+           (g (play g (repeat 3 '(stock))))
+           (g (game-select (game-select g '(foundation 0)) '(pile 5))))
+      (assert-equal "CA" (card-string (pile-card (car (game-pile g 5)))))
+      (assert-equal -52 (game-score g))))
+  (test "undo gives the points back"
+    (let* ((line (append (repeat 8 '(stock)) '((waste) (waste))))
+           (g (play (fixture 'standard 1) line)))
+      (assert-equal 10 (game-score g))
+      (assert-equal 0 (game-score (game-undo g)))))
+  (test "the scoring may be set only before the first move"
+    (let ((g (fixture 'standard 1)))
+      (assert-equal 'vegas (game-scoring (game-with-scoring g 'vegas)))
+      (assert-equal 'standard (game-scoring (game-with-scoring (game-draw! g) 'vegas))))))
+
+(test-group "the deal: the bankroll and the SCORE control"
+  (let* ((d (deal-with-model (deal-restore 1 (fixture 'vegas 1) 'tags #t) 'tags))
+         (d (deal-step d (make-input-frame '() '() (place-center geom (deal-game d) '(stock))) geom)))
+    (test "NEXT carries a Vegas result into the bank; a Standard deal banks nothing"
+      (let ((n (deal-step d (make-input-frame '() '() (control-center geom 'next)) geom)))
+        (assert-equal -52 (deal-bank n))
+        (assert-equal 'vegas (game-scoring (deal-game n)))
+        (assert-equal -52 (game-score (deal-game n))))
+      (let* ((s (deal-restore 1 (fixture 'standard 1) 'tags #t))
+             (n (deal-step s (make-input-frame '() '() (control-center geom 'next)) geom)))
+        (assert-equal 0 (deal-bank n))))
+    (test "the SCORE control flips the scoring before a move and refuses after"
+      (let* ((s (deal-restore 1 (fixture 'standard 1) 'tags #t))
+             (v (deal-step s (make-input-frame '() '() (control-center geom 'score)) geom))
+             (late (deal-step d (make-input-frame '() '() (control-center geom 'score)) geom)))
+        (assert-equal 'vegas (game-scoring (deal-game v)))
+        (assert-equal -52 (game-score (deal-game v)))
+        (assert-equal 'vegas (game-scoring (deal-game late)))
+        (assert-equal MSG-TOO-LATE (deal-message late))))))
+
