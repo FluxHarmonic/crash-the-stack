@@ -17,19 +17,33 @@
           (sigil math)
           (crash cards deck)
           (crash cards rules)
-          (crash cards input))
+          (crash cards input)
+          (crash trace))
 
   (export CARDS-SAVE-VERSION deal->datum datum->deal deal-save-due?)
 
   (begin
     (define CARDS-SAVE-VERSION 1)
 
+    ;; The trace's time is saved every so many ticks (5 s) between the
+    ;; events that save at once, so a reload loses at most that much.
+    (define SAVE-EVERY-TICKS 300)
+
     ;; A save is due whenever the game changed (every move, draw, undo,
-    ;; draw-count flip or new deal changes the game struct) or a setting did.
+    ;; draw-count flip or new deal changes the game struct), a setting
+    ;; did, the trace changed phase or mode, or the clock crossed a
+    ;; SAVE-EVERY-TICKS boundary.
     (define (deal-save-due? before after)
-      (or (not (eq? (deal-game before) (deal-game after)))
-          (not (eq? (deal-model before) (deal-model after)))
-          (not (eq? (deal-labels-shown before) (deal-labels-shown after)))))
+      (let ((t0 (deal-trace before))
+            (t1 (deal-trace after)))
+        (or (not (eq? (deal-game before) (deal-game after)))
+            (not (eq? (deal-model before) (deal-model after)))
+            (not (eq? (deal-labels-shown before) (deal-labels-shown after)))
+            (not (eq? (trace-phase t0) (trace-phase t1)))
+            (not (eq? (trace-mode t0) (trace-mode t1)))
+            (not (= (trace-ice-count t0) (trace-ice-count t1)))
+            (not (= (quotient (trace-ticks t0) SAVE-EVERY-TICKS)
+                    (quotient (trace-ticks t1) SAVE-EVERY-TICKS))))))
 
     (define (deal->datum d)
       (let ((g (deal-game d)))
@@ -46,6 +60,20 @@
               (cons 'selected (game-selected g))
               (cons 'rng (game-rng g))
               (list 'score (game-scoring g) (game-score g) (deal-bank d))
+              (cons 'corrupt (game-corrupt g))
+              (let ((tr (deal-trace d)))
+                (list 'trace
+                      (trace-mode tr)
+                      (trace-phase tr)
+                      (trace-ticks tr)
+                      (trace-hints tr)
+                      (trace-shuffles tr)
+                      (trace-countdown tr)
+                      (trace-ice-timer tr)
+                      (trace-ice-count tr)
+                      (trace-last-ice tr)
+                      (trace-cleared-in tr)
+                      (trace-extra tr)))
               (list 'settings
                     (deal-model d)
                     (deal-labels-shown d)))))
@@ -134,6 +162,20 @@
                   (memq (car sc) SCORINGS)
                   (exact? (cadr sc)) (integer? (cadr sc))
                   (exact? (caddr sc)) (integer? (caddr sc))))
+           (let ((c (field d 'corrupt)))
+             (or (not c)
+                 (and (pair? c) (card? (car c)) (count? (cdr c)) (> (cdr c) 0))))
+           (let ((tr (field d 'trace)))
+             (and (list? tr)
+                  (= (length tr) 11)
+                  (memq (car tr) MODES)
+                  (memq (cadr tr) PHASES)
+                  (every count?
+                         (list (list-ref tr 2) (list-ref tr 3) (list-ref tr 4)
+                               (list-ref tr 5) (list-ref tr 6) (list-ref tr 7)
+                               (list-ref tr 10)))
+                  (memq (list-ref tr 8) '(#f encrypt corrupt churn))
+                  (memq (list-ref tr 9) '(#f trace counter))))
            (let ((st (field d 'settings)))
              (and (list? st)
                   (= (length st) 2)
@@ -144,7 +186,8 @@
     (define (datum->deal d)
       (and (well-formed? d)
            (let ((st (field d 'settings))
-                 (sc (field d 'score)))
+                 (sc (field d 'score))
+                 (tr (field d 'trace)))
              (deal-with-bank
                (deal-restore (field d 'seed)
                              (game tableau: (list->vector (field d 'tableau))
@@ -157,7 +200,19 @@
                                    moves: (field d 'moves)
                                    scoring: (car sc)
                                    score: (cadr sc)
+                                   corrupt: (field d 'corrupt)
                                    rng: (field d 'rng))
                              (car st)
-                             (cadr st))
+                             (cadr st)
+                             (trace mode: (car tr)
+                                    phase: (cadr tr)
+                                    ticks: (list-ref tr 2)
+                                    hints: (list-ref tr 3)
+                                    shuffles: (list-ref tr 4)
+                                    countdown: (list-ref tr 5)
+                                    ice-timer: (list-ref tr 6)
+                                    ice-count: (list-ref tr 7)
+                                    last-ice: (list-ref tr 8)
+                                    cleared-in: (list-ref tr 9)
+                                    extra: (list-ref tr 10)))
                (caddr sc)))))))

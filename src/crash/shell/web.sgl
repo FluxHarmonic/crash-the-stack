@@ -62,6 +62,9 @@
 ;;;   crash: cards moved N                   a move landed; N = the move count
 ;;;   crash: cards drew N                    a draw; N = cards in the waste
 ;;;   crash: cards undo N
+;;;   crash: cards ice NAME                  a counter-hack landed (encrypt corrupt churn nothing)
+;;;   crash: cards trace V MODE PHASE ICE LAST   the meter after a phase or mode change,
+;;;                                         a counter-hack, or a charge
 ;;;   crash: cards auto                      auto-complete armed (every tableau card up)
 ;;;   crash: cards won moves N
 ;;;
@@ -315,6 +318,8 @@
               ((not (= (deal-seed before) (deal-seed after)))
                (set! *announced* #f)
                (set! *restored* #f))
+              ((not (= (trace-ice-count (deal-trace before)) (trace-ice-count (deal-trace after))))
+               (say "cards" "ice" (or (trace-last-ice (deal-trace after)) 'nothing)))
               ((game-won? g1) (say "cards" "won" "moves" m1))
               ((and (deal-auto after) (not (deal-auto before))) (say "cards" "auto"))
               ((< h1 h0) (say "cards" "undo" m1))
@@ -335,6 +340,22 @@
         ((stock) 'g)
         ((waste) 'h)
         (else '-)))
+
+    ;; The card table's meter line, whenever its phase, mode or ICE count
+    ;; moved, or the game charged it (a pass, an undo).
+    (define (report-deal-trace! before after)
+      (let ((t0 (deal-trace before))
+            (t1 (deal-trace after)))
+        (when (or (not (eq? (trace-phase t0) (trace-phase t1)))
+                  (not (eq? (trace-mode t0) (trace-mode t1)))
+                  (not (= (trace-ice-count t0) (trace-ice-count t1)))
+                  (not (= (trace-extra t0) (trace-extra t1))))
+          (say "cards" "trace"
+               (exact (floor (trace-value t1)))
+               (trace-mode t1)
+               (trace-phase t1)
+               (trace-ice-count t1)
+               (or (trace-last-ice t1) 'none)))))
 
     (define (say-deal d)
       (let* ((g (deal-game d))
@@ -408,6 +429,7 @@
         (set! *deal* after)
         (set! *card-fx* x)
         (report-deal-change! before after)
+        (report-deal-trace! before after)
         (begin-frame)
         (draw-deal after *card-geom* x)
         (end-frame)))
@@ -490,7 +512,8 @@
                   (open-menu!))
                  (else (stack-tick f dt))))
           (else
-           (if (menu-frame? f (and click (hit-card-control *card-geom* (car click) (cdr click))))
+           (if (or (menu-frame? f (and click (hit-card-control *card-geom* (car click) (cdr click))))
+                   (jack-out-tap? *deal* f *card-geom*))
                (open-menu!)
                (cards-tick f dt))))))
 

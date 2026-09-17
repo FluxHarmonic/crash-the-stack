@@ -26,11 +26,14 @@
           (crash cards deck)
           (crash cards rules)
           (crash cards geometry)
+          (crash trace)
           (crash cards input))
 
   (export card-fx card-fx? card-fx-new card-fx-clock
           card-fx-frame card-fx-observe card-fx-idle?
           card-fx-flying card-fx-launched card-fx-cascading? card-fx-ticks
+          card-fx-glitch card-fx-toast
+          GLITCH-TICKS TOAST-TICKS TOAST-HOLD
           flyer flyer-card flyer-x flyer-y flyer-trail
           CASCADE-GAP GRAVITY BOUNCE TRAIL LAUNCH-VX-MIN LAUNCH-VX-MAX)
 
@@ -44,6 +47,9 @@
     (define LAUNCH-VX-MIN 1.6)      ; sideways speed, pixels per tick, either way
     (define LAUNCH-VX-MAX 4.2)
     (define LAUNCH-VY -1.5)         ; a small hop off the foundation
+    (define GLITCH-TICKS 45)        ; the full-screen glitch when the trace completes
+    (define TOAST-TICKS 130)        ; a message: held, then it slides up and fades
+    (define TOAST-HOLD 0.7)         ; the fraction of TOAST-TICKS it holds still
 
     ;; A flying card: where it is, where it goes, where it was.
     (define-struct flyer
@@ -62,13 +68,28 @@
       (until-launch default: 0)              ; ticks until the next launch
       (game default: #f)                     ; the won game, for what to launch
       (flying default: '())
-      (rng default: 1))
+      (rng default: 1)
+      (glitch-ticks default: 0)              ; ticks of glitch left
+      (toast-state default: #f))             ; (message . ticks-left), or #f
 
     (define (card-fx-new)
       (card-fx clock: (clock-new)))
 
     (define (card-fx-idle? x)
-      (and (not (card-fx-cascading? x)) (null? (card-fx-flying x))))
+      (and (not (card-fx-cascading? x))
+           (null? (card-fx-flying x))
+           (= 0 (card-fx-glitch-ticks x))
+           (not (card-fx-toast-state x))))
+
+    ;; The glitch's progress 0..1, or #f.
+    (define (card-fx-glitch x)
+      (and (> (card-fx-glitch-ticks x) 0)
+           (- 1.0 (/ (card-fx-glitch-ticks x) GLITCH-TICKS))))
+
+    ;; (message . progress 0..1), or #f.
+    (define (card-fx-toast x)
+      (let ((t (card-fx-toast-state x)))
+        (and t (cons (car t) (- 1.0 (/ (cdr t) TOAST-TICKS))))))
 
     (define (card-fx-ticks x)
       (clock-ticks (card-fx-clock x)))
@@ -78,18 +99,29 @@
     ;; The step from before to after won the game: start the cascade from
     ;; the foundations as they stand. A new deal stops it.
     (define (card-fx-observe x before after g)
-      (cond ((and (deal-won? after) (not (deal-won? before)))
-             (card-fx x
-                      cascading?: #t
-                      launched: (vector 0 0 0 0)
-                      next-foundation: 0
-                      until-launch: CASCADE-GAP
-                      game: (deal-game after)
-                      flying: '()
-                      rng: (prng-seed (+ 7 (card-fx-ticks x)))))
-            ((not (= (deal-seed before) (deal-seed after)))
-             (card-fx x cascading?: #f flying: '() game: #f))
-            (else x)))
+      (let* ((x (cond ((and (deal-won? after) (not (deal-won? before)))
+                       (card-fx x
+                                cascading?: #t
+                                launched: (vector 0 0 0 0)
+                                next-foundation: 0
+                                until-launch: CASCADE-GAP
+                                game: (deal-game after)
+                                flying: '()
+                                rng: (prng-seed (+ 7 (card-fx-ticks x)))))
+                      ((not (= (deal-seed before) (deal-seed after)))
+                       (card-fx x cascading?: #f flying: '() game: #f))
+                      (else x)))
+             ;; the trace completing: the glitch
+             (x (if (and (eq? (trace-phase (deal-trace after)) 'counter)
+                         (not (eq? (trace-phase (deal-trace before)) 'counter)))
+                    (card-fx x glitch-ticks: GLITCH-TICKS)
+                    x))
+             ;; a new message: a toast
+             (m (deal-message after)))
+        (if (and (> (string-length m) 0)
+                 (not (string=? m (deal-message before))))
+            (card-fx x toast-state: (cons m TOAST-TICKS))
+            x)))
 
     ;; --- advancing ----------------------------------------------------------------
 
@@ -153,7 +185,14 @@
                                       (card-fx-flying x))))))
 
     (define (tick x g)
-      (let ((x (fly x g)))
+      (let* ((x (fly x g))
+             (x (if (> (card-fx-glitch-ticks x) 0)
+                    (card-fx x glitch-ticks: (- (card-fx-glitch-ticks x) 1))
+                    x))
+             (x (let ((t (card-fx-toast-state x)))
+                  (cond ((not t) x)
+                        ((<= (cdr t) 1) (card-fx x toast-state: #f))
+                        (else (card-fx x toast-state: (cons (car t) (- (cdr t) 1))))))))
         (if (not (card-fx-cascading? x))
             x
             (let ((until (- (card-fx-until-launch x) 1)))

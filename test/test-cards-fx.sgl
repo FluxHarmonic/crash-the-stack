@@ -1,0 +1,98 @@
+;;; P2 - the card table's effects on the fixed clock.
+;;;
+;;; A frame with nothing to show is idle; the win starts the cascade,
+;;; which launches one card per CASCADE-GAP ticks from the foundations,
+;;; every flying card obeys gravity and bounces off the board's bottom
+;;; edge, the trail never exceeds TRAIL positions, and every card is gone
+;;; once the launched count reaches 52; the trace completing starts the
+;;; glitch, which runs GLITCH-TICKS and stops; a new message becomes a
+;;; toast that lasts TOAST-TICKS. (The one frame path no rules leg
+;;; reaches: this file exists because a wrong accessor here once reddened
+;;; every browser sub-arm while the rules legs stayed green.)
+
+(import (sigil test)
+        (sigil math)
+        (crash input)
+        (crash trace)
+        (crash tween)
+        (crash geometry)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input)
+        (crash cards fx))
+
+(define geom (make-card-geometry 640 400))
+
+(define (card-fx-frame* x dt) (card-fx-frame x dt geom))
+(define (frames* x n)
+  (if (= n 0) x (frames* (card-fx-frame* x (/ 1.0 60.0)) (- n 1))))
+
+(define (won-deal)
+  (let ((won (game (game-new 1 1)
+                   tableau: (make-vector PILES '())
+                   stock: '()
+                   waste: '()
+                   foundations: (list->vector
+                                  (map (lambda (s) (reverse (map (lambda (r) (make-card s r)) (iota 13 1))))
+                                       (iota 4))))))
+    (deal-restore 1 won 'tags #t (trace-new 'twist))))
+
+(test-group "idle and the frame"
+  (test "a new fx is idle and a frame of it stays idle"
+    (let* ((x (card-fx-new))
+           (d (deal-new 1 1))
+           (x1 (card-fx-frame* x 0.02))
+           (x2 (card-fx-observe x1 d d geom)))
+      (assert-true (card-fx-idle? x))
+      (assert-true (card-fx-idle? x2))
+      (assert-false (card-fx-glitch x2))
+      (assert-false (card-fx-toast x2)))))
+
+(test-group "the cascade"
+  (let* ((before (deal-new 1 1))
+         (after (won-deal))
+         (x (card-fx-observe (card-fx-new) before after geom)))
+    (test "the win starts it"
+      (assert-true (card-fx-cascading? x))
+      (assert-false (card-fx-idle? x)))
+    (test "one launch per CASCADE-GAP ticks, cycling the foundations"
+      (let ((x1 (frames* x CASCADE-GAP))
+            (x4 (frames* x (* 4 CASCADE-GAP))))
+        (assert-equal 1 (length (card-fx-flying x1)))
+        (assert-equal '(1 0 0 0) (vector->list (card-fx-launched x1)))
+        (assert-equal '(1 1 1 1) (vector->list (card-fx-launched x4)))))
+    (test "a card falls, bounces off the board's bottom edge, and never overruns it"
+      (let* ((floor-y (- 400 HUD-HEIGHT CARD-H))
+             (x1 (frames* x (* 30 CASCADE-GAP))))
+        (assert-true (every (lambda (f) (<= (flyer-y f) (+ floor-y 0.001))) (card-fx-flying x1)))
+        (assert-true (pair? (card-fx-flying x1)))))
+    (test "the trail is bounded by TRAIL"
+      (let ((x1 (frames* x 200)))
+        (assert-true (every (lambda (f) (<= (length (flyer-trail f)) TRAIL)) (card-fx-flying x1)))))
+    (test "every card is launched and, in time, gone"
+      (let ((x1 (frames* x 3000)))
+        (assert-equal '(13 13 13 13) (vector->list (card-fx-launched x1)))
+        (assert-false (card-fx-cascading? x1))
+        (assert-equal '() (card-fx-flying x1))))
+    (test "a new deal stops it"
+      (let ((x1 (card-fx-observe (frames* x 50) after (deal-next after) geom)))
+        (assert-false (card-fx-cascading? x1))
+        (assert-equal '() (card-fx-flying x1))))))
+
+(test-group "the glitch and the toasts"
+  (test "the trace completing starts the glitch, which runs GLITCH-TICKS"
+    (let* ((d (deal-new 1 1))
+           (traced (deal-advance d (* 60 TRACE-AT)))
+           (x (card-fx-observe (card-fx-new) d traced geom)))
+      (assert-equal 'counter (trace-phase (deal-trace traced)))
+      (assert-true (and (card-fx-glitch x) #t))
+      (assert-true (and (card-fx-glitch (frames* x (- GLITCH-TICKS 1))) #t))
+      (assert-false (card-fx-glitch (frames* x GLITCH-TICKS)))))
+  (test "a new message is a toast for TOAST-TICKS"
+    (let* ((d (deal-new 1 1))
+           (d1 (deal d message: "HELLO."))
+           (x (card-fx-observe (card-fx-new) d d1 geom)))
+      (assert-equal "HELLO." (car (card-fx-toast x)))
+      (assert-true (and (card-fx-toast (frames* x (- TOAST-TICKS 1))) #t))
+      (assert-false (card-fx-toast (frames* x TOAST-TICKS))))))

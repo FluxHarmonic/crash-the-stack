@@ -35,13 +35,17 @@
           (crash input)
           (crash cards deck)
           (crash cards rules)
-          (crash cards geometry))
+          (crash cards geometry)
+          (crash trace)
+          (crash cards trace))
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
           deal-model deal-labels deal-labels-shown deal-typed deal-auto deal-bank
+          deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
           deal-step deal-advance deal-undo deal-next deal-toggle-draw deal-with-model
-          deal-toggle-scoring deal-with-bank
+          deal-toggle-scoring deal-with-bank deal-toggle-mode deal-with-mode
+          jack-out-tap?
           AUTO-TICKS
           deal-places tag-places pile-key->index PILE-KEYS
           CARD-MODELS card-model-name
@@ -81,6 +85,7 @@
       (auto default: #f)             ; auto-complete is running: every tableau card is up
       (auto-acc default: 0)          ; ticks toward the next auto-complete step
       (bank default: 0)              ; the Vegas bankroll carried between deals
+      (trace default: #f)            ; the ICE, (crash trace) driven by (crash cards trace)
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -136,6 +141,9 @@
               labels: (tag-places g)
               typed: ""
               auto: (or (deal-auto d) arm?)
+              trace: (if (and (game-won? g) (deal-trace d))
+                         (trace-finish (deal-trace d))
+                         (deal-trace d))
               message: (cond ((game-won? g) MSG-WON)
                              ((or arm? (deal-auto d)) MSG-AUTO)
                              ((and (null? (legal-moves g))
@@ -144,9 +152,48 @@
                               MSG-STUCK)
                              (else "")))))
 
-    ;; The frame's sim ticks: while auto-complete runs, one card every
-    ;; AUTO-TICKS until the game is won.
+    (define (deal-severed? d)
+      (and (deal-trace d) (trace-severed? (deal-trace d))))
+
+    (define (deal-finished? d)
+      (and (deal-trace d)
+           (memq (trace-phase (deal-trace d)) '(severed cleared))
+           #t))
+
+    ;; The HUD line for what the ICE just did, or the phase that began.
+    (define (event-message events)
+      (let ((last (if (null? events) #f (list-ref events (- (length events) 1)))))
+        (case last
+          ((traced) MSG-TRACED)
+          ((encrypt) MSG-ENCRYPTED)
+          ((corrupt) MSG-CORRUPTED)
+          ((churn) MSG-CHURNED)
+          ((nothing) MSG-NOTHING)
+          ((severed) MSG-SEVERED)
+          (else #f))))
+
+    ;; The frame's sim ticks reach the trace here (one at a time inside
+    ;; trace-advance*, which fires the counter-hacks its seconds cover);
+    ;; the game it hands back replaces the deal's. Then auto-complete.
     (define (deal-advance d ticks)
+      (cond ((= ticks 0) d)
+            ((not (deal-trace d)) (auto-advance d ticks))
+            ((deal-finished? d) d)
+            (else
+             (let* ((r (trace-advance* (deal-trace d) (deal-game d) ticks fire-cards-ice))
+                    (tr (car r))
+                    (g (cadr r))
+                    (events (caddr r))
+                    (message (event-message events))
+                    (d (cond ((not (eq? g (deal-game d)))
+                              (deal (with-game (deal d trace: tr) g) message: (or message "")))
+                             (message (deal d trace: tr message: message))
+                             (else (deal d trace: tr)))))
+               (auto-advance d ticks)))))
+
+    ;; While auto-complete runs, one card every AUTO-TICKS until the game
+    ;; is won.
+    (define (auto-advance d ticks)
       (if (or (not (deal-auto d)) (deal-won? d) (= ticks 0))
           d
           (let loop ((d d) (acc (+ (deal-auto-acc d) ticks)))
@@ -160,19 +207,55 @@
                          (deal d auto: #f auto-acc: 0 message: MSG-NO-PASSES)
                          (loop (with-game d g) (- acc AUTO-TICKS)))))))))
 
+    ;; A fresh deal is a twist game (Vegas, the ICE running); the flip to
+    ;; the clean face (timed Standard) is a tap on the meter or the score
+    ;; before the first move.
     (define (deal-new seed draw)
-      (deal (with-game (deal seed: seed) (game-new seed draw))
+      (deal (with-game (deal seed: seed trace: (trace-new 'twist))
+                       (game-with-scoring (game-new seed draw) 'vegas))
             message: MSG-DEALT))
 
-    ;; While auto-complete runs (or the game is won) the table takes no
-    ;; move: only NEXT and the menu.
+    ;; While auto-complete runs, the game is won, or the link is severed,
+    ;; the table takes no move: only NEXT, RETRY and the menu.
     (define (busy? d)
-      (or (deal-auto d) (deal-won? d)))
+      (or (deal-auto d) (deal-won? d) (deal-severed? d)))
+
+    ;; The same seed again (a severed deal's first choice, ctrl+r any
+    ;; time): a fresh deal of this seed, settings and mode kept.
+    (define (deal-retry d)
+      (let ((fresh (deal-new (deal-seed d) (game-draw (deal-game d)))))
+        (deal-with-mode (deal fresh
+                              model: (deal-model d)
+                              labels-shown: (deal-labels-shown d)
+                              bank: (deal-bank d))
+                        (trace-mode (deal-trace d)))))
+
+    ;; Twist (Vegas, the ICE) or clean (timed Standard, no ICE). The two
+    ;; move together, so only while no move has been made.
+    (define (deal-with-mode d mode)
+      (let ((g (deal-game d)))
+        (if (or (> (game-moves g) 0) (not (memq mode MODES)))
+            d
+            (deal d
+                  trace: (trace-with-mode (deal-trace d) mode)
+                  game: (game-with-scoring g (if (eq? mode 'twist) 'vegas 'standard))))))
+
+    (define (deal-toggle-mode d)
+      (cond ((busy? d) d)
+            ((> (game-moves (deal-game d)) 0) (deal d message: MSG-TOO-LATE))
+            (else
+             (deal-with-mode d (if (eq? (trace-mode (deal-trace d)) 'twist) 'clean 'twist)))))
+
+    (define (deal-with-trace d tr)
+      (deal d trace: tr))
 
     ;; A deal from saved parts ((crash cards save)): the game and the
     ;; settings; the tags are recomputed.
-    (define (deal-restore seed g model labels-shown)
-      (deal-with-model (with-game (deal seed: seed labels-shown: labels-shown) g)
+    (define (deal-restore seed g model labels-shown . rest)
+      (deal-with-model (with-game (deal seed: seed
+                                        labels-shown: labels-shown
+                                        trace: (if (pair? rest) (car rest) (trace-new 'twist)))
+                                  g)
                        model))
 
     (define (deal-with-model d model)
@@ -185,8 +268,13 @@
     (define (deal-won? d)
       (game-won? (deal-game d)))
 
+    ;; An undo that changed something costs UNDO-COST on the trace.
     (define (deal-undo d)
-      (if (busy? d) d (with-game d (game-undo (deal-game d)))))
+      (let* ((g (deal-game d))
+             (g1 (game-undo g)))
+        (cond ((busy? d) d)
+              ((eq? g g1) d)
+              (else (with-game (deal d trace: (trace-undo (deal-trace d))) g1)))))
 
     ;; The next seed, the draw count, the scoring and the settings kept; a
     ;; Vegas deal's result joins the bankroll.
@@ -194,21 +282,15 @@
       (let* ((g (deal-game d))
              (vegas? (eq? (game-scoring g) 'vegas))
              (fresh (deal-new (+ 1 (deal-seed d)) (game-draw g))))
-        (deal (with-game fresh (game-with-scoring (deal-game fresh) (game-scoring g)))
-              message: MSG-DEALT
-              model: (deal-model d)
-              labels-shown: (deal-labels-shown d)
-              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d)))))
+        (deal-with-mode (deal fresh
+                              model: (deal-model d)
+                              labels-shown: (deal-labels-shown d)
+                              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d)))
+                        (trace-mode (deal-trace d)))))
 
-    ;; Standard <-> Vegas, while no move has been made.
+    ;; Standard <-> Vegas is the clean <-> twist flip.
     (define (deal-toggle-scoring d)
-      (let ((g (deal-game d)))
-        (cond ((busy? d) d)
-              ((> (game-moves g) 0) (deal d message: MSG-TOO-LATE))
-              (else
-               (with-game d (game-with-scoring g (if (eq? (game-scoring g) 'vegas)
-                                                      'standard
-                                                      'vegas)))))))
+      (deal-toggle-mode d))
 
     (define (deal-with-bank d bank)
       (deal d bank: bank))
@@ -225,12 +307,16 @@
             (else
              (let* ((g (deal-game d))
                     (g1 (game-select g place)))
-               (if (and (eq? g g1)
-                        (eq? (car place) 'stock)
-                        (null? (game-stock g))
-                        (pair? (game-waste g)))
-                   (deal d message: MSG-NO-PASSES)
-                   (with-game d g1))))))
+               (cond ((and (eq? g g1)
+                           (eq? (car place) 'stock)
+                           (null? (game-stock g))
+                           (pair? (game-waste g)))
+                      (deal d message: MSG-NO-PASSES))
+                     ((and (eq? g g1) (eq? (car place) 'waste) (game-corrupted? g))
+                      (deal d message: MSG-CORRUPT-REFUSED))
+                     ((> (game-passes g1) (game-passes g))
+                      (with-game (deal d trace: (trace-pass (deal-trace d))) g1))
+                     (else (with-game d g1)))))))
 
     (define (deselect d)
       (let ((g (deal-game d)))
@@ -246,12 +332,18 @@
       (> (string-length (deal-typed d)) 0))
 
     ;; The commands both models share; #f when the frame holds none.
+    (define (held? f key) (and (memq key (input-frame-held f)) #t))
+
     (define (step-commands d f)
-      (cond ((pressed? f 'tab)
-             (deal d model: (next-card-model (deal-model d)) typed: ""))
-            ((pressed? f 'return) (deselect d))
-            ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
-            (else #f)))
+      (let ((ctrl (held? f 'ctrl)))
+        (cond ((pressed? f 'tab)
+               (deal d model: (next-card-model (deal-model d)) typed: ""))
+              ((pressed? f 'return) (deselect d))
+              ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
+              ((and ctrl (pressed? f 'r)) (deal-retry d))
+              ((and ctrl (pressed? f 'n)) (deal-next d))
+              ((and ctrl (pressed? f 'm)) (deal-toggle-mode d))
+              (else #f))))
 
     ;; Tags: each letter extends what has been typed; a complete tag taps
     ;; its place; Space clears a half-typed tag or toggles the overlay;
@@ -343,12 +435,30 @@
         ((undo) (deal-undo d))
         ((draw) (deal-toggle-draw d))
         ((next) (deal-next d))
-        ((score) (deal-toggle-scoring d))
+        ((score mode) (deal-toggle-mode d))
         (else d)))
+
+    ;; On a severed table the choices are the board area's thirds: RETRY
+    ;; LINK (the same deal again), NEW DEAL, JACK OUT (the menu; the shell
+    ;; reads that one with jack-out-tap? before stepping).
+    (define (jack-out-tap? d f g)
+      (let ((click (input-frame-click f)))
+        (and click
+             (deal-severed? d)
+             (< (cdr click) (- (card-geometry-vh g) (card-geometry-hud-h g)))
+             (>= (car click) (* 2 (quotient (card-geometry-vw g) 3))))))
 
     (define (step-pointer d f g)
       (let ((click (input-frame-click f)))
         (cond ((not click) d)
+              ((deal-severed? d)
+               (if (< (cdr click) (- (card-geometry-vh g) (card-geometry-hud-h g)))
+                   (let ((third (quotient (card-geometry-vw g) 3)))
+                     (cond ((< (car click) third) (deal-retry d))
+                           ((< (car click) (* 2 third)) (deal-next d))
+                           (else d)))
+                   (let ((name (hit-card-control g (car click) (cdr click))))
+                     (if (memq name '(next menu)) (step-control d name) d))))
               ((hit-card-control g (car click) (cdr click))
                => (lambda (name) (step-control d name)))
               (else
@@ -359,6 +469,7 @@
 
     (define (deal-step d f g)
       (cond ((step-commands d f) => (lambda (d) d))
+            ((held? f 'ctrl) (step-pointer d f g))
             (else
              (let ((d (step-pointer d f g)))
                (case (deal-model d)

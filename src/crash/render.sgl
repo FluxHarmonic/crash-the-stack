@@ -31,6 +31,7 @@
           (crash menu))
 
   (export draw-session draw-frame-ms draw-menu
+          draw-meter-in draw-glitch-in draw-severed-in draw-message-in
           TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
 
   (begin
@@ -378,8 +379,11 @@
     ;; CLEARED: the score. Clean: GNOME's clock. Tapping it flips the face
     ;; while the game is still in TRACE ((crash input)).
     (define (draw-meter g tr)
-      (let* ((r (control-rect g 'mode))
-             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+      (draw-meter-in (control-rect g 'mode) tr))
+
+    ;; The meter in any rect (the card table has its own HUD, P2).
+    (define (draw-meter-in r tr)
+      (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
              (phase (trace-phase tr))
              (clean? (eq? (trace-mode tr) 'clean)))
         (color! C-BG)
@@ -414,8 +418,11 @@
     ;; it up (the cleared sequence); fade: 0..1 slides it up and fades it
     ;; out (a toast leaving). A state message passes 1 and 0.
     (define (draw-message g message top rise fade)
+      (draw-message-in (geometry-vw g) message top rise fade))
+
+    (define (draw-message-in vw message top rise fade)
       (let* ((w (text-width message 3))
-             (x (exact (floor (/ (- (geometry-vw g) w) 2))))
+             (x (exact (floor (/ (- vw w) 2))))
              (k (ease 'out-back rise))
              (y (exact (floor (- (+ (/ top 2) (* 40 (- 1.0 k)))
                                  (* 50 (ease 'in-out-quad fade))))))
@@ -492,11 +499,13 @@
     ;; the hot colours, thinning out as it passes, from the board's own
     ;; random stream seeded by the tick so it flickers.
     (define (draw-glitch g x p)
-      (let* ((vw (geometry-vw g))
-             (top (- (geometry-vh g) (geometry-hud-h g)))
-             (n (exact (floor (* 24 (- 1.0 p)))))
+      (draw-glitch-in (geometry-vw g) (- (geometry-vh g) (geometry-hud-h g)) (fx-ticks x) p))
+
+    ;; ticks: the frame's sim tick, seeding the flicker.
+    (define (draw-glitch-in vw top ticks p)
+      (let* ((n (exact (floor (* 24 (- 1.0 p)))))
              (a (* 0.7 (- 1.0 p))))
-        (let loop ((k 0) (rng (prng-seed (+ 13 (fx-ticks x)))))
+        (let loop ((k 0) (rng (prng-seed (+ 13 ticks))))
           (when (< k n)
             (let* ((r1 (prng-next rng))
                    (r2 (prng-next r1))
@@ -510,11 +519,17 @@
 
     ;; The severed connection: static over the board and the two choices.
     (define (draw-severed g x)
-      (let* ((vw (geometry-vw g))
-             (top (- (geometry-vh g) (geometry-hud-h g))))
+      (draw-severed-in (geometry-vw g)
+                       (- (geometry-vh g) (geometry-hud-h g))
+                       (fx-ticks x)
+                       '("RETRY LINK" "NEW STACK" "JACK OUT")))
+
+    ;; labels: the three choices, left to right, each a third of the board.
+    (define (draw-severed-in vw top ticks labels)
+      (begin
         (color-alpha! C-BG 0.75)
         (draw-filled-rect 0 0 vw top)
-        (let loop ((k 0) (rng (prng-seed (+ 17 (fx-ticks x)))))
+        (let loop ((k 0) (rng (prng-seed (+ 17 ticks))))
           (when (< k 160)
             (let* ((r1 (prng-next rng))
                    (r2 (prng-next r1))
@@ -546,9 +561,9 @@
                                  (+ by 13)
                                  2)))
                   (let ((third (quotient vw 3)))
-                    (list (cons "RETRY LINK" (half third))
-                          (cons "NEW STACK" (+ third (half third)))
-                          (cons "JACK OUT" (+ (* 2 third) (half third))))))))
+                    (list (cons (car labels) (half third))
+                          (cons (cadr labels) (+ third (half third)))
+                          (cons (caddr labels) (+ (* 2 third) (half third))))))))
 
     ;; --- the menu -------------------------------------------------------------
 

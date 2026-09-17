@@ -1,0 +1,30 @@
+#!/bin/sh
+# Host a SNAPSHOT of build/web for play over the VPN, so a build in
+# progress never reaches the player.
+#
+#   scripts/host-web            copy build/web -> build/hosted, (re)start serve-web on it
+#   PORT=8771 scripts/host-web  another port
+#
+# `sigil build --config web` writes build/web in place, and `sigil serve`
+# reads the directory live: hosting build/web directly served David a
+# half-built page mid-slice (2026-09-17, "=: expected number" on the
+# card table, reported as a bug at the last committed SHA it was not).
+# Host only what was built at a commit, from a copy that no build touches.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+PORT="${PORT:-8770}"
+SRC="build/web"
+DST="build/hosted"
+[ -f "$SRC/index.html" ] || { echo "host-web: $SRC/index.html missing; build --config web first"; exit 1; }
+dirty="$(git status --porcelain --untracked-files=no)"
+if [ -n "$dirty" ]; then
+  echo "host-web: the tree is dirty; the snapshot would not match a commit. Commit first."
+  exit 1
+fi
+rm -rf "$DST"
+cp -r "$SRC" "$DST"
+if [ -f "build/web-serve-$PORT.pid" ]; then
+  PORT="$PORT" scripts/serve-web --stop || true
+fi
+DIR="$DST" PORT="$PORT" scripts/serve-web
+echo "host-web: serving $DST (web version $(grep -o 'version: "[^"]*"' "$DST/index.html" | head -1 | cut -d'"' -f2)) on port $PORT"

@@ -26,6 +26,11 @@
 //               -> "crash: cards moved 1"; Backspace undoes; Tab -> "crash:
 //               cards model piles"; then the two letters "crash: cards keys
 //               KS KD" gives -> "moved 1" again (gate leg 7 on the web build)
+//   traced      UNDOS pairs of a tap on the stock and a tap on UNDO (each
+//               undo costs UNDO-COST 10; 20 of them reach TRACE-AT 200) ->
+//               "crash: cards trace 200 twist counter 0 none" and, within
+//               ICE-FIRST + 5 s, "crash: cards ice NAME" with NAME one of the
+//               table's members (the phase machine on the card table)
 //   reload      the page is reloaded and the deal comes back from
 //               localStorage: "crash: cards restored moves 1" (the keys
 //               sub-arm's last move)
@@ -65,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "reload", "won", "console"];
+const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "traced", "reload", "won", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -188,14 +193,45 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
   else if (entries.continue) fail("menu", `a fresh origin has nothing to CONTINUE, got ${ids}`);
   else {
     await sleep(800);
+    // By keys first (David, 2026-09-17: Enter on CARDS threw on a build in
+    // progress): ArrowDown moves the highlight from STACK to CARDS, Enter
+    // picks it; the table must boot and draw a frame with no error.
+    async function menuKey(k) {
+      await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
+      await sleep(40);
+      await evalJS(`document.dispatchEvent(new KeyboardEvent("keyup", { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
+      await sleep(150);
+    }
     let m0 = consoleLines.length;
-    await tap(entries.cards[0], entries.cards[1]);
-    const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
-    const booted = chose && await waitLine(/^crash: cards seed /, m0, 5000);
-    if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
-    else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
-    else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
-    else pass("menu", `entries ${ids}; tap on CARDS -> ${chose.m[0]}, table booted`);
+    await menuKey("ArrowDown"); await menuKey("Enter");
+    const choseK = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
+    const bootedK = choseK && await waitLine(/^crash: cards seed /, m0, 5000);
+    await sleep(600);
+    const errorsAfterKeys = consoleErrors.length + consoleLines.slice(m0).filter((l) => /^Error:/.test(l)).length;
+    if (!choseK) fail("menu", "no \"crash: menu chose\" line after ArrowDown, Enter");
+    else if (choseK.m[1] !== "cards") fail("menu", `keys: expected chose cards, got ${choseK.m[0]}`);
+    else if (!bootedK) fail("menu", "keys chose cards but no card-table boot line followed");
+    else if (errorsAfterKeys > 0) fail("menu", `keys booted the table with ${errorsAfterKeys} error line(s) in the console`);
+    else {
+      // then by tap, from the menu again (?fresh so the CONTINUE entry does not shift CARDS)
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+      const menu2 = await waitLine(/^crash: menu (.+)$/, consoleLines.length, 20000);
+      const parts2 = menu2 ? menu2.m[1].split(" ") : [];
+      const entries2 = {};
+      for (let i = 0; i + 2 < parts2.length; i += 3) entries2[parts2[i]] = [parts2[i + 1], parts2[i + 2]];
+      await sleep(800);
+      m0 = consoleLines.length;
+      if (!entries2.cards) fail("menu", "no CARDS entry on the second menu");
+      else {
+        await tap(entries2.cards[0], entries2.cards[1]);
+        const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
+        const booted = chose && await waitLine(/^crash: cards seed /, m0, 5000);
+        if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
+        else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
+        else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
+        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); tap on CARDS -> ${chose.m[0]}, table booted`);
+      }
+    }
   }
 }
 
@@ -323,6 +359,37 @@ async function type(tag) { for (const ch of tag) await press(ch); }
   }
 }
 
+// ---- traced --------------------------------------------------------------------------------
+{
+  const UNDOS = 20;
+  const stock2 = await waitLine(/^crash: cards stock (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
+  const ctl2 = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
+  if (!stock2 || !ctl2) fail("traced", "no stock or UNDO control line to tap");
+  else {
+    mark = consoleLines.length;
+    let ok = true;
+    for (let i = 0; i < UNDOS && ok; i++) {
+      const m0 = consoleLines.length;
+      await tap(stock2.m[1], stock2.m[2]);
+      const drew = await waitLine(/^crash: cards drew (\d+)$/, m0, 3000);
+      const m1 = consoleLines.length;
+      if (drew) await tap(ctl2.m[1], ctl2.m[2]);
+      const undo = drew && await waitLine(/^crash: cards undo (\d+)$/, m1, 3000);
+      if (!undo) { ok = false; fail("traced", `pair ${i + 1}: ${drew ? "no undo line" : "no drew line"}`); }
+    }
+    if (ok) {
+      const traced = await waitLine(/^crash: cards trace (\d+) twist counter 0 none$/, mark, 5000);
+      if (!traced) fail("traced", `20 undos did not complete the trace (no "crash: cards trace N twist counter 0 none")`);
+      else {
+        const ice = await waitLine(/^crash: cards ice (\w+)$/, traced.index, 15000);
+        if (!ice) fail("traced", `${traced.m[0]}, but no counter-hack within 15 s`);
+        else if (!["encrypt", "corrupt", "churn", "nothing"].includes(ice.m[1])) fail("traced", `unknown counter-hack ${ice.m[0]}`);
+        else pass("traced", `${traced.m[0]}; ${ice.m[0]}`);
+      }
+    }
+  }
+}
+
 // ---- reload --------------------------------------------------------------------------
 mark = consoleLines.length;
 await send("Page.navigate", { url: URL.replace("&fresh", "") });
@@ -337,7 +404,7 @@ else pass("reload", restored.m[0]);
   // suit (S H D C) then rank; foundations top first.
   const found = (suit) => Array.from({ length: 13 }, (_, k) => suit * 13 + 12 - k);
   const spades = found(0).slice(1); // without the king (12), which sits on pile 0
-  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score standard 0 0) (settings tags #t))`;
+  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings tags #t))`;
   await evalJS(`localStorage.setItem("cards", ${JSON.stringify(datum)})`);
   mark = consoleLines.length;
   await send("Page.navigate", { url: URL.replace("&fresh", "") });
@@ -370,8 +437,13 @@ else pass("reload", restored.m[0]);
 }
 
 // ---- console ---------------------------------------------------------------------------
-if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
-else fail("console", consoleErrors.join(" | "));
+// The runtime prints its own errors ("Error: ...", "Scheme error in
+// frame: ...") through the WASI shim as plain console lines, not
+// console.error, so they count here too (2026-09-17: a per-frame "=:
+// expected number" left this sub-arm reading "0 errors").
+const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
+if (consoleErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
+else fail("console", consoleErrors.concat(runtimeErrors.slice(0, 5).map((l) => "runtime: " + l)).join(" | "));
 
 const failed = results.filter((r) => r[1] === "FAIL").length;
 console.log(`RESULT: ${results.length - failed} passed, ${failed} failed`);

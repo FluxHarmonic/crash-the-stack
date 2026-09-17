@@ -40,8 +40,10 @@
   (export game game?
           game-tableau game-foundations game-stock game-waste
           game-draw game-passes game-selected game-history game-moves game-rng
-          game-scoring game-score
+          game-scoring game-score game-corrupt
           game-new game-from-deck game-with-scoring
+          game-corrupted? game-corrupt-waste game-encrypt game-churn
+          encryptable-places
           PILES FOUNDATIONS DRAW-COUNTS SCORINGS
           SCORE-TO-FOUNDATION SCORE-WASTE-TO-TABLEAU SCORE-TURN-OVER
           SCORE-FROM-FOUNDATION SCORE-RECYCLE-ONE SCORE-RECYCLE-THREE
@@ -100,6 +102,7 @@
       (moves default: 0)
       (scoring default: 'standard)    ; standard | vegas
       (score default: 0)
+      (corrupt default: #f)           ; (card . draws-left) while the ICE holds the waste's top
       (rng default: 1))
 
     ;; --- construction --------------------------------------------------------
@@ -171,8 +174,15 @@
            (and (pair? f) (car f))))
         (else #f)))
 
+    ;; Is the waste's top the card the ICE corrupted?
+    (define (game-corrupted? g)
+      (let ((c (game-corrupt g)))
+        (and c
+             (pair? (game-waste g))
+             (= (car c) (car (game-waste g))))))
+
     ;; A place the player may pick up: a face-up pile card, the top of the
-    ;; waste, the top of a foundation.
+    ;; waste (unless corrupted), the top of a foundation.
     (define (place-selectable? g p)
       (case (place-kind p)
         ((pile)
@@ -180,7 +190,8 @@
                (depth (if (pair? (cddr p)) (caddr p) 0)))
            (and (< depth (length pile))
                 (pile-up? (list-ref pile depth)))))
-        ((waste foundation) (and (place-card g p) #t))
+        ((waste) (and (place-card g p) (not (game-corrupted? g))))
+        ((foundation) (and (place-card g p) #t))
         (else #f)))
 
     ;; The cards a selection would move, top first: a pile's run down to
@@ -342,13 +353,20 @@
     ;; top; an empty stock takes the waste back (a pass); nothing to do
     ;; with both empty. Named with a bang for the reader's eye only: it
     ;; returns a new game like every move.
+    ;; The corruption wears off with the draws: one fewer each, gone at 0.
+    (define (draw-off-corrupt g)
+      (let ((c (game-corrupt g)))
+        (cond ((not c) g)
+              ((<= (cdr c) 1) (game g corrupt: #f))
+              (else (game g corrupt: (cons (car c) (- (cdr c) 1)))))))
+
     (define (game-draw! g)
       (cond ((pair? (game-stock g))
              (let loop ((n (game-draw g))
                         (stock (game-stock g))
                         (waste (game-waste g)))
                (if (or (= n 0) (null? stock))
-                   (push-history g (game g stock: stock waste: waste))
+                   (push-history g (draw-off-corrupt (game g stock: stock waste: waste)))
                    (loop (- n 1) (cdr stock) (cons (car stock) waste)))))
             ((and (pair? (game-waste g)) (recycle-allowed? g))
              (let ((passes (+ 1 (game-passes g))))
@@ -400,6 +418,59 @@
               ((game-move g sel p) => (lambda (moved) moved))
               ((place-selectable? g p) (game g selected: p))
               (else (game g selected: #f)))))
+
+    ;; --- what the ICE can do to the table (the members live in (crash cards trace)) ---
+
+    ;; The waste's top card is unplayable for draws draws. No history
+    ;; entry: the counter-hacks cut the history themselves.
+    (define (game-corrupt-waste g draws)
+      (if (pair? (game-waste g))
+          (game g corrupt: (cons (car (game-waste g)) draws) selected: #f)
+          g))
+
+    ;; Every face-up tableau card with at least one card on top of it:
+    ;; what encrypt may turn face down (the uncovered flip brings it back).
+    (define (encryptable-places g)
+      (apply append
+             (map (lambda (i)
+                    (let ((pile (game-pile g i)))
+                      (let loop ((depth 1) (acc '()))
+                        (if (or (>= depth (length pile))
+                                (not (pile-up? (list-ref pile depth))))
+                            (reverse acc)
+                            (loop (+ depth 1) (cons (list 'pile i depth) acc))))))
+                  (iota PILES))))
+
+    ;; The card at a pile place turned face down.
+    (define (game-encrypt g p)
+      (let* ((i (cadr p))
+             (depth (caddr p))
+             (pile (game-pile g i)))
+        (if (or (>= depth (length pile)) (= depth 0))
+            g
+            (game g
+                  tableau: (vector-with (game-tableau g)
+                                        i
+                                        (append (take pile depth)
+                                                (list (cons (pile-card (list-ref pile depth)) #f))
+                                                (drop-n pile (+ depth 1))))
+                  selected: #f))))
+
+    ;; The stock and the waste shuffled together into a new stock with
+    ;; the given random state (the caller advances it); the waste empty,
+    ;; the passes untouched. Returns (cons game rng).
+    (define (game-churn g rng)
+      (let* ((cards (list->vector (append (game-stock g) (reverse (game-waste g)))))
+             (n (vector-length cards)))
+        (let loop ((i (- n 1)) (rng rng))
+          (if (< i 1)
+              (cons (game g stock: (vector->list cards) waste: '() corrupt: #f selected: #f) rng)
+              (let* ((rng (prng-next rng))
+                     (j (prng-index rng (+ i 1)))
+                     (tmp (vector-ref cards i)))
+                (vector-set! cards i (vector-ref cards j))
+                (vector-set! cards j tmp)
+                (loop (- i 1) rng))))))
 
     ;; --- the state of play ---------------------------------------------------
 
@@ -497,7 +568,8 @@
             (game-passes g)
             (game-selected g)
             (game-scoring g)
-            (game-score g)))
+            (game-score g)
+            (game-corrupt g)))
 
     (define (game-equal? a b)
       (equal? (game-canonical a) (game-canonical b)))))

@@ -514,8 +514,13 @@ let iceLock = null;
 }
 
 // ---- 11. console ------------------------------------------------------------
-if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
-else fail("console", `${consoleErrors.length} error(s): ${JSON.stringify(consoleErrors.slice(0, 5))}`);
+// The runtime prints its own errors ("Error: ...", "Scheme error in
+// frame: ...") through the WASI shim as plain console lines, not
+// console.error, so they count here too (2026-09-17: a per-frame "=:
+// expected number" left this sub-arm reading "0 errors").
+const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
+if (consoleErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
+else fail("console", `${consoleErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(consoleErrors.concat(runtimeErrors).slice(0, 5))}`);
 
 // ---- screenshot for the record ----------------------------------------------
 const shot = await send("Page.captureScreenshot", { format: "png" });

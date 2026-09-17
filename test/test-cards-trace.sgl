@@ -1,0 +1,222 @@
+;;; P2 - the ICE on the card table (the trace's leg 2, Klondike side).
+;;;
+;;; On scripted ticks over the fixture deal: the phase flips to
+;;; COUNTER-HACK on the exact tick the value reaches TRACE-AT, a turn of
+;;; the waste and an undo charge the trace by their pinned costs, the
+;;; first counter-hack fires at ICE-FIRST and the countdown reaching zero
+;;; severs the link, after which no pick or undo is taken and RETRY deals
+;;; the same seed again. Each member on its own: encrypt turns exactly one
+;;; covered face-up card down and the ordinary flip brings it back;
+;;; corrupt refuses the waste's top for exactly CORRUPT-DRAWS draws;
+;;; churn keeps the card set and empties the waste; the pick is
+;;; deterministic per random state and none applicable passes. Clean
+;;; mode never changes phase; the timed Standard score follows Windows'
+;;; penalty and bonus.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash input)
+        (crash trace)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input)
+        (crash cards trace))
+
+(define geom (make-card-geometry 640 400))
+
+(define (fixture-deal)
+  (deal-restore 1 (game-with-scoring (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'vegas)
+                'tags #t (trace-new 'twist)))
+
+(define (tap d place)
+  (deal-step d (make-input-frame '() '() (place-center geom (deal-game d) place)) geom))
+
+(define (taps d places)
+  (fold (lambda (d p) (tap d p)) d places))
+
+(define (repeat n x)
+  (if (= n 0) '() (cons x (repeat (- n 1) x))))
+
+(define (cards-of g)
+  (list-sort < (append (game-stock g) (game-waste g))))
+
+(define (vector-with-list v i x)
+  (let ((nv (vector-copy v)))
+    (vector-set! nv i x)
+    nv))
+
+(define (corrupt-applicable-for g)
+  (and (memq 'corrupt (map ice-member-name (cards-ice-applicable g))) #t))
+
+(test-group "the trace on the card table: phases and costs"
+  (test "a fresh deal is a twist game on the trace at 0"
+    (let ((d (fixture-deal)))
+      (assert-equal 'twist (trace-mode (deal-trace d)))
+      (assert-equal 'trace (trace-phase (deal-trace d)))
+      (assert-equal 0 (trace-value (deal-trace d)))))
+  (test "the phase flips to counter on the tick the value reaches TRACE-AT, not before"
+    (let* ((d (deal-advance (fixture-deal) (- (* 60 TRACE-AT) 1)))
+           (d1 (deal-advance d 1)))
+      (assert-equal 'trace (trace-phase (deal-trace d)))
+      (assert-equal 'counter (trace-phase (deal-trace d1)))
+      (assert-equal MSG-TRACED (deal-message d1))))
+  ;; Vegas allows no turn under draw one, so the pass costs are checked
+  ;; under draw three (three passes).
+  (test "a turn of the waste costs PASS-COST on the trace"
+    (let* ((d (deal-toggle-draw (fixture-deal)))
+           (d (taps d (repeat 8 '(stock))))
+           (d1 (tap d '(stock))))
+      (assert-equal 3 (game-draw (deal-game d)))
+      (assert-equal 0 (trace-value (deal-trace d)))
+      (assert-equal 1 (game-passes (deal-game d1)))
+      (assert-equal PASS-COST (trace-value (deal-trace d1)))))
+  (test "Vegas under draw one: no turn, so no pass and no cost"
+    (let* ((d (taps (fixture-deal) (repeat 24 '(stock))))
+           (d1 (tap d '(stock))))
+      (assert-equal 0 (game-passes (deal-game d1)))
+      (assert-equal 0 (trace-value (deal-trace d1)))
+      (assert-equal MSG-NO-PASSES (deal-message d1))))
+  (test "an undo costs UNDO-COST; an undo with nothing to undo costs nothing"
+    (let* ((d (tap (fixture-deal) '(stock)))
+           (d1 (deal-step d (make-input-frame '(backspace) '() #f) geom))
+           (d2 (deal-step d1 (make-input-frame '(backspace) '() #f) geom)))
+      (assert-equal 0 (game-moves (deal-game d1)))
+      (assert-equal UNDO-COST (trace-value (deal-trace d1)))
+      (assert-equal UNDO-COST (trace-value (deal-trace d2)))))
+  (test "the first counter-hack fires at ICE-FIRST after the trace completes"
+    (let* ((d (deal-advance (fixture-deal) (* 60 TRACE-AT)))
+           (d1 (deal-advance d (- (* 60 ICE-FIRST) 1)))
+           (d2 (deal-advance d1 1)))
+      (assert-equal 0 (trace-ice-count (deal-trace d1)))
+      (assert-equal 1 (trace-ice-count (deal-trace d2)))
+      ;; at the deal nothing is encryptable and the waste is empty: churn
+      (assert-equal 'churn (trace-last-ice (deal-trace d2)))
+      (assert-equal MSG-CHURNED (deal-message d2))
+      (assert-equal '() (game-history (deal-game d2)))))
+  (test "under the ICE a pass eats PASS-SEVER-COST off the countdown"
+    (let* ((d (deal-advance (deal-toggle-draw (fixture-deal)) (* 60 TRACE-AT)))
+           (before (trace-countdown (deal-trace d)))
+           (d (taps d (repeat 9 '(stock)))))
+      (assert-equal 1 (game-passes (deal-game d)))
+      (assert-equal (- before (* 60 PASS-SEVER-COST)) (trace-countdown (deal-trace d)))))
+  (test "the countdown reaching zero severs the link; picks and undo are refused; RETRY re-deals"
+    (let* ((d (deal-advance (fixture-deal) (* 60 (+ TRACE-AT SEVER-AT))))
+           (g (deal-game d))
+           ;; a tap on a severed table is one of its three choices, so the
+           ;; refused pick goes by key: the stock's tag (a) in TAGS
+           (picked (deal-step d (make-input-frame '(a) '() #f) geom))
+           (undone (deal-step d (make-input-frame '(backspace) '() #f) geom))
+           (retried (deal-step d (make-input-frame '(r) '(ctrl) #f) geom)))
+      (assert-true (deal-severed? d))
+      (assert-equal 'severed (trace-phase (deal-trace d)))
+      (assert-true (game-equal? g (deal-game picked)))
+      (assert-true (game-equal? g (deal-game undone)))
+      (assert-equal 'trace (trace-phase (deal-trace retried)))
+      (assert-equal 1 (deal-seed retried))
+      (assert-equal 0 (game-moves (deal-game retried)))))
+  (test "a win under the ICE is tagged; the trace stops"
+    (let* ((d (deal-advance (fixture-deal) (* 60 TRACE-AT)))
+           (won (game (deal-game d)
+                      tableau: (make-vector PILES '())
+                      stock: '()
+                      waste: '()
+                      foundations: (list->vector
+                                     (map (lambda (s) (reverse (map (lambda (r) (make-card s r)) (iota 13 1))))
+                                          (iota 4)))))
+           (d (deal-advance (deal-restore 1 won 'tags #t (deal-trace d)) 600)))
+      (assert-true (deal-won? d))
+      (assert-equal 'cleared (trace-phase (deal-trace d)))
+      (assert-equal 'counter (trace-cleared-in (deal-trace d)))))
+  (test "clean mode: the clock runs, no phase ever changes, Standard scoring"
+    (let* ((d (deal-with-mode (fixture-deal) 'clean))
+           (d (deal-advance d (* 60 (+ TRACE-AT SEVER-AT 10)))))
+      (assert-equal 'clean (trace-mode (deal-trace d)))
+      (assert-equal 'trace (trace-phase (deal-trace d)))
+      (assert-equal 'standard (game-scoring (deal-game d)))
+      (assert-equal 0 (trace-ice-count (deal-trace d)))))
+  (test "the flip is refused after the first move"
+    (let* ((d (tap (fixture-deal) '(stock)))
+           (d1 (deal-toggle-mode d)))
+      (assert-equal 'twist (trace-mode (deal-trace d1)))
+      (assert-equal MSG-TOO-LATE (deal-message d1)))))
+
+(test-group "the members"
+  (let* ((d (taps (fixture-deal) '((pile 0 0) (pile 2))))   ; S2 onto D3: D3 is covered, face up
+         (g (deal-game d)))
+    (test "encrypt: applicable when a face-up card lies under another; the pick turns it down; the flip brings it back"
+      (assert-equal '() (encryptable-places (deal-game (fixture-deal))))
+      (assert-equal '((pile 2 1)) (encryptable-places g))
+      (let* ((e (game-encrypt g '(pile 2 1)))
+             (entry (list-ref (game-pile e 2) 1)))
+        (assert-equal "D3" (card-string (pile-card entry)))
+        (assert-false (pile-up? entry))
+        (assert-true (pile-up? (car (game-pile e 2))))
+        ;; S2 off pile 2 onto... nothing takes a black 2 here; use undo-free
+        ;; take: move S2 to the foundation? no. Move it back to pile 0 (empty, no: not a king).
+        ;; The flip is take-from's: move S2 onto D3 elsewhere is impossible, so
+        ;; test the flip through game-move on a built pile.
+        (let* ((f (game e tableau: (vector-with-list (game-tableau e) 0 (list (cons (make-card 1 3) #t)))))  ; H3 on pile 0
+               (f (game-move f '(pile 2 0) '(pile 0))))                                                  ; S2 onto H3
+          (assert-true (and f #t))
+          (assert-true (pile-up? (car (game-pile f 2))))
+          (assert-equal "D3" (card-string (pile-card (car (game-pile f 2))))))))
+    (test "corrupt: applicable with a waste; the top is refused for exactly CORRUPT-DRAWS draws"
+      (assert-false (corrupt-applicable-for (deal-game (fixture-deal))))
+      (let* ((g1 (game-select (deal-game (fixture-deal)) '(stock)))       ; S7 on the waste
+             (c (game-corrupt-waste g1 CORRUPT-DRAWS)))
+        (assert-true (corrupt-applicable-for g1))
+        (assert-true (game-corrupted? c))
+        (assert-false (place-selectable? c '(waste)))
+        (assert-false (member '((waste) . (pile 1)) (legal-moves c)))
+        (let loop ((g c) (n 0))
+          (if (< n CORRUPT-DRAWS)
+              (begin
+                (assert-true (and (game-corrupt g) #t))
+                (loop (game-draw! g) (+ n 1)))
+              (assert-false (game-corrupt g))))
+        ;; the corrupted card, drawn past and turned back up: playable again
+        (let* ((g (game-with-draw c 1))
+               (g (fold (lambda (g _) (game-draw! g)) g (iota CORRUPT-DRAWS))))
+          (assert-false (game-corrupt g)))))
+    (test "churn: keeps the card set, empties the waste, leaves the passes"
+      (let* ((g1 (fold (lambda (g _) (game-draw! g)) (deal-game (fixture-deal)) (iota 5)))
+             (r (game-churn g1 12345))
+             (c (car r)))
+        (assert-equal 5 (length (game-waste g1)))
+        (assert-equal '() (game-waste c))
+        (assert-equal (cards-of g1) (cards-of c))
+        (assert-equal 24 (length (game-stock c)))
+        (assert-equal (game-passes g1) (game-passes c))
+        (assert-false (equal? (game-stock g1) (game-stock c)))))
+    (test "the pick is deterministic per random state and cuts the history"
+      (let* ((g1 (fold (lambda (g _) (game-draw! g)) g (iota 3)))     ; encryptable, a waste, 24 cards: all three apply
+             (a (fire-cards-ice g1 0))
+             (b (fire-cards-ice g1 0)))
+        (assert-equal 3 (length (cards-ice-applicable g1)))
+        (assert-equal (cdr a) (cdr b))
+        (assert-true (game-equal? (car a) (car b)))
+        (assert-equal '() (game-history (car a)))
+        (assert-true (memq (cdr a) '(encrypt corrupt churn)))))
+    (test "none applicable: the interval passes"
+      (let* ((bare (game g stock: '() waste: '() tableau: (make-vector PILES '())))
+             (r (fire-cards-ice bare 0)))
+        (assert-equal '() (cards-ice-applicable bare))
+        (assert-false (cdr r))
+        (assert-true (eq? bare (car r)))))))
+
+(test-group "the timed Standard score"
+  (let ((g (game-with-scoring (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'standard)))
+    (test "2 off every 10 seconds, never below zero"
+      (let ((g50 (game g score: 50)))
+        (assert-equal 50 (timed-score g50 (trace-new 'clean) #f))
+        (assert-equal 30 (timed-score g50 (trace ticks: (* 60 100)) #f))
+        (assert-equal 0 (timed-score g50 (trace ticks: (* 60 1000)) #f))))
+    (test "the win bonus: 700000 over the seconds, from 30 seconds on"
+      (let ((g50 (game g score: 50)))
+        ;; 60 s: 50 - 12 penalty + 700000 / 60
+        (assert-equal (+ 38 (quotient 700000 60)) (timed-score g50 (trace ticks: (* 60 60)) #t))
+        (assert-equal 46 (timed-score g50 (trace ticks: (* 60 20)) #t))))
+    (test "Vegas is untimed"
+      (assert-equal -52 (timed-score (game-with-scoring g 'vegas) (trace ticks: (* 60 1000)) #t)))))

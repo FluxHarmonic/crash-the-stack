@@ -1,0 +1,139 @@
+;;; (crash cards trace) - The ICE on the card table.
+;;;
+;;; The same three phases as the stack's ((crash trace): TRACE,
+;;; COUNTER-HACK, SEVERED; rulings D13 and D15), driven through
+;;; trace-advance* with this table's own counter-hacks and its own costs.
+;;; What feeds the trace here (the design note's Klondike twist 1): time,
+;;; every turn of the waste (PASS-COST), every undo (UNDO-COST; new, the
+;;; stack's undo is free; David rules from play) and every scramble
+;;; (SCRAMBLE-COST). Under the ICE the same acts eat into the countdown
+;;; by their SEVER costs instead.
+;;;
+;;; The counter-hack set, each a member with applicable? and apply like
+;;; the stack's, picked uniformly with the game's random stream:
+;;;   encrypt   a face-up tableau card with a card on top of it turns face
+;;;             down; it turns back when uncovered (the ordinary flip)
+;;;   corrupt   the waste's top card is unplayable for CORRUPT-DRAWS draws
+;;;   churn     the stock and the waste are shuffled into a new stock
+;;; None applicable: the interval passes with a message. Every hit cuts
+;;; the undo history (ruled 2026-09-17 for the stack: an undoable
+;;; counter-hack has no teeth).
+;;;
+;;; Clean mode on this table is Windows' timed Standard game: the same
+;;; clock, -2 per 10 s, and 700000 / seconds at a win past 30 s (the
+;;; Wikipedia table; the numbers are constants here). Twist mode is
+;;; Vegas. This module is in the rules family: no platform, no drawing.
+
+(define-library (crash cards trace)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack prng)
+          (crash trace)
+          (crash cards deck)
+          (crash cards rules))
+
+  (export PASS-COST UNDO-COST SCRAMBLE-COST
+          PASS-SEVER-COST UNDO-SEVER-COST SCRAMBLE-SEVER-COST
+          CORRUPT-DRAWS
+          TIME-PENALTY TIME-PENALTY-EVERY BONUS-NUMERATOR BONUS-AFTER
+          CARDS-ICE-SET cards-ice-applicable fire-cards-ice
+          trace-pass trace-undo trace-scramble
+          timed-score
+          MSG-ENCRYPTED MSG-CORRUPTED MSG-CHURNED MSG-CORRUPT-REFUSED)
+
+  (begin
+    ;; --- the numbers David tunes (seconds) -------------------------------------
+
+    (define PASS-COST 30)            ; on the trace, per turn of the waste
+    (define UNDO-COST 10)            ; on the trace, per undo (new; the stack's undo is free)
+    (define SCRAMBLE-COST 60)        ; on the trace, per scramble
+    (define PASS-SEVER-COST 15)      ; off the countdown, per turn of the waste
+    (define UNDO-SEVER-COST 5)       ; off the countdown, per undo
+    (define SCRAMBLE-SEVER-COST 30)  ; off the countdown, per scramble
+    (define CORRUPT-DRAWS 3)         ; draws a corrupted waste top stays unplayable
+
+    ;; Windows' timed Standard game.
+    (define TIME-PENALTY 2)          ; points off ...
+    (define TIME-PENALTY-EVERY 10)   ; ... every this many seconds
+    (define BONUS-NUMERATOR 700000)  ; the win bonus is this over the seconds taken ...
+    (define BONUS-AFTER 30)          ; ... when the game took at least this long
+
+    (define MSG-ENCRYPTED "ICE ENCRYPTED A CARD.")
+    (define MSG-CORRUPTED "ICE CORRUPTED THE WASTE.")
+    (define MSG-CHURNED "ICE CHURNED THE STOCK.")
+    (define MSG-CORRUPT-REFUSED "CORRUPTED. DRAW PAST IT.")
+
+    ;; --- the player's costs -----------------------------------------------------
+
+    (define (trace-pass tr) (trace-charge tr PASS-COST PASS-SEVER-COST))
+    (define (trace-undo tr) (trace-charge tr UNDO-COST UNDO-SEVER-COST))
+    (define (trace-scramble tr) (trace-charge tr SCRAMBLE-COST SCRAMBLE-SEVER-COST))
+
+    ;; --- the counter-hack set -----------------------------------------------------
+
+    ;; Each apply takes the game and the game's advanced random state and
+    ;; returns the game (with its rng set to what it used).
+
+    (define (encrypt-applicable? g)
+      (pair? (encryptable-places g)))
+
+    (define (encrypt-apply g rng)
+      (let* ((places (encryptable-places g))
+             (p (list-ref places (prng-index rng (length places)))))
+        (game (game-encrypt g p) rng: rng)))
+
+    (define (corrupt-applicable? g)
+      (and (pair? (game-waste g)) (not (game-corrupted? g))))
+
+    (define (corrupt-apply g rng)
+      (game (game-corrupt-waste g CORRUPT-DRAWS) rng: rng))
+
+    (define (churn-applicable? g)
+      (>= (+ (length (game-stock g)) (length (game-waste g))) 4))
+
+    (define (churn-apply g rng)
+      (let ((r (game-churn g rng)))
+        (game (car r) rng: (cdr r))))
+
+    (define CARDS-ICE-SET
+      (list (ice-member name: 'encrypt
+                        applicable?: encrypt-applicable?
+                        apply: encrypt-apply)
+            (ice-member name: 'corrupt
+                        applicable?: corrupt-applicable?
+                        apply: corrupt-apply)
+            (ice-member name: 'churn
+                        applicable?: churn-applicable?
+                        apply: churn-apply)))
+
+    (define (cards-ice-applicable g)
+      (filter (lambda (m) ((ice-member-applicable? m) g)) CARDS-ICE-SET))
+
+    ;; One counter-hack on the card table, the shape trace-advance* wants:
+    ;; a uniform pick over the applicable members with the game's random
+    ;; stream, the history cut at the event; none applicable -> (cons g #f).
+    (define (fire-cards-ice g now)
+      (let ((members (cards-ice-applicable g)))
+        (if (null? members)
+            (cons g #f)
+            (let* ((rng (prng-next (game-rng g)))
+                   (m (list-ref members (prng-index rng (length members))))
+                   (hit ((ice-member-apply m) g (prng-next rng))))
+              (cons (game hit history: '() selected: #f)
+                    (ice-member-name m))))))
+
+    ;; --- the timed Standard score ------------------------------------------------
+
+    ;; The score as Windows shows it in a timed Standard game: the move
+    ;; points less the time penalty, never below zero, plus the bonus on
+    ;; a win. Vegas is untimed and is the bankroll as it stands.
+    (define (timed-score g tr won?)
+      (if (eq? (game-scoring g) 'vegas)
+          (game-score g)
+          (let* ((seconds (quotient (trace-ticks tr) 60))
+                 (penalty (* TIME-PENALTY (quotient seconds TIME-PENALTY-EVERY)))
+                 (base (max 0 (- (game-score g) penalty)))
+                 (bonus (if (and won? (>= seconds BONUS-AFTER))
+                            (quotient BONUS-NUMERATOR seconds)
+                            0)))
+            (+ base bonus))))))
