@@ -11,16 +11,16 @@
 // exits 2, and says which sub-arms did not run.
 //
 //   imports     the wasm's import modules are exactly wasi + gl + sigil_wasm_gles3
-//   boot        the game prints its boot line (seed, first solution pair, centres)
+//   boot        the game prints its boot line (seed, first solution pair, centers)
 //   render      the board region of the WebGL canvas is drawn: many non-background
-//               pixels in at least six colour bins: the copper bars alone give two
+//               pixels in at least six color bins: the copper bars alone give two
 //               or three, a board gives ten (read in the same animation
 //               frame the game draws, so preserveDrawingBuffer:false is not a problem)
-//   tap-select  a synthetic pointerdown at tile A's centre -> "crash: select A"
+//   tap-select  a synthetic pointerdown at tile A's center -> "crash: select A"
 //   tap-match   a second one at its pair B     -> "crash: removed A B tiles 142"
-//   keys-match  undo (the page button), Tab (cursor -> coords), then the
-//               column letter and row digit of each tile of the same pair,
-//               from the game's "crash: labels" boot line -> "crash: removed A B tiles 142"
+//   keys-match  undo (the page button), then the hint-mode tags of each tile of
+//               the same pair, from the game's "crash: labels" boot line
+//               -> "crash: removed A B tiles 142"
 //   console     zero error-level console entries and zero exceptions
 //
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
@@ -213,18 +213,18 @@ const px = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
   // the board region: the middle 80% of the viewport
   const x0 = Math.floor(c.width * 0.1), x1 = Math.floor(c.width * 0.9);
   const y0 = Math.floor(c.height * 0.1), y1 = Math.floor(c.height * 0.8);
-  let lit = 0, total = 0; const colours = new Set();
+  let lit = 0, total = 0; const colors = new Set();
   for (let y = y0; y < y1; y += 2) for (let x = x0; x < x1; x += 2) {
     const i = (y * c.width + x) * 4; const r = d[i], gg = d[i + 1], b = d[i + 2]; total++;
-    if (r + gg + b > 120) { lit++; colours.add(((r >> 5) << 6) | ((gg >> 5) << 3) | (b >> 5)); }
+    if (r + gg + b > 120) { lit++; colors.add(((r >> 5) << 6) | ((gg >> 5) << 3) | (b >> 5)); }
   }
-  resolve({ lit, total, colours: colours.size, w: c.width, h: c.height });
+  resolve({ lit, total, colors: colors.size, w: c.width, h: c.height });
 }))`);
-if (px.lit > px.total * 0.15 && px.colours >= 6) pass("render", `${px.lit}/${px.total} sampled pixels lit, ${px.colours} colour bins, buffer ${px.w}x${px.h}`);
-else fail("render", `lit ${px.lit}/${px.total}, colour bins ${px.colours}, buffer ${px.w}x${px.h}`);
+if (px.lit > px.total * 0.15 && px.colors >= 6) pass("render", `${px.lit}/${px.total} sampled pixels lit, ${px.colors} color bins, buffer ${px.w}x${px.h}`);
+else fail("render", `lit ${px.lit}/${px.total}, color bins ${px.colors}, buffer ${px.w}x${px.h}`);
 
 // ---- 4. tap-select ----------------------------------------------------------
-// virtual centre -> buffer pixel (the letterbox the game applies) -> CSS point
+// virtual center -> buffer pixel (the letterbox the game applies) -> CSS point
 // on the canvas -> a PointerEvent the page template's listener sees.
 async function tap(vx, vy) {
   return evalJS(`(() => {
@@ -263,23 +263,24 @@ if (EXPECT_NO_SELECTION) {
   }
 }
 
-// ---- 6. keys-match (coords model) --------------------------------------------
-// After the tap-match (or, in the positive-control run, on the full board)
-// the arm undoes nothing and picks a NEW pair by keyboard: the game's second
-// boot line gives the first pair's coordinate labels, so Tab (cursor ->
-// coords), then the column letter and row digit of each tile, must first
-// select A and then remove the pair. In the normal run the pair is already
-// gone, so the arm presses "undo" first (the page button's path), which
-// puts it back and prints "crash: undo tiles 144".
+// ---- 6. keys-match (hint mode, the default keyboard model) -------------------
+// The game's second boot line gives the first pair's hint tags (one or two
+// letters each, on every uncovered tile). Typing A's tag must select A and
+// typing B's tag must remove the pair. In the normal run the pair is already
+// gone after tap-match, so the arm presses the page's undo button first
+// (its own path), which puts the tiles back and prints "crash: undo tiles
+// 144"; the tags come back with the board. In the positive-control run the
+// board is still full and no undo is needed.
 async function key(type, k) {
   await evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
 }
 async function press(k) { await key("keydown", k); await sleep(40); await key("keyup", k); await sleep(120); }
-const labels = await waitLine(/^crash: labels (\d+) ([a-z])(\d) (\d+) ([a-z])(\d)$/, 0, 2000);
+async function type(tag) { for (const ch of tag) await press(ch); }
+const labels = await waitLine(/^crash: labels (\d+) ([a-z]+) (\d+) ([a-z]+)$/, 0, 2000);
 let keysOk = false, keysDetail = "";
 if (!labels) keysDetail = "no \"crash: labels\" boot line";
 else {
-  const [, LA, colA, rowA, LB, colB, rowB] = labels.m;
+  const [, LA, tagA, LB, tagB] = labels.m;
   if (!EXPECT_NO_SELECTION) {
     mark = consoleLines.length;
     await evalJS(`document.querySelector('[data-key="undo"]').click()`);
@@ -287,19 +288,18 @@ else {
     if (!undo) keysDetail = "undo button produced no \"crash: undo\" line";
   }
   if (!keysDetail) {
-    await press("Tab"); // cursor -> coords
     mark = consoleLines.length;
-    await press(colA); await press(rowA);
+    await type(tagA);
     const sel = await waitLine(/^crash: select (\d+)$/, mark, 2000);
-    if (!sel) keysDetail = `no "crash: select" after ${colA}${rowA}`;
-    else if (sel.m[1] !== LA) keysDetail = `expected select ${LA} after ${colA}${rowA}, got select ${sel.m[1]}`;
+    if (!sel) keysDetail = `no "crash: select" after typing ${tagA}`;
+    else if (sel.m[1] !== LA) keysDetail = `expected select ${LA} after ${tagA}, got select ${sel.m[1]}`;
     else {
       mark = consoleLines.length;
-      await press(colB); await press(rowB);
+      await type(tagB);
       const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 2000);
-      if (!rem) keysDetail = `no "crash: removed" after ${colB}${rowB}`;
+      if (!rem) keysDetail = `no "crash: removed" after typing ${tagB}`;
       else if (rem.m[3] !== "142") keysDetail = `expected tiles 142, got "${rem.m[0]}"`;
-      else { keysOk = true; keysDetail = `coords model, ${colA}${rowA} then ${colB}${rowB}: ${rem.m[0]}`; }
+      else { keysOk = true; keysDetail = `hint mode, ${tagA} then ${tagB}: ${rem.m[0]}`; }
     }
   }
 }
