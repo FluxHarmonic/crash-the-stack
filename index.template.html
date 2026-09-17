@@ -23,12 +23,24 @@
          ..." on a boot error; the stylesheet hides the first and shows the
          second, so a phone with no WebGL2 sees the reason, not a black box. -->
     <div id="status"></div>
+    <!-- Ruling D14: when a new version of the service worker is waiting,
+         this prompt shows at launch (never mid-board), the UPDATE item
+         below stays until the player applies it, and applying is the only
+         thing that reloads. -->
+    <div id="update-prompt" hidden>
+      <span>A new version is ready.</span>
+      <button type="button" id="update-apply">apply</button>
+      <button type="button" id="update-later">not now</button>
+    </div>
     <!-- The game's commands (undo, shuffle, hint, next) are drawn on the
          canvas by the game itself and tapped there. This one button is the
          page's: fullscreen is a browser matter. No data-key, so the loader
          reports its click as ("click", "fullscreen"), which the game ignores. -->
     <nav class="commands" aria-label="page commands">
       <button type="button" id="fullscreen">full</button>
+      <!-- The placeholder menu's one item until P4's menu: applies a waiting
+           update. Hidden until there is one. -->
+      <button type="button" id="update" hidden>update</button>
     </nav>
   </main>
 
@@ -149,6 +161,89 @@
     document.addEventListener("keydown", function (e) {
       if (e.key === "Tab") e.preventDefault();
     }, true);
+  })();
+
+  // Updates, ruling D14 (2026-09-17): sw.js is registered at every launch and
+  // never skips waiting on its own. When a new version is installed and
+  // WAITING, the launch prompt asks apply / not now (only inside the first
+  // seconds of a launch; a version found later shows only the UPDATE item),
+  // the UPDATE item stays until applied, and applying sends SKIP_WAITING and
+  // reloads on controllerchange. A board in play is never reloaded from
+  // under the player. ?force-update=1 is the recovery path: every worker
+  // unregistered, every cache deleted, then a plain reload. The state is
+  // published as window.crashUpdate for the browser arm.
+  (function () {
+    "use strict";
+    var status = { version: "__VERSION__", state: "none", prompted: false, reg: null };
+    window.crashUpdate = status;
+    if (!("serviceWorker" in navigator)) { status.state = "unsupported"; return; }
+    var params = new URLSearchParams(location.search);
+    if (params.get("force-update") === "1") {
+      status.state = "forcing";
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        return Promise.all(regs.map(function (r) { return r.unregister(); }));
+      }).then(function () {
+        return caches.keys().then(function (names) {
+          return Promise.all(names.map(function (n) { return caches.delete(n); }));
+        });
+      }).then(function () {
+        params.delete("force-update");
+        var rest = params.toString();
+        location.replace(location.pathname + (rest ? "?" + rest : ""));
+      });
+      return;
+    }
+    var launchUntil = Date.now() + 8000;
+    var prompt = document.getElementById("update-prompt");
+    var item = document.getElementById("update");
+    var applied = false;
+    function waiting(reg) {
+      status.reg = reg;
+      status.state = "waiting";
+      item.hidden = false;
+      if (Date.now() < launchUntil) { prompt.hidden = false; status.prompted = true; }
+    }
+    function track(reg) {
+      status.reg = reg;
+      if (reg.waiting && navigator.serviceWorker.controller) waiting(reg);
+      reg.addEventListener("updatefound", function () {
+        var w = reg.installing;
+        if (!w) return;
+        w.addEventListener("statechange", function () {
+          if (w.state === "installed" && navigator.serviceWorker.controller) waiting(reg);
+        });
+      });
+    }
+    function apply() {
+      if (!status.reg || !status.reg.waiting) return;
+      applied = true;
+      status.state = "applying";
+      status.reg.waiting.postMessage({ type: "SKIP_WAITING" });
+    }
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (applied) location.reload();
+    });
+    status.apply = apply;
+    status.check = function () { return status.reg ? status.reg.update() : Promise.resolve(); };
+    status.activeVersion = function () {
+      return new Promise(function (resolve) {
+        var c = navigator.serviceWorker.controller;
+        if (!c) { resolve(null); return; }
+        var ch = new MessageChannel();
+        ch.port1.onmessage = function (e) { resolve(e.data && e.data.version); };
+        c.postMessage({ type: "VERSION" }, [ch.port2]);
+      });
+    };
+    document.getElementById("update-apply").addEventListener("click", apply);
+    document.getElementById("update-later").addEventListener("click", function () { prompt.hidden = true; });
+    item.addEventListener("click", apply);
+    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
+      if (status.state === "none") status.state = "registered";
+      track(reg);
+    }).catch(function (err) {
+      status.state = "failed";
+      document.getElementById("status").textContent = "Service worker refused: " + err.message;
+    });
   })();
   </script>
   <!--sigil:app-->

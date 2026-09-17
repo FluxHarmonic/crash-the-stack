@@ -31,6 +31,13 @@
 //   reload      the page is reloaded (fresh navigation, same origin) and the
 //               game boots from localStorage: "crash: restored tiles 142 ...
 //               phase counter ice 1 locked ..." (gate leg 4, web)
+//   update      ruling D14: with the game running under a controlling service
+//               worker, the arm serves a sw.js with a new version and asks for
+//               an update check; the new worker must reach WAITING without any
+//               reload (the page's token survives, no new boot line) and with
+//               only the UPDATE item shown, not the launch prompt (the launch
+//               window has passed); on the next launch the prompt must show,
+//               and applying it must reload onto the new version
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -73,7 +80,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "traced", "reload", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "traced", "reload", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -94,12 +101,16 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 }
 
 // ---- static server on loopback ---------------------------------------------
+// swVersionOverride, when set, is stamped into the served sw.js in place of
+// the build's version: how the update sub-arm plays a new deploy.
+let swVersionOverride = null;
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   fs.readFile(fp, (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
+    if (urlPath === "/sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
     res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(buf);
   });
@@ -146,7 +157,7 @@ function shutdown(code) {
 // its CDP port are never leaked for the next run to drive by mistake.
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 120000;
+const WHOLE_RUN_MS = 180000;
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -210,6 +221,8 @@ function timedOut(name) {
 // ?trace switches on the game's console lines; a player's page prints nothing.
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
+// any boot line, a restored board's "pair none" included
+const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
 const boot = await waitLine(BOOT_RE, 0, 20000);
 if (!boot) { fail("boot", "no boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
 const [, seed, tiles0, A, AX, AY, B, BX, BY] = boot.m;
@@ -396,7 +409,62 @@ let iceLock = null;
   }
 }
 
-// ---- 9. manifest: the PWA is installable from this origin -------------------
+// ---- 9. update: a new service-worker version waits, never interrupts -------
+{
+  const builtVersion = (fs.readFileSync(path.join(ROOT, "index.html"), "utf8").match(/version: "([^"]+)"/) || [])[1];
+  const swExists = fs.existsSync(path.join(ROOT, "sw.js"));
+  if (EXPECT_NO_SELECTION) skip("update", "not part of the positive-control run");
+  else if (!swExists || !builtVersion) fail("update", `build has no sw.js or no stamped version (sw.js ${swExists}, version ${builtVersion})`);
+  else {
+    let detail = "";
+    // the page after the reload sub-arm is controlled by the build's worker
+    const controlled = await evalJS(`!!navigator.serviceWorker.controller`);
+    const active = controlled ? await evalJS(`window.crashUpdate.activeVersion()`) : null;
+    if (!controlled) detail = "the reloaded page is not controlled by a service worker";
+    else if (active !== builtVersion) detail = `active worker version ${active}, built ${builtVersion}`;
+    if (!detail) {
+      // past the launch window, with a board in play: a new deploy lands
+      await sleep(8500);
+      await evalJS(`window.__crashToken = "still-here"`);
+      const bootsBefore = consoleLines.filter((l) => BOOT_ANY.test(l)).length;
+      swVersionOverride = "v-next";
+      await evalJS(`window.crashUpdate.check()`);
+      let state = null;
+      for (let i = 0; i < 40 && state !== "waiting"; i++) { await sleep(250); state = await evalJS(`window.crashUpdate.state`); }
+      const token = await evalJS(`window.__crashToken`);
+      const bootsAfter = consoleLines.filter((l) => BOOT_ANY.test(l)).length;
+      const itemShown = await evalJS(`!document.getElementById("update").hidden`);
+      const promptShown = await evalJS(`!document.getElementById("update-prompt").hidden`);
+      if (state !== "waiting") detail = `new worker did not reach waiting within 10 s (state ${state})`;
+      else if (token !== "still-here" || bootsAfter !== bootsBefore) detail = `the page reloaded under a running board (token ${token}, boots ${bootsBefore} -> ${bootsAfter})`;
+      else if (!itemShown) detail = "UPDATE item not shown while a version waits";
+      else if (promptShown) detail = "the launch prompt showed mid-board";
+    }
+    if (!detail) {
+      // the next launch: the prompt, then apply
+      mark = consoleLines.length;
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+      const boot2 = await waitLine(BOOT_ANY, mark, 20000);
+      let promptShown = false;
+      for (let i = 0; i < 40 && !promptShown; i++) { await sleep(250); promptShown = await evalJS(`!document.getElementById("update-prompt").hidden`); }
+      if (!boot2) detail = "no boot line on the next launch";
+      else if (!promptShown) detail = "no launch prompt on the next launch with a version waiting";
+      else {
+        mark = consoleLines.length;
+        await evalJS(`document.getElementById("update-apply").click()`);
+        const boot3 = await waitLine(BOOT_ANY, mark, 20000);
+        const version = boot3 ? await evalJS(`window.crashUpdate.activeVersion()`) : null;
+        if (!boot3) detail = "applying the update did not reload the page";
+        else if (version !== "v-next") detail = `after applying, the active worker is ${version}, expected v-next`;
+        else pass("update", `waited without a reload mid-board, prompted on the next launch, applied to ${version}`);
+      }
+    }
+    swVersionOverride = null;
+    if (detail) fail("update", detail);
+  }
+}
+
+// ---- 10. manifest: the PWA is installable from this origin ------------------
 {
   try {
     const m = await send("Page.getAppManifest");
@@ -421,7 +489,7 @@ let iceLock = null;
   }
 }
 
-// ---- 10. console ------------------------------------------------------------
+// ---- 11. console ------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
 else fail("console", `${consoleErrors.length} error(s): ${JSON.stringify(consoleErrors.slice(0, 5))}`);
 

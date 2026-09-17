@@ -11,9 +11,39 @@
 ;;;   scripts/dev sigil build --config web               browser (manifest has binaryen)
 ;;;   scripts/serve-web                                  host build/web on wg0
 
+(import (sigil process) (sigil string) (sigil time) (sigil math))
+
 (define sigil-repo "codeberg:sigil/sigil")
 (define app-repo "codeberg:sigil/sigil-app")
 (define graphics-repo "codeberg:sigil/sigil-graphics")
+
+;; The web build's version, for the service worker and the page: the git
+;; commit, plus the build's second when the tree was dirty so two dirty
+;; builds of one commit are still two versions (ruling D14: the installed
+;; PWA prompts when a NEW version is waiting, so a version must change
+;; whenever the files might have).
+(define (web-version)
+  (let* ((sha (string-trim (process-output->string "git" "rev-parse" "--short=12" "HEAD")))
+         (dirty (string-trim (process-output->string "git" "status" "--porcelain" "--untracked-files=no")))
+         (sha (if (string=? sha "") "unversioned" sha)))
+    (if (string=? dirty "")
+        sha
+        (string-append sha "-dirty-" (number->string (exact (floor (current-second))))))))
+
+;; After link-web-application on a wasm target: copy web/sw.js into the
+;; build with its version stamped, and stamp the page's __VERSION__ too.
+(define (stamp-web-version ctx)
+  (let* ((out (config-output-dir (context-config ctx)))
+         (version (web-version))
+         (stamp (lambda (text)
+                  (string-replace text "__VERSION__" version)))
+         (sw (read-file-string "web/sw.js"))
+         (page-path (path-join out "index.html"))
+         (page (read-file-string page-path)))
+    (write-file-string (path-join out "sw.js") (stamp sw))
+    (write-file-string page-path (stamp page))
+    (display "  web version ") (display version) (newline)
+    ctx))
 
 (package
   name: "crash-the-stack"
@@ -108,4 +138,8 @@
         (lambda (ctx)
           (if (wasm-target? (context-config ctx))
               ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx)
+              ctx))
+        (lambda (ctx)
+          (if (wasm-target? (context-config ctx))
+              (stamp-web-version ctx)
               ctx))))))
