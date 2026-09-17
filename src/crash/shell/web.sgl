@@ -35,6 +35,10 @@
 ;;;   crash: seed S tiles N pair A AX AY B BX BY   the first solution pair
 ;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
+;;;   crash: tags shown|hidden touch on|off fresh on|off   the boot's inputs
+;;;   crash: update waiting|prompt|apply   the web build's waiting update, as
+;;;                                         the game shows it (ruling D14)
+;;;   crash: control apply X Y             the prompt's APPLY box (with later, update)
 ;;;   crash: control NAME X Y              the centre of each HUD control
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
@@ -43,6 +47,8 @@
 ;;;   crash: removed A B tiles N           a pair left the board
 ;;;   crash: unlock A B                    a locked pair's first match
 ;;;   crash: lock A B                      the ICE locked a pair
+;;;   crash: remap                         the ICE re-dealt the stack
+;;;   crash: ice nothing                   an interval with nothing to hit
 ;;;   crash: trace V H S PHASE ICE         the meter after a hint, a shuffle, a
 ;;;                                         phase change or a counter-hack: value,
 ;;;                                         hints, shuffles, phase, counter-hacks fired
@@ -79,6 +85,8 @@
     ;; --- state between dispatches ------------------------------------------
     (define *session* #f)
     (define *geom* #f)
+    (define *lay* #f)
+    (define *booted* #f)     ; the table has been booted (on the first frame)
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
@@ -198,7 +206,7 @@
               ((not (= (trace-ice-count t0) (trace-ice-count t1)))
                (case (trace-last-ice t1)
                  ((lock) (report-lock! b0 b1))
-                 ((shuffle) (say "shuffle"))
+                 ((remap) (say "remap"))
                  (else (say "ice" "nothing"))))
               ((< n1 n0)
                ;; Two tiles left: the selected one and the one just picked.
@@ -253,12 +261,16 @@
                    "pair" a (car ca) (cdr ca)
                    b (car cb) (cdr cb))
               (say "labels" a (slot-tag s a) b (slot-tag s b))))
+        (say "tags"
+             (if (session-labels-shown s) "shown" "hidden")
+             "touch" (if *touch* "on" "off")
+             "fresh" (if *fresh* "on" "off"))
         (for-each (lambda (c)
                     (say "control"
                          (car c)
                          (+ (cadr c) (half (cadddr c)))
                          (+ (caddr c) (half (list-ref c 4)))))
-                  (geometry-controls *geom*))))
+                  (append (geometry-controls *geom*) (update-controls *geom*)))))
 
     ;; --- one frame -----------------------------------------------------------
 
@@ -282,7 +294,49 @@
         (when ms (set! *last-ms* ms))
         dt))
 
+    ;; Boot the table: the saved board unless ?fresh, tags hidden on a touch
+    ;; screen. Called on the first frame, and again whenever a page
+    ;; parameter (?fresh, the touch flag) lands after that. (The loader
+    ;; calls setInstance before sigil_wasm_init, so a dispatch made there is
+    ;; dropped with "VM not initialized", measured 2026-09-17 by P2 and by
+    ;; this row's touch probe; the page sends its parameters on a later
+    ;; task and the shell boots lazily.)
+    (define (boot!)
+      (let ((booted (boot-session *lay* 1 *fresh*)))
+        (set! *session* (if *touch*
+                            (session (car booted) labels-shown: #f)
+                            (car booted)))
+        (set! *restored* (cdr booted))
+        (set! *announced* #f)
+        (store-remove! UPDATE-KEY)
+        (set! *booted* #t)))
+
+    ;; A page parameter landed: take it, and if the table is already up,
+    ;; boot again with it.
+    (define (param! setter)
+      (setter)
+      (when *booted* (boot!))
+      0)
+
+    ;; The update's state reaches the session; the game draws it and takes
+    ;; the choice ((crash input) step-update). Reported for the arm.
+    (define (update! state)
+      (when *session*
+        (set! *session* (session-with-update *session* state))
+        (say "update" state))
+      0)
+
+    ;; The player's APPLY reaches the page through the store (localStorage,
+    ;; which the page polls): the dispatch ABI's return value cannot carry
+    ;; it (measured 2026-09-17: the page saw 0 whatever the handler
+    ;; answered). The key is cleared at boot and by the page once read.
+    (define UPDATE-KEY "update")
+
+    (define (update-chosen!)
+      (store-set! UPDATE-KEY "apply"))
+
     (define (web-tick dt)
+      (unless *booted* (boot!))
       (when *session*
         (gles3-resize-to-display)
         (ensure-texture!)
@@ -308,6 +362,9 @@
                (x (fx-observe x before after *geom*)))
           (set! *session* after)
           (set! *fx* x)
+          (unless (eq? (session-update before) (session-update after))
+            (say "update" (session-update after))
+            (when (eq? (session-update after) 'apply) (update-chosen!)))
           (report-change! before after)
           (report-trace! before after)
           (when (not (= (session-seed before) (session-seed after)))
@@ -325,18 +382,11 @@
       (gfx-setup)
       (set-viewport VW VH)
       (set-letterbox-color 0.0 0.0 0.0)
-      (let ((lay (turtle-layout)))
-        (set! *geom* (make-geometry lay VW VH))
-        ;; ?fresh arrives as a ("fresh", "on") dispatch before the first frame
-        (let ((booted (boot-session lay 1 *fresh*)))
-          ;; a touch screen starts every launch with the tags hidden, saved
-          ;; setting or not (David, 2026-09-17: his restored board kept them
-          ;; on); Space shows them for the session
-          (set! *session* (if *touch*
-                              (session (car booted) labels-shown: #f)
-                              (car booted)))
-          (set! *restored* (cdr booted)))
-        (set! *fx* (fx-new)))
+      ;; the table itself boots on the first frame (boot!), after the page's
+      ;; parameters have had a task to land
+      (set! *lay* (turtle-layout))
+      (set! *geom* (make-geometry *lay* VW VH))
+      (set! *fx* (fx-new))
       (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
       ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
@@ -349,6 +399,10 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
-            ((string=? type "fresh") (set! *fresh* (string=? payload "on")) 0)
-            ((string=? type "touch") (set! *touch* (string=? payload "on")) 0)
+            ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
+            ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
+            ((string=? type "update")
+             (cond ((string=? payload "waiting") (update! 'waiting))
+                   ((string=? payload "prompt") (update! 'prompt))
+                   (else 0)))
             (else 0)))))

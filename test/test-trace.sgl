@@ -156,7 +156,7 @@
       (assert-true (board-equal? (session-board traced) (session-board before-first))))
     (test "the first counter-hack fires at ICE-FIRST and is a member of the set"
       (assert-equal 1 (trace-ice-count (tr-of first)))
-      (assert-true (and (memq (trace-last-ice (tr-of first)) '(lock shuffle)) #t))
+      (assert-true (and (memq (trace-last-ice (tr-of first)) '(lock remap)) #t))
       (assert-false (board-equal? (session-board traced) (session-board first)))
       (assert-equal (* TPS ICE-INTERVAL) (trace-ice-timer (tr-of first))))
     (test "the second fires one ICE-INTERVAL later, not before"
@@ -177,13 +177,38 @@
                   (let* ((s (under-ice (one-match-board rng) 1))
                          (hit (session-advance s 1)))
                     (assert-equal 1 (trace-ice-count (tr-of hit)))
-                    (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
+                    (assert-equal 'remap (trace-last-ice (tr-of hit)))
                     (assert-equal '() (locked-of hit))))
                 '(1 2 3 4 5 6 7 8 9 10 11 12))
       (assert-true #t))
     (test "the lock member itself refuses a board with one unlocked legal match"
-      (assert-equal '(shuffle)
+      (assert-equal '(remap)
                     (map ice-member-name (ice-applicable (one-match-board 1)))))
+    (test "three free tiles of one face: three matches that share tiles never receive a lock"
+      ;; the review's probe: (1 2) (1 3) (2 3) all share a tile, so any lock
+      ;; would be weak on arrival; the ICE must remap instead
+      (let ((b (board-new (tower-3-layout) (vector 0 0 0 0 1 1))))
+        (assert-equal 3 (length (unlocked-matches b)))
+        (assert-equal '() (safe-lock-pairs b))
+        (assert-equal '(remap) (map ice-member-name (ice-applicable b)))
+        (for-each (lambda (rng)
+                    (let* ((bb (board-new (tower-3-layout) (vector 0 0 0 0 1 1))))
+                      (set-board-rng! bb rng)
+                      (let ((hit (session-advance (under-ice bb 1) 1)))
+                        (assert-equal '() (locked-of hit))
+                        (assert-equal 'remap (trace-last-ice (tr-of hit))))))
+                  '(2 4 6 8))
+        (assert-true #t)))
+    (test "a fresh lock is strong on arrival: a disjoint match remains"
+      (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+             (b (session-board traced))
+             (now (trace-ticks (session-trace traced))))
+        (for-each (lambda (pair)
+                    (let ((locked (board-lock-pair b (car pair) (cdr pair) now)))
+                      (assert-true (pair? (unlocked-matches locked)))
+                      (assert-true (lock-strong? locked (car pair) now))))
+                  (safe-lock-pairs b))
+        (assert-true (pair? (safe-lock-pairs b)))))
     (test "with nothing applicable the interval passes with no effect"
       (let* ((b (board-new (sexp->layout '(stack ((0 . 0) (3 . 0)))) (vector 4 4)))
              (s (under-ice b 1))
@@ -285,8 +310,8 @@
   (let* ((s (under-ice (one-match-board 3) 1))
          (hit (session-advance s 1))
          (b (session-board hit)))
-    (test "the ICE re-dealt the stack"
-      (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
+    (test "the ICE remapped the stack"
+      (assert-equal 'remap (trace-last-ice (tr-of hit)))
       (assert-equal MSG-REMAPPED (session-message hit)))
     (test "six tiles before, six after, faces moved"
       (assert-equal 6 (board-tile-count b))
@@ -302,8 +327,22 @@
              (s (under-ice locked 1))
              (hit (session-advance s 1)))
         (assert-equal '(3 5) (board-locked-slots locked))
-        (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
-        (assert-equal '() (locked-of hit))))))
+        (assert-equal 'remap (trace-last-ice (tr-of hit)))
+        (assert-equal '() (locked-of hit))))
+    (test "a remainder the generator cannot re-deal is reported as nothing, locks kept"
+      ;; column-4: no face assignment clears it, so reshuffle answers unchanged
+      (let* ((b (board-new (column-4-layout) (vector 0 0 1 1)))
+             (locked (board-lock-pair b 0 1 NOW))
+             (hit (session-advance (under-ice locked 1) 1)))
+        (assert-equal 1 (trace-ice-count (tr-of hit)))
+        (assert-false (trace-last-ice (tr-of hit)))
+        (assert-equal '(0 1) (locked-of hit))
+        (assert-equal MSG-NOTHING (session-message hit))))
+    (test "the player's own shuffle drops every lock with the faces"
+      (let* ((b (board-lock-pair (two-pairs-board) 0 1 NOW))
+             (s (under-ice b (* TPS ICE-INTERVAL)))
+             (shuffled (session-step s (frame '(s) '(ctrl)) geom)))
+        (assert-equal '() (locked-of shuffled))))))
 
 (test-group "trace: (e) what a hint and a shuffle cost in each phase"
   (let* ((s (session-new lay SEED))
@@ -396,6 +435,23 @@
              (done (session-pick (session-pick (session-pick (session-pick s 0) 1) 2) 3)))
         (assert-equal 'cleared (phase-of done))
         (assert-equal 'trace (trace-cleared-in (tr-of done)))))))
+
+(test-group "trace: a layout's header sets this board's thresholds"
+  (let* ((lay2 (sexp->layout '(stack (trace-at 60) (sever-at 30)
+                                     ((0 . 0) (3 . 0) (6 . 0) (9 . 0)))))
+         (s (session-new lay2 1))
+         (tr (session-trace s)))
+    (test "the session's trace carries the header's numbers"
+      (assert-equal 60 (trace-trace-at tr))
+      (assert-equal 30 (trace-sever-at tr)))
+    (test "the trace completes at the header's trace-at, not the constant"
+      (let ((traced (session-advance s (* TPS 60))))
+        (assert-equal 'counter (phase-of traced))
+        (assert-equal (* TPS 30) (trace-countdown (tr-of traced)))))
+    (test "the Turtle, with no header, uses the constants"
+      (let ((t0 (session-trace (session-new lay SEED))))
+        (assert-equal TRACE-AT (trace-trace-at t0))
+        (assert-equal SEVER-AT (trace-sever-at t0))))))
 
 (test-group "trace: (h) clean mode is GNOME's clock and nothing else"
   (let* ((clean (session-with-trace-mode (session-new lay SEED) 'clean))

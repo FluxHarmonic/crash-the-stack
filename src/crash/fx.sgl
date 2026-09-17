@@ -37,7 +37,7 @@
           fx-frame fx-observe fx-idle?
           fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
           fx-glitch fx-ticks fx-toast
-          LOCK-TICKS GLITCH-TICKS TOAST-TICKS
+          LOCK-TICKS LOCK-SHAKE GLITCH-TICKS TOAST-TICKS
           effect effect? effect-kind effect-ids effect-tween effect-data
           PULSE-TICKS PULSE-SCALE
           MATCH-TICKS MATCH-LIFT MATCH-SCALE MATCH-PARTICLES
@@ -68,7 +68,8 @@
     (define CLEARED-TICKS 150)     ; the STACK CRASHED sequence
     (define RAIN-DROPS 60)
     (define SETTLE-TICKS 10)       ; tiles an undo brings back scale in
-    (define LOCK-TICKS 30)         ; a freshly locked pair shakes, twice a mismatch's length
+    (define LOCK-TICKS 24)         ; a freshly locked pair shakes, a little longer than a mismatch
+    (define LOCK-SHAKE 1.5)        ; and gently: pixels of amplitude (David, 2026-09-17: too violent at the mismatch's)
     (define UNLOCK-TICKS 24)       ; a broken lock: both tiles swell and settle
     (define GLITCH-TICKS 45)       ; the full-screen glitch when the trace completes
     (define TOAST-TICKS 160)       ; a message: slides in from the right, holds about 2 s, slides out
@@ -247,107 +248,132 @@
 
     ;; Everything the step changed, as effects. g is the geometry the tiles
     ;; were drawn with (ghosts keep their rects from it).
+    ;; A shake of the given amplitude on some tiles.
+    (define (shake-on x ids ticks amplitude)
+      (spawn x (effect kind: 'shake
+                       ids: ids
+                       tween: (life ticks 'linear)
+                       data: amplitude)))
+
+    ;; The mismatch shake's amplitude: GNOME's max(3 px, 4% of the tile width).
+    (define (mismatch-amplitude g)
+      (max SHAKE-MIN (* SHAKE-FRACTION (geometry-tile-w g))))
+
+    ;; Tiles gone: a match. Same tiles, faces moved, history not shorter: a
+    ;; shuffle or a remap. Tiles back: an undo, they settle.
+    (define (observe-tiles x b0 b1 g)
+      (let ((gone (gone-tiles b0 b1))
+            (back (returned-tiles b0 b1)))
+        (cond ((= (length gone) 2)
+               (spawn-match (without-kind x 'pulse) b0 g (car gone) (cadr gone)))
+              ((and (null? gone)
+                    (null? back)
+                    (>= (length (board-history b1)) (length (board-history b0)))
+                    (not (equal? (vector->list (board-faces b0))
+                                 (vector->list (board-faces b1)))))
+               (spawn-shuffle (without-kind x 'pulse) b0 b1))
+              ((pair? back)
+               (spawn (without-kind x 'pulse)
+                      (effect kind: 'settle
+                              ids: back
+                              tween: (life SETTLE-TICKS 'out-back))))
+              (else x))))
+
+    ;; A newly selected tile pulses; selected while another was (a mismatch,
+    ;; or the pair would be gone) it also shakes, as GNOME shakes the second
+    ;; tile. A cleared selection ends the pulse.
+    (define (observe-selection x b0 b1 g)
+      (let ((sel0 (board-selected b0))
+            (sel1 (board-selected b1)))
+        (cond ((and sel1 (not (eqv? sel0 sel1)))
+               (let ((x (spawn (without-kind x 'pulse)
+                               (effect kind: 'pulse
+                                       ids: (list sel1)
+                                       tween: (life PULSE-TICKS 'out-quad)))))
+                 (if sel0 (shake-on x (list sel1) SHAKE-TICKS (mismatch-amplitude g)) x)))
+              ((and sel0 (not sel1)) (without-kind x 'pulse))
+              (else x))))
+
+    ;; The priced hint: a new ring blinks; a cleared ring stops.
+    (define (observe-hint x before after)
+      (cond ((and (session-hint after)
+                  (not (eqv? (session-hint before) (session-hint after))))
+             (spawn (without-kind x 'blink)
+                    (effect kind: 'blink
+                            ids: (list (session-hint after))
+                            tween: (life (* BLINKS BLINK-TICKS) 'linear))))
+            ((not (session-hint after)) (without-kind x 'blink))
+            (else x)))
+
+    ;; Locks: a broken one (tiles stayed, locks went) swells both tiles; a
+    ;; fresh one from the ICE shakes both, longer than a mismatch.
+    (define (observe-locks x b0 b1 g)
+      (let* ((gone (gone-tiles b0 b1))
+             (unlocked (filter (lambda (id)
+                                 (and (tile-present? b1 id) (not (tile-locked? b1 id))))
+                               (board-locked-slots b0)))
+             (newly-locked (filter (lambda (id) (not (tile-locked? b0 id)))
+                                   (board-locked-slots b1)))
+             (x (if (or (null? unlocked) (pair? gone))
+                    x
+                    (spawn x (effect kind: 'unlock
+                                     ids: unlocked
+                                     tween: (life UNLOCK-TICKS 'out-quad))))))
+        (if (null? newly-locked) x (shake-on x newly-locked LOCK-TICKS LOCK-SHAKE))))
+
+    ;; A strong lock refused a pick: that tile shakes.
+    (define (observe-refused x before after g)
+      (if (and (session-refused after)
+               (or (not (eqv? (session-refused before) (session-refused after)))
+                   (not (eq? before after))))
+          (shake-on x (list (session-refused after)) SHAKE-TICKS LOCK-SHAKE)
+          x))
+
+    ;; A fresh message becomes a toast, replacing the one before it.
+    (define (observe-message x before after)
+      (let ((m1 (session-message after)))
+        (if (and (> (string-length m1) 0)
+                 (or (not (string=? m1 (session-message before)))
+                     (not (eq? (session-board before) (session-board after)))))
+            (spawn (without-kind x 'toast)
+                   (effect kind: 'toast
+                           tween: (life TOAST-TICKS 'linear)
+                           data: m1))
+            x)))
+
+    ;; The trace completing is the glitch; the board clearing, the rain.
+    (define (observe-phase x before after)
+      (let ((x (if (and (board-cleared? (session-board after))
+                        (not (board-cleared? (session-board before))))
+                   (spawn-cleared x)
+                   x)))
+        (if (and (eq? (trace-phase (session-trace after)) 'counter)
+                 (not (eq? (trace-phase (session-trace before)) 'counter)))
+            (spawn x (effect kind: 'glitch tween: (life GLITCH-TICKS 'linear)))
+            x)))
+
+    ;; Everything the step changed, as effects, one observer per kind of
+    ;; change. g is the geometry the tiles were drawn with (ghosts keep
+    ;; their rects from it). A new deal resets the table: nothing to
+    ;; animate but the clock.
     (define (fx-observe x before after g)
-      (let* ((b0 (session-board before))
-             (b1 (session-board after))
-             (gone (gone-tiles b0 b1))
-             (back (returned-tiles b0 b1))
-             (h0 (length (board-history b0)))
-             (h1 (length (board-history b1)))
-             (sel0 (board-selected b0))
-             (sel1 (board-selected b1))
-             (new-deal? (not (= (session-seed before) (session-seed after)))))
-        (cond
-          ;; a new deal: the table is reset, nothing to animate but the clock
-          (new-deal? (fx x effects: '()))
-          (else
-           (let* ((x (cond ((= (length gone) 2)
-                            (spawn-match (without-kind x 'pulse) b0 g (car gone) (cadr gone)))
-                           ((and (null? gone) (null? back) (> h1 h0)
-                                 (not (equal? (vector->list (board-faces b0))
-                                              (vector->list (board-faces b1)))))
-                            (spawn-shuffle (without-kind x 'pulse) b0 b1))
-                           ((pair? back)
-                            (spawn (without-kind x 'pulse)
-                                   (effect kind: 'settle
-                                           ids: back
-                                           tween: (life SETTLE-TICKS 'out-back))))
-                           (else x)))
-                  ;; selection: a new tile selected pulses; a tile selected while
-                  ;; another was (and did not match, or the pair would be gone)
-                  ;; shakes as GNOME shakes the second tile
-                  (x (cond ((and sel1 (not (eqv? sel0 sel1)))
-                            (let ((x (spawn (without-kind x 'pulse)
-                                            (effect kind: 'pulse
-                                                    ids: (list sel1)
-                                                    tween: (life PULSE-TICKS 'out-quad)))))
-                              (if sel0
-                                  (spawn x (effect kind: 'shake
-                                                   ids: (list sel1)
-                                                   tween: (life SHAKE-TICKS 'linear)
-                                                   data: (max SHAKE-MIN
-                                                              (* SHAKE-FRACTION (geometry-tile-w g)))))
-                                  x)))
-                           ((and sel0 (not sel1)) (without-kind x 'pulse))
-                           (else x)))
-                  ;; the priced hint: a new ring blinks; a cleared ring stops
-                  (x (cond ((and (session-hint after)
-                                 (not (eqv? (session-hint before) (session-hint after))))
-                            (spawn (without-kind x 'blink)
-                                   (effect kind: 'blink
-                                           ids: (list (session-hint after))
-                                           tween: (life (* BLINKS BLINK-TICKS) 'linear))))
-                           ((not (session-hint after)) (without-kind x 'blink))
-                           (else x)))
-                  (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
-                         (spawn-cleared x)
-                         x))
-                  ;; a strong lock refused a pick: that tile shakes
-                  (x (if (and (session-refused after)
-                              (or (not (eqv? (session-refused before) (session-refused after)))
-                                  (not (eq? before after))))
-                         (spawn x (effect kind: 'shake
-                                          ids: (list (session-refused after))
-                                          tween: (life SHAKE-TICKS 'linear)
-                                          data: (max SHAKE-MIN
-                                                     (* SHAKE-FRACTION (geometry-tile-w g)))))
-                         x))
-                  ;; a fresh message: a toast (the old one is replaced)
-                  (m1 (session-message after))
-                  (x (if (and (> (string-length m1) 0)
-                              (or (not (string=? m1 (session-message before)))
-                                  (not (eq? b0 b1))))
-                         (spawn (without-kind x 'toast)
-                                (effect kind: 'toast
-                                        tween: (life TOAST-TICKS 'linear)
-                                        data: m1))
-                         x))
-                  ;; the trace completed: the ICE is on you
-                  (x (if (and (eq? (trace-phase (session-trace after)) 'counter)
-                              (not (eq? (trace-phase (session-trace before)) 'counter)))
-                         (spawn x (effect kind: 'glitch
-                                          tween: (life GLITCH-TICKS 'linear)))
-                         x))
-                  ;; a lock broken (tiles stayed, locks went): both swell
-                  (unlocked (filter (lambda (id)
-                                      (and (tile-present? b1 id) (not (tile-locked? b1 id))))
-                                    (board-locked-slots b0)))
-                  (x (if (or (null? unlocked) (pair? gone))
-                         x
-                         (spawn x (effect kind: 'unlock
-                                          ids: unlocked
-                                          tween: (life UNLOCK-TICKS 'out-quad)))))
-                  ;; the ICE locked a pair: both tiles shake
-                  (newly-locked (filter (lambda (id) (not (tile-locked? b0 id)))
-                                        (board-locked-slots b1)))
-                  (x (if (null? newly-locked)
-                         x
-                         (spawn x (effect kind: 'shake
-                                          ids: newly-locked
-                                          tween: (life LOCK-TICKS 'linear)
-                                          data: (max SHAKE-MIN
-                                                     (* SHAKE-FRACTION (geometry-tile-w g))))))))
-             x)))))
+      (if (not (= (session-seed before) (session-seed after)))
+          (fx x effects: '())
+          (let ((b0 (session-board before))
+                (b1 (session-board after)))
+            (observe-phase
+              (observe-message
+                (observe-refused
+                  (observe-locks
+                    (observe-hint
+                      (observe-selection
+                        (observe-tiles x b0 b1 g)
+                        b0 b1 g)
+                      before after)
+                    b0 b1 g)
+                  before after g)
+                before after)
+              before after))))
 
     ;; --- reading the effects back --------------------------------------------
 

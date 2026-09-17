@@ -21,10 +21,12 @@
           (sigil list)
           (sigil math)
           (crash stack layout)
-          (crash input))
+          (crash input)
+          (crash trace))
 
   (export editor editor? editor-new editor-from-layout
           editor-slots editor-cursor editor-dim editor-message editor-count
+          editor-trace-at editor-sever-at THRESHOLD-STEP
           editor-step editor-place editor-remove editor-move
           placeable? editor-datum editor-layout
           CANVAS-MIN-HX CANVAS-MAX-HX CANVAS-MIN-HY CANVAS-MAX-HY CANVAS-LAYERS
@@ -42,19 +44,32 @@
     (define DIM-MODES '(full dim hidden))
 
     ;; slots: (layer hx hy) triples, in placement order. cursor: the same
-    ;; shape. dim: how layers above the cursor's are drawn.
+    ;; shape. dim: how layers above the cursor's are drawn. trace-at,
+    ;; sever-at: this layout's thresholds, written to the file's header.
     (define-struct editor
       (slots default: '())
       (cursor default: '(0 0 0))
       (dim default: 'full)
+      (trace-at default: TRACE-AT)
+      (sever-at default: SEVER-AT)
       (message default: ""))
+
+    (define THRESHOLD-STEP 10)
+
+    ;; Digit keys are symbols the reader cannot spell.
+    (define KEY-1 (string->symbol "1"))
+    (define KEY-2 (string->symbol "2"))
+    (define KEY-3 (string->symbol "3"))
+    (define KEY-4 (string->symbol "4"))
 
     (define (editor-new)
       (editor))
 
     (define (editor-from-layout lay)
       (editor slots: (map (lambda (s) (list (slot-layer s) (slot-hx s) (slot-hy s)))
-                          (vector->list (layout-slots lay)))))
+                          (vector->list (layout-slots lay)))
+              trace-at: (layout-setting lay 'trace-at TRACE-AT)
+              sever-at: (layout-setting lay 'sever-at SEVER-AT)))
 
     (define (editor-count e)
       (length (editor-slots e)))
@@ -137,7 +152,9 @@
     ;;
     ;; Arrows or hjkl move one tile (two half-units); with shift held, one
     ;; half-unit. u and d go a layer up and down. Space places or removes
-    ;; at the cursor. Tab cycles the dimming of the layers above.
+    ;; at the cursor. Tab cycles the dimming of the layers above. 1 and 2
+    ;; turn this layout's trace-at down and up by THRESHOLD-STEP seconds,
+    ;; 3 and 4 its sever-at.
 
     (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
     (define (held? f key) (and (memq key (input-frame-held f)) #t))
@@ -161,6 +178,14 @@
                    (editor-place e (editor-cursor e))))
               ((pressed? f 'tab)
                (editor e dim: (next-dim (editor-dim e))))
+              ((pressed? f KEY-1)
+               (editor e trace-at: (max THRESHOLD-STEP (- (editor-trace-at e) THRESHOLD-STEP))))
+              ((pressed? f KEY-2)
+               (editor e trace-at: (+ (editor-trace-at e) THRESHOLD-STEP)))
+              ((pressed? f KEY-3)
+               (editor e sever-at: (max THRESHOLD-STEP (- (editor-sever-at e) THRESHOLD-STEP))))
+              ((pressed? f KEY-4)
+               (editor e sever-at: (+ (editor-sever-at e) THRESHOLD-STEP)))
               (else e))))
 
     ;; --- the file -------------------------------------------------------------------
@@ -169,13 +194,16 @@
     (define (half->coord h)
       (if (even? h) (quotient h 2) (/ h 2.0)))
 
-    ;; The layout as the 2020 (stack LAYER ...) form, layers bottom-up, or
-    ;; #f when it could never be cleared (no tiles, or an odd count).
+    ;; The layout as the 2020 (stack LAYER ...) form with this layout's
+    ;; thresholds first, layers bottom-up, or #f when it could never be
+    ;; cleared (no tiles, or an odd count).
     (define (editor-datum e)
       (let ((n (editor-count e)))
         (and (> n 0)
              (even? n)
              (cons 'stack
+                 (cons (list 'trace-at (editor-trace-at e))
+                 (cons (list 'sever-at (editor-sever-at e))
                    (let layer ((l 0) (acc '()))
                      (if (= l CANVAS-LAYERS)
                          (let trim ((layers (reverse acc)))
@@ -189,7 +217,7 @@
                                                              (half->coord (pos-hy p))))
                                            (filter (lambda (p) (= (pos-layer p) l))
                                                    (editor-slots e)))
-                                      acc))))))))
+                                      acc))))))))))
 
     ;; The reason a save is refused, for the HUD.
     (define (refusal e)

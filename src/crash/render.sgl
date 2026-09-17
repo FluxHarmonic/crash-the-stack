@@ -377,14 +377,19 @@
     ;; Row 2 under the ICE and after the sever, in place of the keys line
     ;; (David, 2026-09-17: make the phase unmistakable, and say that being
     ;; traced does not end the game).
+    (define (lock-line b now)
+      (let ((locked (board-locked-slots b)))
+        (cond ((null? locked) " CRASH THE STACK TO ESCAPE.")
+              ((any (lambda (id) (lock-weak? b id now)) locked)
+               " A LOCK IS WEAK: TAP IT TO BREAK.")
+              (else " A STRONG LOCK HOLDS UNTIL IT WEAKENS."))))
+
     (define (phase-line tr b)
       (case (trace-phase tr)
         ((counter)
          (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
                         ". LINK SEVERS IN " (trace-countdown-string tr) "."
-                        (if (pair? (board-locked-slots b))
-                            " A STRONG LOCK HOLDS UNTIL IT WEAKENS."
-                            " CRASH THE STACK TO ESCAPE.")))
+                        (lock-line b (trace-ticks tr))))
         ((severed)
          "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
         (else #f)))
@@ -457,6 +462,39 @@
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
               (draw-text text (+ x 4) (+ y 3) 2)))))
 
+    ;; A box with a label, the shape of every control.
+    (define (draw-box r label fill edge ink)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! fill)
+        (draw-filled-rect x y w h)
+        (color! edge)
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (color! ink)
+        (draw-text label
+                   (+ x (exact (floor (/ (- w (text-width label 2)) 2))))
+                   (+ y (exact (floor (/ (- h 14) 2))))
+                   2)))
+
+    ;; The web build's waiting update (ruling D14): the mark in the HUD
+    ;; while a version waits, the prompt's two boxes above the HUD.
+    (define (draw-update-mark g)
+      (draw-box (cdr (assq 'update (update-controls g))) "UPDATE" C-BAR-C C-SELECTED C-SELECTED))
+
+    (define (draw-update-prompt g)
+      (let* ((vw (geometry-vw g))
+             (top (- (geometry-vh g) (geometry-hud-h g)))
+             (title "NEW VERSION READY")
+             (tw (text-width title 2)))
+        (color-alpha! C-BG 0.9)
+        (draw-filled-rect (- (half vw) 150) (- top 74) 300 62)
+        (color! C-SELECTED)
+        (draw-text title (- (half vw) (half tw)) (- top 68) 2)
+        (draw-box (cdr (assq 'apply (update-controls g))) "APPLY" C-BAR-C C-SELECTED C-TEXT)
+        (draw-box (cdr (assq 'later (update-controls g))) "NOT NOW" C-BAR-C C-TEXT-DIM C-TEXT)))
+
     ;; The centred message box. rise: 0..1 slides it in from below and fades
     ;; it up (the cleared sequence); fade: 0..1 slides it up and fades it
     ;; out (a toast leaving). A state message passes 1 and 0.
@@ -516,7 +554,9 @@
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
         (draw-text left 8 (+ top 7) 2)
-        (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
+        (if (memq (session-update s) '(waiting prompt))
+            (draw-update-mark g)
+            (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2))
         (draw-controls g)
         (draw-meter g (session-trace s))
         ;; row 2, centered (David, 2026-09-17)
@@ -687,10 +727,12 @@
         (draw-text (string-append "EDIT  TILES " (number->string (editor-count e))
                                   "  LAYER " (number->string cl)
                                   "  AT " (number->string (cadr c)) "," (number->string (caddr c))
-                                  "  ABOVE " (case dim ((full) "FULL") ((dim) "DIM") (else "HIDDEN")))
+                                  "  ABOVE " (case dim ((full) "FULL") ((dim) "DIM") (else "HIDDEN"))
+                                  "  TRACE " (number->string (editor-trace-at e))
+                                  "  ICE " (number->string (editor-sever-at e)))
                    8 (+ top 7) 2)
         (color! C-TEXT-DIM)
-        (draw-text "ARROWS/HJKL MOVE  SHIFT HALF STEP  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM ABOVE  ^S SAVE  ^P PLAY  ESC QUIT"
+        (draw-text "ARROWS/HJKL MOVE  SHIFT HALF  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM  1/2 TRACE  3/4 ICE  ^S SAVE  ^P PLAY  ESC QUIT"
                    8 (+ top 32) 1)
         (unless (string=? (editor-message e) "")
           (draw-message g (editor-message e) top 1.0 0.0))))
@@ -705,4 +747,5 @@
           (draw-hint-labels s g))
         (when glitch (draw-glitch g x glitch))
         (when (trace-severed? (session-trace s)) (draw-severed g x))
-        (draw-hud s g x)))))
+        (draw-hud s g x)
+        (when (eq? (session-update s) 'prompt) (draw-update-prompt g))))))

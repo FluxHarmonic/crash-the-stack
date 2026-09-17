@@ -10,6 +10,11 @@
 ;;; The file format is the 2020 Crash The Stack one: (stack LAYER ...) where
 ;;; each LAYER is a list of (x . y) in whole-tile units, y growing downward,
 ;;; layers listed bottom-up. sexp->layout turns those into half-unit integers.
+;;; Optional SETTINGS may come first, each a list headed by a symbol:
+;;; (stack (trace-at 180) (sever-at 220) LAYER ...). A setting present
+;;; overrides the game's constant for boards on this layout; one absent
+;;; means the default (ruled 2026-09-17). They are kept on the layout as an
+;;; alist, layout-settings, and layout-setting answers one by name.
 ;;;
 ;;; Nothing here knows what a face or a game is; see (crash stack rules).
 
@@ -23,7 +28,7 @@
           layout-min-hx layout-max-hx layout-min-hy layout-max-hy
           layout-slot-count layout-slot layout-layer-counts
           layout-cell-count layout-cell-index
-          slots->layout sexp->layout
+          slots->layout sexp->layout layout-settings layout-setting layout->sexp
           neighborhood neighborhood-left neighborhood-right neighborhood-above
           layout-neighborhood layout-reading-order
           half)
@@ -44,7 +49,8 @@
       (min-hy default: 0)
       (max-hy default: 0)
       (neighborhoods default: (vector) mutable: #t)
-      (reading-order default: (quote ()) mutable: #t))  ; slot ids, top row first, left to right
+      (reading-order default: (quote ()) mutable: #t)   ; slot ids, top row first, left to right
+      (settings default: '() mutable: #t))              ; ((trace-at . 180) ...) from the file's header
 
     (define (layout-slot-count l)
       (vector-length (layout-slots l)))
@@ -113,22 +119,60 @@
     (define (coord->half x)
       (exact (round (* 2 x))))
 
-    ;; (stack ((x . y) ...) ...) -> layout. Raises on any other head symbol.
+    ;; A setting form: (name value) with a symbol head; a layer is a list of
+    ;; pairs (or empty).
+    (define (setting-form? x)
+      (and (pair? x) (symbol? (car x))))
+
+    ;; (stack SETTING ... ((x . y) ...) ...) -> layout. Raises on any other
+    ;; head symbol.
     (define (sexp->layout form)
       (unless (and (pair? form) (eq? (car form) 'stack))
         (error "sexp->layout: expected (stack layer ...)" form))
-      (let loop ((layers (cdr form)) (layer 0) (acc '()))
-        (if (null? layers)
-            (slots->layout (reverse acc))
-            (loop (cdr layers)
-                  (+ layer 1)
-                  (fold (lambda (acc pos)
-                          (cons (slot layer: layer
-                                      hx: (coord->half (car pos))
-                                      hy: (coord->half (cdr pos)))
-                                acc))
-                        acc
-                        (car layers))))))
+      (let* ((settings (map (lambda (f) (cons (car f) (cadr f)))
+                            (filter setting-form? (cdr form))))
+             (layers (filter (lambda (f) (not (setting-form? f))) (cdr form))))
+        (let loop ((layers layers) (layer 0) (acc '()))
+          (if (null? layers)
+              ;; set, not copy-constructed: under native codegen the copy form
+              ;; on this struct raised struct-ref (measured 2026-09-17 on the
+              ;; web build; the native bundle was fine)
+              (let ((l (slots->layout (reverse acc))))
+                (set-layout-settings! l settings)
+                l)
+              (loop (cdr layers)
+                    (+ layer 1)
+                    (fold (lambda (acc pos)
+                            (cons (slot layer: layer
+                                        hx: (coord->half (car pos))
+                                        hy: (coord->half (cdr pos)))
+                                  acc))
+                          acc
+                          (car layers)))))))
+
+    ;; A setting's value, or default when the layout does not set it.
+    (define (layout-setting l name default)
+      (let ((entry (assq name (layout-settings l))))
+        (if entry (cdr entry) default)))
+
+    ;; A half-unit coordinate in whole tiles: 11 -> 5.5, 10 -> 5.
+    (define (half->coord h)
+      (if (even? h) (quotient h 2) (/ h 2.0)))
+
+    ;; The layout back in the file form, settings first, layers bottom-up.
+    (define (layout->sexp l)
+      (cons 'stack
+            (append (map (lambda (e) (list (car e) (cdr e))) (layout-settings l))
+                    (let loop ((layer 0) (acc '()))
+                      (if (= layer (layout-layer-count l))
+                          (reverse acc)
+                          (loop (+ layer 1)
+                                (cons (map (lambda (s)
+                                             (cons (half->coord (slot-hx s))
+                                                   (half->coord (slot-hy s))))
+                                           (filter (lambda (s) (= (slot-layer s) layer))
+                                                   (vector->list (layout-slots l))))
+                                      acc)))))))
 
     ;; --- neighborhoods -------------------------------------------------------
     ;;

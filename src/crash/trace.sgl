@@ -35,17 +35,19 @@
           (sigil math)
           (crash stack rules)
           (crash stack generate)
-          (crash stack prng))
+          (crash stack prng)
+          (crash tween))
 
   (export trace trace? trace-new
           trace-mode trace-phase trace-ticks trace-hints trace-shuffles
+          trace-trace-at trace-sever-at trace-with-thresholds
           trace-countdown trace-ice-timer trace-ice-count trace-last-ice
           trace-cleared-in trace-severed?
           trace-value trace-fraction trace-clock-string
           trace-countdown-string trace-ice-string
           trace-add-ticks trace-hint trace-shuffle trace-with-mode trace-flip-allowed?
           trace-advance trace-finish
-          lock-weak? lock-strong?
+          lock-weak? lock-strong? safe-lock-pairs
           ice-member ice-member? ice-member-name ice-member-applicable? ice-member-apply
           ICE-SET ice-applicable
           TRACE-AT HINT-COST SHUFFLE-COST
@@ -85,11 +87,12 @@
     (define TAG-CLEAN-RUN "CLEAN RUN")
     (define TAG-UNDER-ICE "UNDER ICE")
 
-    (define TICKS-PER-SECOND 60)
     (define MODES '(twist clean))
     (define PHASES '(trace counter severed cleared))
 
-    (define (seconds->ticks s) (* s TICKS-PER-SECOND))
+    ;; Whole seconds of the constants above as ticks (TICKS-PER-SECOND is
+    ;; (crash tween)'s, the one clock).
+    (define (ticks-of seconds) (* seconds TICKS-PER-SECOND))
 
     ;; --- state ---------------------------------------------------------------
 
@@ -97,10 +100,14 @@
     ;; countdown: ticks left before the sever (COUNTER-HACK only).
     ;; ice-timer: ticks until the next counter-hack. ice-count: fired so far.
     ;; last-ice: the last member's name, or #f. cleared-in: the phase a
-    ;; cleared board was cleared in.
+    ;; cleared board was cleared in. trace-at, sever-at: this board's
+    ;; thresholds in seconds, the constants unless the layout's header
+    ;; says otherwise (ruled 2026-09-17).
     (define-struct trace
       (mode default: 'twist)
       (phase default: 'trace)
+      (trace-at default: TRACE-AT)
+      (sever-at default: SEVER-AT)
       (ticks default: 0)
       (hints default: 0)
       (shuffles default: 0)
@@ -112,6 +119,10 @@
 
     (define (trace-new mode)
       (trace mode: (if (memq mode MODES) mode 'twist)))
+
+    ;; A trace with this board's thresholds (a layout's header may set them).
+    (define (trace-with-thresholds tr trace-at sever-at)
+      (trace tr trace-at: trace-at sever-at: sever-at))
 
     (define (trace-severed? tr)
       (eq? (trace-phase tr) 'severed))
@@ -127,12 +138,12 @@
     ;; The bar: 0..1 filling toward the trace, then 1..0 counting down.
     (define (trace-fraction tr)
       (case (trace-phase tr)
-        ((trace) (min 1.0 (/ (trace-value tr) TRACE-AT)))
-        ((counter) (/ (trace-countdown tr) (seconds->ticks SEVER-AT)))
+        ((trace) (min 1.0 (/ (trace-value tr) (trace-trace-at tr))))
+        ((counter) (/ (trace-countdown tr) (ticks-of (trace-sever-at tr))))
         ((severed) 0.0)
         (else (if (eq? (trace-cleared-in tr) 'counter)
-                  (/ (trace-countdown tr) (seconds->ticks SEVER-AT))
-                  (min 1.0 (/ (trace-value tr) TRACE-AT))))))
+                  (/ (trace-countdown tr) (ticks-of (trace-sever-at tr)))
+                  (min 1.0 (/ (trace-value tr) (trace-trace-at tr)))))))
 
     (define (two-digits n)
       (if (< n 10)
@@ -170,7 +181,7 @@
 
     (define (charge tr seconds)
       (if (eq? (trace-phase tr) 'counter)
-          (trace tr countdown: (max 0 (- (trace-countdown tr) (seconds->ticks seconds))))
+          (trace tr countdown: (max 0 (- (trace-countdown tr) (ticks-of seconds))))
           tr))
 
     ;; The flip between faces is allowed only while the game is still a
@@ -178,7 +189,7 @@
     (define (trace-flip-allowed? tr)
       (if (eq? (trace-mode tr) 'twist)
           (eq? (trace-phase tr) 'trace)
-          (< (trace-value tr) TRACE-AT)))
+          (< (trace-value tr) (trace-trace-at tr))))
 
     (define (trace-with-mode tr mode)
       (if (and (memq mode MODES) (trace-flip-allowed? tr))
@@ -201,51 +212,69 @@
     ;; brings back an unlocked match makes it strong again.
     (define (lock-weak? b id now)
       (and (tile-locked? b id)
-           (or (>= (- now (tile-lock-tick b id)) (seconds->ticks LOCK-DECAY))
+           (or (>= (- now (tile-lock-tick b id)) (ticks-of LOCK-DECAY))
                (null? (unlocked-matches b)))))
 
     (define (lock-strong? b id now)
       (and (tile-locked? b id) (not (lock-weak? b id now))))
 
-    ;; Lock: one unlocked legal pair, chosen by the board's random stream.
-    ;; Not applicable when it would be weak on arrival, i.e. would leave no
-    ;; unlocked legal match (David: "if lock comes up while there's only
-    ;; one pair left, a different counter-hack is used").
+    ;; Lock: one unlocked legal pair, chosen by the board's random stream
+    ;; among the pairs that leave another unlocked legal match standing, so
+    ;; a fresh lock is never weak on arrival (D15; David: "if lock comes up
+    ;; while there's only one pair left, a different counter-hack is
+    ;; used"). Counting matches is not enough: three free tiles of one face
+    ;; give three matches that all share tiles, and locking any of them
+    ;; leaves none (the adversarial review's probe).
+    (define (disjoint? m o)
+      (not (or (= (car m) (car o)) (= (car m) (cdr o))
+               (= (cdr m) (car o)) (= (cdr m) (cdr o)))))
+
+    (define (safe-lock-pairs b)
+      (let ((matches (unlocked-matches b)))
+        (filter (lambda (m)
+                  (any (lambda (o) (disjoint? m o)) matches))
+                matches)))
+
     (define (lock-applicable? b)
-      (>= (length (unlocked-matches b)) 2))
+      (pair? (safe-lock-pairs b)))
 
     (define (lock-apply b now)
-      (let* ((matches (unlocked-matches b))
+      (let* ((pairs (safe-lock-pairs b))
              (rng (prng-next (board-rng b)))
-             (pair (list-ref matches (prng-index rng (length matches))))
+             (pair (list-ref pairs (prng-index rng (length pairs))))
              (nx (board-lock-pair b (car pair) (cdr pair) now)))
         (set-board-rng! nx rng)
         nx))
 
     ;; Remap: every lock dropped, then the remaining tiles re-dealt by the
     ;; solvable generator, so the board stays winnable and the player's
-    ;; read of it is gone. Applicable when at least two pairs remain.
-    (define (shuffle-applicable? b)
+    ;; read of it is gone. Applicable when at least two pairs remain; a
+    ;; remainder the generator cannot re-deal (it answers unchanged) is
+    ;; reported as nothing happening, locks kept.
+    (define (remap-applicable? b)
       (>= (board-tile-count b) 4))
 
-    (define (shuffle-apply b now)
-      (reshuffle (board-break-locks b)))
+    (define (remap-apply b now)
+      (let* ((broken (board-break-locks b))
+             (dealt (reshuffle broken)))
+        (and (not (eq? dealt broken)) dealt)))
 
     (define ICE-SET
       (list (ice-member name: 'lock
                         applicable?: lock-applicable?
                         apply: lock-apply)
-            (ice-member name: 'shuffle
-                        applicable?: shuffle-applicable?
-                        apply: shuffle-apply)))
+            (ice-member name: 'remap
+                        applicable?: remap-applicable?
+                        apply: remap-apply)))
 
     (define (ice-applicable b)
       (filter (lambda (m) ((ice-member-applicable? m) b)) ICE-SET))
 
     ;; One counter-hack: a uniform pick over the applicable members with
-    ;; the board's random stream; none applicable -> the interval passes
-    ;; with no effect. The undo history is cut at the event: a counter-hack
-    ;; the player could undo would have no teeth (ruled 2026-09-17); the
+    ;; the board's random stream; none applicable, or a member that could
+    ;; do nothing after all (apply answers #f) -> the interval passes with
+    ;; no effect. The undo history is cut at the event: a counter-hack the
+    ;; player could undo would have no teeth (ruled 2026-09-17); the
     ;; player's own moves after it are undoable as usual. Returns
     ;; (cons board name-or-#f).
     (define (fire-ice b now)
@@ -254,12 +283,15 @@
             (cons b #f)
             (let* ((rng (prng-next (board-rng b)))
                    (m (list-ref members (prng-index rng (length members))))
-                   (b (board-copy b)))
-              (set-board-rng! b rng)
-              (let ((hit ((ice-member-apply m) b now)))
-                (set-board-history! hit '())
-                (set-board-selected! hit #f)
-                (cons hit (ice-member-name m)))))))
+                   (copy (board-copy b)))
+              (set-board-rng! copy rng)
+              (let ((hit ((ice-member-apply m) copy now)))
+                (if (not hit)
+                    (cons b #f)
+                    (begin
+                      (set-board-history! hit '())
+                      (set-board-selected! hit #f)
+                      (cons hit (ice-member-name m)))))))))
 
     ;; --- the phase machine ----------------------------------------------------------
 
@@ -278,12 +310,12 @@
                    ((eq? (trace-mode tr) 'clean)
                     (loop (+ k 1) tr b events))
                    ((eq? (trace-phase tr) 'trace)
-                    (if (>= (trace-value tr) TRACE-AT)
+                    (if (>= (trace-value tr) (trace-trace-at tr))
                         (loop (+ k 1)
                               (trace tr
                                      phase: 'counter
-                                     countdown: (seconds->ticks SEVER-AT)
-                                     ice-timer: (seconds->ticks ICE-FIRST))
+                                     countdown: (ticks-of (trace-sever-at tr))
+                                     ice-timer: (ticks-of ICE-FIRST))
                               b
                               (cons 'traced events))
                         (loop (+ k 1) tr b events)))
@@ -299,7 +331,7 @@
                                (loop (+ k 1)
                                      (trace tr
                                             countdown: countdown
-                                            ice-timer: (seconds->ticks ICE-INTERVAL)
+                                            ice-timer: (ticks-of ICE-INTERVAL)
                                             ice-count: (+ 1 (trace-ice-count tr))
                                             last-ice: (cdr fired))
                                      (car fired)

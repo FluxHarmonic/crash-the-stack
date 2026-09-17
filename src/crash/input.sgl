@@ -25,9 +25,9 @@
 ;;; on the board edges) was "too hard to scan"; hint mode solves the same
 ;;; problem. Glyph (press a face key, the highlight jumps to a free tile of
 ;;; that face) let one keystroke search the whole board for a free K and its
-;;; partner: GNOME's hint, made free. It survives as the PRICED HINT:
+;;; partner: GNOME's hint, made free. It survives as the priced hint:
 ;;; ctrl+h then a face key rings a free tile of that face and costs
-;;; HINT-COST on the trace meter ((crash trace)), like every other hint.
+;;; HINT-COST on the trace ((crash trace)), like every other hint.
 ;;;
 ;;; The session carries the trace ((crash trace): TRACE, COUNTER-HACK,
 ;;; SEVERED): the shell hands in the sim ticks each frame through
@@ -70,6 +70,7 @@
           session-typed session-hint session-hint-partner session-hint-armed
           session-hints session-cursor-shown
           session-trace session-refused session-advance session-with-trace-mode
+          session-update session-with-update
           session-best session-with-best session-restore
           session-retry session-next
           session-labels session-labels-shown
@@ -106,6 +107,7 @@
       (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
       (trace default: #f)                 ; the meter, (crash trace)
       (refused default: #f)               ; a strong-locked tile the last pick bounced off, or #f
+      (update default: #f)                ; a new version of the web build: #f | waiting | prompt | apply
       (best default: #f)                  ; best trace on this layout so far, or #f
       (render-mode default: 'primitives)  ; primitives | texture
       (seed default: 1)
@@ -260,7 +262,10 @@
       (let* ((b (generate lay seed))
              (blank (lambda ()
                       (board-new lay (make-vector (layout-slot-count lay) 0))))
-             (s (session-on-board (session seed: seed trace: (trace-new 'twist))
+             (tr (trace-with-thresholds (trace-new 'twist)
+                                        (layout-setting lay 'trace-at TRACE-AT)
+                                        (layout-setting lay 'sever-at SEVER-AT)))
+             (s (session-on-board (session seed: seed trace: tr)
                                   (or b (blank)))))
         (if b
             (session s message: MSG-JACKED-IN)
@@ -403,7 +408,7 @@
                                                 s)
                                             typed: "")))))))))))
 
-    ;; --- the priced hint (prototype; P1 attaches the trace cost) -------------
+    ;; --- the priced hint -----------------------------------------------------
     ;;
     ;; ctrl+h arms it; the next face key rings the first playable tile of
     ;; that face after the current hint ring (wrapping), and the hint count
@@ -454,6 +459,32 @@
                       trace: (trace-hint (session-trace s))
                       message: (if target "" "NO MOVES LEFT"))))
 
+    ;; --- a waiting update (the web shell's, ruling D14) -------------------------
+    ;;
+    ;; The page tells the shell a new version is waiting; the shell puts
+    ;; the state here and the game draws it: a prompt with APPLY and NOT
+    ;; NOW above the HUD at launch, an UPDATE mark in the HUD during play
+    ;; (tapping it brings the prompt back). APPLY leaves the state at apply
+    ;; for the shell to hand to the page; nothing here reloads anything.
+
+    (define (session-with-update s state)
+      (session s update: state))
+
+    ;; A click while an update is showing: the prompt's boxes or the mark.
+    ;; Answers the new session, or #f when the click is not about the update.
+    (define (step-update s click g)
+      (let ((state (session-update s)))
+        (cond ((not state) #f)
+              ((eq? state 'prompt)
+               (let ((hit (hit-update-control g (car click) (cdr click))))
+                 (cond ((eq? hit 'apply) (session s update: 'apply))
+                       ((eq? hit 'later) (session s update: 'waiting))
+                       (else #f))))
+              ((eq? state 'waiting)
+               (and (eq? (hit-update-control g (car click) (cdr click)) 'update)
+                    (session s update: 'prompt)))
+              (else #f))))
+
     ;; --- the trace meter ------------------------------------------------------
 
     (define (session-with-best s best)
@@ -488,10 +519,14 @@
       (memq (trace-phase (session-trace s)) '(severed cleared)))
 
     ;; A shuffle that changed the board costs SHUFFLE-COST; one the generator
-    ;; refused (nothing clearable) costs nothing and says so.
+    ;; refused (nothing clearable) costs nothing and says so. Every lock goes
+    ;; with the faces it was on (a lock over two re-dealt faces would mean
+    ;; nothing), so a shuffle is also the expensive way out of a lock.
     (define (shuffle-command s)
       (let* ((b (session-board s))
-             (nb (reshuffle b)))
+             (broken (board-break-locks b))
+             (nb (let ((dealt (reshuffle broken)))
+                   (if (eq? dealt broken) b dealt))))
         (cond ((finished? s) s)
               ((eq? nb b) (session s message: "NOTHING TO SHUFFLE"))
               (else (session (session-on-board s nb)
@@ -503,7 +538,7 @@
         (case last
           ((traced) MSG-TRACED)
           ((lock) MSG-LOCKED-PAIR)
-          ((shuffle) MSG-REMAPPED)
+          ((remap) MSG-REMAPPED)
           ((nothing) MSG-NOTHING)
           ((severed) MSG-SEVERED)
           (else #f))))
@@ -571,6 +606,7 @@
     (define (step-pointer s f g)
       (let ((click (input-frame-click f)))
         (cond ((not click) s)
+              ((and (session-update s) (step-update s click g)) => (lambda (s) s))
               ((severed? s)
                (if (< (cdr click) (- (geometry-vh g) (geometry-hud-h g)))
                    (let ((third (quotient (geometry-vw g) 3)))

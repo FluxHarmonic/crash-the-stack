@@ -35,10 +35,11 @@
 //   update      ruling D14: with the game running under a controlling service
 //               worker, the arm serves a sw.js with a new version and asks for
 //               an update check; the new worker must reach WAITING without any
-//               reload (the page's token survives, no new boot line) and with
-//               only the UPDATE item shown, not the launch prompt (the launch
-//               window has passed); on the next launch the prompt must show,
-//               and applying it must reload onto the new version
+//               reload (the page's token survives, no new boot line) and the
+//               game must be told "waiting" (its HUD mark), not "prompt" (the
+//               launch window has passed); on the next launch the game must
+//               be told "prompt", a tap on its APPLY box must answer "apply",
+//               and the page must then reload onto the new version
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -191,8 +192,18 @@ await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable"
 // Never run at devicePixelRatio 1: the page's CSS-to-buffer factor is then 1 and
 // its inverse is also 1, so a wrong factor (sabotage S5) is invisible. Measured
 // 2026-09-16: the arm stayed green under S5 until this override existed.
-if (PHONE) await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
-else await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 760, deviceScaleFactor: 2, mobile: false });
+if (PHONE) {
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  // a phone: a coarse pointer that cannot hover, and touch, so the game
+  // starts with its hint tags hidden (David's rule) and the arm shows them
+  await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "coarse" }, { name: "hover", value: "none" }] });
+} else {
+  await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 760, deviceScaleFactor: 2, mobile: false });
+  // a desktop with a mouse (headless Chrome otherwise reports hover: none,
+  // which reads as a touch screen)
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "fine" }, { name: "hover", value: "hover" }] });
+}
 
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
@@ -325,6 +336,13 @@ else {
     }
   }
   if (!keysDetail) {
+    // a touch screen starts with the tags hidden; Space shows them (the game's
+    // own "crash: tags" boot line says which)
+    const tags = await waitLine(/^crash: tags (shown|hidden) touch (on|off)/, 0, 2000);
+    if (PHONE && (!tags || tags.m[2] !== "on")) keysDetail = `phone emulation but the game saw touch ${tags ? tags.m[2] : "?"}`;
+    else if (tags && tags.m[1] === "hidden") { await press(" "); await sleep(150); }
+  }
+  if (!keysDetail) {
     mark = consoleLines.length;
     await type(tagA);
     const sel = await waitLine(/^crash: select (\d+)$/, mark, 2000);
@@ -376,10 +394,10 @@ let iceLock = null;
         if (!ice) detail = "no counter-hack within 16 s of the trace completing";
         else {
           const lock = consoleLines.slice(mark, ice.index + 3).map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
-          const shuffles = consoleLines.slice(mark, ice.index + 3).filter((l) => l === "crash: shuffle").length;
+          const remaps = consoleLines.slice(mark, ice.index + 3).filter((l) => l === "crash: remap").length;
           if (lock) { iceLock = [lock[1], lock[2]]; pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 locked ${lock[1]} ${lock[2]}`); }
-          else if (shuffles) pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 remapped the stack`);
-          else detail = `ICE 1 fired (${ice.m[0]}) but neither a lock nor a shuffle line followed`;
+          else if (remaps) pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 remapped the stack`);
+          else detail = `ICE 1 fired (${ice.m[0]}) but neither a lock nor a remap line followed`;
         }
       }
     }
@@ -430,36 +448,39 @@ let iceLock = null;
       await sleep(8500);
       await evalJS(`window.__crashToken = "still-here"`);
       const bootsBefore = consoleLines.filter((l) => BOOT_ANY.test(l)).length;
+      mark = consoleLines.length;
       swVersionOverride = "v-next";
       await evalJS(`window.crashUpdate.check()`);
       let state = null;
       for (let i = 0; i < 40 && state !== "waiting"; i++) { await sleep(250); state = await evalJS(`window.crashUpdate.state`); }
+      const told = await waitLine(/^crash: update (\w+)$/, mark, 3000);
       const token = await evalJS(`window.__crashToken`);
       const bootsAfter = consoleLines.filter((l) => BOOT_ANY.test(l)).length;
-      const itemShown = await evalJS(`!document.getElementById("update").hidden`);
-      const promptShown = await evalJS(`!document.getElementById("update-prompt").hidden`);
       if (state !== "waiting") detail = `new worker did not reach waiting within 10 s (state ${state})`;
       else if (token !== "still-here" || bootsAfter !== bootsBefore) detail = `the page reloaded under a running board (token ${token}, boots ${bootsBefore} -> ${bootsAfter})`;
-      else if (!itemShown) detail = "UPDATE item not shown while a version waits";
-      else if (promptShown) detail = "the launch prompt showed mid-board";
+      else if (!told) detail = "the game was not told about the waiting version";
+      else if (told.m[1] !== "waiting") detail = `mid-board the game was told "${told.m[1]}", expected "waiting" (the mark, not the launch prompt)`;
     }
     if (!detail) {
-      // the next launch: the prompt, then apply
+      // the next launch: the prompt, then a tap on the game's APPLY box
       mark = consoleLines.length;
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
-      let promptShown = false;
-      for (let i = 0; i < 40 && !promptShown; i++) { await sleep(250); promptShown = await evalJS(`!document.getElementById("update-prompt").hidden`); }
+      const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 10000) : null;
+      const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;
       if (!boot2) detail = "no boot line on the next launch";
-      else if (!promptShown) detail = "no launch prompt on the next launch with a version waiting";
+      else if (!prompt) detail = "the game was not told \"prompt\" on the next launch with a version waiting";
+      else if (!applyCtl) detail = "no \"crash: control apply\" boot line to tap";
       else {
         mark = consoleLines.length;
-        await evalJS(`document.getElementById("update-apply").click()`);
-        const boot3 = await waitLine(BOOT_ANY, mark, 20000);
+        await tap(applyCtl.m[1], applyCtl.m[2]);
+        const chose = await waitLine(/^crash: update apply$/, mark, 3000);
+        const boot3 = chose ? await waitLine(BOOT_ANY, chose.index + 1, 20000) : null;
         const version = boot3 ? await evalJS(`window.crashUpdate.activeVersion()`) : null;
-        if (!boot3) detail = "applying the update did not reload the page";
+        if (!chose) detail = "tapping APPLY did not answer \"crash: update apply\"";
+        else if (!boot3) detail = `applying the update did not reload the page (page state ${await evalJS("JSON.stringify({state: window.crashUpdate.state, told: window.crashUpdate.told, waiting: !!(window.crashUpdate.reg && window.crashUpdate.reg.waiting)})")})`;
         else if (version !== "v-next") detail = `after applying, the active worker is ${version}, expected v-next`;
-        else pass("update", `waited without a reload mid-board, prompted on the next launch, applied to ${version}`);
+        else pass("update", `waited without a reload mid-board (told waiting), prompted on the next launch, APPLY tapped, applied to ${version}`);
       }
     }
     swVersionOverride = null;

@@ -10,7 +10,9 @@
 // then WAITS; the page notices (registration.waiting), prompts at launch,
 // shows an indicator during play, and only when the player chooses does it
 // send SKIP_WAITING, after which controllerchange reloads the page. A board
-// in play is never interrupted by an update.
+// in play is never interrupted by an update. (The browser activates a
+// waiting worker by itself once no client of the old one is left, i.e.
+// after the app is closed; that launch shows no prompt.)
 //
 // Fetch: same-origin GET requests are served from this version's cache
 // first and the network second (the response is cached for next time);

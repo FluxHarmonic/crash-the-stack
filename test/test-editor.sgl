@@ -12,6 +12,7 @@
         (sigil list)
         (crash stack layout)
         (crash input)
+        (crash trace)
         (crash editor))
 
 (define (frame pressed . rest)
@@ -72,14 +73,16 @@
     (test "every planned tile landed"
       (assert-equal 12 (editor-count e))
       (assert-equal (sorted-triples PLAN) (sorted-triples (editor-slots e))))
-    (test "the datum is a stack of three layers"
+    (test "the datum is a stack of two settings and three layers"
       (assert-true (and d #t))
       (assert-equal 'stack (car d))
-      (assert-equal 3 (length (cdr d)))
-      (assert-equal '(6 4 2) (map length (cdr d))))
+      (assert-equal (list 'trace-at TRACE-AT) (cadr d))
+      (assert-equal (list 'sever-at SEVER-AT) (caddr d))
+      (assert-equal 5 (length (cdr d)))
+      (assert-equal '(6 4 2) (map length (cdddr d))))
     (test "half steps are written as halves, whole steps as integers"
-      (assert-true (member '(0.5 . 0.5) (cadr (cdr d))))
-      (assert-true (member '(1 . 0) (car (cdr d)))))
+      (assert-true (member '(0.5 . 0.5) (list-ref d 4)))
+      (assert-true (member '(1 . 0) (list-ref d 3))))
     (test "the game's loader reads it back to the same tiles"
       (assert-equal 12 (layout-slot-count lay))
       (assert-equal 3 (layout-layer-count lay))
@@ -88,7 +91,23 @@
       (assert-equal (sorted-triples PLAN)
                     (sorted-triples (editor-slots (editor-from-layout lay)))))
     (test "the layout it makes is playable-shaped: an even count, layers counted"
-      (assert-equal '(6 4 2) (layout-layer-counts lay)))))
+      (assert-equal '(6 4 2) (layout-layer-counts lay)))
+    (test "the thresholds ride in the header: turned in the editor, read back by the loader"
+      (let* ((turned (press (press (press e (list (string->symbol "1")))
+                                   (list (string->symbol "4")))
+                            (list (string->symbol "4"))))
+             (d2 (editor-datum turned))
+             (lay2 (sexp->layout d2)))
+        (assert-equal (- TRACE-AT THRESHOLD-STEP) (editor-trace-at turned))
+        (assert-equal (+ SEVER-AT (* 2 THRESHOLD-STEP)) (editor-sever-at turned))
+        (assert-equal (- TRACE-AT THRESHOLD-STEP) (layout-setting lay2 'trace-at 0))
+        (assert-equal (+ SEVER-AT (* 2 THRESHOLD-STEP)) (layout-setting lay2 'sever-at 0))
+        (assert-equal 12 (layout-slot-count lay2))
+        (assert-equal (editor-trace-at turned) (editor-trace-at (editor-from-layout lay2)))))
+    (test "a file without a header means the defaults"
+      (let ((lay0 (sexp->layout '(stack ((0 . 0) (3 . 0))))))
+        (assert-equal '() (layout-settings lay0))
+        (assert-equal TRACE-AT (layout-setting lay0 'trace-at TRACE-AT))))))
 
 (test-group "editor: what is refused"
   (let* ((e (build PLAN))

@@ -92,7 +92,9 @@
                     (trace-ice-timer tr)
                     (trace-ice-count tr)
                     (trace-last-ice tr)
-                    (trace-cleared-in tr))
+                    (trace-cleared-in tr)
+                    (trace-trace-at tr)
+                    (trace-sever-at tr))
               (list 'settings
                     (session-model s)
                     (session-labels-shown s)
@@ -145,14 +147,16 @@
              (and (exact? rng) (integer? rng) (> rng 0)))
            (let ((tr (field d 'trace)))
              (and (list? tr)
-                  (= (length tr) 10)
+                  (= (length tr) 12)
                   (memq (car tr) MODES)
                   (memq (cadr tr) PHASES)
                   (every (lambda (x) (and (exact? x) (integer? x) (>= x 0)))
                          (list (list-ref tr 2) (list-ref tr 3) (list-ref tr 4)
                                (list-ref tr 5) (list-ref tr 6) (list-ref tr 7)))
-                  (memq (list-ref tr 8) '(#f lock shuffle))
-                  (memq (list-ref tr 9) '(#f trace counter))))
+                  (memq (list-ref tr 8) '(#f lock remap))
+                  (memq (list-ref tr 9) '(#f trace counter))
+                  (every (lambda (x) (and (exact? x) (integer? x) (> x 0)))
+                         (list (list-ref tr 10) (list-ref tr 11)))))
            (let ((st (field d 'settings)))
              (and (list? st)
                   (= (length st) 3)
@@ -160,20 +164,62 @@
                   (boolean? (cadr st))
                   (memq (caddr st) '(primitives texture))))))
 
-    ;; A session from a save datum, or #f when the datum is not one.
+    ;; The faces still on the board come in even counts (pairs leave
+    ;; together); anything else is not a board this game made and would
+    ;; trap the next shuffle.
+    (define (even-face-counts? faces present)
+      (let ((counts (make-vector 36 0)))
+        (let loop ((f faces) (p present))
+          (unless (null? f)
+            (when (car p)
+              (vector-set! counts (car f) (+ 1 (vector-ref counts (car f)))))
+            (loop (cdr f) (cdr p))))
+        (let loop ((i 0))
+          (cond ((= i 36) #t)
+                ((odd? (vector-ref counts i)) #f)
+                (else (loop (+ i 1)))))))
+
+    ;; A lock entry is kept only when both tiles are present and each names
+    ;; the other; anything else is dropped rather than trusted.
+    (define (consistent-locks locked present)
+      (let ((v (list->vector locked))
+            (p (list->vector present)))
+        (let loop ((i 0))
+          (when (< i (vector-length v))
+            (let ((l (vector-ref v i)))
+              (when (and l
+                         (not (and (vector-ref p i)
+                                   (vector-ref p (car l))
+                                   (vector-ref v (car l))
+                                   (= (car (vector-ref v (car l))) i))))
+                (vector-set! v i #f)))
+            (loop (+ i 1))))
+        v))
+
+    ;; A session from a save datum, or #f when the datum is not one. A
+    ;; selection that is no longer a playable, unlocked tile is dropped;
+    ;; a random state MINSTD would fix at zero is replaced.
     (define (datum->session d)
       (let* ((lay (turtle-layout))
              (n (layout-slot-count lay)))
         (and (well-formed? d n)
+             (even-face-counts? (field d 'faces) (field d 'present))
              (let* ((b0 (board-new lay
                                    (list->vector (field d 'faces))
                                    (list->vector (field d 'present))))
-                    (b (board b0
-                              locked: (list->vector (field d 'locked))
-                              selected: (field d 'selected)))
+                    (b1 (board b0
+                               locked: (consistent-locks (field d 'locked)
+                                                         (field d 'present))))
+                    (sel (field d 'selected))
+                    (b (board b1
+                              selected: (and sel
+                                             (playable? b1 sel)
+                                             (not (tile-locked? b1 sel))
+                                             sel)))
                     (tr (field d 'trace))
-                    (st (field d 'settings)))
-               (set-board-rng! b (field d 'rng))
+                    (st (field d 'settings))
+                    (rng (field d 'rng)))
+               (set-board-rng! b (if (< rng 2147483647) rng 1))
                (session-restore (field d 'seed)
                                 b
                                 (trace mode: (car tr)
@@ -185,7 +231,9 @@
                                        ice-timer: (list-ref tr 6)
                                        ice-count: (list-ref tr 7)
                                        last-ice: (list-ref tr 8)
-                                       cleared-in: (list-ref tr 9))
+                                       cleared-in: (list-ref tr 9)
+                                       trace-at: (list-ref tr 10)
+                                       sever-at: (list-ref tr 11))
                                 (car st)
                                 (cadr st)
                                 (caddr st))))))))
