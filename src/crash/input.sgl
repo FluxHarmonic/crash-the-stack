@@ -66,6 +66,7 @@
           session-typed session-hint session-hint-partner session-hint-armed
           session-hints session-cursor-shown
           session-trace session-advance session-with-trace-mode
+          session-best session-with-best session-restore
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
           session-step session-pick session-with-model
@@ -99,6 +100,7 @@
       (hint-partner default: #f)          ; the pair hint's second slot, or #f
       (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
       (trace default: #f)                 ; the meter, (crash trace)
+      (best default: #f)                  ; best trace on this layout so far, or #f
       (render-mode default: 'primitives)  ; primitives | texture
       (seed default: 1)
       (message default: ""))
@@ -261,11 +263,20 @@
 
     ;; The one door: every model and the pointer come through here. A pick
     ;; that is not playable changes nothing, the keyboard highlight included.
+    ;; A match that broke a lock (tiles stayed, locks went) says so, because
+    ;; the pair staying put otherwise reads as nothing having happened
+    ;; (David, 2026-09-17).
     (define (session-pick s id)
-      (if (not (playable? (session-board s) id))
-          s
-          (session (session-on-board s (board-select (session-board s) id))
-                        highlight: id)))
+      (let ((b0 (session-board s)))
+        (if (not (playable? b0 id))
+            s
+            (let* ((b1 (board-select b0 id))
+                   (unlocked? (and (= (board-tile-count b0) (board-tile-count b1))
+                                   (< (length (board-locked-slots b1))
+                                      (length (board-locked-slots b0))))))
+              (session (session-on-board s b1)
+                            highlight: id
+                            message: (if unlocked? "LOCK BROKEN: MATCH AGAIN" ""))))))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
     (define (session-with-model s model)
@@ -426,6 +437,19 @@
 
     ;; --- the trace meter ------------------------------------------------------
 
+    (define (session-with-best s best)
+      (session s best: best))
+
+    ;; A session from saved parts ((crash save)): the board as it was, the
+    ;; meter, and the settings; tags and the cursor's home are recomputed.
+    (define (session-restore seed b tr model labels-shown render-mode)
+      (session-with-model (session-on-board (session seed: seed
+                                                     trace: tr
+                                                     labels-shown: labels-shown
+                                                     render-mode: render-mode)
+                                            b)
+                          model))
+
     (define (session-with-trace-mode s mode)
       (session s trace: (trace-with-mode (session-trace s) mode)))
 
@@ -496,7 +520,8 @@
                    (session (session-new (board-layout b) seed)
                                  model: (session-model s)
                                  labels-shown: (session-labels-shown s)
-                                 render-mode: (session-render-mode s))
+                                 render-mode: (session-render-mode s)
+                                 best: (session-best s))
                    (trace-mode (session-trace s)))))
               ((or (pressed? f 'trace-mode)
                    (and ctrl (pressed? f 'm)))

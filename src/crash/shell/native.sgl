@@ -6,7 +6,12 @@
 ;;; lives in the modules this imports; the web shell (crash shell web) replaces
 ;;; only this file, and (crash main) picks between the two.
 ;;;
-;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys]
+;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
+;;;
+;;; The board, the meter and the settings are saved to the user data
+;;; directory ((crash store): $XDG_DATA_HOME/crash-the-stack) after every
+;;; change and restored at start; --fresh ignores the saved board and
+;;; deals --seed.
 ;;;
 ;;; --log-keys prints the key symbols sigil-app reports each frame, for
 ;;; checking what a physical key arrives as (David saw Enter cycle the
@@ -90,7 +95,7 @@
     ;; Last frame's wall time in ms, shown in the HUD under --log-keys.
     (define *frame-ms* 0.0)
 
-    (define (game-loop seed texture-first? model log-keys?)
+    (define (game-loop seed texture-first? model log-keys? fresh?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
@@ -98,18 +103,23 @@
         (let* ((lay (turtle-layout))
                (geom (make-geometry lay VW VH))
                (tex (load-test-tile)))
-          (let loop ((s (let ((s (session-with-model (session-new lay seed) model)))
-                          ;; --texture starts in the test-tile renderer
-                          (if texture-first?
-                              (session s render-mode: 'texture)
-                              s)))
+          (let loop ((s (let ((s (car (boot-session lay seed fresh?))))
+                          ;; --texture starts in the test-tile renderer; --keys
+                          ;; picks the model; a restored board keeps its own
+                          ;; settings unless the flags say otherwise
+                          (session (if model (session-with-model s model) s)
+                                   render-mode: (if texture-first?
+                                                    'texture
+                                                    (session-render-mode s)))))
                      (x (fx-new)))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))
                    (f (poll-frame))
                    (x (fx-frame x dt))
-                   (after (session-advance (session-step s f geom)
-                                           (clock-steps (fx-clock x))))
+                   (after (save-after-frame!
+                            s
+                            (session-advance (session-step s f geom)
+                                             (clock-steps (fx-clock x)))))
                    (x (fx-observe x s after geom)))
               (when log-keys?
                 (set! *frame-ms* (* 1000.0 dt))
@@ -142,10 +152,12 @@
                        seed-arg
                        1))
              (texture-first? (and (member "--texture" args) #t))
-             (model (string->symbol (arg-value args "--keys" "hint")))
-             (log-keys? (and (member "--log-keys" args) #t)))
+             (model-arg (arg-value args "--keys" #f))
+             (model (and model-arg (string->symbol model-arg)))
+             (log-keys? (and (member "--log-keys" args) #t))
+             (fresh? (and (member "--fresh" args) #t)))
         (run-game "Crash The Stack"
                   WINDOW-W
                   WINDOW-H
-                  (game-loop seed texture-first? model log-keys?))
+                  (game-loop seed texture-first? model log-keys? fresh?))
         0))))

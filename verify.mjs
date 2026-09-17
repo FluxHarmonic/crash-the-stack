@@ -11,6 +11,7 @@
 // exits 2, and says which sub-arms did not run.
 //
 //   imports     the wasm's import modules are exactly wasi + gl + sigil_wasm_gles3
+//               + sigil_browser (localStorage), no env, no emscripten
 //   boot        the game prints its boot line (seed, first solution pair, centers)
 //   render      the board region of the WebGL canvas is drawn: many non-background
 //               pixels in at least six color bins: the copper bars alone give two
@@ -24,6 +25,12 @@
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
 //   lock        three taps on the SHUF control spike the meter to LOCK-AT
 //               (3 x 60) -> "crash: shuffle" three times, then "crash: lock A B"
+//   reload      the page is reloaded (fresh navigation, same origin) and the
+//               game boots from localStorage: "crash: restored tiles 142 ...
+//               locked A B" with the pair the lock named (gate leg 4, web)
+//   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
+//               errors, it names the icons, and Page.getInstallabilityErrors
+//               is empty on this (loopback, so secure) origin
 //   console     zero error-level console entries and zero exceptions
 //
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
@@ -63,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "lock", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "lock", "reload", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -77,7 +84,7 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
   const byModule = {};
   for (const imp of WebAssembly.Module.imports(mod)) (byModule[imp.module] = byModule[imp.module] || []).push(imp.name);
   const modules = Object.keys(byModule).sort();
-  const expected = ["gl", "sigil_wasm_gles3", "wasi_snapshot_preview1"];
+  const expected = ["gl", "sigil_browser", "sigil_wasm_gles3", "wasi_snapshot_preview1"];
   const listing = modules.map((m) => `${m}(${byModule[m].length})`).join(" ");
   if (JSON.stringify(modules) === JSON.stringify(expected)) pass("imports", listing);
   else fail("imports", `expected modules ${expected.join(",")} got ${listing}`);
@@ -347,7 +354,55 @@ else fail("keys-match", keysDetail);
   }
 }
 
-// ---- 8. console -------------------------------------------------------------
+// ---- 8. reload: the saved board comes back (gate leg 4, the web half) --------
+// A fresh Chrome profile means an empty localStorage at the first boot (the
+// boot line said tiles 144). After the taps above the board has 142 tiles,
+// three shuffles and one locked pair; a reload must restore exactly that.
+{
+  const lockLine = consoleLines.map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
+  if (EXPECT_NO_SELECTION) skip("reload", "nothing was changed to restore with forwarding off");
+  else if (!lockLine) skip("reload", "no lock landed to restore");
+  else {
+    mark = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+    const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) locked ((?:\d+ ?)*)$/, mark, 20000);
+    if (!restored) fail("reload", `no "crash: restored" line within 20 s of the reload`);
+    else {
+      const want = [lockLine[1], lockLine[2]].sort((a, b) => a - b).join(" ");
+      const got = restored.m[3].trim().split(/\s+/).sort((a, b) => a - b).join(" ");
+      if (restored.m[1] !== "142") fail("reload", `expected tiles 142 after the reload, got ${restored.m[0]}`);
+      else if (got !== want) fail("reload", `expected locked ${want}, got ${restored.m[0]}`);
+      else pass("reload", restored.m[0]);
+    }
+  }
+}
+
+// ---- 9. manifest: the PWA is installable from this origin -------------------
+{
+  try {
+    const m = await send("Page.getAppManifest");
+    const errors = m.errors || [];
+    let detail = "";
+    if (!m.url || !m.url.endsWith("assets/manifest.webmanifest")) detail = `manifest url ${m.url}`;
+    else if (errors.length) detail = `manifest errors: ${JSON.stringify(errors.slice(0, 3))}`;
+    else {
+      let data = null;
+      try { data = JSON.parse(m.data); } catch { detail = "manifest data is not JSON"; }
+      if (data && (!data.icons || data.icons.length < 2 || data.name !== "Crash The Stack")) detail = `manifest content: ${m.data.slice(0, 120)}`;
+    }
+    if (!detail) {
+      const inst = await send("Page.getInstallabilityErrors");
+      const errs = (inst.installabilityErrors || []).map((e) => e.errorId);
+      if (errs.length) detail = `installability errors: ${errs.join(", ")}`;
+      else pass("manifest", `${m.url.replace(/^.*\//, "")} parsed, 0 errors, installable`);
+    }
+    if (detail) fail("manifest", detail);
+  } catch (err) {
+    fail("manifest", `CDP: ${err.message}`);
+  }
+}
+
+// ---- 10. console ------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
 else fail("console", `${consoleErrors.length} error(s): ${JSON.stringify(consoleErrors.slice(0, 5))}`);
 

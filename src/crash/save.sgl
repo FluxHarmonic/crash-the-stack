@@ -1,0 +1,166 @@
+;;; (crash save) - A session as a datum, and back.
+;;;
+;;; What survives a reload or a restart: the board's position (which
+;;; slots hold a tile, their faces, the locks, the selection, the random
+;;; state the next shuffle draws from), the trace meter, and the settings
+;;; a player has changed (keyboard model, tags shown, renderer, meter
+;;; face). Not the history: undo does not reach across a reload (a P1
+;;; limit, about 30 KB of snapshots if it ever should). The layout is
+;;; named, not embedded; only the Turtle exists so far.
+;;;
+;;; datum->session is strict: anything not shaped like a save of this
+;;; version answers #f, and the caller deals a fresh board. A corrupted
+;;; save must never trap the game at boot. (crash store) turns the datum
+;;; into text and back; this module reads no platform.
+
+(define-library (crash save)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (crash stack layout)
+          (crash stack rules)
+          (crash stack turtle)
+          (crash input)
+          (crash trace))
+
+  (export SAVE-VERSION session->datum datum->session
+          save-due? SAVE-EVERY-TICKS
+          best->datum datum->best)
+
+  (begin
+    (define SAVE-VERSION 1)
+
+    ;; The meter's time is saved every so many ticks (5 s) between the
+    ;; events that save at once, so a reload loses at most that much.
+    (define SAVE-EVERY-TICKS 300)
+
+    ;; Does the step from before to after warrant a save? A board change,
+    ;; a hint, a shuffle, the lock, a flipped face or setting, a cleared
+    ;; board, or the clock crossing a SAVE-EVERY-TICKS boundary.
+    (define (save-due? before after)
+      (let ((b0 (session-board before))
+            (b1 (session-board after))
+            (t0 (session-trace before))
+            (t1 (session-trace after)))
+        (or (not (eq? b0 b1))
+            (not (= (trace-hints t0) (trace-hints t1)))
+            (not (= (trace-shuffles t0) (trace-shuffles t1)))
+            (not (eq? (trace-locked? t0) (trace-locked? t1)))
+            (not (eq? (trace-mode t0) (trace-mode t1)))
+            (not (eq? (session-model before) (session-model after)))
+            (not (eq? (session-labels-shown before) (session-labels-shown after)))
+            (not (eq? (session-render-mode before) (session-render-mode after)))
+            (not (= (quotient (trace-ticks t0) SAVE-EVERY-TICKS)
+                    (quotient (trace-ticks t1) SAVE-EVERY-TICKS))))))
+
+    ;; The best (lowest) finished trace per layout: ((turtle . seconds)).
+    (define (best->datum best)
+      (list 'crash-best SAVE-VERSION (cons 'turtle best)))
+
+    (define (datum->best d)
+      (and (pair? d)
+           (eq? (car d) 'crash-best)
+           (pair? (cdr d))
+           (eqv? (cadr d) SAVE-VERSION)
+           (pair? (cddr d))
+           (let ((entry (assq 'turtle (cddr d))))
+             (and entry
+                  (number? (cdr entry))
+                  (>= (cdr entry) 0)
+                  (cdr entry)))))
+
+    (define (session->datum s)
+      (let ((b (session-board s))
+            (tr (session-trace s)))
+        (list 'crash-save
+              SAVE-VERSION
+              (cons 'seed (session-seed s))
+              (cons 'layout 'turtle)
+              (cons 'present (vector->list (board-present b)))
+              (cons 'faces (vector->list (board-faces b)))
+              (cons 'locked (vector->list (board-locked b)))
+              (cons 'selected (board-selected b))
+              (cons 'rng (board-rng b))
+              (list 'trace
+                    (trace-ticks tr)
+                    (trace-hints tr)
+                    (trace-shuffles tr)
+                    (trace-locked? tr)
+                    (trace-mode tr))
+              (list 'settings
+                    (session-model s)
+                    (session-labels-shown s)
+                    (session-render-mode s)))))
+
+    (define (field d key)
+      (let ((entry (assq key (cddr d))))
+        (and entry (cdr entry))))
+
+    (define (booleans? l n)
+      (and (list? l)
+           (= (length l) n)
+           (every boolean? l)))
+
+    (define (faces? l n)
+      (and (list? l)
+           (= (length l) n)
+           (every (lambda (f)
+                    (and (exact? f) (integer? f) (>= f 0) (< f 36)))
+                  l)))
+
+    (define (well-formed? d n)
+      (and (pair? d)
+           (eq? (car d) 'crash-save)
+           (pair? (cdr d))
+           (eqv? (cadr d) SAVE-VERSION)
+           (list? (cddr d))
+           (every pair? (cddr d))
+           (eq? (field d 'layout) 'turtle)
+           (let ((seed (field d 'seed)))
+             (and (exact? seed) (integer? seed) (>= seed 0)))
+           (booleans? (field d 'present) n)
+           (faces? (field d 'faces) n)
+           (booleans? (field d 'locked) n)
+           (let ((sel (field d 'selected)))
+             (or (not sel)
+                 (and (exact? sel) (integer? sel) (>= sel 0) (< sel n))))
+           (let ((rng (field d 'rng)))
+             (and (exact? rng) (integer? rng) (> rng 0)))
+           (let ((tr (field d 'trace)))
+             (and (list? tr)
+                  (= (length tr) 5)
+                  (every (lambda (x) (and (exact? x) (integer? x) (>= x 0)))
+                         (list (car tr) (cadr tr) (caddr tr)))
+                  (boolean? (cadddr tr))
+                  (memq (list-ref tr 4) MODES)))
+           (let ((st (field d 'settings)))
+             (and (list? st)
+                  (= (length st) 3)
+                  (memq (car st) MODELS)
+                  (boolean? (cadr st))
+                  (memq (caddr st) '(primitives texture))))))
+
+    ;; A session from a save datum, or #f when the datum is not one.
+    (define (datum->session d)
+      (let* ((lay (turtle-layout))
+             (n (layout-slot-count lay)))
+        (and (well-formed? d n)
+             (let* ((b0 (board-new lay
+                                   (list->vector (field d 'faces))
+                                   (list->vector (field d 'present))))
+                    (b (board b0
+                              locked: (list->vector (field d 'locked))
+                              selected: (field d 'selected)))
+                    (tr (field d 'trace))
+                    (st (field d 'settings)))
+               (set-board-rng! b (field d 'rng))
+               (session-restore (field d 'seed)
+                                b
+                                (trace ticks: (car tr)
+                                       hints: (cadr tr)
+                                       shuffles: (caddr tr)
+                                       locked?: (cadddr tr)
+                                       mode: (list-ref tr 4))
+                                (car st)
+                                (cadr st)
+                                (caddr st))))))))

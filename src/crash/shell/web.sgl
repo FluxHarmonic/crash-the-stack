@@ -45,6 +45,11 @@
 ;;;   crash: lock A B                      the ICE locked a pair
 ;;;   crash: trace V H S L                 the meter after a hint, a shuffle or
 ;;;                                         the lock: value, hints, shuffles, locked?
+;;;   crash: restored tiles N trace V locked A B ...   a saved board came back
+;;;                                         at boot (verify.mjs's reload sub-arm)
+;;;
+;;; The board is saved to localStorage after every change ((crash store),
+;;; (crash shell)) and restored at boot; ?fresh deals seed 1 instead.
 
 (define-library (crash shell web)
   (import (sigil struct)
@@ -59,6 +64,8 @@
           (crash geometry)
           (crash input)
           (crash trace)
+          (crash save)
+          (crash store)
           (crash tween)
           (crash fx)
           (crash render)
@@ -78,6 +85,8 @@
     (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
     (define *texture* #f)    ; the decoded test tile, once ready
     (define *trace* #f)      ; print the trace lines above
+    (define *restored* #f)   ; the boot restored a saved board
+    (define *fresh* #f)      ; ?fresh: ignore the saved board
     (define *announced* #f)  ; the boot lines have been printed for this deal
 
     ;; --- keys ----------------------------------------------------------------
@@ -267,11 +276,19 @@
         ;; a new deal.
         (when (and *trace* (not *announced*))
           (say-first-pair *session*)
+          (when *restored*
+            (let ((b (session-board *session*)))
+              (apply say "restored"
+                     "tiles" (board-tile-count b)
+                     "trace" (exact (floor (trace-value (session-trace *session*))))
+                     "locked" (board-locked-slots b))))
           (set! *announced* #t))
         (let* ((before *session*)
                (x (fx-frame *fx* dt))
-               (after (session-advance (session-step before (input-this-frame) *geom*)
-                                       (clock-steps (fx-clock x))))
+               (after (save-after-frame!
+                        before
+                        (session-advance (session-step before (input-this-frame) *geom*)
+                                         (clock-steps (fx-clock x)))))
                (x (fx-observe x before after *geom*)))
           (set! *session* after)
           (set! *fx* x)
@@ -294,7 +311,10 @@
       (set-letterbox-color 0.0 0.0 0.0)
       (let ((lay (turtle-layout)))
         (set! *geom* (make-geometry lay VW VH))
-        (set! *session* (session-new lay 1))
+        ;; ?fresh arrives as a ("fresh", "on") dispatch before the first frame
+        (let ((booted (boot-session lay 1 *fresh*)))
+          (set! *session* (car booted))
+          (set! *restored* (cdr booted)))
         (set! *fx* (fx-new)))
       (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
@@ -308,4 +328,5 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
+            ((string=? type "fresh") (set! *fresh* (string=? payload "on")) 0)
             (else 0)))))

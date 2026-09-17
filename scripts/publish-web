@@ -1,0 +1,41 @@
+#!/bin/sh
+# Publish build/web to Cloudflare Pages (project crashthestack), the HTTPS
+# home of the free web build: https://crashthestack.pages.dev/.
+#
+#   scripts/publish-web "<row>: <one line>"     deploy the current build/web
+#
+# Only the files a browser needs are sent: the page, the stylesheet, the
+# wasm, the bridge loader and its manifest, and assets/ (the test tile,
+# the PWA manifest and icons, the asset licence and manifest). bin/ and
+# native/ are build intermediates and stay home. The deploy is tagged
+# with the current commit so the site says which tree it is.
+#
+# wrangler must be on PATH and logged in (it is, on this box). This script
+# never touches DNS or the project's settings.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+
+MESSAGE="${1:-}"
+[ -n "$MESSAGE" ] || { echo "publish-web: give the deploy a message: publish-web \"<row>: <one line>\""; exit 1; }
+[ -f build/web/index.html ] || { echo "publish-web: build/web/index.html missing; build --config web first"; exit 1; }
+[ -f build/web/crash-the-stack.wasm ] || { echo "publish-web: build/web/crash-the-stack.wasm missing"; exit 1; }
+command -v wrangler > /dev/null || { echo "publish-web: wrangler not on PATH"; exit 1; }
+
+STAGE="$(mktemp -d /tmp/crash-publish-XXXXXX)"
+trap 'rm -rf "$STAGE"' EXIT
+for f in index.html styles.css crash-the-stack.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json; do
+  [ -f "build/web/$f" ] || { echo "publish-web: build/web/$f missing"; exit 1; }
+  cp "build/web/$f" "$STAGE/"
+done
+cp -r build/web/assets "$STAGE/assets"
+# The published set, for the record; a deploy that grew or shrank is visible here.
+echo "publish-web: publishing $(find "$STAGE" -type f | wc -l) files from build/web ($(du -sh "$STAGE" | cut -f1)):"
+(cd "$STAGE" && find . -type f | sort | sed 's|^\./|  |')
+echo "publish-web: wasm sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16), page $(sha256sum build/web/index.html | cut -c1-16)"
+
+SHA="$(git rev-parse HEAD)"
+wrangler pages deploy "$STAGE" \
+  --project-name crashthestack \
+  --branch master \
+  --commit-hash "$SHA" \
+  --commit-message "$MESSAGE"

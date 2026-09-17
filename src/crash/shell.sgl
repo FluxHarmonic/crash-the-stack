@@ -2,15 +2,57 @@
 ;;;
 ;;; The virtual viewport the game is drawn into on every target, the test
 ;;; tile's path relative to where the game runs (the repo root natively, the
-;;; served build/web on the web), and the modifier keys (crash input) reads.
+;;; served build/web on the web), the modifier keys (crash input) reads,
+;;; and the two things every shell does with the store: restore the saved
+;;; board at boot (or deal) and save after a frame that changed something.
 ;;; (crash shell native) and (crash shell web) import this and nothing
 ;;; else shared; (crash main) picks between them.
 
 (define-library (crash shell)
-  (export VW VH TEST-TILE-PATH MODIFIERS)
+  (import (crash stack layout)
+          (crash stack rules)
+          (crash input)
+          (crash trace)
+          (crash save)
+          (crash store))
+
+  (export VW VH TEST-TILE-PATH MODIFIERS
+          BOARD-KEY BEST-KEY
+          boot-session save-after-frame!)
 
   (begin
     (define VW 640)
     (define VH 400)
     (define TEST-TILE-PATH "assets/test-tile.png")
-    (define MODIFIERS '(ctrl shift))))
+    (define MODIFIERS '(ctrl shift))
+
+    (define BOARD-KEY "board")
+    (define BEST-KEY "best")
+
+    ;; (cons session restored?): the saved session if there is one and
+    ;; fresh? is #f, else a new deal of seed; the best result comes along
+    ;; either way.
+    (define (boot-session lay seed fresh?)
+      (let ((saved (and (not fresh?)
+                        (datum->session (store-read-datum BOARD-KEY))))
+            (best (datum->best (store-read-datum BEST-KEY))))
+        (cons (session-with-best (or saved (session-new lay seed)) best)
+              (and saved #t))))
+
+    ;; After a frame: save the session when the step warrants it, and when
+    ;; the board was just cleared record the trace as the best if it is.
+    ;; Returns the session (with a new best, if one landed).
+    (define (save-after-frame! before after)
+      (let* ((b0 (session-board before))
+             (b1 (session-board after))
+             (finished? (and (board-cleared? b1) (not (board-cleared? b0))))
+             (value (trace-value (session-trace after)))
+             (best (session-best after))
+             (after (if (and finished? (or (not best) (< value best)))
+                        (begin
+                          (store-write-datum! BEST-KEY (best->datum value))
+                          (session-with-best after value))
+                        after)))
+        (when (save-due? before after)
+          (store-write-datum! BOARD-KEY (session->datum after)))
+        after))))

@@ -1,0 +1,105 @@
+;;; (crash store) - Where a save lives on each target.
+;;;
+;;; One interface, two backends, picked at the import like (crash main):
+;;; on the web, the browser's localStorage through (sigil browser
+;;; local-storage) (blackICE's precedent); natively, one file per key
+;;; under the user's data directory ($XDG_DATA_HOME/crash-the-stack, or
+;;; ~/.local/share/crash-the-stack), which the gate points elsewhere with
+;;; set-store-root!. Keys are short names ("board", "settings"); values
+;;; are text. store-read-datum and store-write-datum! carry an
+;;; s-expression through, which is how (crash save)'s datum travels.
+;;;
+;;; Nothing here raises: a missing key is #f, a failed write is #f (the
+;;; shell may say so in the HUD), and a save that does not read back as
+;;; one datum is #f. The bodies cond-expand because a define nested in
+;;; cond-expand is not registered under native codegen.
+
+(define-library (crash store)
+  (cond-expand
+    (wasm (import (sigil io)
+                  (sigil browser local-storage)))
+    (else (import (sigil io)
+                  (sigil fs)
+                  (sigil process))))
+
+  (export store-root set-store-root!
+          store-get store-set! store-remove!
+          store-read-datum store-write-datum!
+          datum->text text->datum
+          STORE-KEYS)
+
+  (begin
+    (define STORE-KEYS '("board" "settings"))
+
+    ;; Native only: the directory the files live in. #f until first use.
+    (define *root* #f)
+
+    (define (default-root)
+      (cond-expand
+        (wasm "localStorage")
+        (else
+         (let ((xdg (getenv "XDG_DATA_HOME"))
+               (home (getenv "HOME")))
+           (string-append (cond ((and xdg (> (string-length xdg) 0)) xdg)
+                                (home (string-append home "/.local/share"))
+                                (else "."))
+                          "/crash-the-stack")))))
+
+    (define (store-root)
+      (or *root*
+          (begin (set! *root* (default-root)) *root*)))
+
+    (define (set-store-root! path)
+      (set! *root* path))
+
+    (define (key-path key)
+      (string-append (store-root) "/" key ".sgl"))
+
+    ;; --- the three verbs ---------------------------------------------------------
+
+    (define (store-get key)
+      (guard (e (else #f))
+        (cond-expand
+          (wasm (local-storage-get key))
+          (else (read-file-string (key-path key) missing: #f)))))
+
+    (define (store-set! key text)
+      (guard (e (else #f))
+        (cond-expand
+          (wasm (local-storage-set! key text))
+          (else (begin
+                  (ensure-directory (store-root))
+                  (write-file-string (key-path key) text)
+                  #t)))))
+
+    (define (store-remove! key)
+      (guard (e (else #f))
+        (cond-expand
+          (wasm (local-storage-remove! key))
+          (else (begin
+                  (when (file-exists? (key-path key))
+                    (delete-file (key-path key)))
+                  #t)))))
+
+    ;; --- datums ------------------------------------------------------------------
+
+    (define (datum->text d)
+      (with-output-to-string (lambda () (write d))))
+
+    ;; The one datum in the text, or #f for anything else (empty, more than
+    ;; one, unreadable).
+    (define (text->datum text)
+      (and (string? text)
+           (guard (e (else #f))
+             (let* ((port (open-input-string text))
+                    (d (read port))
+                    (more (read port)))
+               (and (not (eof-object? d))
+                    (eof-object? more)
+                    d)))))
+
+    (define (store-read-datum key)
+      (text->datum (store-get key)))
+
+    (define (store-write-datum! key d)
+      (store-set! key (datum->text d)))))

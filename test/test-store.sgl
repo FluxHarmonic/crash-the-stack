@@ -1,0 +1,127 @@
+;;; Gate leg 4 (native) - the store round trip.
+;;;
+;;; A played session (a match, a hint, a shuffle, a lock, a selection, a
+;;; setting changed) goes through (crash save) to a datum, through (crash
+;;; store) to a file under a temporary root, and back: the board is
+;;; structurally equal (locks and selection included), the trace and the
+;;; settings match. A missing key is #f; text that is not one save datum
+;;; is #f and never traps. The web half of this leg is verify.mjs's
+;;; reload sub-arm.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil math)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack turtle)
+        (crash geometry)
+        (crash input)
+        (crash trace)
+        (crash save)
+        (crash store))
+
+(define lay (turtle-layout))
+(define geom (make-geometry lay 640 400))
+
+(define (frame pressed . rest)
+  (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
+
+;; A session with something of everything in it.
+(define (played)
+  (let* ((s (session-new lay 9))
+         (pair (car (board-solution (session-board s))))
+         (s (session-pick (session-pick s (car pair)) (cdr pair)))   ; a match
+         (s (session-step s (frame '(pair-hint)) geom))              ; a hint (30)
+         (s (session-step s (frame '(s) '(ctrl)) geom))              ; a shuffle (60)
+         (s (session-advance s 5400))                                ; 90 s -> 180: the lock
+         (s (session-pick s (car (playable-slots (session-board s))))) ; a selection
+         (s (session-step s (frame '(tab)) geom))                    ; cursor model
+         (s (session-step s (frame '(m) '(ctrl)) geom)))             ; clean face
+    s))
+
+(define root (string-append (make-temp-directory) "/crash-store"))
+(set-store-root! root)
+
+(test-group "store: a session survives the round trip"
+  (let* ((s (played))
+         (d (session->datum s)))
+    (test "the played session is what the leg says it is"
+      (assert-equal 142 (board-tile-count (session-board s)))
+      (assert-equal 2 (length (board-locked-slots (session-board s))))
+      (assert-true (and (board-selected (session-board s)) #t))
+      (assert-equal 'cursor (session-model s))
+      (assert-equal 'clean (trace-mode (session-trace s)))
+      (assert-true (trace-locked? (session-trace s))))
+    (test "nothing is stored yet"
+      (assert-false (store-get "board"))
+      (assert-false (store-read-datum "board")))
+    (test "the write lands as a file under the root"
+      (assert-true (store-write-datum! "board" d))
+      (assert-true (file-exists? (string-append root "/board.sgl"))))
+    (test "the datum reads back equal"
+      (assert-equal d (store-read-datum "board")))
+    (test "the restored board is structurally equal, locks and selection included"
+      (let ((r (datum->session (store-read-datum "board"))))
+        (assert-true (and r #t))
+        (assert-true (board-equal? (session-board s) (session-board r)))
+        (assert-equal (board-locked-slots (session-board s))
+                      (board-locked-slots (session-board r)))
+        (assert-equal (board-selected (session-board s))
+                      (board-selected (session-board r)))
+        (assert-equal (board-rng (session-board s)) (board-rng (session-board r)))))
+    (test "the trace and the settings come back"
+      (let* ((r (datum->session (store-read-datum "board")))
+             (t0 (session-trace s))
+             (t1 (session-trace r)))
+        (assert-equal (trace-ticks t0) (trace-ticks t1))
+        (assert-equal (trace-hints t0) (trace-hints t1))
+        (assert-equal (trace-shuffles t0) (trace-shuffles t1))
+        (assert-equal (trace-locked? t0) (trace-locked? t1))
+        (assert-equal (trace-mode t0) (trace-mode t1))
+        (assert-equal (session-seed s) (session-seed r))
+        (assert-equal (session-model s) (session-model r))
+        (assert-equal (session-labels-shown s) (session-labels-shown r))
+        (assert-equal (session-render-mode s) (session-render-mode r))))
+    (test "the restored session plays on: the locked pair still needs two matches"
+      (let* ((r (datum->session (store-read-datum "board")))
+             (l (board-locked-slots (session-board r)))
+             (b (session-board (session-with-model r 'hint)))
+             (once (board-select (board-select (board b selected: #f) (car l)) (cadr l))))
+        (assert-true (tile-present? once (car l)))
+        (assert-false (tile-locked? once (car l)))))
+    (test "history is not saved: the restored session has nothing to undo"
+      (let ((r (datum->session (store-read-datum "board"))))
+        (assert-equal '() (board-history (session-board r)))))
+    (test "remove empties the key"
+      (assert-true (store-remove! "board"))
+      (assert-false (store-get "board"))
+      (assert-true (store-remove! "board")))))
+
+(test-group "store: what does not read back"
+  (test "a missing key is #f, not an error"
+    (assert-false (store-get "nothing-here"))
+    (assert-false (store-read-datum "nothing-here")))
+  (test "text that is not a datum is #f"
+    (assert-true (store-set! "junk" "(this is (not"))
+    (assert-false (store-read-datum "junk"))
+    (assert-true (store-set! "junk" ""))
+    (assert-false (store-read-datum "junk"))
+    (assert-true (store-set! "junk" "(a) (b)"))
+    (assert-false (store-read-datum "junk")))
+  (test "a datum that is not a save is #f from datum->session"
+    (assert-false (datum->session '(something else)))
+    (assert-false (datum->session '(crash-save 99 (seed . 1))))
+    (assert-false (datum->session 42))
+    (let ((d (session->datum (session-new lay 1))))
+      ;; the right shape with a wrong face
+      (assert-false (datum->session
+                      (map (lambda (e)
+                             (if (and (pair? e) (eq? (car e) 'faces))
+                                 (cons 'faces (cons 99 (cdr (cdr e))))
+                                 e))
+                           d)))))
+  (test "a fresh session round-trips too"
+    (let* ((s (session-new lay 1))
+           (r (datum->session (text->datum (datum->text (session->datum s))))))
+      (assert-true (board-equal? (session-board s) (session-board r)))
+      (assert-equal 144 (board-tile-count (session-board r))))))

@@ -67,13 +67,15 @@
     (define RAIN-DROPS 60)
     (define SETTLE-TICKS 10)       ; tiles an undo brings back scale in
     (define LOCK-TICKS 30)         ; a freshly locked pair shakes, twice a mismatch's length
+    (define UNLOCK-TICKS 24)       ; a broken lock: both tiles swell and settle
+    (define UNLOCK-SCALE 1.22)
 
     (define TAU 6.283185307179586)
 
     ;; --- state ---------------------------------------------------------------
 
-    ;; kind: pulse | match | shake | blink | shuffle | cleared | settle.
-    ;; A lock is a longer shake on both tiles.
+    ;; kind: pulse | match | shake | blink | shuffle | cleared | settle | unlock.
+    ;; A lock is a longer shake on both tiles; an unlock a bigger pulse on both.
     ;; ids: the slots it concerns. tween: 0..1 over the effect's life.
     ;; data: kind-specific, documented at each spawn below.
     (define-struct effect
@@ -293,6 +295,15 @@
                   (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
                          (spawn-cleared x)
                          x))
+                  ;; a lock broken (tiles stayed, locks went): both swell
+                  (unlocked (filter (lambda (id)
+                                      (and (tile-present? b1 id) (not (tile-locked? b1 id))))
+                                    (board-locked-slots b0)))
+                  (x (if (or (null? unlocked) (pair? gone))
+                         x
+                         (spawn x (effect kind: 'unlock
+                                          ids: unlocked
+                                          tween: (life UNLOCK-TICKS 'out-quad)))))
                   ;; the ICE locked a pair: both tiles shake
                   (newly-locked (filter (lambda (id) (not (tile-locked? b0 id)))
                                         (board-locked-slots b1)))
@@ -361,6 +372,10 @@
                       ((settle)
                        (let ((p (progress e alpha)))
                          (loop (cdr es) dx dy (* sx p) (* sy p) face #t)))
+                      ((unlock)
+                       (let* ((p (progress e alpha))
+                              (bump (* (- UNLOCK-SCALE 1.0) (sin (* 3.14159265 p)))))
+                         (loop (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
                       (else (loop (cdr es) dx dy sx sy face touched?)))))))))
 
     ;; The match ghosts this frame: (face x y w h alpha) each, both tiles
