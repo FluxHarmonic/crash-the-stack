@@ -23,24 +23,13 @@
          ..." on a boot error; the stylesheet hides the first and shows the
          second, so a phone with no WebGL2 sees the reason, not a black box. -->
     <div id="status"></div>
-    <!-- Ruling D14: when a new version of the service worker is waiting,
-         this prompt shows at launch (never mid-board), the UPDATE item
-         below stays until the player applies it, and applying is the only
-         thing that reloads. -->
-    <div id="update-prompt" hidden>
-      <span>A new version is ready.</span>
-      <button type="button" id="update-apply">apply</button>
-      <button type="button" id="update-later">not now</button>
-    </div>
+
     <!-- The game's commands (undo, shuffle, hint, next) are drawn on the
          canvas by the game itself and tapped there. This one button is the
          page's: fullscreen is a browser matter. No data-key, so the loader
          reports its click as ("click", "fullscreen"), which the game ignores. -->
     <nav class="commands" aria-label="page commands">
       <button type="button" id="fullscreen">full</button>
-      <!-- The placeholder menu's one item until P4's menu: applies a waiting
-           update. Hidden until there is one. -->
-      <button type="button" id="update" hidden>update</button>
     </nav>
   </main>
 
@@ -72,20 +61,20 @@
         bridges = Object.freeze(Object.assign({}, real, {
           setInstance: function (manifest, inst) {
             instance = inst;
-            // The page's parameters, sent on the next task: setInstance runs
-            // before the loader's sigil_wasm_init, and a dispatch made here
-            // is dropped with "VM not initialized" (measured 2026-09-17). The
-            // game boots its table on its first frame and boots again if a
-            // parameter lands later, so the order against that frame does
-            // not matter.
-            //   ?trace   the console lines verify.mjs reads
-            //   ?fresh   ignore the saved board or deal
-            //   ?cards   the card table (Klondike) until the menu lands
-            //   ?seed=N  the seed a fresh deal or board starts from
-            //   touch    a touch screen starts a fresh board with the hint
-            //            tags hidden (David, 2026-09-17: visual noise without
-            //            a keyboard); Space shows them, a saved board keeps
-            //            its own setting
+            // The page's parameters, all on a later task: setInstance runs
+            // before the loader initializes the VM, and a dispatch made here
+            // is dropped ("VM not initialized"; measured 2026-09-17, the
+            // touch flag went that way). The game boots on its first frame
+            // and boots again if a parameter lands after that.
+            //   trace: the console lines verify.mjs reads.
+            //   fresh: ignore the saved board or deal.
+            //   cards / stack: straight to that table, past the menu (the
+            //          arms' doors); seed=N: the seed a fresh deal or
+            //          board starts from.
+            //   touch: a touch screen starts every launch with the hint tags
+            //          hidden (David, 2026-09-17; Space shows them). Phones
+            //          and tablets match; a touch laptop with a trackpad
+            //          does not.
             var params = new URLSearchParams(location.search);
             setTimeout(function () {
               if (params.has("trace")) dispatch("trace", "on");
@@ -93,7 +82,10 @@
               if (params.has("cards")) dispatch("cards", "on");
               if (params.has("stack")) dispatch("stack", "on");
               if (params.has("seed")) dispatch("seed", params.get("seed"));
-              if (matchMedia("(pointer: coarse)").matches) dispatch("touch", "on");
+              if (matchMedia("(pointer: coarse)").matches || matchMedia("(hover: none)").matches) {
+                dispatch("touch", "on");
+              }
+              updates.ready();
             }, 0);
             return real.setInstance(manifest, inst);
           }
@@ -102,9 +94,10 @@
     });
 
     var encoder = new TextEncoder();
-    function dispatch(type, payload) {
+    // The game's answer (an integer), or -1 when it cannot be asked.
+    function dispatchRc(type, payload) {
       var ex = instance && instance.exports;
-      if (!ex || typeof ex.sigil_wasm_dispatch_event !== "function") return false;
+      if (!ex || typeof ex.sigil_wasm_dispatch_event !== "function") return -1;
       function put(s) {
         var bytes = encoder.encode(s + "\0");
         var ptr = ex.malloc(bytes.length);
@@ -114,11 +107,11 @@
       var t = put(type), p = put(payload);
       var rc = ex.sigil_wasm_dispatch_event(t, p);
       ex.free(p); ex.free(t);
-      return rc === 0;
+      return rc;
     }
-
-    // The update script below tells the game when a version is waiting.
-    window.crashDispatch = dispatch;
+    function dispatch(type, payload) { return dispatchRc(type, payload) === 0; }
+    var updates = { ready: function () {} };
+    globalThis.__crashDispatch = { dispatch: dispatch, dispatchRc: dispatchRc, updates: updates };
 
     var canvas = document.getElementById("stage");
 
@@ -192,17 +185,21 @@
   })();
 
   // Updates, ruling D14 (2026-09-17): sw.js is registered at every launch and
-  // never skips waiting on its own. When a new version is installed and
-  // WAITING, the launch prompt asks apply / not now (only inside the first
-  // seconds of a launch; a version found later shows only the UPDATE item),
-  // the UPDATE item stays until applied, and applying sends SKIP_WAITING and
-  // reloads on controllerchange. A board in play is never reloaded from
-  // under the player. ?force-update=1 is the recovery path: every worker
-  // unregistered, every cache deleted, then a plain reload. The state is
-  // published as window.crashUpdate for the browser arm.
+  // never skips waiting on its own. The GAME shows the state (a prompt with
+  // APPLY / NOT NOW above its HUD at launch, an UPDATE mark in the HUD during
+  // play); this page only tells it when a new version is WAITING, polls it
+  // for the player's choice, and on APPLY sends SKIP_WAITING and reloads on
+  // controllerchange. Nothing else reloads a running board. (One case is
+  // the browser's: a waiting worker activates by itself once every tab and
+  // the installed app are closed, so the next launch after that boots the
+  // new version with no prompt; the board is saved, nothing is lost.)
+  // ?force-update=1 is the recovery path: every worker unregistered, every
+  // cache deleted, then a plain reload. window.crashUpdate is the state for
+  // the browser arm.
   (function () {
     "use strict";
-    var status = { version: "__VERSION__", state: "none", prompted: false, reg: null };
+    var bridge = globalThis.__crashDispatch;
+    var status = { version: "__VERSION__", state: "none", told: null, reg: null };
     window.crashUpdate = status;
     if (!("serviceWorker" in navigator)) { status.state = "unsupported"; return; }
     var params = new URLSearchParams(location.search);
@@ -222,48 +219,48 @@
       return;
     }
     var launchUntil = Date.now() + 8000;
-    var prompt = document.getElementById("update-prompt");
-    var item = document.getElementById("update");
+    var gameReady = false;
     var applied = false;
-    // The game's menu shows an UPDATE entry once told; choosing it leaves
-    // "apply" in localStorage (the game has no bridge back to this page),
-    // which is polled here while a version is waiting. A stopgap until the
-    // prompt moves into the game with a bridge.
-    var MAILBOX = "crash-update";
-    function tellGame() {
-      var dispatch = window.crashDispatch;
-      if (dispatch) dispatch("update", "waiting");
+    var polling = null;
+    // Tell the game once it is up: the launch prompt inside the first
+    // seconds, the mark after that; then watch for its APPLY, which the
+    // game leaves in localStorage under "update" (the dispatch ABI's return
+    // value does not carry a handler's answer).
+    function chosen() {
+      try { return localStorage.getItem("update") === "apply"; } catch (e) { return false; }
     }
+    function tell() {
+      if (status.state !== "waiting" || !gameReady || status.told) return;
+      status.told = Date.now() < launchUntil ? "prompt" : "waiting";
+      bridge.dispatch("update", status.told);
+      polling = setInterval(function () { if (chosen()) apply(); }, 500);
+    }
+    bridge.updates.ready = function () { gameReady = true; tell(); };
     function waiting(reg) {
       status.reg = reg;
       status.state = "waiting";
-      item.hidden = false;
-      if (Date.now() < launchUntil) { prompt.hidden = false; status.prompted = true; }
-      tellGame();
-      var poll = setInterval(function () {
-        var v = null;
-        try { v = localStorage.getItem(MAILBOX); } catch (e) { /* storage blocked */ }
-        if (v === "apply") {
-          try { localStorage.removeItem(MAILBOX); } catch (e) { /* storage blocked */ }
-          clearInterval(poll);
-          apply();
-        }
-      }, 500);
+      tell();
+    }
+    function watch(w, reg) {
+      w.addEventListener("statechange", function () {
+        if (w.state === "installed" && navigator.serviceWorker.controller) waiting(reg);
+      });
     }
     function track(reg) {
       status.reg = reg;
       if (reg.waiting && navigator.serviceWorker.controller) waiting(reg);
+      // a worker already installing when the page loaded fired updatefound
+      // before anyone listened
+      if (reg.installing) watch(reg.installing, reg);
       reg.addEventListener("updatefound", function () {
-        var w = reg.installing;
-        if (!w) return;
-        w.addEventListener("statechange", function () {
-          if (w.state === "installed" && navigator.serviceWorker.controller) waiting(reg);
-        });
+        if (reg.installing) watch(reg.installing, reg);
       });
     }
     function apply() {
-      if (!status.reg || !status.reg.waiting) return;
+      if (!status.reg || !status.reg.waiting || applied) return;
       applied = true;
+      if (polling) clearInterval(polling);
+      try { localStorage.removeItem("update"); } catch (e) {}
       status.state = "applying";
       status.reg.waiting.postMessage({ type: "SKIP_WAITING" });
     }
@@ -281,9 +278,6 @@
         c.postMessage({ type: "VERSION" }, [ch.port2]);
       });
     };
-    document.getElementById("update-apply").addEventListener("click", apply);
-    document.getElementById("update-later").addEventListener("click", function () { prompt.hidden = true; });
-    item.addEventListener("click", apply);
     navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
       if (status.state === "none") status.state = "registered";
       track(reg);

@@ -35,6 +35,10 @@
 ;;;   crash: seed S tiles N pair A AX AY B BX BY   the first solution pair
 ;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
+;;;   crash: tags shown|hidden touch on|off fresh on|off   the boot's inputs
+;;;   crash: update waiting|prompt|apply   the web build's waiting update, as
+;;;                                         the game shows it (ruling D14)
+;;;   crash: control apply X Y             the prompt's APPLY box (with later, update)
 ;;;   crash: control NAME X Y              the centre of each HUD control
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
@@ -43,6 +47,8 @@
 ;;;   crash: removed A B tiles N           a pair left the board
 ;;;   crash: unlock A B                    a locked pair's first match
 ;;;   crash: lock A B                      the ICE locked a pair
+;;;   crash: remap                         the ICE re-dealt the stack
+;;;   crash: ice nothing                   an interval with nothing to hit
 ;;;   crash: trace V H S PHASE ICE         the meter after a hint, a shuffle, a
 ;;;                                         phase change or a counter-hack: value,
 ;;;                                         hints, shuffles, phase, counter-hacks fired
@@ -66,6 +72,7 @@
 ;;;   crash: cards trace V MODE PHASE ICE LAST   the meter after a phase or mode change,
 ;;;                                         a counter-hack, or a charge
 ;;;   crash: cards scramble N                a scramble was used; N left in the bank
+;;;   crash: cards tagsshown on|off model M touch on|off   the deal's tag state at boot
 ;;;   crash: cards auto                      auto-complete armed (every tableau card up)
 ;;;   crash: cards won moves N
 ;;;
@@ -77,8 +84,9 @@
 ;;; from N (with ?fresh, or when nothing is saved). The MENU control in
 ;;; either HUD, ctrl+e, or a severed stack's JACK OUT come back to the
 ;;; menu; the table stays in memory meanwhile. The menu's UPDATE entry
-;;; leaves "apply" in the localStorage key crash-update, which the page
-;;; polls while a version is waiting.
+;;; applies a waiting version the way the in-game prompt does (P1's
+;;; mechanism: "apply" in the localStorage key update, which the page
+;;; polls).
 ;;;   crash: menu ID X Y ...                the menu's entries and their centers
 ;;;   crash: menu chose ID
 
@@ -243,7 +251,7 @@
               ((not (= (trace-ice-count t0) (trace-ice-count t1)))
                (case (trace-last-ice t1)
                  ((lock) (report-lock! b0 b1))
-                 ((shuffle) (say "shuffle"))
+                 ((remap) (say "remap"))
                  (else (say "ice" "nothing"))))
               ((< n1 n0)
                ;; Two tiles left: the selected one and the one just picked.
@@ -298,12 +306,16 @@
                    "pair" a (car ca) (cdr ca)
                    b (car cb) (cdr cb))
               (say "labels" a (slot-tag s a) b (slot-tag s b))))
+        (say "tags"
+             (if (session-labels-shown s) "shown" "hidden")
+             "touch" (if *touch* "on" "off")
+             "fresh" (if *fresh* "on" "off"))
         (for-each (lambda (c)
                     (say "control"
                          (car c)
                          (+ (cadr c) (half (cadddr c)))
                          (+ (caddr c) (half (list-ref c 4)))))
-                  (geometry-controls *geom*))))
+                  (append (geometry-controls *geom*) (update-controls *geom*)))))
 
     ;; What changed on the card table between two deals, as one line.
     (define (report-deal-change! before after)
@@ -384,6 +396,9 @@
         (say "cards" "restored" "moves" (game-moves (deal-game d))))
       (when (deal-auto d)
         (say "cards" "auto"))
+      (say "cards" "tagsshown" (if (deal-labels-shown d) "on" "off")
+           "model" (deal-model d)
+           "touch" (if *touch* "on" "off"))
       (for-each (lambda (c)
                   (say "control"
                        (car c)
@@ -461,6 +476,9 @@
              (x (fx-observe x before after *geom*)))
         (set! *session* after)
         (set! *fx* x)
+        (unless (eq? (session-update before) (session-update after))
+          (say "update" (session-update after))
+          (when (eq? (session-update after) 'apply) (update-chosen!)))
         (report-change! before after)
         (report-trace! before after)
         (when (not (= (session-seed before) (session-seed after)))
@@ -543,7 +561,7 @@
         (let ((lay (turtle-layout)))
           (set! *geom* (make-geometry lay VW VH))
           (let ((booted (boot-session lay *seed* *fresh*)))
-            (set! *session* (if (and *touch* (not (cdr booted)))
+            (set! *session* (if *touch*
                                 (session (car booted) labels-shown: #f)
                                 (car booted)))
             (set! *restored* (cdr booted)))
@@ -555,27 +573,47 @@
       (unless *deal*
         (let ((booted (boot-deal *seed* *fresh*)))
           (set! *card-geom* (make-card-geometry VW VH))
-          (set! *deal* (if (and *touch* (not (cdr booted)))
+          (set! *deal* (if *touch*
                            (deal (car booted) labels-shown: #f)
                            (car booted)))
           (set! *card-fx* (card-fx-new))
           (set! *restored* (cdr booted)))))
 
-    ;; A menu choice. UPDATE: the page owns the service worker; the shell
-    ;; leaves "apply" in the page's mailbox key and the page applies it
-    ;; (a stopgap until the update prompt moves into the game).
+    ;; The update's state reaches the stack's session (the game draws it
+    ;; and takes the choice, (crash input) step-update) and the menu (its
+    ;; UPDATE entry). Reported for the arm.
+    (define (update! state)
+      (set! *update* (memq state '(waiting prompt)))
+      (when *session*
+        (set! *session* (session-with-update *session* state))
+        (say "update" state))
+      (when (and *booted* (eq? *screen* 'menu)) (open-menu!))
+      0)
+
+    ;; The player's APPLY reaches the page through the store (localStorage,
+    ;; which the page polls): the dispatch ABI's return value cannot carry
+    ;; it (measured 2026-09-17 by P1: the page saw 0 whatever the handler
+    ;; answered). The key is cleared at boot and by the page once read.
+    (define UPDATE-KEY "update")
+
+    (define (update-chosen!)
+      (store-set! UPDATE-KEY "apply"))
+
+    ;; A menu choice. UPDATE applies the waiting version the same way the
+    ;; in-game prompt does.
     (define (choose! choice)
       (let ((id (if (eq? choice 'continue) (active-game) choice)))
         (case id
           ((stack) (set-active-game! 'stack) (open-stack!))
           ((cards) (set-active-game! 'cards) (open-cards!))
-          ((update) (store-set! UPDATE-KEY "apply"))
+          ((update) (update-chosen!))
           (else #f))))
 
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
       (set! *booted* #t)
+      (store-remove! UPDATE-KEY)
       (cond (*cards* (open-cards!))
             (*stack* (open-stack!))
             (else (open-menu!))))
@@ -610,9 +648,9 @@
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
             ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))
             ((string=? type "update")
-             (set! *update* (string=? payload "waiting"))
-             (when (and *booted* (eq? *screen* 'menu)) (open-menu!))
-             0)
+             (cond ((string=? payload "waiting") (update! 'waiting))
+                   ((string=? payload "prompt") (update! 'prompt))
+                   (else 0)))
             ((string=? type "seed")
              (param! (lambda ()
                        (let ((n (string->number payload)))

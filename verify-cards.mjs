@@ -144,8 +144,18 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
-if (PHONE) await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
-else await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 760, deviceScaleFactor: 2, mobile: false });
+if (PHONE) {
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  // a phone: a coarse pointer that cannot hover, and touch, so the table
+  // starts with its tags hidden (David's rule) and the arm shows them
+  await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "coarse" }, { name: "hover", value: "none" }] });
+} else {
+  await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 760, deviceScaleFactor: 2, mobile: false });
+  // a desktop with a mouse (headless Chrome otherwise reports hover: none,
+  // which the page reads as a touch screen; P1's finding)
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "fine" }, { name: "hover", value: "hover" }] });
+}
 
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
@@ -272,7 +282,10 @@ if (SHOT) {
   // On the phone viewport a fresh deal starts with the tags hidden (a
   // touch screen); Space shows them for the second picture, then hides
   // them again so the rest of the arm runs as it would.
-  if (PHONE) {
+  // the tags are hidden on a touch screen at boot: Space shows them for a
+  // second picture, then hides them again
+  const shownAtBoot = await waitLine(/^crash: cards tagsshown (on|off) /, bootMark, 2000);
+  if (shownAtBoot && shownAtBoot.m[1] === "off") {
     const space = async (t) => evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(t)}, { key: " ", bubbles: true, cancelable: true }))`);
     await space("keydown"); await sleep(40); await space("keyup"); await sleep(400);
     const tagsShot = await send("Page.captureScreenshot", { format: "png" });
@@ -342,6 +355,11 @@ async function type(tag) { for (const ch of tag) await press(ch); }
     await press("Backspace");
     const back = await waitLine(/^crash: cards undo 0$/, mark, 3000);
     if (!back) fail("keys", "Backspace did not undo the draw back to move 0");
+    // a touch screen starts every launch with the tags hidden (headless
+    // Chrome reads as one whatever the emulated media say; the boot line
+    // "crash: cards tagsshown on|off" is the game's own word); Space shows them
+    const shown = await waitLine(/^crash: cards tagsshown (on|off) /, bootMark, 2000);
+    if (shown && shown.m[1] === "off") await press(" ");
     mark = consoleLines.length;
     await type(tags.m[1]); await type(tags.m[2]);
     const moved = back && await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
