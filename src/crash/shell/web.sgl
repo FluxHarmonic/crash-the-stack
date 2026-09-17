@@ -43,6 +43,8 @@
 ;;;   crash: removed A B tiles N           a pair left the board
 ;;;   crash: unlock A B                    a locked pair's first match
 ;;;   crash: lock A B                      the ICE locked a pair
+;;;   crash: trace V H S L                 the meter after a hint, a shuffle or
+;;;                                         the lock: value, hints, shuffles, locked?
 
 (define-library (crash shell web)
   (import (sigil struct)
@@ -56,6 +58,7 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash trace)
           (crash tween)
           (crash fx)
           (crash render)
@@ -149,8 +152,23 @@
       (when *trace*
         (println "~a" (apply str "crash:" (map (lambda (p) (str " " p)) parts)))))
 
+    ;; The meter's line, whenever a hint, a shuffle or the lock moved it.
+    (define (report-trace! before after)
+      (let ((t0 (session-trace before))
+            (t1 (session-trace after)))
+        (when (or (not (= (trace-hints t0) (trace-hints t1)))
+                  (not (= (trace-shuffles t0) (trace-shuffles t1)))
+                  (not (eq? (trace-locked? t0) (trace-locked? t1))))
+          (say "trace"
+               (exact (floor (trace-value t1)))
+               (trace-hints t1)
+               (trace-shuffles t1)
+               (if (trace-locked? t1) 1 0)))))
+
     ;; What changed between two sessions, as one line, or nothing. A new
     ;; deal is reported by say-first-pair instead (web-tick checks the seed).
+    ;; A shuffle and the lock can land in one frame (the shuffle's cost
+    ;; crosses the threshold), so the lock is reported on its own after.
     (define (report-change! before after)
       (let* ((b0 (session-board before))
              (b1 (session-board after))
@@ -173,12 +191,13 @@
               ((and (> h1 h0)
                     (not (equal? (vector->list (board-faces b0))
                                  (vector->list (board-faces b1)))))
-               (say "shuffle"))
+               (say "shuffle")
+               (report-lock! b0 b1))
               ((> h1 h0)
                (let ((l0 (board-locked-slots b0))
                      (l1 (board-locked-slots b1)))
                  (if (> (length l1) (length l0))
-                     (apply say "lock" (filter (lambda (id) (not (memv id l0))) l1))
+                     (report-lock! b0 b1)
                      (apply say "unlock" (filter (lambda (id) (not (memv id l1))) l0)))))
               ((and (board-selected b1)
                     (not (eqv? (board-selected b0) (board-selected b1))))
@@ -186,6 +205,12 @@
               ((and (board-selected b0)
                     (not (board-selected b1)))
                (say "deselect")))))
+
+    (define (report-lock! b0 b1)
+      (let ((l0 (board-locked-slots b0))
+            (l1 (board-locked-slots b1)))
+        (when (> (length l1) (length l0))
+          (apply say "lock" (filter (lambda (id) (not (memv id l0))) l1)))))
 
     ;; A slot's hint-mode tag, from the session's own table.
     (define (slot-tag s id)
@@ -251,6 +276,7 @@
           (set! *session* after)
           (set! *fx* x)
           (report-change! before after)
+          (report-trace! before after)
           (when (not (= (session-seed before) (session-seed after)))
             (set! *announced* #f))
           (begin-frame)

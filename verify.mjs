@@ -22,6 +22,8 @@
 //               "crash: control undo X Y" boot line gives), then the hint-mode
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
+//   lock        three taps on the SHUF control spike the meter to LOCK-AT
+//               (3 x 60) -> "crash: shuffle" three times, then "crash: lock A B"
 //   console     zero error-level console entries and zero exceptions
 //
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
@@ -61,7 +63,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "lock", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -197,10 +199,12 @@ function timedOut(name) {
 // ---- 2. boot ----------------------------------------------------------------
 // ?trace switches on the game's console lines; a player's page prints nothing.
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
-const boot = await waitLine(/^crash: seed (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/, 0, 20000);
+const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
+const boot = await waitLine(BOOT_RE, 0, 20000);
 if (!boot) { fail("boot", "no boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
-const [, seed, A, AX, AY, B, BX, BY] = boot.m;
-pass("boot", `seed ${seed} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY})`);
+const [, seed, tiles0, A, AX, AY, B, BX, BY] = boot.m;
+if (tiles0 !== "144") fail("boot", `expected a fresh 144-tile board, got tiles ${tiles0}`);
+else pass("boot", `seed ${seed} tiles ${tiles0} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY})`);
 await sleep(1500); // a few frames so the first draw has happened
 
 // ---- 3. render --------------------------------------------------------------
@@ -316,7 +320,34 @@ if (keysOk) pass("keys-match", keysDetail);
 else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6));
 else fail("keys-match", keysDetail);
 
-// ---- 7. console -------------------------------------------------------------
+// ---- 7. lock: the trace meter's ICE, through the SHUF control ---------------
+// Each shuffle costs 60 on the meter and LOCK-AT is 180, so the third tap
+// takes the value past the threshold and the next frame locks one legal
+// pair ("crash: lock A B", a and b both present). With forwarding off the
+// control cannot be tapped, so the positive-control run skips this.
+{
+  const ctl = await waitLine(/^crash: control shuf (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  if (EXPECT_NO_SELECTION) skip("lock", "controls are not tappable with forwarding off");
+  else if (!ctl) fail("lock", "no \"crash: control shuf\" boot line");
+  else {
+    let detail = "";
+    for (let i = 0; i < 3 && !detail; i++) {
+      mark = consoleLines.length;
+      await tap(ctl.m[1], ctl.m[2]);
+      const sh = await waitLine(/^crash: shuffle$/, mark, 2000);
+      if (!sh) detail = `shuffle ${i + 1}: no "crash: shuffle" line`;
+      await sleep(150);
+    }
+    if (!detail) {
+      const lock = await waitLine(/^crash: lock (\d+) (\d+)$/, mark, 3000);
+      if (!lock) detail = "three shuffles produced no \"crash: lock\" line";
+      else pass("lock", lock.m[0]);
+    }
+    if (detail) fail("lock", detail);
+  }
+}
+
+// ---- 8. console -------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
 else fail("console", `${consoleErrors.length} error(s): ${JSON.stringify(consoleErrors.slice(0, 5))}`);
 
