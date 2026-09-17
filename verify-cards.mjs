@@ -404,7 +404,7 @@ else pass("reload", restored.m[0]);
   // suit (S H D C) then rank; foundations top first.
   const found = (suit) => Array.from({ length: 13 }, (_, k) => suit * 13 + 12 - k);
   const spades = found(0).slice(1); // without the king (12), which sits on pile 0
-  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings tags #t))`;
+  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (scrambles . 1) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings tags #t))`;
   await evalJS(`localStorage.setItem("cards", ${JSON.stringify(datum)})`);
   mark = consoleLines.length;
   await send("Page.navigate", { url: URL.replace("&fresh", "") });
