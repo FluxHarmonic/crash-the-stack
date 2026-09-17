@@ -24,7 +24,7 @@
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
 //   traced      SHUFFLES taps on the SHUF control fill the trace (60 each,
-//               TRACE-AT 200 -> 4) -> "crash: shuffle" that many times, then
+//               TRACE-AT 180 -> 3) -> "crash: shuffle" that many times, then
 //               "crash: trace ... counter 0" on the next tick,
 //               and within ICE-FIRST + 5 s the first counter-hack:
 //               "crash: trace ... counter 1" with "crash: lock A B" or a sixth
@@ -352,7 +352,7 @@ else fail("keys-match", keysDetail);
 // with either "crash: lock A B" or one more "crash: shuffle". With
 // forwarding off the control cannot be tapped, so the positive-control run
 // skips this.
-const TRACE_AT = 200, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
+const TRACE_AT = 180, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
 let iceLock = null;
 {
   const ctl = await waitLine(/^crash: control shuf (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
