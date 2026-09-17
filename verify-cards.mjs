@@ -414,7 +414,12 @@ else pass("reload", restored.m[0]);
   const found = (suit) => Array.from({ length: 13 }, (_, k) => suit * 13 + 12 - k);
   const spades = found(0).slice(1); // without the king (12), which sits on pile 0
   const datum = `(crash-cards 2 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (scrambles . 1) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings #t))`;
-  await evalJS(`localStorage.setItem("cards", ${JSON.stringify(datum)})`);
+  // Written at pagehide, after the running table's last frame: its own
+  // save (due on a clock boundary every 5 s) once landed between an
+  // immediate write and the navigation, and the page restored the keys
+  // sub-arm's deal instead (2026-09-18: "restored moves 1" where "moves
+  // 0" was expected).
+  await evalJS(`window.addEventListener("pagehide", () => localStorage.setItem("cards", ${JSON.stringify(datum)}))`);
   mark = consoleLines.length;
   await send("Page.navigate", { url: URL.replace("&fresh", "") });
   const restored = await waitLine(/^crash: cards restored moves 0$/, mark, 20000);
