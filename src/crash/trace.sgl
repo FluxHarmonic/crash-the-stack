@@ -7,10 +7,12 @@
 ;;; the ICE is on you: COUNTER-HACK, a countdown of SEVER-AT seconds
 ;;; during which a counter-hack fires on its own timer (the first after
 ;;; ICE-FIRST, then every ICE-INTERVAL), picked with the board's random
-;;; stream from the applicable members of a set: lock a pair (two matches
-;;; to remove; never when it would leave no unlocked legal match), or
-;;; re-deal the remaining tiles (the solvable generator, so the board
-;;; stays winnable). Hints and shuffles now eat into the countdown. When
+;;; stream from the applicable members of a set: lock a pair (a STRONG
+;;; lock cannot be selected at all; it turns WEAK after LOCK-DECAY or when
+;;; it blocks the last legal match, and a weak lock breaks on one tap;
+;;; never placed where it would be weak on arrival: D15), or remap the
+;;; remaining tiles (every lock dropped, then the solvable generator, so
+;;; the board stays winnable). Hints and shuffles now eat into the countdown. When
 ;;; it reaches zero the connection is SEVERED: the board is lost, no move
 ;;; or undo is accepted, and the player gets the same seed again or a new
 ;;; board. Clearing the board wins in any phase; the score is GNOME's
@@ -43,11 +45,15 @@
           trace-countdown-string trace-ice-string
           trace-add-ticks trace-hint trace-shuffle trace-with-mode trace-flip-allowed?
           trace-advance trace-finish
+          lock-weak? lock-strong?
           ice-member ice-member? ice-member-name ice-member-applicable? ice-member-apply
           ICE-SET ice-applicable
           TRACE-AT HINT-COST SHUFFLE-COST
           ICE-FIRST ICE-INTERVAL SEVER-AT HINT-SEVER-COST SHUFFLE-SEVER-COST
-          SCRAMBLE-COUNT MODES PHASES)
+          LOCK-DECAY SCRAMBLE-COUNT MODES PHASES
+          MSG-JACKED-IN MSG-TRACED MSG-LOCKED-PAIR MSG-LOCKED MSG-LOCK-WEAK MSG-LOCK-BROKEN
+          MSG-REMAPPED MSG-NOTHING MSG-SEVERED MSG-TOO-LATE MSG-NO-MENU
+          TAG-CLEAN-RUN TAG-UNDER-ICE)
 
   (begin
     ;; --- the numbers David tunes (seconds unless said otherwise) --------------
@@ -57,10 +63,27 @@
     (define SHUFFLE-COST 60)         ; on the trace, per shuffle (GNOME's)
     (define ICE-FIRST 10)            ; after the trace completes, the first counter-hack
     (define ICE-INTERVAL 30)         ; then one every this often
-    (define SEVER-AT 360)            ; the countdown: the connection is cut at zero
+    (define SEVER-AT 180)            ; the countdown: the connection is cut at zero (360 ruled; halved by David from play, 2026-09-17)
     (define HINT-SEVER-COST 15)      ; off the countdown, per hint
     (define SHUFFLE-SEVER-COST 30)   ; off the countdown, per shuffle
+    (define LOCK-DECAY 45)           ; a strong lock turns weak this long after it lands
     (define SCRAMBLE-COUNT 6)        ; P3's face scramble: free tiles it hits
+
+    ;; The in-world wording (design note, 2026-09-17; D15), one verb per
+    ;; counter-hack, never reused.
+    (define MSG-JACKED-IN "JACKED IN. TRACE RUNNING.")
+    (define MSG-TRACED "TRACED. ICE INBOUND.")
+    (define MSG-LOCKED-PAIR "ICE LOCKED A PAIR.")
+    (define MSG-LOCKED "LOCKED.")
+    (define MSG-LOCK-WEAK "LOCK WEAK. TAP TO BREAK.")
+    (define MSG-LOCK-BROKEN "LOCK BROKEN.")
+    (define MSG-REMAPPED "ICE REMAPPED THE STACK.")
+    (define MSG-NOTHING "ICE PROBED. NOTHING TO HIT.")
+    (define MSG-SEVERED "LINK SEVERED.")
+    (define MSG-TOO-LATE "TOO LATE TO SWITCH.")
+    (define MSG-NO-MENU "JACK OUT: NO MENU YET.")
+    (define TAG-CLEAN-RUN "CLEAN RUN")
+    (define TAG-UNDER-ICE "UNDER ICE")
 
     (define TICKS-PER-SECOND 60)
     (define MODES '(twist clean))
@@ -165,41 +188,48 @@
     ;; --- the counter-hack set ---------------------------------------------------------
 
     ;; name: a symbol for the HUD and the trace lines. applicable?: board ->
-    ;; bool. apply: board -> board (the board's own rng is advanced inside).
+    ;; bool. apply: board, now -> board (the board's own rng is advanced
+    ;; inside; now is the game's tick, for a lock's decay).
     (define-struct ice-member
       (name default: 'none)
       (applicable? default: #f)
       (apply default: #f))
 
-    ;; Legal matches with neither tile locked.
-    (define (unlocked-matches b)
-      (filter (lambda (m)
-                (not (or (tile-locked? b (car m)) (tile-locked? b (cdr m)))))
-              (legal-matches b)))
+    ;; A lock is WEAK when LOCK-DECAY has elapsed since it landed, or when
+    ;; the board has no legal match free of locked tiles (the lock would
+    ;; strand the player). Derived, never stored: an undo or a remap that
+    ;; brings back an unlocked match makes it strong again.
+    (define (lock-weak? b id now)
+      (and (tile-locked? b id)
+           (or (>= (- now (tile-lock-tick b id)) (seconds->ticks LOCK-DECAY))
+               (null? (unlocked-matches b)))))
+
+    (define (lock-strong? b id now)
+      (and (tile-locked? b id) (not (lock-weak? b id now))))
 
     ;; Lock: one unlocked legal pair, chosen by the board's random stream.
-    ;; Not applicable when it would leave no unlocked legal match (David:
-    ;; "if lock comes up while there's only one pair left, a different
-    ;; counter-hack is used").
+    ;; Not applicable when it would be weak on arrival, i.e. would leave no
+    ;; unlocked legal match (David: "if lock comes up while there's only
+    ;; one pair left, a different counter-hack is used").
     (define (lock-applicable? b)
       (>= (length (unlocked-matches b)) 2))
 
-    (define (lock-apply b)
+    (define (lock-apply b now)
       (let* ((matches (unlocked-matches b))
              (rng (prng-next (board-rng b)))
              (pair (list-ref matches (prng-index rng (length matches))))
-             (nx (board-lock-pair b (car pair) (cdr pair))))
+             (nx (board-lock-pair b (car pair) (cdr pair) now)))
         (set-board-rng! nx rng)
         nx))
 
-    ;; Forced shuffle: the remaining tiles re-dealt by the solvable
-    ;; generator, so the board stays winnable and the player's read of it
-    ;; is gone. Applicable when at least two pairs remain.
+    ;; Remap: every lock dropped, then the remaining tiles re-dealt by the
+    ;; solvable generator, so the board stays winnable and the player's
+    ;; read of it is gone. Applicable when at least two pairs remain.
     (define (shuffle-applicable? b)
       (>= (board-tile-count b) 4))
 
-    (define (shuffle-apply b)
-      (reshuffle b))
+    (define (shuffle-apply b now)
+      (reshuffle (board-break-locks b)))
 
     (define ICE-SET
       (list (ice-member name: 'lock
@@ -218,7 +248,7 @@
     ;; the player could undo would have no teeth (ruled 2026-09-17); the
     ;; player's own moves after it are undoable as usual. Returns
     ;; (cons board name-or-#f).
-    (define (fire-ice b)
+    (define (fire-ice b now)
       (let ((members (ice-applicable b)))
         (if (null? members)
             (cons b #f)
@@ -226,7 +256,7 @@
                    (m (list-ref members (prng-index rng (length members))))
                    (b (board-copy b)))
               (set-board-rng! b rng)
-              (let ((hit ((ice-member-apply m) b)))
+              (let ((hit ((ice-member-apply m) b now)))
                 (set-board-history! hit '())
                 (set-board-selected! hit #f)
                 (cons hit (ice-member-name m)))))))
@@ -265,7 +295,7 @@
                                    b
                                    (reverse (cons 'severed events))))
                             ((<= ice-timer 0)
-                             (let ((fired (fire-ice b)))
+                             (let ((fired (fire-ice b (trace-ticks tr))))
                                (loop (+ k 1)
                                      (trace tr
                                             countdown: countdown

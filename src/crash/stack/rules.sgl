@@ -18,11 +18,12 @@
 ;;; cursor, coordinate or glyph key ends there. Faces are integers 0..35;
 ;;; #f is a blank face, which only the generator sees.
 ;;;
-;;; The one twist the rules know about (P1, the trace meter): a tile can be
-;;; LOCKED. A match in which either tile is locked breaks the locks on
-;;; both instead of removing them, so a locked pair is matched twice: once
-;;; to unlock, once to leave. Who locks what, and when, is (crash trace)'s
-;;; business; here a lock is one more bit per slot that undo restores.
+;;; The one twist the rules know about (P1, the trace meter): a pair of
+;;; tiles can be LOCKED. A locked tile cannot be selected here at all;
+;;; whether a lock is strong or weak (weak: one select breaks it) is time
+;;; and board state that (crash trace) derives, and (crash input) calls
+;;; board-unlock-pair when a weak lock is tapped. A lock records its
+;;; partner and the tick it landed, and undo restores it.
 ;;;
 ;;; No rendering, windowing or platform import may appear here; the gate
 ;;; test/test-imports.sgl asserts it.
@@ -36,8 +37,8 @@
           board-layout board-faces board-present board-occ board-locked
           board-selected board-history board-solution board-rng
           board-new board-copy
-          tile-present? tile-face tile-locked?
-          board-tile-count board-cleared? board-locked-slots
+          tile-present? tile-face tile-locked? tile-lock-partner tile-lock-tick
+          board-tile-count board-cleared? board-locked-slots unlocked-matches
           blocked-left? blocked-right? covered? playable?
           playable-slots faces-match? legal-matches
           board-select board-remove-pair board-undo
@@ -55,7 +56,7 @@
       (faces default: (vector) mutable: #t)     ; slot -> 0..35, or #f (blank)
       (present default: (vector) mutable: #t)   ; slot -> #t while the tile is on the board
       (occ default: (vector) mutable: #t)       ; cell -> slot or #f; see layout-cell-index
-      (locked default: (vector) mutable: #t)    ; slot -> #t while the tile is locked
+      (locked default: (vector) mutable: #t)    ; slot -> (partner . tick) while locked, else #f
       (selected default: #f mutable: #t)        ; slot or #f
       (history default: '() mutable: #t)        ; earlier snapshots, newest first
       (solution default: '() mutable: #t)       ; ((a . b) ...) in removal order from the
@@ -114,7 +115,16 @@
       (vector-ref (board-faces b) id))
 
     (define (tile-locked? b id)
-      (vector-ref (board-locked b) id))
+      (and (vector-ref (board-locked b) id) #t))
+
+    (define (tile-lock-partner b id)
+      (let ((l (vector-ref (board-locked b) id)))
+        (and l (car l))))
+
+    ;; The tick the lock landed on, for its decay.
+    (define (tile-lock-tick b id)
+      (let ((l (vector-ref (board-locked b) id)))
+        (and l (cdr l))))
 
     ;; Ascending slot ids of every locked tile still on the board.
     (define (board-locked-slots b)
@@ -182,6 +192,12 @@
       (let ((fa (tile-face b a)) (fc (tile-face b c)))
         (and fa fc (= fa fc))))
 
+    ;; Legal matches with neither tile locked: the moves a player can make.
+    (define (unlocked-matches b)
+      (filter (lambda (m)
+                (not (or (tile-locked? b (car m)) (tile-locked? b (cdr m)))))
+              (legal-matches b)))
+
     ;; Every pair (a . c), a < c, of playable tiles with the same face.
     (define (legal-matches b)
       (let loop ((slots (playable-slots b))
@@ -214,17 +230,17 @@
         (set-board-history! nx (cons (snapshot b) (board-history b)))
         nx))
 
-    ;; Lock two tiles (the trace's ICE response), no questions asked, with
-    ;; the old board on the history so undo takes the lock back.
-    (define (board-lock-pair b a c)
+    ;; Lock two tiles (the trace's ICE response) at tick, no questions
+    ;; asked, with the old board on the history so undo takes the lock back.
+    (define (board-lock-pair b a c tick)
       (let ((nx (board-copy b)))
-        (vector-set! (board-locked nx) a #t)
-        (vector-set! (board-locked nx) c #t)
+        (vector-set! (board-locked nx) a (cons c tick))
+        (vector-set! (board-locked nx) c (cons a tick))
         (set-board-history! nx (cons (snapshot b) (board-history b)))
         nx))
 
-    ;; The first of a locked pair's two matches: both locks go, the tiles
-    ;; stay, the selection clears, the history grows (undo re-locks).
+    ;; A weak lock broken: both locks go, the tiles stay, the selection
+    ;; clears, the history grows (undo re-locks).
     (define (board-unlock-pair b a c)
       (let ((nx (board-copy b)))
         (vector-set! (board-locked nx) a #f)
@@ -233,8 +249,8 @@
         (set-board-history! nx (cons (snapshot b) (board-history b)))
         nx))
 
-    ;; Every lock off, no history entry: the trace's auto-break when the
-    ;; board has thinned to nothing but locked tiles.
+    ;; Every lock off, no history entry: what a forced shuffle does before
+    ;; it re-deals (a lock on two faces that no longer match means nothing).
     (define (board-break-locks b)
       (let ((nx (board-copy b)))
         (vector-fill! (board-locked nx) #f)
@@ -243,19 +259,18 @@
     (define (with-selected b id)
       (board (board-copy b) selected: id))
 
-    ;; The entry point. Picking a tile that is not playable changes nothing.
-    ;; Otherwise: nothing selected -> select it; the selected tile again ->
-    ;; deselect; a matching tile -> both leave, unless either is locked, in
-    ;; which case both unlock and stay; any other tile -> it becomes the
-    ;; selection (the mismatch shake is (crash fx)'s).
+    ;; The entry point. Picking a tile that is not playable, or that is
+    ;; locked, changes nothing. Otherwise: nothing selected -> select it;
+    ;; the selected tile again -> deselect; a matching tile -> both leave;
+    ;; any other tile -> it becomes the selection (the mismatch shake is
+    ;; (crash fx)'s).
     (define (board-select b id)
       (let ((sel (board-selected b)))
         (cond ((not (playable? b id)) b)
+              ((tile-locked? b id) b)
               ((not sel) (with-selected b id))
               ((= sel id) (with-selected b #f))
               ((not (faces-match? b sel id)) (with-selected b id))
-              ((or (tile-locked? b sel) (tile-locked? b id))
-               (board-unlock-pair b sel id))
               (else (board-remove-pair b sel id)))))
 
     ;; Back to the previous snapshot; selection cleared. A board with no

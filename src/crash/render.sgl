@@ -52,7 +52,8 @@
     (define C-SUIT-2    '(0.10 0.55 0.30))   ; i-q
     (define C-SUIT-3    '(0.55 0.25 0.70))   ; r-z
     (define C-LABEL-LIT '(1.00 0.80 0.20))
-    (define C-LOCKED    '(0.55 0.30 0.45))   ; a locked tile's face
+    (define C-LOCKED    '(0.62 0.34 0.38))   ; a strong lock's face
+    (define C-LOCK-WEAK '(0.72 0.62 0.36))   ; a weak lock's face
     (define C-TRACE     '(0.30 0.95 0.85))   ; the meter, low
     (define C-TRACE-HOT '(1.00 0.35 0.35))   ; the meter, near the lock
     ;; Tints for the test-tile texture: white leaves the art as drawn.
@@ -151,20 +152,29 @@
         (color! C-SIDE)
         (draw-filled-rect (- x side) y side h)))
 
-    ;; glow: 0..1, how bright the selected face breathes this frame. A
-    ;; locked tile's face is dimmed and barred across the top.
-    (define (draw-face-primitives g face x y w h selected? locked? glow)
+    ;; glow: 0..1, how bright the selected face breathes this frame. lock:
+    ;; #f, 'strong or 'weak: a locked face is dimmed and barred, red for a
+    ;; strong lock, amber for a weak one. right-open?: no tile beside this
+    ;; one on its own layer, so its right edge is over a lower layer (or
+    ;; nothing) and gets a dark line to read as an edge (David, 2026-09-17:
+    ;; a tile's right boundary was hard to see against the tiles under it;
+    ;; two faces side by side on one layer stay seamless).
+    (define (draw-face-primitives g face x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
-                    (locked? C-LOCKED)
+                    ((eq? lock 'strong) C-LOCKED)
+                    ((eq? lock 'weak) C-LOCK-WEAK)
                     (else C-FACE)))
       (draw-filled-rect x y w h)
       (color! (if selected? C-SELECTED C-FACE-EDGE))
       (draw-filled-rect x y w 1)
       (draw-filled-rect x y 1 h)
+      (when right-open?
+        (color! (if selected? C-SELECTED C-SIDE))
+        (draw-filled-rect (+ x w -1) y 1 h))
       (when face (draw-glyph-on g face x y w h selected?))
-      (when locked?
-        (color! C-HIGHLIGHT)
+      (when lock
+        (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
         (draw-filled-rect x (+ y h -5) w 2)))
 
@@ -231,10 +241,17 @@
                   w2
                   h2))))
 
+    ;; #f, 'strong or 'weak for a tile, at the game's tick.
+    (define (lock-state b id now)
+      (cond ((not (tile-locked? b id)) #f)
+            ((lock-weak? b id now) 'weak)
+            (else 'strong)))
+
     (define (draw-tiles s g tex x)
       (let* ((b (session-board s))
              (lay (board-layout b))
              (selected (board-selected b))
+             (now (trace-ticks (session-trace s)))
              (glow (fx-glow x))
              (textured? (and tex (eq? (session-render-mode s) 'texture)))
              (highlight (and (eq? (session-model s) 'cursor)
@@ -269,7 +286,9 @@
                              (if textured?
                                  (draw-face-texture g b id face tex x y w h selected?)
                                  (draw-face-primitives g face x y w h selected?
-                                                       (tile-locked? b id) glow))))
+                                                       (lock-state b id now)
+                                                       (not (blocked-right? b id))
+                                                       glow))))
             (loop (+ layer 1))))
         (draw-ghosts g x)
         (draw-particles g x)
@@ -360,17 +379,14 @@
     (define (phase-line tr b)
       (case (trace-phase tr)
         ((counter)
-         (string-append "TRACED. ICE IS ON YOU. NEXT ICE " (trace-ice-string tr)
-                        ". CONNECTION SEVERS IN " (trace-countdown-string tr) "."
+         (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
+                        ". LINK SEVERS IN " (trace-countdown-string tr) "."
                         (if (pair? (board-locked-slots b))
-                            " A LOCKED PAIR NEEDS TWO MATCHES."
-                            " CLEAR THE STACK TO WIN.")))
+                            " A STRONG LOCK HOLDS UNTIL IT WEAKENS."
+                            " CRASH THE STACK TO WIN.")))
         ((severed)
-         "CONNECTION SEVERED. TAP THE LEFT HALF FOR THE SAME STACK, THE RIGHT FOR A NEW ONE (^R ^N).")
-        (else
-         (if (pair? (board-locked-slots b))
-             "A LOCKED PAIR NEEDS TWO MATCHES. THE GAME GOES ON."
-             #f))))
+         "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
+        (else #f)))
 
     (define (control-label name)
       (case name
@@ -423,7 +439,7 @@
                    (text (case phase
                            ((trace) (string-append "TRACE "
                                                    (number->string (exact (floor (trace-value tr))))))
-                           ((counter) (string-append "SEVER " (trace-countdown-string tr)))
+                           ((counter) (string-append "LINK " (trace-countdown-string tr)))
                            ((severed) "SEVERED")
                            (else (string-append "CRASHED " (trace-clock-string tr)))))
                    (bar (case phase
@@ -440,18 +456,26 @@
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
               (draw-text text (+ x 4) (+ y 3) 2)))))
 
-    ;; The centred message box: the cleared sequence slides it in and
-    ;; fades it up over its first fifth; every other message just sits.
-    (define (draw-message g message top cleared)
+    ;; The centred message box. rise: 0..1 slides it in from below and fades
+    ;; it up (the cleared sequence); fade: 0..1 slides it up and fades it
+    ;; out (a toast leaving). A state message passes 1 and 0.
+    (define (draw-message g message top rise fade)
       (let* ((w (text-width message 3))
              (x (exact (floor (/ (- (geometry-vw g) w) 2))))
-             (p (if cleared (min 1.0 (* cleared 5.0)) 1.0))
-             (k (ease 'out-back p))
-             (y (exact (floor (+ (/ top 2) (* 40 (- 1.0 k)))))))
-        (color-alpha! C-BG p)
+             (k (ease 'out-back rise))
+             (y (exact (floor (- (+ (/ top 2) (* 40 (- 1.0 k)))
+                                 (* 50 (ease 'in-out-quad fade))))))
+             (a (* rise (- 1.0 fade))))
+        (color-alpha! C-BG a)
         (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
-        (color-alpha! C-SELECTED p)
+        (color-alpha! C-SELECTED a)
         (draw-text message x (- y 10) 3)))
+
+    ;; A toast's fade: nothing through TOAST-HOLD of its life, then out.
+    (define (toast-fade p)
+      (if (< p TOAST-HOLD)
+          0.0
+          (/ (- p TOAST-HOLD) (- 1.0 TOAST-HOLD))))
 
     (define (draw-hud s g x)
       (let* ((b (session-board s))
@@ -487,19 +511,26 @@
                      (- vw 8 (text-width right 2) 24 (text-width (string-append "> " (session-typed s)) 2))
                      (+ top 7)
                      2))
+        ;; state messages sit; everything else is a toast from (crash fx)
         (let* ((tr (session-trace s))
-               (message (cond ((board-cleared? b)
-                               (string-append "STACK CRASHED " (trace-clock-string tr)
-                                              (cond ((eq? (trace-mode tr) 'clean) "")
-                                                    ((eq? (trace-cleared-in tr) 'counter) " UNDER ICE")
-                                                    (else " BEFORE TRACE"))))
-                              ((trace-severed? tr) "")
-                              ((null? (legal-matches b))
-                               "NO MOVES LEFT - SHUFFLE")
-                              (else
-                               (session-message s)))))
-          (unless (string=? message "")
-            (draw-message g message top (and (board-cleared? b) cleared))))))
+               (state (cond ((board-cleared? b)
+                             (string-append "STACK CRASHED " (trace-clock-string tr)
+                                            (cond ((eq? (trace-mode tr) 'clean) "")
+                                                  ((eq? (trace-cleared-in tr) 'counter)
+                                                   (string-append " " TAG-UNDER-ICE))
+                                                  (else (string-append " " TAG-CLEAN-RUN)))))
+                            ((trace-severed? tr) "")
+                            ((null? (legal-matches b)) "NO MOVES LEFT - SHUFFLE")
+                            ((session-hint-armed s) "HINT: PRESS A FACE KEY")
+                            (else "")))
+               (toast (fx-toast x)))
+          (cond ((not (string=? state ""))
+                 (draw-message g state top (if (and (board-cleared? b) cleared)
+                                               (min 1.0 (* cleared 5.0))
+                                               1.0)
+                               0.0))
+                ((and toast (not (trace-severed? tr)))
+                 (draw-message g (car toast) top 1.0 (toast-fade (cdr toast))))))))
 
     ;; --- the trace's screens -------------------------------------------------
 
@@ -526,8 +557,7 @@
     ;; The severed connection: static over the board and the two choices.
     (define (draw-severed g x)
       (let* ((vw (geometry-vw g))
-             (top (- (geometry-vh g) (geometry-hud-h g)))
-             (half-w (half vw)))
+             (top (- (geometry-vh g) (geometry-hud-h g))))
         (color-alpha! C-BG 0.75)
         (draw-filled-rect 0 0 vw top)
         (let loop ((k 0) (rng (prng-seed (+ 17 (fx-ticks x)))))
@@ -538,14 +568,14 @@
               (color-alpha! C-TEXT-DIM (+ 0.15 (* 0.5 (/ (prng-index r3 100) 100.0))))
               (draw-filled-rect (prng-index r1 vw) (prng-index r2 top) 3 2)
               (loop (+ k 1) r3))))
-        (let* ((title "CONNECTION SEVERED")
+        (let* ((title "LINK SEVERED")
                (tw (text-width title 3)))
           (color! C-TRACE-HOT)
           (draw-text title (exact (floor (/ (- vw tw) 2))) (- (half top) 40) 3))
         (for-each (lambda (choice)
                     (let* ((label (car choice))
                            (cx (cdr choice))
-                           (w 200)
+                           (w 180)
                            (h 40)
                            (bx (- cx (half w)))
                            (by (+ (half top) 10)))
@@ -561,8 +591,10 @@
                                  (- cx (half (text-width label 2)))
                                  (+ by 13)
                                  2)))
-                  (list (cons "SAME STACK" (half half-w))
-                        (cons "NEW STACK" (+ half-w (half half-w)))))))
+                  (let ((third (quotient vw 3)))
+                    (list (cons "RETRY LINK" (half third))
+                          (cons "NEW STACK" (+ third (half third)))
+                          (cons "JACK OUT" (+ (* 2 third) (half third))))))))
 
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.
     (define (draw-frame-ms ms)

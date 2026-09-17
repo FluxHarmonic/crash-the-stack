@@ -9,9 +9,16 @@
 ;;;       ICE-INTERVAL, the pick is deterministic per seed, and a board with
 ;;;       one legal match never receives a lock (a different member fires,
 ;;;       or the interval passes);
-;;;   (c) a locked pair auto-breaks when the board thins to it;
-;;;   (d) a forced shuffle keeps the tile count and leaves a board whose
-;;;       recorded solution replays to empty;
+;;;   (c1) a board thinned to a locked pair reports the lock weak; one select
+;;;        on a locked tile breaks the lock and selects it; the partner's
+;;;        select removes both;
+;;;   (c2) the same select on a board that still has an unlocked legal match
+;;;        does nothing: no unlock, no selection, a refused-move message;
+;;;   (c3) after an undo that restores an unlocked match, a weak lock reads
+;;;        strong again;
+;;;   (c4) a strong lock reads weak exactly at LOCK-DECAY and not before;
+;;;   (d) a forced shuffle keeps the tile count, leaves a board whose
+;;;       recorded solution replays to empty, and zero locked tiles;
 ;;;   (e) hint and shuffle add to the trace in TRACE and subtract from the
 ;;;       countdown in COUNTER-HACK by the pinned amounts;
 ;;;   (f) the countdown reaching zero yields severed, after which a pick and
@@ -20,8 +27,9 @@
 ;;;       stops both timers;
 ;;;   (h) the same script in clean mode changes no phase and reports the
 ;;;       clock string.
-;;; Plus the lock's own rule (a locked pair is matched twice), which S2
-;;; reddens.
+;;; Sabotages: S2 (a strong lock breaks on one select) and S2d (the weakness
+;;; test ignores unlocked matches) redden (c2); S2b (the sever never fires)
+;;; reddens (f); S2c (the lock exclusion removed) reddens (b).
 
 (import (sigil test)
         (sigil math)
@@ -103,6 +111,9 @@
   (board-new (sexp->layout '(stack ((0 . 0) (3 . 0) (6 . 0) (9 . 0))))
              (vector 0 0 1 1)))
 
+;; The tick an under-ice session starts at; a lock placed "now" is fresh.
+(define NOW (* TPS TRACE-AT))
+
 (test-group "trace: (a) the phase flips on the exact step the value reaches TRACE-AT"
   (let ((states (run (session-new lay SEED) TRACE-SCRIPT)))
     (test "the constants are the ruling's"
@@ -111,9 +122,10 @@
       (assert-equal 60 SHUFFLE-COST)
       (assert-equal 10 ICE-FIRST)
       (assert-equal 30 ICE-INTERVAL)
-      (assert-equal 360 SEVER-AT)
+      (assert-equal 180 SEVER-AT)
       (assert-equal 15 HINT-SEVER-COST)
-      (assert-equal 30 SHUFFLE-SEVER-COST))
+      (assert-equal 30 SHUFFLE-SEVER-COST)
+      (assert-equal 45 LOCK-DECAY))
     (test "the value after each step is elapsed + 30 per hint + 60 per shuffle"
       (let loop ((states states) (expected TRACE-VALUES))
         (unless (null? states)
@@ -131,7 +143,7 @@
         (assert-equal (* TPS SEVER-AT) (trace-countdown tr))
         (assert-equal (* TPS ICE-FIRST) (trace-ice-timer tr))
         (assert-equal 0 (trace-ice-count tr))
-        (assert-equal "TRACED. ICE IS ON YOU." (session-message (last-of states)))))))
+        (assert-equal MSG-TRACED (session-message (last-of states)))))))
 
 (test-group "trace: (b) counter-hacks fire on the ICE timer, deterministically"
   (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
@@ -179,22 +191,95 @@
         (assert-equal 1 (trace-ice-count (tr-of hit)))
         (assert-false (trace-last-ice (tr-of hit)))
         (assert-true (board-equal? b (session-board hit)))
-        (assert-equal "ICE PROBED AND FOUND NOTHING" (session-message hit))))))
+        (assert-equal MSG-NOTHING (session-message hit))))))
 
-(test-group "trace: (c) a locked pair auto-breaks when the board thins to it"
+(test-group "trace: (c1) a lock the board has thinned to is weak: one pick breaks it"
   (let* ((b (two-pairs-board))
-         (locked (board-lock-pair b 0 1))
+         (locked (board-lock-pair b 0 1 NOW))
          (s (under-ice locked (* TPS ICE-INTERVAL)))
-         (thinned (session-pick (session-pick s 2) 3)))
-    (test "the fixture starts with one locked pair and one free pair"
+         (thinned (session-pick (session-pick s 2) 3))
+         (tb (session-board thinned))
+         (broken (session-pick thinned 0))
+         (done (session-pick broken 1)))
+    (test "the fixture starts with one strong lock and one free pair"
       (assert-equal '(0 1) (board-locked-slots locked))
-      (assert-equal 2 (length (legal-matches locked))))
-    (test "matching the free pair leaves only the locked pair, and the locks break"
-      (assert-equal 2 (board-tile-count (session-board thinned)))
-      (assert-equal '() (locked-of thinned)))
-    (test "one match now clears the board"
-      (let ((done (session-pick (session-pick thinned 0) 1)))
-        (assert-true (board-cleared? (session-board done)))))))
+      (assert-equal 1 (length (unlocked-matches locked)))
+      (assert-true (lock-strong? locked 0 NOW)))
+    (test "matching the free pair leaves the locked pair, and its lock reads weak"
+      (assert-equal 2 (board-tile-count tb))
+      (assert-equal '(0 1) (board-locked-slots tb))
+      (assert-true (lock-weak? tb 0 (trace-ticks (session-trace thinned))))
+      (assert-true (lock-weak? tb 1 (trace-ticks (session-trace thinned)))))
+    (test "one pick on a weak-locked tile breaks the lock on both and selects it"
+      (assert-equal '() (board-locked-slots (session-board broken)))
+      (assert-equal 0 (board-selected (session-board broken)))
+      (assert-equal MSG-LOCK-BROKEN (session-message broken)))
+    (test "the partner's pick removes both"
+      (assert-true (board-cleared? (session-board done))))))
+
+(test-group "trace: (c2) a strong lock refuses the pick"
+  (let* ((b (board-lock-pair (two-pairs-board) 0 1 NOW))
+         (s (under-ice b (* TPS ICE-INTERVAL)))
+         (picked (session-pick s 0)))
+    (test "with an unlocked legal match on the board the lock is strong"
+      (assert-true (lock-strong? b 0 (trace-ticks (session-trace s))))
+      (assert-false (lock-weak? b 0 (trace-ticks (session-trace s)))))
+    (test "the pick unlocks nothing and selects nothing"
+      (assert-equal '(0 1) (board-locked-slots (session-board picked)))
+      (assert-false (board-selected (session-board picked)))
+      (assert-true (board-equal? b (session-board picked))))
+    (test "the refused move says so and names the tile"
+      (assert-equal MSG-LOCKED (session-message picked))
+      (assert-equal 0 (session-refused picked)))
+    (test "the rules themselves refuse a locked tile"
+      (assert-true (board-equal? b (board-select b 0)))
+      (assert-true (board-equal? (board-select b 2)
+                                 (board-select (board-select b 2) 0))))))
+
+(test-group "trace: (c3) an undo that restores an unlocked match makes a weak lock strong again"
+  (let* ((b (board-lock-pair (two-pairs-board) 0 1 NOW))
+         (s (under-ice b (* TPS ICE-INTERVAL)))
+         (thinned (session-pick (session-pick s 2) 3))
+         (now (trace-ticks (session-trace thinned)))
+         (undone (session-step thinned (frame '(backspace)) geom)))
+    (test "thinned: weak"
+      (assert-true (lock-weak? (session-board thinned) 0 now)))
+    (test "undone: the free pair is back and the lock is strong"
+      (assert-equal 4 (board-tile-count (session-board undone)))
+      (assert-equal '(0 1) (board-locked-slots (session-board undone)))
+      (assert-true (lock-strong? (session-board undone) 0 now)))
+    (test "a pick on it is refused again"
+      (assert-equal '(0 1) (board-locked-slots (session-board (session-pick undone 0)))))))
+
+(test-group "trace: (c4) a strong lock turns weak at LOCK-DECAY, not before"
+  (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+         (now0 (trace-ticks (session-trace traced)))
+         (b (board-lock-pair (session-board traced)
+                             (car (car (unlocked-matches (session-board traced))))
+                             (cdr (car (unlocked-matches (session-board traced))))
+                             now0))
+         (a (car (board-locked-slots b)))
+         (decay (* TPS LOCK-DECAY)))
+    (test "fresh: strong, with unlocked matches around"
+      (assert-true (> (length (unlocked-matches b)) 0))
+      (assert-true (lock-strong? b a now0)))
+    (test "one tick before LOCK-DECAY: still strong"
+      (assert-true (lock-strong? b a (+ now0 decay -1))))
+    (test "at LOCK-DECAY: weak"
+      (assert-true (lock-weak? b a (+ now0 decay))))
+    (test "the session reports the decay once, through session-advance"
+      ;; the ICE timer pushed out of the way so nothing else fires meanwhile
+      (let* ((s (session-restore SEED
+                                 b
+                                 (trace (session-trace traced) ice-timer: (* TPS 1000))
+                                 'hint
+                                 #t
+                                 'primitives))
+             (before (session-advance s (- decay 1)))
+             (at (session-advance before 1)))
+        (assert-false (string=? MSG-LOCK-WEAK (session-message before)))
+        (assert-equal MSG-LOCK-WEAK (session-message at))
+        (assert-true (lock-weak? (session-board at) a (trace-ticks (session-trace at))))))))
 
 (test-group "trace: (d) a forced shuffle keeps the tile count and stays winnable"
   (let* ((s (under-ice (one-match-board 3) 1))
@@ -202,7 +287,7 @@
          (b (session-board hit)))
     (test "the ICE re-dealt the stack"
       (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
-      (assert-equal "ICE RE-DEALT THE STACK" (session-message hit)))
+      (assert-equal MSG-REMAPPED (session-message hit)))
     (test "six tiles before, six after, faces moved"
       (assert-equal 6 (board-tile-count b))
       (assert-false (equal? (vector->list (board-faces (one-match-board 3)))
@@ -211,7 +296,14 @@
       (assert-equal #t (replay-solution b (board-solution b))))
     (test "the re-deal is not undoable"
       (assert-equal '() (board-history b))
-      (assert-true (board-equal? b (board-undo b))))))
+      (assert-true (board-equal? b (board-undo b))))
+    (test "a remap drops every lock"
+      (let* ((locked (board-lock-pair (one-match-board 4) 3 5 NOW))
+             (s (under-ice locked 1))
+             (hit (session-advance s 1)))
+        (assert-equal '(3 5) (board-locked-slots locked))
+        (assert-equal 'shuffle (trace-last-ice (tr-of hit)))
+        (assert-equal '() (locked-of hit))))))
 
 (test-group "trace: (e) what a hint and a shuffle cost in each phase"
   (let* ((s (session-new lay SEED))
@@ -249,7 +341,7 @@
     (test "at zero the phase is severed"
       (assert-equal 'severed (phase-of severed))
       (assert-true (trace-severed? (tr-of severed)))
-      (assert-equal "CONNECTION SEVERED" (session-message severed)))
+      (assert-equal MSG-SEVERED (session-message severed)))
     (test "a pick is refused"
       (let* ((b (session-board severed))
              (id (car (playable-slots b)))
@@ -274,11 +366,15 @@
       (let ((next (session-step severed (frame '(n) '(ctrl)) geom)))
         (assert-equal (+ SEED 1) (session-seed next))
         (assert-equal 'trace (phase-of next))))
-    (test "a tap on the left half of a severed board is the same stack, the right a new one"
+    (test "the severed board's thirds: RETRY LINK, NEW STACK, JACK OUT"
       (let ((left (session-step severed (make-input-frame '() '() (cons 100 150)) geom))
-            (right (session-step severed (make-input-frame '() '() (cons 500 150)) geom)))
+            (middle (session-step severed (make-input-frame '() '() (cons 320 150)) geom))
+            (right (session-step severed (make-input-frame '() '() (cons 560 150)) geom)))
         (assert-equal SEED (session-seed left))
-        (assert-equal (+ SEED 1) (session-seed right))))))
+        (assert-equal 'trace (phase-of left))
+        (assert-equal (+ SEED 1) (session-seed middle))
+        (assert-equal 'severed (phase-of right))
+        (assert-equal MSG-NO-MENU (session-message right))))))
 
 (test-group "trace: (g) clearing under the ICE wins with the phase tag and stops the timers"
   (let* ((s (under-ice (two-pairs-board) (* TPS ICE-INTERVAL)))
@@ -317,7 +413,7 @@
     (test "the flip to twist is refused once the clock is past TRACE-AT"
       (let ((flipped (session-step later (frame '(m) '(ctrl)) geom)))
         (assert-equal 'clean (trace-mode (tr-of flipped)))
-        (assert-equal "TOO LATE TO SWITCH" (session-message flipped))))
+        (assert-equal MSG-TOO-LATE (session-message flipped))))
     (test "the flip is allowed while below it, both ways"
       (let* ((early (session-advance (session-new lay SEED) 600))
              (to-clean (session-step early (frame '(m) '(ctrl)) geom))
@@ -333,26 +429,3 @@
       (let ((next (session-step last (frame '(n) '(ctrl)) geom)))
         (assert-equal 'clean (trace-mode (tr-of next)))
         (assert-true (close? 0 (value-of next)))))))
-
-(test-group "trace: a locked pair is matched twice (the lock's own rule)"
-  (let* ((b (board-lock-pair (two-pairs-board) 0 1))
-         (once (board-select (board-select b 0) 1))
-         (twice (board-select (board-select once 0) 1)))
-    (test "one match leaves both present, unlocked, unselected, with history +1"
-      (assert-true (tile-present? once 0))
-      (assert-true (tile-present? once 1))
-      (assert-false (tile-locked? once 0))
-      (assert-false (board-selected once))
-      (assert-equal 2 (length (board-history once)))
-      (assert-equal 4 (board-tile-count once)))
-    (test "undoing the first match re-locks the pair"
-      (assert-true (tile-locked? (board-undo once) 0)))
-    (test "the second match removes both"
-      (assert-false (tile-present? twice 0))
-      (assert-false (tile-present? twice 1)))
-    (test "the session's pointer path goes through the same rule"
-      (let* ((s (under-ice b (* TPS ICE-INTERVAL)))
-             (s2 (session-pick (session-pick s 0) 1)))
-        (assert-true (tile-present? (session-board s2) 0))
-        (assert-false (tile-locked? (session-board s2) 0))
-        (assert-equal "LOCK BROKEN: MATCH AGAIN" (session-message s2))))))

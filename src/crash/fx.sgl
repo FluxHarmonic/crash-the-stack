@@ -36,8 +36,8 @@
   (export fx fx? fx-new fx-clock fx-effects
           fx-frame fx-observe fx-idle?
           fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
-          fx-glitch fx-ticks
-          LOCK-TICKS GLITCH-TICKS
+          fx-glitch fx-ticks fx-toast
+          LOCK-TICKS GLITCH-TICKS TOAST-TICKS TOAST-HOLD
           effect effect? effect-kind effect-ids effect-tween effect-data
           PULSE-TICKS PULSE-SCALE
           MATCH-TICKS MATCH-LIFT MATCH-SCALE MATCH-PARTICLES
@@ -71,6 +71,8 @@
     (define LOCK-TICKS 30)         ; a freshly locked pair shakes, twice a mismatch's length
     (define UNLOCK-TICKS 24)       ; a broken lock: both tiles swell and settle
     (define GLITCH-TICKS 45)       ; the full-screen glitch when the trace completes
+    (define TOAST-TICKS 130)       ; a message: held, then it slides up and fades
+    (define TOAST-HOLD 0.7)        ; the fraction of TOAST-TICKS it holds still (about 1.5 s)
     (define UNLOCK-SCALE 1.22)
 
     (define TAU 6.283185307179586)
@@ -78,8 +80,10 @@
     ;; --- state ---------------------------------------------------------------
 
     ;; kind: pulse | match | shake | blink | shuffle | cleared | settle |
-    ;; unlock | glitch. A lock is a longer shake on both tiles; an unlock a
-    ;; bigger pulse on both; the glitch is the trace completing.
+    ;; unlock | glitch | toast. A lock is a longer shake on both tiles; an
+    ;; unlock a bigger pulse on both; the glitch is the trace completing; a
+    ;; toast is the session's message, shown for a moment (David,
+    ;; 2026-09-17: messages that stayed until tapped were in the way).
     ;; ids: the slots it concerns. tween: 0..1 over the effect's life.
     ;; data: kind-specific, documented at each spawn below.
     (define-struct effect
@@ -299,6 +303,26 @@
                   (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
                          (spawn-cleared x)
                          x))
+                  ;; a strong lock refused a pick: that tile shakes
+                  (x (if (and (session-refused after)
+                              (or (not (eqv? (session-refused before) (session-refused after)))
+                                  (not (eq? before after))))
+                         (spawn x (effect kind: 'shake
+                                          ids: (list (session-refused after))
+                                          tween: (life SHAKE-TICKS 'linear)
+                                          data: (max SHAKE-MIN
+                                                     (* SHAKE-FRACTION (geometry-tile-w g)))))
+                         x))
+                  ;; a fresh message: a toast (the old one is replaced)
+                  (m1 (session-message after))
+                  (x (if (and (> (string-length m1) 0)
+                              (or (not (string=? m1 (session-message before)))
+                                  (not (eq? b0 b1))))
+                         (spawn (without-kind x 'toast)
+                                (effect kind: 'toast
+                                        tween: (life TOAST-TICKS 'linear)
+                                        data: m1))
+                         x))
                   ;; the trace completed: the ICE is on you
                   (x (if (and (eq? (trace-phase (session-trace after)) 'counter)
                               (not (eq? (trace-phase (session-trace before)) 'counter)))
@@ -485,6 +509,11 @@
     (define (fx-glitch x)
       (let ((e (find (lambda (e) (eq? (effect-kind e) 'glitch)) (fx-effects x))))
         (and e (progress e (alpha-of x)))))
+
+    ;; The live toast as (text . progress), or #f.
+    (define (fx-toast x)
+      (let ((e (find (lambda (e) (eq? (effect-kind e) 'toast)) (fx-effects x))))
+        (and e (cons (effect-data e) (progress e (alpha-of x))))))
 
     ;; The clock's tick count, for anything drawn as noise.
     (define (fx-ticks x)

@@ -69,7 +69,7 @@
           session-render-mode session-seed session-message
           session-typed session-hint session-hint-partner session-hint-armed
           session-hints session-cursor-shown
-          session-trace session-advance session-with-trace-mode
+          session-trace session-refused session-advance session-with-trace-mode
           session-best session-with-best session-restore
           session-retry session-next
           session-labels session-labels-shown
@@ -105,6 +105,7 @@
       (hint-partner default: #f)          ; the pair hint's second slot, or #f
       (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
       (trace default: #f)                 ; the meter, (crash trace)
+      (refused default: #f)               ; a strong-locked tile the last pick bounced off, or #f
       (best default: #f)                  ; best trace on this layout so far, or #f
       (render-mode default: 'primitives)  ; primitives | texture
       (seed default: 1)
@@ -250,6 +251,7 @@
                  hint-partner: #f
                  typed: ""
                  message: ""
+                 refused: #f
                  cursor-shown: #f)))
 
     ;; A layout no face assignment can clear (the generator answered #f) still
@@ -261,31 +263,39 @@
              (s (session-on-board (session seed: seed trace: (trace-new 'twist))
                                   (or b (blank)))))
         (if b
-            s
+            (session s message: MSG-JACKED-IN)
             (session s message: "NO SOLVABLE DEAL FOR THIS LAYOUT"))))
 
     ;; --- picking ------------------------------------------------------------
 
+    ;; Can a pick break this lock? Only a weak one (D15).
+    (define (breakable? b id now)
+      (lock-weak? b id now))
+
     ;; The one door: every model and the pointer come through here. A pick
-    ;; that is not playable changes nothing, the keyboard highlight included.
-    ;; A match that broke a lock (tiles stayed, locks went) says so, because
-    ;; the pair staying put otherwise reads as nothing having happened
-    ;; (David, 2026-09-17).
+    ;; that is not playable changes nothing, the keyboard highlight
+    ;; included. A locked tile: a STRONG lock refuses the pick (the tile
+    ;; shakes, LOCKED); a WEAK one breaks on the pick and the tile is
+    ;; selected, so the partner's pick removes the pair (D15).
     (define (session-pick s id)
-      (let ((b0 (session-board s)))
-        (if (or (finished? s) (not (playable? b0 id)))
-            s
-            (let* ((b1 (auto-break (board-select b0 id)))
-                   (unlocked? (and (= (board-tile-count b0) (board-tile-count b1))
-                                   (< (length (board-locked-slots b1))
-                                      (length (board-locked-slots b0)))))
-                   (tr (if (board-cleared? b1)
-                           (trace-finish (session-trace s))
-                           (session-trace s))))
-              (session (session-on-board s b1)
-                            highlight: id
-                            trace: tr
-                            message: (if unlocked? "LOCK BROKEN: MATCH AGAIN" ""))))))
+      (let ((b0 (session-board s))
+            (now (trace-ticks (session-trace s))))
+        (cond ((or (finished? s) (not (playable? b0 id))) s)
+              ((and (tile-locked? b0 id) (not (breakable? b0 id now)))
+               (session s refused: id message: MSG-LOCKED))
+              (else
+               (let* ((broke? (tile-locked? b0 id))
+                      (b0 (if broke?
+                              (board-unlock-pair b0 id (tile-lock-partner b0 id))
+                              b0))
+                      (b1 (board-select b0 id))
+                      (tr (if (board-cleared? b1)
+                              (trace-finish (session-trace s))
+                              (session-trace s))))
+                 (session (session-on-board s b1)
+                               highlight: id
+                               trace: tr
+                               message: (if broke? MSG-LOCK-BROKEN "")))))))
 
     ;; A session in the named keyboard model (unknown names leave it as is).
     (define (session-with-model s model)
@@ -469,7 +479,7 @@
           (session-with-trace-mode s (if (eq? (trace-mode (session-trace s)) 'twist)
                                          'clean
                                          'twist))
-          (session s message: "TOO LATE TO SWITCH")))
+          (session s message: MSG-TOO-LATE)))
 
     (define (severed? s)
       (trace-severed? (session-trace s)))
@@ -487,25 +497,30 @@
               (else (session (session-on-board s nb)
                                   trace: (trace-shuffle (session-trace s)))))))
 
-    ;; A locked pair the board has thinned to (nothing but locked tiles
-    ;; left) breaks on its own, so the last matches are never refused.
-    (define (auto-break b)
-      (let ((locked (board-locked-slots b)))
-        (if (and (pair? locked)
-                 (= (length locked) (board-tile-count b)))
-            (board-break-locks b)
-            b)))
-
     ;; The HUD line for what the ICE just did, or the phase that began.
     (define (event-message events)
       (let ((last (if (null? events) #f (list-ref events (- (length events) 1)))))
         (case last
-          ((traced) "TRACED. ICE IS ON YOU.")
-          ((lock) "ICE LOCKED A PAIR")
-          ((shuffle) "ICE RE-DEALT THE STACK")
-          ((nothing) "ICE PROBED AND FOUND NOTHING")
-          ((severed) "CONNECTION SEVERED")
+          ((traced) MSG-TRACED)
+          ((lock) MSG-LOCKED-PAIR)
+          ((shuffle) MSG-REMAPPED)
+          ((nothing) MSG-NOTHING)
+          ((severed) MSG-SEVERED)
           (else #f))))
+
+    ;; A lock that just turned weak by decay says so once.
+    (define (weak-message tr0 tr1 b)
+      (let ((t0 (trace-ticks tr0))
+            (t1 (trace-ticks tr1))
+            (locked (board-locked-slots b)))
+        (and (pair? locked)
+             (let ((any-turned? (let loop ((ids locked))
+                                  (cond ((null? ids) #f)
+                                        ((and (lock-weak? b (car ids) t1)
+                                              (not (lock-weak? b (car ids) t0)))
+                                         #t)
+                                        (else (loop (cdr ids)))))))
+               (and any-turned? MSG-LOCK-WEAK)))))
 
     ;; The frame's sim ticks reach the trace here, one at a time inside
     ;; trace-advance, which fires the counter-hacks its seconds cover; the
@@ -517,9 +532,10 @@
             s
             (let* ((r (trace-advance (session-trace s) b ticks))
                    (tr (car r))
-                   (nb (auto-break (cadr r)))
+                   (nb (cadr r))
                    (events (caddr r))
-                   (message (event-message events)))
+                   (message (or (event-message events)
+                                (weak-message (session-trace s) tr nb))))
               (cond ((and (eq? nb b) (not message))
                      (session s trace: tr))
                     ((eq? nb b)
@@ -549,16 +565,18 @@
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
         (if face (hint-jump s face) s)))
 
-    ;; On a severed board the two choices are the board area's halves:
-    ;; left, the same stack again; right, a new one.
+    ;; On a severed board the three choices are the board area's thirds:
+    ;; RETRY LINK (the same stack again), NEW STACK, JACK OUT (the menu,
+    ;; P4's; until then it only says so).
     (define (step-pointer s f g)
       (let ((click (input-frame-click f)))
         (cond ((not click) s)
               ((severed? s)
                (if (< (cdr click) (- (geometry-vh g) (geometry-hud-h g)))
-                   (if (< (car click) (half (geometry-vw g)))
-                       (session-retry s)
-                       (session-next s))
+                   (let ((third (quotient (geometry-vw g) 3)))
+                     (cond ((< (car click) third) (session-retry s))
+                           ((< (car click) (* 2 third)) (session-next s))
+                           (else (session s message: MSG-NO-MENU))))
                    s))
               (else
                (let ((id (hit-slot g (session-board s) (car click) (cdr click))))
@@ -598,7 +616,7 @@
                    (and ctrl (pressed? f 'h) (session-hint-armed s)))
                (hint-pair s))
               ((and ctrl (pressed? f 'h))
-               (session s hint-armed: #t message: "HINT: PRESS A FACE KEY"))
+               (session s hint-armed: #t))
               ((and ctrl (pressed? f 't))
                (session s render-mode: (if (eq? (session-render-mode s) 'primitives)
                                            'texture
