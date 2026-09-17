@@ -198,3 +198,48 @@
       (assert-equal '("SK") (pile-cards g 0))
       (assert-false (member '((pile 0 0) . (pile 1)) moves))
       (assert-true (and (member '((pile 3 0) . (pile 1)) moves) #t)))))
+
+;; --- the adversarial review's probes (2026-09-18) --------------------------
+
+(test-group "an encrypted packet inside a run ends the run"
+  ;; pile 0 = S3 H4 S5 H6 face up; encrypt H4 (depth 1): S5 and H6 stay
+  ;; where they are, and neither a tap at their strip nor the PILES walk
+  ;; may move them (the review's probe moved the face-down card inside
+  ;; the run and turned it up).
+  (let* ((run (list (cons (c "S3") #t) (cons (c "H4") #t) (cons (c "S5") #t) (cons (c "H6") #t)))
+         (g (game tableau: (vector run (list (cons (c "D6") #t)) '() '() '() '() '())
+                  foundations: (make-vector FOUNDATIONS '())
+                  stock: '()
+                  waste: '()))
+         (e (game-encrypt g '(pile 0 1))))
+    (test "the run is one card long now"
+      (assert-equal 1 (run-length (game-pile e 0)))
+      (assert-false (pile-up? (list-ref (game-pile e 0) 1))))
+    (test "the cards under the encrypted one are not selectable and do not move"
+      (assert-false (place-selectable? e '(pile 0 2)))
+      (assert-false (place-selectable? e '(pile 0 3)))
+      (assert-false (game-move e '(pile 0 2) '(pile 1)))
+      (assert-false (game-move e '(pile 0 3) '(pile 1)))
+      (assert-false (game-move e '(pile 0 1) '(pile 1))))
+    (test "the top card still moves, and uncovers the encrypted one"
+      (let ((m (game-move (game e tableau: (vector (game-pile e 0) (list (cons (c "H4") #t)) '() '() '() '() '()))
+                          '(pile 0 0) '(pile 1))))
+        (assert-true (and m #t))
+        (assert-true (pile-up? (car (game-pile m 0))))
+        (assert-equal "H4" (card-string (pile-card (car (game-pile m 0)))))))))
+
+(test-group "reachable cards under draw three"
+  ;; stock S0 SQ SJ, draw three: the top after a pull is always SJ, and a
+  ;; turn of the waste brings the same three back the same way, so S0 and
+  ;; SQ are never on top: with S9 on its foundation and SK alone on a
+  ;; pile, the scanner must say stuck (the review's probe said not).
+  (let* ((g (game tableau: (vector (list (cons (c "SK") #t)) '() '() '() '() '() '())
+                  foundations: (vector (list (c "S9")) '() '() '())
+                  stock: (list (c "S0") (c "SQ") (c "SJ"))
+                  waste: '()
+                  draw: 3)))
+    (test "only the jack is reachable by drawing"
+      (assert-equal '("SJ") (map card-string (reachable-cards g))))
+    (test "so the table is stuck under draw three, and not under draw one"
+      (assert-true (game-stuck? g))
+      (assert-false (game-stuck? (game-with-draw g 1))))))

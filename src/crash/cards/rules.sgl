@@ -51,9 +51,9 @@
           RECYCLE-THREE-FREE
           VEGAS-BUY-IN VEGAS-PER-CARD VEGAS-PASSES-ONE VEGAS-PASSES-THREE
           pile-card pile-up? game-pile game-foundation
-          place-card place-selectable? selection-cards
+          place-card place-selectable? selection-cards run-length
           valid-pile-move? valid-foundation-move?
-          game-move game-draw! game-undo game-select game-with-draw
+          game-move game-draw! game-undo game-select game-with-draw recycle-allowed? reachable-cards
           game-won? game-all-up? game-face-down-count legal-moves
           game-auto-step
           game-canonical game-equal?)
@@ -184,13 +184,21 @@
 
     ;; A place the player may pick up: a face-up pile card, the top of the
     ;; waste (unless corrupted), the top of a foundation.
+    ;; The face-up run at a pile's top: how many cards from the top are
+    ;; face up before the first face-down one (an encrypted packet inside
+    ;; a run ends it: the cards under it stay where they are).
+    (define (run-length pile)
+      (let loop ((entries pile) (n 0))
+        (if (or (null? entries) (not (pile-up? (car entries))))
+            n
+            (loop (cdr entries) (+ n 1)))))
+
     (define (place-selectable? g p)
       (case (place-kind p)
         ((pile)
          (let ((pile (game-pile g (cadr p)))
                (depth (if (pair? (cddr p)) (caddr p) 0)))
-           (and (< depth (length pile))
-                (pile-up? (list-ref pile depth)))))
+           (< depth (run-length pile))))
         ((waste) (and (place-card g p) (not (game-corrupted? g))))
         ((foundation) (and (place-card g p) #t))
         (else #f)))
@@ -374,6 +382,7 @@
                (push-history g (add-score (game g
                                                 stock: (reverse (game-waste g))
                                                 waste: '()
+                                                corrupt: #f
                                                 passes: passes)
                                           (recycle-points g passes)))))
             (else g)))
@@ -500,6 +509,35 @@
     ;; of passes reads as not stuck while a playable card sits in the
     ;; stock). The scanner the scramble guarantee and the dead-position
     ;; control share.
+    ;; The cards the player can bring to the top of the waste from here
+    ;; by drawing alone, through one full cycle of the stock (out, turned
+    ;; back, out again): every card under draw one; under draw three only
+    ;; every third from where the stock stands, which a turn of the waste
+    ;; does not change (the adversarial review's probe). A Vegas deal out
+    ;; of passes cannot turn the waste: what is left in the stock, and the
+    ;; waste's top, are all it can reach.
+    (define (reachable-cards g)
+      (let ((d (game-draw g)))
+        (let loop ((stock (game-stock g))
+                   (waste (game-waste g))
+                   (turned 0)
+                   (acc (if (pair? (game-waste g)) (list (car (game-waste g))) '())))
+          (cond ((pair? stock)
+                 (let ((n (min d (length stock))))
+                   (loop (drop-n stock n)
+                         (append (reverse (take stock n)) waste)
+                         turned
+                         (cons (list-ref stock (- n 1)) acc))))
+                ((and (pair? waste) (< turned 2) (recycle-allowed? g))
+                 (loop (reverse waste) '() (+ turned 1) acc))
+                (else (distinct acc))))))
+
+    (define (distinct cards)
+      (let loop ((cs cards) (acc '()))
+        (cond ((null? cs) (reverse acc))
+              ((memv (car cs) acc) (loop (cdr cs) acc))
+              (else (loop (cdr cs) (cons (car cs) acc))))))
+
     (define (game-stuck? g)
       (and (null? (progress-moves g))
            (let ((tops (append (map (lambda (i) (place-card g (list 'pile i 0))) (iota PILES))))
@@ -507,18 +545,29 @@
              (not (any (lambda (card)
                          (or (any (lambda (top) (valid-pile-move? card top)) tops)
                              (any (lambda (top) (valid-foundation-move? card top)) foundation-tops)))
-                       (append (game-stock g) (game-waste g)))))))
+                       (reachable-cards g))))))
 
-    ;; One shuffle of the hidden cards (every face-down tableau card, the
-    ;; stock and the waste) back into the same face-down slots and a new
-    ;; stock, with the given random state; face-up cards, foundations and
-    ;; passes untouched. Returns (cons game rng).
+    ;; What a pile keeps through a scramble: everything from the top down
+    ;; to its last face-up card (an encrypted packet inside the run stays
+    ;; in place); the face-down cards under that are the hidden part.
+    (define (kept-length pile)
+      (let loop ((entries pile) (i 0) (last-up 0))
+        (cond ((null? entries) last-up)
+              ((pile-up? (car entries)) (loop (cdr entries) (+ i 1) (+ i 1)))
+              (else (loop (cdr entries) (+ i 1) last-up)))))
+
+    ;; One shuffle of the hidden cards (every face-down tableau card under
+    ;; a pile's last face-up one, the stock and the waste) back into the
+    ;; same face-down slots and a new stock, with the given random state;
+    ;; face-up cards, foundations and passes untouched. Returns (cons game
+    ;; rng).
     (define (shuffle-hidden g rng)
-      (let* ((down-counts (map (lambda (i) (length (filter (lambda (e) (not (pile-up? e))) (game-pile g i))))
-                               (iota PILES)))
+      (let* ((kept (lambda (pile) (take pile (kept-length pile))))
+             (hidden (lambda (pile) (drop-n pile (kept-length pile))))
+             (down-counts (map (lambda (i) (length (hidden (game-pile g i)))) (iota PILES)))
              (pool (list->vector
                      (append (apply append
-                                    (map (lambda (i) (map pile-card (filter (lambda (e) (not (pile-up? e))) (game-pile g i))))
+                                    (map (lambda (i) (map pile-card (hidden (game-pile g i))))
                                          (iota PILES)))
                              (game-stock g)
                              (reverse (game-waste g)))))
@@ -542,7 +591,7 @@
                                 selected: #f)
                           rng)
                     (let* ((pile (game-pile g i))
-                           (ups (filter pile-up? pile))
+                           (ups (kept pile))
                            (downs (list-ref down-counts i)))
                       (vector-set! tableau i
                                    (append ups
@@ -595,16 +644,32 @@
     ;; waste back when the stock is out). With every tableau card face up
     ;; some card is always reachable this way, so repeating it wins. A
     ;; won game is returned as it is.
+    ;; Auto-complete's own draw: one card, whatever the draw count (draw
+    ;; three's parity would otherwise bury a needed card for good: the
+    ;; adversarial review's probe), no score, no pass counted, no history
+    ;; entry. A corrupted waste top is skipped as a source; the draw past
+    ;; it wears the corruption off as any draw does.
+    (define (auto-draw g)
+      (cond ((pair? (game-stock g))
+             (draw-off-corrupt (game g
+                                     stock: (cdr (game-stock g))
+                                     waste: (cons (car (game-stock g)) (game-waste g)))))
+            ((pair? (game-waste g))
+             (game g stock: (reverse (game-waste g)) waste: '()))
+            (else g)))
+
     (define (game-auto-step g)
       (if (game-won? g)
           g
           (let ((sources (append (filter (lambda (p) (pair? (game-pile g (cadr p))))
                                          (map (lambda (i) (list 'pile i 0)) (iota PILES)))
-                                 (if (pair? (game-waste g)) (list (list 'waste)) '()))))
+                                 (if (and (pair? (game-waste g)) (not (game-corrupted? g)))
+                                     (list (list 'waste))
+                                     '()))))
             (let loop ((sources sources))
-              (cond ((null? sources) (game-draw! g))
+              (cond ((null? sources) (auto-draw g))
                     ((foundation-for g (place-card g (car sources)))
-                     => (lambda (dst) (game-move g (car sources) dst)))
+                     => (lambda (dst) (or (game-move g (car sources) dst) (loop (cdr sources)))))
                     (else (loop (cdr sources))))))))
 
     ;; Every move the player could make now, as (src . dst) places, from

@@ -106,3 +106,47 @@
                      foundations: (list->vector (map (lambda (s) (reverse (map (lambda (r) (c s r)) (iota 13 1)))) (iota 4))))))
       (assert-true (game-won? won))
       (assert-true (eq? won (game-auto-step won))))))
+
+;; --- the adversarial review's probes (2026-09-18) --------------------------
+
+(test-group "auto-complete after the review"
+  (test "a corrupted waste top that fits a foundation is skipped, not a trap"
+    ;; every pile top a king (no foundation takes it), the waste's top the
+    ;; ace of spades, corrupted: the step draws instead of returning #f
+    (let* ((kings (map (lambda (s) (list (cons (c s 13) #t))) (iota 4)))
+           (g (game tableau: (list->vector (append kings (list '() '() '())))
+                    foundations: (make-vector FOUNDATIONS '())
+                    stock: (list (c 1 1))
+                    waste: (list (c 0 1))
+                    draw: 1))
+           (g (game-corrupt-waste g 3))
+           (g1 (game-auto-step g)))
+      (assert-true (game? g1))
+      (assert-equal '("HA" "SA") (map card-string (game-waste g1)))
+      (assert-equal 2 (cdr (game-corrupt g1)))))
+  (test "under draw three the run still finishes: auto-complete draws one card at a time"
+    ;; stock S4 S5 ... SK S3 with S3 last: under draw three S3 would never
+    ;; come round (the review's probe); every other card is on the table
+    (let* ((spades (map (lambda (r) (c 0 r)) (iota 13 1)))
+           (stock (append (map (lambda (r) (c 0 r)) (iota 10 4)) (list (c 0 3))))
+           (others (filter (lambda (card) (not (memv card spades))) (fresh-deck)))
+           (g (game tableau: (vector (list (cons (c 0 1) #t)) (list (cons (c 0 2) #t)) '() '() '() '() '())
+                    foundations: (vector '() (reverse (map (lambda (r) (c 1 r)) (iota 13 1)))
+                                         (reverse (map (lambda (r) (c 2 r)) (iota 13 1)))
+                                         (reverse (map (lambda (r) (c 3 r)) (iota 13 1))))
+                    stock: stock
+                    waste: '()
+                    draw: 3
+                    scoring: 'standard
+                    score: 500))
+           (d (deal-restore 1 g 'tags #t)))
+      (assert-equal 52 (+ (length stock) 2 39))
+      (let loop ((d d) (n 0))
+        (cond ((deal-won? d)
+               (assert-true (< n 400))
+               ;; the thirteen commits score their 10 each; no recycle
+               ;; penalty, no pass counted by the run
+               (assert-equal 630 (game-score (deal-game d)))
+               (assert-equal 0 (game-passes (deal-game d))))
+              ((> n 400) (assert-true #f))
+              (else (loop (advance d AUTO-TICKS) (+ n 1))))))))

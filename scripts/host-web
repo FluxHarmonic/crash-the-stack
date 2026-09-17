@@ -21,10 +21,21 @@ if [ -n "$dirty" ]; then
   echo "host-web: the tree is dirty; the snapshot would not match a commit. Commit first."
   exit 1
 fi
-rm -rf "$DST"
-cp -r "$SRC" "$DST"
+# The build must be HEAD's: package.sgl stamps the page with the commit
+# (and "-dirty-<time>" for a dirty tree), so an older or dirty build is
+# refused here rather than served.
+head="$(git rev-parse --short=12 HEAD)"
+stamp="$(grep -o 'version: "[^"]*"' "$SRC/index.html" | head -1 | cut -d'"' -f2)"
+if [ "$stamp" != "$head" ]; then
+  echo "host-web: $SRC was built at '$stamp', HEAD is $head. Build --config web at HEAD first."
+  exit 1
+fi
+# Stop the old server before the copy, so it never serves a half-copied
+# directory; the copy is quick, the gap is a second or two.
 if [ -f "build/web-serve-$PORT.pid" ]; then
   PORT="$PORT" scripts/serve-web --stop || true
 fi
+rm -rf "$DST"
+cp -r "$SRC" "$DST"
 DIR="$DST" PORT="$PORT" scripts/serve-web
 echo "host-web: serving $DST (web version $(grep -o 'version: "[^"]*"' "$DST/index.html" | head -1 | cut -d'"' -f2)) on port $PORT"

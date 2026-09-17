@@ -411,7 +411,7 @@ async function type(tag) { for (const ch of tag) await press(ch); }
       else {
         const ice = await waitLine(/^crash: cards ice (\w+)$/, traced.index, 15000);
         if (!ice) fail("traced", `${traced.m[0]}, but no counter-hack within 15 s`);
-        else if (!["encrypt", "corrupt", "churn", "nothing"].includes(ice.m[1])) fail("traced", `unknown counter-hack ${ice.m[0]}`);
+        else if (!["encrypt", "corrupt", "churn"].includes(ice.m[1])) fail("traced", `expected a member of the card table's set to land, got ${ice.m[0]}`);
         else pass("traced", `${traced.m[0]}; ${ice.m[0]}`);
       }
     }
