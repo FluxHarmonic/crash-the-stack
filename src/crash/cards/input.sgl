@@ -8,9 +8,26 @@
 ;;; A tap lands on a PLACE through (crash cards geometry)'s hit-place and
 ;;; ends in game-select, the one door of (crash cards rules): tap-tap,
 ;;; with the stock a tap away. The HUD controls (UNDO, DRAW, NEXT) are
-;;; hit-tested first, from the same rects the renderer draws, and each
-;;; is one command here; the keyboard model (Cybersol's asdf jkl piles,
-;;; g draw, h waste, uiop foundations) is a later slice.
+;;; hit-tested first, from the same rects the renderer draws.
+;;;
+;;; Two keyboard models, Tab switching, both to be tried (David,
+;;; 2026-09-17: "the hint key overlay in the stack game works really
+;;; well, we should use the same in solitaire ... make it switchable so I
+;;; can try both"):
+;;;
+;;;   tags    every tappable place wears a tag from the stack's alphabet
+;;;           and assigner (the stock, the waste's top, each foundation,
+;;;           each pile's face-up cards top down or its empty slot); type
+;;;           the tag to tap the place. Space hides and shows the tags,
+;;;           or clears a half-typed one. The default.
+;;;   piles   Cybersol's letters: a s d f j k l the piles (the same key
+;;;           again takes the run one card deeper, wrapping), g the stock,
+;;;           h the waste, u i o p the foundations, ; clears (on the web;
+;;;           sigil-app reports no semicolon natively). Its overlay draws
+;;;           the letter on each place.
+;;;
+;;; Always: Return deselects, Backspace undoes (after erasing a typed tag
+;;; letter), Tab switches the model.
 
 (define-library (crash cards input)
   (import (sigil struct)
@@ -22,7 +39,10 @@
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
-          deal-step deal-undo deal-next deal-toggle-draw
+          deal-model deal-labels deal-labels-shown deal-typed
+          deal-step deal-undo deal-next deal-toggle-draw deal-with-model
+          deal-places tag-places pile-key->index PILE-KEYS
+          CARD-MODELS card-model-name
           MSG-DEALT MSG-WON MSG-STUCK)
 
   (begin
@@ -30,27 +50,74 @@
     (define MSG-WON "DECK CRASHED.")
     (define MSG-STUCK "NO MOVES LEFT - UNDO OR NEXT")
 
+    (define CARD-MODELS '(tags piles))
+
+    ;; Cybersol's pile keys, left to right.
+    (define PILE-KEYS '(a s d f j k l))
+    (define FOUNDATION-KEYS '(u i o p))
+
+    (define (card-model-name m)
+      (case m
+        ((tags) "TAGS")
+        ((piles) "PILES")
+        (else "?")))
+
     ;; A deal is immutable: a change is a copy-construction.
     (define-struct deal
       (game default: #f)
       (seed default: 1)
+      (model default: 'tags)         ; tags | piles
+      (labels default: '())          ; ((place . "ab") ...), recomputed when the game changes
+      (labels-shown default: #t)     ; space toggles; both overlays obey it
+      (typed default: "")            ; tag letters typed so far
       (message default: ""))
 
-    (define (deal-new seed draw)
-      (deal game: (game-new seed draw)
-            seed: seed
-            message: MSG-DEALT))
+    ;; --- places and their tags ----------------------------------------------
 
-    ;; A deal from saved parts ((crash cards save)).
-    (define (deal-restore seed g)
-      (deal game: g seed: seed))
+    ;; Every place a tap could land on, in tag order: the stock, the
+    ;; waste's top when there is one, the foundations, then each pile's
+    ;; face-up cards from the top down (or the empty pile itself).
+    (define (deal-places g)
+      (append (list '(stock))
+              (if (pair? (game-waste g)) (list '(waste)) '())
+              (map (lambda (i) (list 'foundation i)) (iota FOUNDATIONS))
+              (apply append
+                     (map (lambda (i)
+                            (let ((pile (game-pile g i)))
+                              (if (null? pile)
+                                  (list (list 'pile i))
+                                  (let loop ((depth 0) (acc '()))
+                                    (if (or (= depth (length pile))
+                                            (not (pile-up? (list-ref pile depth))))
+                                        (reverse acc)
+                                        (loop (+ depth 1)
+                                              (cons (list 'pile i depth) acc)))))))
+                          (iota PILES)))))
 
-    (define (deal-won? d)
-      (game-won? (deal-game d)))
+    ;; ((place . tag) ...) over the places, with the stack's assigner.
+    (define (tag-places g)
+      (let* ((places (deal-places g))
+             (len (hint-label-length (length places))))
+        (let loop ((places places) (i 0) (acc '()))
+          (if (null? places)
+              (reverse acc)
+              (loop (cdr places)
+                    (+ i 1)
+                    (cons (cons (car places) (hint-label i len)) acc))))))
 
+    (define (label->place labels text)
+      (let ((entry (find (lambda (e) (string=? (cdr e) text)) labels)))
+        (and entry (car entry))))
+
+    ;; --- construction ---------------------------------------------------------
+
+    ;; Everything that must follow a game change: the tags, the message,
+    ;; the typed text.
     (define (with-game d g)
       (deal d
             game: g
+            labels: (tag-places g)
+            typed: ""
             message: (cond ((game-won? g) MSG-WON)
                            ((and (null? (legal-moves g))
                                  (null? (game-stock g))
@@ -58,12 +125,34 @@
                             MSG-STUCK)
                            (else ""))))
 
+    (define (deal-new seed draw)
+      (deal (with-game (deal seed: seed) (game-new seed draw))
+            message: MSG-DEALT))
+
+    ;; A deal from saved parts ((crash cards save)): the game and the
+    ;; settings; the tags are recomputed.
+    (define (deal-restore seed g model labels-shown)
+      (deal-with-model (with-game (deal seed: seed labels-shown: labels-shown) g)
+                       model))
+
+    (define (deal-with-model d model)
+      (if (memq model CARD-MODELS) (deal d model: model typed: "") d))
+
+    (define (next-card-model m)
+      (let ((rest (cdr (memq m CARD-MODELS))))
+        (if (null? rest) (car CARD-MODELS) (car rest))))
+
+    (define (deal-won? d)
+      (game-won? (deal-game d)))
+
     (define (deal-undo d)
       (with-game d (game-undo (deal-game d))))
 
-    ;; The next seed, the draw count kept.
+    ;; The next seed, the draw count and settings kept.
     (define (deal-next d)
-      (deal-new (+ 1 (deal-seed d)) (game-draw (deal-game d))))
+      (deal (deal-new (+ 1 (deal-seed d)) (game-draw (deal-game d)))
+            model: (deal-model d)
+            labels-shown: (deal-labels-shown d)))
 
     ;; One or three: the next draw honors it.
     (define (deal-toggle-draw d)
@@ -73,6 +162,112 @@
     (define (pick d place)
       (with-game d (game-select (deal-game d) place)))
 
+    (define (deselect d)
+      (let ((g (deal-game d)))
+        (if (game-selected g)
+            (with-game d (game g selected: #f))
+            (deal d typed: ""))))
+
+    ;; --- keys -----------------------------------------------------------------
+
+    (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+
+    (define (typing? d)
+      (> (string-length (deal-typed d)) 0))
+
+    ;; The commands both models share; #f when the frame holds none.
+    (define (step-commands d f)
+      (cond ((pressed? f 'tab)
+             (deal d model: (next-card-model (deal-model d)) typed: ""))
+            ((pressed? f 'return) (deselect d))
+            ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
+            (else #f)))
+
+    ;; Tags: each letter extends what has been typed; a complete tag taps
+    ;; its place; Space clears a half-typed tag or toggles the overlay;
+    ;; Backspace erases a letter.
+    (define (step-tags d f)
+      (let loop ((keys (input-frame-pressed f)) (d d))
+        (if (null? keys)
+            d
+            (let ((key (car keys))
+                  (typed (deal-typed d)))
+              (cond ((eq? key 'space)
+                     (loop (cdr keys)
+                           (if (typing? d)
+                               (deal d typed: "")
+                               (deal d labels-shown: (not (deal-labels-shown d))))))
+                    ((and (eq? key 'backspace) (typing? d))
+                     (loop (cdr keys)
+                           (deal d typed: (substring typed 0 (- (string-length typed) 1)))))
+                    ((not (label-key? key)) (loop (cdr keys) d))
+                    ((not (deal-labels-shown d)) (loop (cdr keys) d))
+                    (else
+                     (let* ((labels (deal-labels d))
+                            (len (hint-label-length (length labels)))
+                            (typed (string-append typed (symbol->string key))))
+                       (if (< (string-length typed) len)
+                           (loop (cdr keys) (deal d typed: typed))
+                           (let ((place (label->place labels typed)))
+                             (loop (cdr keys)
+                                   (deal (if place (pick d place) d) typed: "")))))))))))
+
+    (define (pile-key->index key)
+      (let loop ((keys PILE-KEYS) (i 0))
+        (cond ((null? keys) #f)
+              ((eq? (car keys) key) i)
+              (else (loop (cdr keys) (+ i 1))))))
+
+    (define (foundation-key->index key)
+      (let loop ((keys FOUNDATION-KEYS) (i 0))
+        (cond ((null? keys) #f)
+              ((eq? (car keys) key) i)
+              (else (loop (cdr keys) (+ i 1))))))
+
+    ;; A pile key while that pile's card is the selection: the run one
+    ;; deeper, wrapping to the top past the last face-up card (Cybersol's
+    ;; offset cycle). Otherwise the pile's top.
+    (define (pile-place d i)
+      (let* ((g (deal-game d))
+             (sel (game-selected g))
+             (pile (game-pile g i))
+             (up-count (length (filter pile-up? pile))))
+        (if (and sel
+                 (eq? (car sel) 'pile)
+                 (= (cadr sel) i)
+                 (< (+ 1 (caddr sel)) up-count))
+            (list 'pile i (+ 1 (caddr sel)))
+            (list 'pile i 0))))
+
+    (define (step-piles d f)
+      (let loop ((keys (input-frame-pressed f)) (d d))
+        (if (null? keys)
+            d
+            (let ((key (car keys)))
+              (cond ((eq? key 'space)
+                     (loop (cdr keys) (deal d labels-shown: (not (deal-labels-shown d)))))
+                    ((pile-key->index key)
+                     => (lambda (i)
+                          (let ((g (deal-game d))
+                                (place (pile-place d i)))
+                            ;; the same pile again with its top selected:
+                            ;; game-select would send it to a foundation;
+                            ;; here it walks the run instead
+                            (loop (cdr keys)
+                                  (if (and (game-selected g)
+                                           (eq? (car (game-selected g)) 'pile)
+                                           (= (cadr (game-selected g)) i))
+                                      (with-game d (game g selected: place))
+                                      (pick d place))))))
+                    ((foundation-key->index key)
+                     => (lambda (i) (loop (cdr keys) (pick d (list 'foundation i)))))
+                    ((eq? key 'g) (loop (cdr keys) (pick d '(stock))))
+                    ((eq? key 'h) (loop (cdr keys) (pick d '(waste))))
+                    ((eq? key (string->symbol ";")) (loop (cdr keys) (deselect d)))
+                    (else (loop (cdr keys) d)))))))
+
+    ;; --- controls and the pointer -----------------------------------------------
+
     (define (step-control d name)
       (case name
         ((undo) (deal-undo d))
@@ -80,11 +275,22 @@
         ((next) (deal-next d))
         (else d)))
 
-    (define (deal-step d f g)
+    (define (step-pointer d f g)
       (let ((click (input-frame-click f)))
         (cond ((not click) d)
               ((hit-card-control g (car click) (cdr click))
                => (lambda (name) (step-control d name)))
               (else
                (let ((place (hit-place g (deal-game d) (car click) (cdr click))))
-                 (if place (pick d place) d))))))))
+                 (if place (pick d place) d))))))
+
+    ;; --- one frame ----------------------------------------------------------------
+
+    (define (deal-step d f g)
+      (cond ((step-commands d f) => (lambda (d) d))
+            (else
+             (let ((d (step-pointer d f g)))
+               (case (deal-model d)
+                 ((tags) (step-tags d f))
+                 ((piles) (step-piles d f))
+                 (else d))))))))

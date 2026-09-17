@@ -54,6 +54,8 @@
 ;;;   crash: cards stock X Y                the stock's center
 ;;;   crash: cards first SX SY DX DY        the first legal move's source and
 ;;;                                         destination centers, or "first none"
+;;;   crash: cards tags TS TD               the same move's source and destination tags
+;;;   crash: cards keys KS KD               ... and their PILES-model letters
 ;;;   crash: cards restored moves N          ... from a saved deal
 ;;;   crash: cards select PLACE              a card was selected
 ;;;   crash: cards deselect
@@ -304,7 +306,9 @@
              (m1 (game-moves g1))
              (h0 (length (game-history g0)))
              (h1 (length (game-history g1))))
-        (cond ((eq? g0 g1) #f)
+        (cond ((not (eq? (deal-model before) (deal-model after)))
+               (say "cards" "model" (deal-model after)))
+              ((eq? g0 g1) #f)
               ((not (= (deal-seed before) (deal-seed after)))
                (set! *announced* #f)
                (set! *restored* #f))
@@ -319,6 +323,15 @@
               ((and (game-selected g0) (not (game-selected g1)))
                (say "cards" "deselect")))))
 
+    ;; Cybersol's letter for a place (the PILES model).
+    (define (pile-key p)
+      (case (car p)
+        ((pile) (list-ref PILE-KEYS (cadr p)))
+        ((foundation) (list-ref '(u i o p) (cadr p)))
+        ((stock) 'g)
+        ((waste) 'h)
+        (else '-)))
+
     (define (say-deal d)
       (let* ((g (deal-game d))
              (moves (legal-moves g)))
@@ -329,9 +342,16 @@
           (say "cards" "stock" (car stock) (cdr stock)))
         (if (null? moves)
             (say "cards" "first" "none")
-            (let ((src (place-center *card-geom* g (car (car moves))))
-                  (dst (place-center *card-geom* g (cdr (car moves)))))
-              (say "cards" "first" (car src) (cdr src) (car dst) (cdr dst)))))
+            (let* ((src (place-center *card-geom* g (car (car moves))))
+                   (dst (place-center *card-geom* g (cdr (car moves))))
+                   (tag (lambda (p)
+                          (let ((entry (find (lambda (e) (equal? (car e) p)) (deal-labels d))))
+                            (if entry (cdr entry) "-"))))
+                   (dst-place (let ((p (cdr (car moves))))
+                                (if (eq? (car p) 'pile) (list 'pile (cadr p) 0) p))))
+              (say "cards" "first" (car src) (cdr src) (car dst) (cdr dst))
+              (say "cards" "tags" (tag (car (car moves))) (tag dst-place))
+              (say "cards" "keys" (pile-key (car (car moves))) (pile-key dst-place)))))
       (when *restored*
         (say "cards" "restored" "moves" (game-moves (deal-game d))))
       (for-each (lambda (c)
@@ -497,7 +517,9 @@
       (unless *deal*
         (let ((booted (boot-deal *seed* *fresh*)))
           (set! *card-geom* (make-card-geometry VW VH))
-          (set! *deal* (car booted))
+          (set! *deal* (if (and *touch* (not (cdr booted)))
+                           (deal (car booted) labels-shown: #f)
+                           (car booted)))
           (set! *restored* (cdr booted)))))
 
     ;; A menu choice. UPDATE: the page owns the service worker; the shell

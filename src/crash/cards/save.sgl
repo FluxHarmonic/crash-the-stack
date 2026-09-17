@@ -2,8 +2,8 @@
 ;;;
 ;;; What survives a reload or a restart on the card table: the seed, the
 ;;; draw count, the passes and moves, every pile with its face-up flags,
-;;; the foundations, the stock, the waste, the selection and the random
-;;; state. Not the history: undo does not reach across a reload (the same
+;;; the foundations, the stock, the waste, the selection, the random
+;;; state, and the settings (keyboard model, tags shown). Not the history: undo does not reach across a reload (the same
 ;;; P1 limit as the Mahjongg save). datum->deal is strict: anything not
 ;;; shaped like a save of this version, or not holding each of the 52
 ;;; cards exactly once, answers #f and the caller deals afresh. A
@@ -24,9 +24,11 @@
     (define CARDS-SAVE-VERSION 1)
 
     ;; A save is due whenever the game changed (every move, draw, undo,
-    ;; draw-count flip or new deal changes the game struct).
+    ;; draw-count flip or new deal changes the game struct) or a setting did.
     (define (deal-save-due? before after)
-      (not (eq? (deal-game before) (deal-game after))))
+      (or (not (eq? (deal-game before) (deal-game after)))
+          (not (eq? (deal-model before) (deal-model after)))
+          (not (eq? (deal-labels-shown before) (deal-labels-shown after)))))
 
     (define (deal->datum d)
       (let ((g (deal-game d)))
@@ -41,7 +43,10 @@
               (cons 'stock (game-stock g))
               (cons 'waste (game-waste g))
               (cons 'selected (game-selected g))
-              (cons 'rng (game-rng g)))))
+              (cons 'rng (game-rng g))
+              (list 'settings
+                    (deal-model d)
+                    (deal-labels-shown d)))))
 
     (define (field d key)
       (let ((entry (assq key (cddr d))))
@@ -120,18 +125,26 @@
                   (complete? tableau foundations stock waste)
                   (place? (field d 'selected) tableau foundations waste)))
            (let ((rng (field d 'rng)))
-             (and (exact? rng) (integer? rng) (> rng 0)))))
+             (and (exact? rng) (integer? rng) (> rng 0)))
+           (let ((st (field d 'settings)))
+             (and (list? st)
+                  (= (length st) 2)
+                  (memq (car st) CARD-MODELS)
+                  (boolean? (cadr st))))))
 
     ;; A deal from a save datum, or #f when the datum is not one.
     (define (datum->deal d)
       (and (well-formed? d)
-           (deal-restore (field d 'seed)
-                         (game tableau: (list->vector (field d 'tableau))
-                               foundations: (list->vector (field d 'foundations))
-                               stock: (field d 'stock)
-                               waste: (field d 'waste)
-                               draw: (field d 'draw)
-                               passes: (field d 'passes)
-                               selected: (field d 'selected)
-                               moves: (field d 'moves)
-                               rng: (field d 'rng)))))))
+           (let ((st (field d 'settings)))
+             (deal-restore (field d 'seed)
+                           (game tableau: (list->vector (field d 'tableau))
+                                 foundations: (list->vector (field d 'foundations))
+                                 stock: (field d 'stock)
+                                 waste: (field d 'waste)
+                                 draw: (field d 'draw)
+                                 passes: (field d 'passes)
+                                 selected: (field d 'selected)
+                                 moves: (field d 'moves)
+                                 rng: (field d 'rng))
+                           (car st)
+                           (cadr st)))))))

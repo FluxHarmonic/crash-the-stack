@@ -1,0 +1,153 @@
+;;; Gate leg 7 (P2) - input parity on the card table.
+;;;
+;;; One known move on the fixture deal (S2 from pile 0 onto D3 on pile
+;;; 2), made three ways: a tap at each place's center, the TAGS model
+;;; (the tag of each place, typed letter by letter), and the PILES model
+;;; (a, then d). All three must leave the game in the same state after
+;;; the first pick (S2 selected, nothing moved) and after the second (the
+;;; move made), and the same as two direct game-select calls. A second
+;;; scenario picks S2 and then an illegal destination (H6 on pile 1),
+;;; where the right answer is a changed selection and no move. A third
+;;; draws from the stock three ways.
+
+(import (sigil test)
+        (sigil math)
+        (crash input)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input))
+
+(define VW 640)
+(define VH 400)
+(define geom (make-card-geometry VW VH))
+
+(define (frame pressed) (make-input-frame pressed '() #f))
+(define (click-frame xy) (make-input-frame '() '() xy))
+
+(define (fresh model)
+  (deal-with-model (deal-restore 1 (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'tags #t)
+                   model))
+
+(define (canon d) (game-canonical (deal-game d)))
+
+;; --- the three ways of tapping one place -------------------------------------
+
+(define (by-tap d place)
+  (deal-step d (click-frame (place-center geom (deal-game d) place)) geom))
+
+(define (by-tags d place)
+  (let ((entry (find (lambda (e) (equal? (car e) place)) (deal-labels d))))
+    (unless entry (error "no tag for place" place))
+    (let loop ((chars (string->list (cdr entry))) (d d))
+      (if (null? chars)
+          d
+          (loop (cdr chars)
+                (deal-step d (frame (list (string->symbol (string (car chars))))) geom))))))
+
+(define (by-piles d place)
+  (deal-step d
+             (frame (list (case (car place)
+                            ((pile) (list-ref PILE-KEYS (cadr place)))
+                            ((stock) 'g)
+                            ((waste) 'h)
+                            ((foundation) (list-ref '(u i o p) (cadr place)))
+                            (else (error "no pile key for" place)))))
+             geom))
+
+(define SRC '(pile 0 0))
+(define DST '(pile 2 0))
+
+(define direct-1 (game-select (deal-game (fresh 'tags)) SRC))
+(define direct-2 (game-select direct-1 DST))
+
+(test-group "the direct calls are the reference"
+  (test "S2 is selected, then moved onto D3"
+    (assert-equal SRC (game-selected direct-1))
+    (assert-equal '() (game-pile direct-2 0))
+    (assert-equal "S2" (card-string (pile-card (car (game-pile direct-2 2)))))
+    (assert-equal 1 (game-moves direct-2))))
+
+(define (parity name model way)
+  (test-group (string-append "parity: " name)
+    (let* ((d0 (fresh model))
+           (d1 (way d0 SRC))
+           (d2 (way d1 DST)))
+      (test "the first pick selects S2 and moves nothing"
+        (assert-equal (game-canonical direct-1) (canon d1))
+        (assert-equal 0 (game-moves (deal-game d1))))
+      (test "the second makes the move"
+        (assert-equal (game-canonical direct-2) (canon d2))
+        (assert-equal 1 (game-moves (deal-game d2)))))))
+
+(parity "tap" 'tags by-tap)
+(parity "tags" 'tags by-tags)
+(parity "piles" 'piles by-piles)
+
+(test-group "an illegal destination changes the selection, not the table"
+  (let ((direct (game-select direct-1 '(pile 1 0))))
+    (test "the reference: H6 becomes the selection, no move"
+      (assert-equal '(pile 1 0) (game-selected direct))
+      (assert-equal 0 (game-moves direct)))
+    (for-each (lambda (entry)
+                (let* ((name (car entry)) (model (cadr entry)) (way (caddr entry))
+                       (d (way (way (fresh model) SRC) '(pile 1 0))))
+                  (test (string-append name ": the same")
+                    (assert-equal (game-canonical direct) (canon d)))))
+              (list (list "tap" 'tags by-tap)
+                    (list "tags" 'tags by-tags)
+                    (list "piles" 'piles by-piles)))))
+
+(test-group "the stock three ways"
+  (let ((direct (game-select (deal-game (fresh 'tags)) '(stock))))
+    (for-each (lambda (entry)
+                (let* ((name (car entry)) (model (cadr entry)) (way (caddr entry))
+                       (d (way (fresh model) '(stock))))
+                  (test (string-append name ": one card drawn")
+                    (assert-equal (game-canonical direct) (canon d))
+                    (assert-equal '("S7") (map card-string (game-waste (deal-game d)))))))
+              (list (list "tap" 'tags by-tap)
+                    (list "tags" 'tags by-tags)
+                    (list "piles" 'piles by-piles)))))
+
+(test-group "the models' own keys"
+  (test "Tab switches the model and back"
+    (let* ((d (fresh 'tags))
+           (d1 (deal-step d (frame '(tab)) geom))
+           (d2 (deal-step d1 (frame '(tab)) geom)))
+      (assert-equal 'piles (deal-model d1))
+      (assert-equal 'tags (deal-model d2))))
+  (test "in PILES the same pile key walks the run deeper, then wraps"
+    ;; move H6 onto S7? not on this deal. Build a run: after S2 onto D3
+    ;; pile 2 is S2 D3 (both up): a, d makes it; then d selects (pile 2 0),
+    ;; d again (pile 2 1), d again wraps to (pile 2 0).
+    (let* ((d (by-piles (by-piles (fresh 'piles) SRC) DST))
+           (d1 (deal-step d (frame '(d)) geom))
+           (d2 (deal-step d1 (frame '(d)) geom))
+           (d3 (deal-step d2 (frame '(d)) geom)))
+      (assert-equal '(pile 2 0) (game-selected (deal-game d1)))
+      (assert-equal '(pile 2 1) (game-selected (deal-game d2)))
+      (assert-equal '(pile 2 0) (game-selected (deal-game d3)))))
+  (test "Enter deselects in both models"
+    (let ((d (by-tags (fresh 'tags) SRC)))
+      (assert-false (game-selected (deal-game (deal-step d (frame '(return)) geom)))))
+    (let ((d (by-piles (fresh 'piles) SRC)))
+      (assert-false (game-selected (deal-game (deal-step d (frame '(return)) geom))))))
+  (test "Space hides the tags, and a tag typed while hidden does nothing"
+    (let* ((d (deal-step (fresh 'tags) (frame '(space)) geom))
+           (d1 (by-tags d SRC)))
+      (assert-false (deal-labels-shown d))
+      (assert-false (game-selected (deal-game d1)))))
+  (test "Backspace undoes when nothing is typed"
+    (let* ((d (by-tags (by-tags (fresh 'tags) SRC) DST))
+           (d1 (deal-step d (frame '(backspace)) geom)))
+      (assert-equal 1 (game-moves (deal-game d)))
+      (assert-equal 0 (game-moves (deal-game d1)))))
+  (test "every place has a distinct tag"
+    (let* ((labels (deal-labels (fresh 'tags)))
+           (tags (map cdr labels)))
+      (assert-equal (length (deal-places (deal-game (fresh 'tags)))) (length labels))
+      (assert-true (let loop ((ts tags))
+                     (cond ((null? ts) #t)
+                           ((member (car ts) (cdr ts)) #f)
+                           (else (loop (cdr ts)))))))))

@@ -189,10 +189,88 @@
                     (draw (- depth 1))))))
           (loop (+ i 1)))))
 
+    ;; --- the key overlays ---------------------------------------------------------
+    ;;
+    ;; TAGS: each place's tag in the 3x5 set, top right of its exposed
+    ;; strip (the rank sits top left), the letters typed so far lit.
+    ;; PILES: Cybersol's letter on each place in the 5x7 set. Both obey
+    ;; the deal's labels-shown.
+
+    ;; The rect a place shows: a pile card's own rect (its top strip is
+    ;; what the fan leaves visible), else the place's rect.
+    (define (place-rect g game p)
+      (case (car p)
+        ((stock) (stock-rect g))
+        ((waste) (waste-card-rect g game 0))
+        ((foundation) (foundation-rect g (cadr p)))
+        ((pile)
+         (let ((depth (if (pair? (cddr p)) (caddr p) 0)))
+           (if (>= depth (length (game-pile game (cadr p))))
+               (pile-slot-rect g (cadr p))
+               (pile-card-rect g game (cadr p) depth))))
+        (else (list 0 0 0 0))))
+
+    (define (draw-tag-box x y w h)
+      (color! C-BG)
+      (draw-filled-rect x y w h))
+
+    (define (draw-tags d g)
+      (let ((game (deal-game d))
+            (typed (deal-typed d)))
+        (for-each
+          (lambda (entry)
+            (let* ((r (place-rect g game (car entry)))
+                   (label (cdr entry))
+                   (tw (text-width-mini label 2))
+                   (w (+ 4 tw))
+                   (x (+ (car r) (caddr r) -3 (- w)))
+                   (y (+ (cadr r) 2))
+                   (prefix? (and (> (string-length typed) 0)
+                                 (<= (string-length typed) (string-length label))
+                                 (string=? typed (substring label 0 (string-length typed))))))
+              (draw-tag-box x y w 14)
+              (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
+              (draw-text-mini label (+ x 2) (+ y 2) 2)))
+          (deal-labels d))))
+
+    ;; ((kind i) . "KEY") for each key in order. (A two-list map is
+    ;; refused by the dev bundle at runtime; P1's finding.)
+    (define (keyed kind keys)
+      (let loop ((keys keys) (i 0) (acc '()))
+        (if (null? keys)
+            (reverse acc)
+            (loop (cdr keys)
+                  (+ i 1)
+                  (cons (cons (if (eq? kind 'pile) (list kind i 0) (list kind i))
+                              (string-upcase (symbol->string (car keys))))
+                        acc)))))
+
+    ;; The letter on each of Cybersol's places: the piles' top card or
+    ;; empty slot, the stock, the waste's top, the foundations.
+    (define (draw-pile-keys g game)
+      (let ((letters (append (list (cons '(stock) "G"))
+                             (if (pair? (game-waste game)) (list (cons '(waste) "H")) '())
+                             (keyed 'foundation '(u i o p))
+                             (keyed 'pile PILE-KEYS))))
+        (for-each
+          (lambda (entry)
+            (let* ((r (place-rect g game (car entry)))
+                   (label (cdr entry))
+                   (tw (text-width label 2))
+                   (w (+ 6 tw))
+                   (x (+ (car r) (caddr r) -3 (- w)))
+                   (y (+ (cadr r) 2)))
+              (draw-tag-box x y w 18)
+              (color! C-LABEL-LIT)
+              (draw-text label (+ x 3) (+ y 2) 2)))
+          letters)))
+
     ;; --- HUD ----------------------------------------------------------------------
 
-    (define KEYS-LINE
-      "TAP A CARD, THEN WHERE IT GOES.  TAP IT AGAIN: TO A FOUNDATION.  TAP THE STOCK: DRAW.")
+    (define TAGS-LINE
+      "TAGS: TYPE ONE  SPACE HIDE  ENTER DESELECT  TAB PILES  BKSP UNDO  |  TAP A CARD, THEN ITS TARGET")
+    (define PILES-LINE
+      "PILES: ASDF JKL (AGAIN: DEEPER)  G DRAW  H WASTE  UIOP FOUNDATIONS  ENTER DESELECT  TAB TAGS  BKSP UNDO")
 
     (define (control-label name game)
       (case name
@@ -245,7 +323,13 @@
         (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
         (draw-controls g game)
         (color! C-TEXT-DIM)
-        (draw-text KEYS-LINE 8 (+ top 32) 1)
+        (draw-text (if (eq? (deal-model d) 'tags) TAGS-LINE PILES-LINE) 8 (+ top 32) 1)
+        (when (> (string-length (deal-typed d)) 0)
+          (color! C-HIGHLIGHT)
+          (draw-text (string-append "> " (deal-typed d))
+                     (- vw 8 (text-width right 2) 24 (text-width (string-append "> " (deal-typed d)) 2))
+                     (+ top 7)
+                     2))
         (let ((message (deal-message d)))
           (when (and (> (string-length message) 0)
                      (or (game-won? game) (string=? message MSG-STUCK)))
@@ -258,4 +342,9 @@
         (draw-background g)
         (draw-top-row g game)
         (draw-tableau g game)
+        (when (deal-labels-shown d)
+          (case (deal-model d)
+            ((tags) (draw-tags d g))
+            ((piles) (draw-pile-keys g game))
+            (else #f)))
         (draw-hud d g)))))

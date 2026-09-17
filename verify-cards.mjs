@@ -20,8 +20,15 @@
 //   two-tap     a tap at the first move's source -> "crash: cards select ...",
 //               a tap at its destination -> "crash: cards moved 2"
 //   undo        a tap on the UNDO control -> "crash: cards undo 1"
+//   keys        the same move by keys, from the deal (Backspace first undoes
+//               the draw, whose waste card had shifted the tags): in TAGS the
+//               two tags the boot line "crash: cards tags TS TD" gives, typed
+//               -> "crash: cards moved 1"; Backspace undoes; Tab -> "crash:
+//               cards model piles"; then the two letters "crash: cards keys
+//               KS KD" gives -> "moved 1" again (gate leg 7 on the web build)
 //   reload      the page is reloaded and the deal comes back from
-//               localStorage: "crash: cards restored moves 1"
+//               localStorage: "crash: cards restored moves 1" (the keys
+//               sub-arm's last move)
 //   console     zero error-level console entries and zero exceptions
 //
 // Every sub-arm anchors on a line the passing path of the OTHER arm cannot
@@ -51,7 +58,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "reload", "console"];
+const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "reload", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -260,12 +267,57 @@ else {
   else pass("undo", undo.m[0]);
 }
 
+// ---- keys ------------------------------------------------------------------------------
+async function key(type, k) {
+  await evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
+}
+async function press(k) { await key("keydown", k); await sleep(40); await key("keyup", k); await sleep(120); }
+async function type(tag) { for (const ch of tag) await press(ch); }
+{
+  const tags = await waitLine(/^crash: cards tags (\S+) (\S+)$/, bootMark, 2000);
+  if (!tags) fail("keys", "no \"crash: cards tags\" boot line");
+  else if (tags.m[1] === "-" || tags.m[2] === "-") fail("keys", `a place of the first move has no tag: ${tags.m[0]}`);
+  else {
+    // The tags were assigned at the deal; the draw put a card on the waste
+    // and every tag after it shifted. Undo the draw first (Backspace with
+    // nothing typed), back to the deal and its tags.
+    mark = consoleLines.length;
+    await press("Backspace");
+    const back = await waitLine(/^crash: cards undo 0$/, mark, 3000);
+    if (!back) fail("keys", "Backspace did not undo the draw back to move 0");
+    mark = consoleLines.length;
+    await type(tags.m[1]); await type(tags.m[2]);
+    const moved = back && await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
+    if (!back) { /* reported */ }
+    else if (!moved) fail("keys", `typed ${tags.m[1]} ${tags.m[2]} in TAGS, no "crash: cards moved" line`);
+    else {
+      mark = consoleLines.length;
+      await press("Backspace");
+      const undo = await waitLine(/^crash: cards undo (\d+)$/, mark, 3000);
+      mark = consoleLines.length;
+      await press("Tab");
+      const model = await waitLine(/^crash: cards model (\w+)$/, mark, 3000);
+      if (!undo) fail("keys", "Backspace produced no undo line");
+      else if (!model || model.m[1] !== "piles") fail("keys", `Tab did not switch to PILES: ${model ? model.m[0] : "no model line"}`);
+      else {
+        const keys = await waitLine(/^crash: cards keys (\S+) (\S+)$/, bootMark, 2000);
+        const srcKey = keys ? keys.m[1] : "-", dstKey = keys ? keys.m[2] : "-";
+        mark = consoleLines.length;
+        await press(srcKey); await press(dstKey);
+        const moved2 = await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
+        if (!moved2) fail("keys", `PILES ${srcKey} ${dstKey}: no "crash: cards moved" line`);
+        else pass("keys", `TAGS ${tags.m[1]} ${tags.m[2]} -> ${moved.m[0]}; undo; PILES ${srcKey} ${dstKey} -> ${moved2.m[0]}`);
+      }
+    }
+  }
+}
+
 // ---- reload --------------------------------------------------------------------------
 mark = consoleLines.length;
 await send("Page.navigate", { url: URL.replace("&fresh", "") });
 const restored = await waitLine(/^crash: cards restored moves (\d+)$/, mark, 20000);
 if (!restored) fail("reload", "no \"crash: cards restored\" line within 20 s of a reload");
-else if (restored.m[1] !== "1") fail("reload", `expected the saved deal at move 1, got "${restored.m[0]}"`);
+else if (restored.m[1] !== "1") fail("reload", `expected the saved deal at move 1 (the keys sub-arm's last move), got "${restored.m[0]}"`);
 else pass("reload", restored.m[0]);
 
 // ---- console ---------------------------------------------------------------------------
