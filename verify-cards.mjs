@@ -269,6 +269,16 @@ else fail("render", `lit ${px.lit}/${px.total}, color bins ${px.colors}, buffer 
 if (SHOT) {
   const shot = await send("Page.captureScreenshot", { format: "png" });
   fs.writeFileSync(SHOT, Buffer.from(shot.data, "base64"));
+  // On the phone viewport a fresh deal starts with the tags hidden (a
+  // touch screen); Space shows them for the second picture, then hides
+  // them again so the rest of the arm runs as it would.
+  if (PHONE) {
+    const space = async (t) => evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(t)}, { key: " ", bubbles: true, cancelable: true }))`);
+    await space("keydown"); await sleep(40); await space("keyup"); await sleep(400);
+    const tagsShot = await send("Page.captureScreenshot", { format: "png" });
+    fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-tags.png", Buffer.from(tagsShot.data, "base64"));
+    await space("keydown"); await sleep(40); await space("keyup"); await sleep(200);
+  }
 }
 
 // ---- draw ---------------------------------------------------------------------

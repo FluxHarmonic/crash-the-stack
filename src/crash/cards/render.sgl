@@ -1,4 +1,4 @@
-;;; (crash cards render) - Drawing the card table.
+;;; (crash cards render) - Drawing the card table (DEFRAG, ruling D16).
 ;;;
 ;;; Takes a deal and a card geometry and draws one frame with
 ;;; sigil-graphics primitives, in the P0 tile shape: each card a flat face
@@ -35,8 +35,32 @@
     (define GLYPH-SCALE 2)
     (define BIG-SUIT-SCALE 6)
 
+    ;; The four subsystems (ruling D16): hot PWR and TX for hearts and
+    ;; diamonds, cold MEM and DSK for spades and clubs; the class reads by
+    ;; temperature (hot in the palette's reds, cold in its blues and
+    ;; greens) and the two subsystems in a class differ by hue.
+    (define (subsystem-tag c)
+      (case (card-suit c)
+        ((0) "MEM")
+        ((1) "PWR")
+        ((2) "TX")
+        (else "DSK")))
+
     (define (suit-color c)
-      (if (card-red? c) C-SUIT-1 C-BG))
+      (case (card-suit c)
+        ((0) C-SUIT-0)          ; MEM: blue
+        ((1) C-SUIT-1)          ; PWR: red
+        ((2) C-LABEL-LIT)       ; TX: amber
+        (else C-SUIT-2)))       ; DSK: green
+
+    ;; The court's in-world names, under the big suit mark.
+    (define (rank-word c)
+      (case (card-rank c)
+        ((1) "BOOT")
+        ((11) "DAEMON")
+        ((12) "SYSOP")
+        ((13) "ROOT")
+        (else #f)))
 
     ;; --- background -----------------------------------------------------------
 
@@ -122,13 +146,23 @@
         (draw-filled-rect x y 1 h)
         (color! (suit-color c))
         (draw-text rank (+ x 4) (+ y 3) GLYPH-SCALE)
-        (draw-suit (card-suit c) (+ x 4 rw 4) (+ y 3) GLYPH-SCALE)
-        ;; the big suit, when the face is tall enough to hold it under the corner
+        ;; the subsystem tag where a card's suit symbol would sit (the icons
+        ;; are P3's), and the suit mark small beside it for the classic eye
+        (draw-text (subsystem-tag c) (+ x 4 rw 4) (+ y 3) 1)
+        (draw-suit (card-suit c) (+ x 4 rw 4) (+ y 11) 1)
+        ;; the big suit mark, when the face is tall enough to hold it under
+        ;; the corner, with the court's name under it
         (when (>= h (+ 3 (* GLYPH-SCALE GLYPH-H) bh 6))
           (draw-suit (card-suit c)
                      (+ x (half (- w bw)))
-                     (+ y (half (- h bh)) 6)
-                     BIG-SUIT-SCALE))
+                     (+ y (half (- h bh)))
+                     BIG-SUIT-SCALE)
+          (let ((word (rank-word c)))
+            (when word
+              (draw-text word
+                         (+ x (half (- w (text-width word 1))))
+                         (+ y (half (- h bh)) bh 4)
+                         1))))
         (when selected?
           (draw-outline (list (- x 1) (- y 1) (+ w 2) (+ h 2)) C-SELECTED))))
 
@@ -313,17 +347,17 @@
     ;; --- HUD ----------------------------------------------------------------------
 
     (define TAGS-LINE
-      "TAGS: TYPE ONE  F DRAW  J WASTE  SPACE HIDE  ENTER DESELECT  TAB PILES  BKSP UNDO  ^S SCRAM")
+      "TAGS: TYPE ONE  F PULL  J BUFFER  SPACE HIDE  ENTER CLEAR  TAB STACKS")
     (define PILES-LINE
-      "PILES: ASDF JKL (AGAIN: DEEPER)  G DRAW  H WASTE  UIOP FOUNDATIONS  ENTER DESELECT  TAB TAGS  BKSP UNDO  ^S SCRAM")
+      "STACKS: ASDF JKL (AGAIN: DEEPER)  G PULL  H BUFFER  UIOP CORES  TAB TAGS")
 
     (define (control-label name game d)
       (case name
-        ((undo) "UNDO")
-        ((draw) (if (= (game-draw game) 3) "DRAW 3" "DRAW 1"))
-        ((next) "NEXT")
+        ((undo) "ROLLBACK")
+        ((draw) (if (= (game-draw game) 3) "PULL 3" "PULL 1"))
+        ((next) "DUMP")
         ((menu) "MENU")
-        ((scram) (string-append "SCRAM " (number->string (deal-scrambles d))))
+        ((scram) "SCRAMBLE")
         (else "?")))
 
     ;; The buttons; the SCORE readout and the meter are drawn on their own.
@@ -339,9 +373,16 @@
                     (draw-outline (list x y w h) C-TEXT-DIM)
                     (color! C-TEXT)
                     (draw-text label
-                               (+ x (exact (floor (/ (- w tw) 2))))
+                               (+ x (exact (floor (/ (- (if (eq? name 'scram) (- w 12) w) tw) 2))))
                                (+ y 3)
-                               2)))
+                               2)
+                    ;; the bank count, a small badge in the button's corner
+                    (when (eq? name 'scram)
+                      (let ((n (number->string (deal-scrambles d))))
+                        (color! C-LABEL-LIT)
+                        (draw-filled-rect (+ x w -11) (+ y 1) 10 9)
+                        (color! C-BG)
+                        (draw-text n (+ x w -9) (+ y 2) 1)))))
                 (filter (lambda (c)
                           (and (not (memq (car c) '(score mode)))
                                (or (not (eq? (car c) 'scram))
@@ -354,7 +395,15 @@
       (let ((game (deal-game d)))
         (if (eq? (game-scoring game) 'vegas)
             (string-append "$" (number->string (game-score game)))
-            (string-append "SCORE " (number->string (timed-score game (deal-trace d) (deal-won? d)))))))
+            (number->string (timed-score game (deal-trace d) (deal-won? d))))))
+
+    ;; Row 2's right end: the scoring's name, the bankroll, the dump.
+    (define (score-line d)
+      (let ((game (deal-game d)))
+        (if (eq? (game-scoring game) 'vegas)
+            (string-append "BOUNTY  BANK " (number->string (deal-bank d))
+                           "  DUMP " (number->string (deal-seed d)))
+            (string-append "AUDIT  DUMP " (number->string (deal-seed d))))))
 
     ;; Row 2 under the ICE and after the sever, in place of the keys line.
     (define (phase-line tr game)
@@ -363,10 +412,10 @@
          (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
                         ". LINK SEVERS IN " (trace-countdown-string tr) "."
                         (if (game-corrupted? game)
-                            " THE WASTE IS CORRUPTED: DRAW PAST IT."
-                            " CRASH THE DECK TO WIN.")))
+                            " THE BUFFER IS CORRUPTED: PULL PAST IT."
+                            " BRING THE SYSTEM ONLINE.")))
         ((severed)
-         "LINK SEVERED. TAP: RETRY LINK / NEW DEAL / JACK OUT (^R ^N).")
+         "LINK SEVERED. TAP: RETRY LINK / NEW DUMP / JACK OUT (^R ^N).")
         (else #f)))
 
     ;; The state message, or "" (toasts are (crash cards fx)'s).
@@ -375,7 +424,7 @@
              (tr (deal-trace d))
              (message (deal-message d)))
         (cond ((game-won? game)
-               (string-append "DECK CRASHED " (trace-clock-string tr)
+               (string-append "SYSTEM ONLINE " (trace-clock-string tr)
                               (cond ((eq? (trace-mode tr) 'clean) "")
                                     ((eq? (trace-cleared-in tr) 'counter)
                                      (string-append " " TAG-UNDER-ICE))
@@ -395,9 +444,7 @@
              (vw (card-geometry-vw g))
              (vh (card-geometry-vh g))
              (top (- vh (card-geometry-hud-h g)))
-             (right (if (eq? (game-scoring game) 'vegas)
-                        (string-append "BANK " (number->string (deal-bank d)))
-                        (string-append "SEED " (number->string (deal-seed d)))))
+             (right (score-line d))
              (score-rect (card-control-rect g 'score)))
         (color! C-BG)
         (draw-filled-rect 0 top vw (card-geometry-hud-h g))
@@ -451,5 +498,5 @@
             (draw-severed-in (card-geometry-vw g)
                              top
                              (card-fx-ticks x)
-                             '("RETRY LINK" "NEW DEAL" "JACK OUT"))))
+                             '("RETRY LINK" "NEW DUMP" "JACK OUT"))))
         (draw-hud d g x)))))
