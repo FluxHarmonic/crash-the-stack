@@ -1,26 +1,38 @@
-;;; (crash web) - The browser shell.
+;;; (crash shell web) - The browser shell.
 ;;;
-;;; The same game as (crash native), driven the way a browser drives things:
-;;; the generic loader (sigil-web-app.js, from sigil-wasm-runtime) forwards
-;;; DOM keydown/keyup by key name, the page template forwards pointerdown as
-;;; canvas-buffer pixels, and the gles3 app shell dispatches ("frame", ms)
-;;; once per requestAnimationFrame. Every one of those arrives here through
-;;; (crash main)'s sigil-web-dispatch-event, and each frame this shell folds
-;;; what arrived into one input-frame, steps the session, and draws it,
-;;; exactly as the native shell does with sigil-app's polled state.
+;;; The same game as (crash shell native), driven the way a browser drives
+;;; things: the generic loader (sigil-web-app.js, from sigil-wasm-runtime)
+;;; forwards DOM keydown/keyup by key name, the page template forwards
+;;; pointerdown as canvas-buffer pixels, and the gles3 app shell dispatches
+;;; ("frame", ms) once per requestAnimationFrame. Every one of those arrives
+;;; here through (crash main)'s sigil-web-dispatch-event, and each frame this
+;;; shell folds what arrived into one input-frame, steps the session, and
+;;; draws it, exactly as the native shell does with sigil-app's polled state.
 ;;;
-;;; No coroutine and no wait-frame: delimited continuations do not work under
-;;; native codegen, so the frame loop is inverted (one tick per dispatch).
+;;; The frame loop is inverted (one tick per dispatch) rather than a
+;;; coroutine that wait-frames, because the browser already hands us one
+;;; frame at a time; there is nothing to suspend. (sigil coroutines) itself
+;;; does work under native-codegen wasm as of sigil 0.22.1: measured
+;;; 2026-09-17, the stdlib's doubler example returned 10 and 42 from the web
+;;; build; Cinder's July finding that reset/shift trapped there is stale. A
+;;; top-level define inside cond-expand still is not registered (measured the
+;;; same day: "call: not a procedure"), which is why (crash main) is shaped
+;;; the way it is.
 ;;;
 ;;; What the browser cannot give the game: ctrl chords (the loader drops any
 ;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t), so the page
 ;;; carries buttons that send command names, and this shell turns each
-;;; name into the native key or chord for a frame of its own. Escape does
-;;; nothing here; there is no window to close.
+;;; name into the native key or chord for a frame of its own. That is a
+;;; stopgap: the controls belong in the game's own UI, drawn on the canvas
+;;; and tapped there (David, 2026-09-17), which is a render + input change
+;;; for P1, not this shell. Escape does nothing here; there is no window to
+;;; close.
 ;;;
-;;; Console lines this shell prints (the browser arm in verify.mjs reads them):
-;;;   crash: seed S pair A AX AY B BX BY   at boot: the first solution pair
-;;;                                         and its centers in virtual pixels
+;;; Trace lines, printed only when the page was opened with ?trace (the
+;;; template dispatches ("trace", "on") after boot; verify.mjs relies on
+;;; them, a player never sees them):
+;;;   crash: seed S pair A AX AY B BX BY   the first solution pair and its
+;;;                                         centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
@@ -28,7 +40,7 @@
 ;;;   crash: shuffle                       the board was shuffled
 ;;;   crash: removed A B tiles N           a pair left the board
 
-(define-library (crash web)
+(define-library (crash shell web)
   (import (sigil struct)
           (sigil math)
           (sigil string)
@@ -40,16 +52,12 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
-          (crash render))
+          (crash render)
+          (crash shell))
 
   (export web-main web-dispatch)
 
   (begin
-    (define VW 640)
-    (define VH 400)
-    (define TEST-TILE-URL "assets/test-tile.png")
-    (define MODIFIERS '(ctrl shift))
-
     ;; --- state between dispatches ------------------------------------------
     (define *session* #f)
     (define *geom* #f)
@@ -59,6 +67,8 @@
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
     (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
     (define *texture* #f)    ; the decoded test tile, once ready
+    (define *trace* #f)      ; print the trace lines above
+    (define *announced* #f)  ; the boot lines have been printed for this deal
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -142,18 +152,14 @@
             (set! *texture* (load-texture img))
             (image-free! img)))))
 
-    ;; --- console lines -------------------------------------------------------
+    ;; --- trace lines ---------------------------------------------------------
 
-    ;; One write per line: the loader's WASI shim logs every fd_write as its
-    ;; own console entry, so a line assembled from several displays would
-    ;; arrive as several entries.
+    ;; The loader's WASI shim logs every fd_write as its own console entry,
+    ;; so the line is built first (str) and written once; println's newline
+    ;; is a second, empty entry, which nothing reads.
     (define (say . parts)
-      (display (string-append "crash:"
-                              (apply string-append
-                                     (map (lambda (p)
-                                            (string-append " " (format "~a" p)))
-                                          parts))
-                              "\n")))
+      (when *trace*
+        (println "~a" (apply str "crash:" (map (lambda (p) (str " " p)) parts)))))
 
     ;; What changed between two sessions, as one line, or nothing. A new
     ;; deal is reported by say-first-pair instead (web-tick checks the seed).
@@ -225,12 +231,17 @@
       (when *session*
         (gles3-resize-to-display)
         (ensure-texture!)
+        ;; The boot lines wait for trace to be switched on, and repeat after
+        ;; a new deal.
+        (when (and *trace* (not *announced*))
+          (say-first-pair *session*)
+          (set! *announced* #t))
         (let* ((before *session*)
                (after (session-step before (input-this-frame) *geom*)))
           (set! *session* after)
           (report-change! before after)
           (when (not (= (session-seed before) (session-seed after)))
-            (say-first-pair after))
+            (set! *announced* #f))
           (begin-frame)
           (draw-session after *geom* *texture*)
           (end-frame))))
@@ -247,8 +258,7 @@
       (let ((lay (turtle-layout)))
         (set! *geom* (make-geometry lay VW VH))
         (set! *session* (session-new lay 1)))
-      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-URL))
-      (say-first-pair *session*)
+      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
       ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
       (gles3-start-loop "crash-web-tick")
@@ -259,4 +269,5 @@
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
+            ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
             (else 0)))))

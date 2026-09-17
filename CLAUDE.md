@@ -33,8 +33,9 @@ suggestions.
 - The rules family under `(crash stack ...)`, plus `(crash geometry)` and
   `(crash input)`, import only `(sigil struct)`, `(sigil math)`,
   `(sigil list)` and each other. `test/test-imports.sgl` enforces it.
-- `(crash render)` draws; `(crash main)` is the only module that reads a
-  platform (sigil-app). The web shell replaces `main` and nothing else.
+- `(crash render)` draws; the shells under `(crash shell ...)` are the only
+  modules that read a platform (`native` sigil-app, `web` the browser bridges);
+  `(crash shell)` holds what they share and `(crash main)` picks one.
 
 ## Building
 

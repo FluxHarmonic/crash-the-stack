@@ -194,7 +194,8 @@ function timedOut(name) {
 }
 
 // ---- 2. boot ----------------------------------------------------------------
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html` });
+// ?trace switches on the game's console lines; a player's page prints nothing.
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
 const boot = await waitLine(/^crash: seed (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/, 0, 20000);
 if (!boot) { fail("boot", "no boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
 const [, seed, A, AX, AY, B, BX, BY] = boot.m;
