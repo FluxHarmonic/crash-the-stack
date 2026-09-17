@@ -21,11 +21,10 @@
 //               a tap at its destination -> "crash: cards moved 2"
 //   undo        a tap on the UNDO control -> "crash: cards undo 1"
 //   keys        the same move by keys, from the deal (Backspace first undoes
-//               the draw, whose waste card had shifted the tags): in TAGS the
-//               two tags the boot line "crash: cards tags TS TD" gives, typed
-//               -> "crash: cards moved 1"; Backspace undoes; Tab -> "crash:
-//               cards model piles"; then the two letters "crash: cards keys
-//               KS KD" gives -> "moved 1" again (gate leg 7 on the web build)
+//               the draw, whose waste card had shifted the tags): the two
+//               tags the boot line "crash: cards tags TS TD" gives, typed
+//               -> "crash: cards moved 1" (gate leg 7 on the web build; the
+//               PILES model and its half of this sub-arm went on 2026-09-18)
 //   traced      UNDOS pairs of a tap on the stock and a tap on UNDO (each
 //               undo costs UNDO-COST 10; 20 of them reach TRACE-AT 200) ->
 //               "crash: cards trace 200 twist counter 0 none" and, within
@@ -364,26 +363,8 @@ async function type(tag) { for (const ch of tag) await press(ch); }
     await type(tags.m[1]); await type(tags.m[2]);
     const moved = back && await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
     if (!back) { /* reported */ }
-    else if (!moved) fail("keys", `typed ${tags.m[1]} ${tags.m[2]} in TAGS, no "crash: cards moved" line`);
-    else {
-      mark = consoleLines.length;
-      await press("Backspace");
-      const undo = await waitLine(/^crash: cards undo (\d+)$/, mark, 3000);
-      mark = consoleLines.length;
-      await press("Tab");
-      const model = await waitLine(/^crash: cards model (\w+)$/, mark, 3000);
-      if (!undo) fail("keys", "Backspace produced no undo line");
-      else if (!model || model.m[1] !== "piles") fail("keys", `Tab did not switch to PILES: ${model ? model.m[0] : "no model line"}`);
-      else {
-        const keys = await waitLine(/^crash: cards keys (\S+) (\S+)$/, bootMark, 2000);
-        const srcKey = keys ? keys.m[1] : "-", dstKey = keys ? keys.m[2] : "-";
-        mark = consoleLines.length;
-        await press(srcKey); await press(dstKey);
-        const moved2 = await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
-        if (!moved2) fail("keys", `PILES ${srcKey} ${dstKey}: no "crash: cards moved" line`);
-        else pass("keys", `TAGS ${tags.m[1]} ${tags.m[2]} -> ${moved.m[0]}; undo; PILES ${srcKey} ${dstKey} -> ${moved2.m[0]}`);
-      }
-    }
+    else if (!moved) fail("keys", `typed ${tags.m[1]} ${tags.m[2]}, no "crash: cards moved" line`);
+    else pass("keys", `tags ${tags.m[1]} ${tags.m[2]} -> ${moved.m[0]}`);
   }
 }
 
@@ -432,7 +413,7 @@ else pass("reload", restored.m[0]);
   // suit (S H D C) then rank; foundations top first.
   const found = (suit) => Array.from({ length: 13 }, (_, k) => suit * 13 + 12 - k);
   const spades = found(0).slice(1); // without the king (12), which sits on pile 0
-  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (scrambles . 1) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings tags #t))`;
+  const datum = `(crash-cards 2 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (score vegas -47 0) (scrambles . 1) (corrupt . #f) (trace twist trace 0 0 0 0 0 0 #f #f 0) (settings #t))`;
   await evalJS(`localStorage.setItem("cards", ${JSON.stringify(datum)})`);
   mark = consoleLines.length;
   await send("Page.navigate", { url: URL.replace("&fresh", "") });

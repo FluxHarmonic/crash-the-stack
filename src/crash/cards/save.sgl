@@ -23,7 +23,9 @@
   (export CARDS-SAVE-VERSION deal->datum datum->deal deal-save-due?)
 
   (begin
-    (define CARDS-SAVE-VERSION 1)
+    ;; 2 (2026-09-18): settings lost the key model; a version 1 save is
+    ;; refused, like any other datum that is not this version's shape.
+    (define CARDS-SAVE-VERSION 2)
 
     ;; The trace's time is saved every so many ticks (5 s) between the
     ;; events that save at once, so a reload loses at most that much.
@@ -37,7 +39,6 @@
       (let ((t0 (deal-trace before))
             (t1 (deal-trace after)))
         (or (not (eq? (deal-game before) (deal-game after)))
-            (not (eq? (deal-model before) (deal-model after)))
             (not (eq? (deal-labels-shown before) (deal-labels-shown after)))
             (not (eq? (trace-phase t0) (trace-phase t1)))
             (not (eq? (trace-mode t0) (trace-mode t1)))
@@ -75,9 +76,7 @@
                       (trace-last-ice tr)
                       (trace-cleared-in tr)
                       (trace-extra tr)))
-              (list 'settings
-                    (deal-model d)
-                    (deal-labels-shown d)))))
+              (list 'settings (deal-labels-shown d)))))
 
     (define (field d key)
       (let ((entry (assq key (cddr d))))
@@ -92,11 +91,16 @@
     (define (cards? l)
       (and (list? l) (every card? l)))
 
-    ;; A pile: entries (card . up?), and if it has a top it is face up.
+    ;; A pile: entries (card . flag), flag #t, #f or locked (encrypted by
+    ;; the ICE), and if it has a top it is face up.
     (define (pile? p)
       (and (list? p)
-           (every (lambda (e) (and (pair? e) (card? (car e)) (boolean? (cdr e)))) p)
-           (or (null? p) (cdr (car p)))))
+           (every (lambda (e)
+                    (and (pair? e)
+                         (card? (car e))
+                         (or (boolean? (cdr e)) (eq? (cdr e) 'locked))))
+                  p)
+           (or (null? p) (eq? (cdr (car p)) #t))))
 
     ;; Every card exactly once across the table.
     (define (complete? tableau foundations stock waste)
@@ -183,9 +187,8 @@
                       (every (lambda (f) (= (length f) 13)) (field d 'foundations)))))
            (let ((st (field d 'settings)))
              (and (list? st)
-                  (= (length st) 2)
-                  (memq (car st) CARD-MODELS)
-                  (boolean? (cadr st))))))
+                  (= (length st) 1)
+                  (boolean? (car st))))))
 
     ;; A deal from a save datum, or #f when the datum is not one.
     (define (datum->deal d)
@@ -209,7 +212,6 @@
                                    corrupt: (field d 'corrupt)
                                    rng: (field d 'rng))
                              (car st)
-                             (cadr st)
                              (trace mode: (car tr)
                                     phase: (cadr tr)
                                     ticks: (list-ref tr 2)

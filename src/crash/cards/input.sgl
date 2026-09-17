@@ -19,27 +19,20 @@
 ;;; with the stock a tap away. The HUD controls (UNDO, DRAW, NEXT) are
 ;;; hit-tested first, from the same rects the renderer draws.
 ;;;
-;;; Two keyboard models, Tab switching, both to be tried (David,
-;;; 2026-09-17: "the hint key overlay in the stack game works really
-;;; well, we should use the same in solitaire ... make it switchable so I
-;;; can try both"):
-;;;
-;;;   tags    the stock is always F and the waste always J (index-finger
-;;;           keys, always the same: David, 2026-09-17, after the stock
-;;;           landed on A and strained the pinky); every other tappable
-;;;           place (each foundation, each pile's face-up cards top down or
-;;;           its empty slot) wears a tag from the stack's assigner over the
-;;;           rest of the alphabet; type the tag to tap the place. Space
-;;;           hides and shows the tags, or clears a half-typed one. The
-;;;           default.
-;;;   piles   Cybersol's letters: a s d f j k l the piles (the same key
-;;;           again takes the run one card deeper, wrapping), g the stock,
-;;;           h the waste, u i o p the foundations, ; clears (on the web;
-;;;           sigil-app reports no semicolon natively). Its overlay draws
-;;;           the letter on each place.
+;;; The keyboard is the stack's hint model (David, 2026-09-17: "the hint
+;;; key overlay in the stack game works really well, we should use the
+;;; same in solitaire"; a second model, Cybersol's pile letters, was
+;;; tried beside it and dropped on 2026-09-18: "just stay with the hint
+;;; one, it is more logical"): the stock is always F and the waste always
+;;; J (index-finger keys, always the same: David, 2026-09-17, after the
+;;; stock landed on A and strained the pinky); every other tappable place
+;;; (each foundation, each pile's face-up cards top down or its empty
+;;; slot) wears a tag from the stack's assigner over the rest of the
+;;; alphabet; type the tag to tap the place. Space hides and shows the
+;;; tags, or clears a half-typed one.
 ;;;
 ;;; Always: Return deselects, Backspace undoes (after erasing a typed tag
-;;; letter), Tab switches the model.
+;;; letter).
 
 (define-library (crash cards input)
   (import (sigil struct)
@@ -53,16 +46,15 @@
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
-          deal-model deal-labels deal-labels-shown deal-typed deal-auto deal-bank
+          deal-labels deal-labels-shown deal-typed deal-auto deal-bank
           deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
-          deal-step deal-advance deal-undo deal-next deal-toggle-draw deal-with-model
+          deal-step deal-advance deal-undo deal-next deal-toggle-draw
           deal-toggle-scoring deal-with-bank deal-toggle-mode deal-with-mode
           deal-scrambles deal-with-scrambles deal-scramble
           SCRAMBLE-START SCRAMBLE-MAX MSG-SCRAMBLED MSG-NO-SCRAMBLE MSG-SCRAMBLE-FAILED
           jack-out-tap?
           AUTO-TICKS
-          deal-places tag-places pile-key->index PILE-KEYS STOCK-KEY WASTE-KEY
-          CARD-MODELS card-model-name
+          deal-places tag-places STOCK-KEY WASTE-KEY
           MSG-DEALT MSG-WON MSG-STUCK MSG-AUTO MSG-TOO-LATE)
 
   (begin
@@ -82,28 +74,15 @@
     (define SCRAMBLE-START 1)
     (define SCRAMBLE-MAX 3)
 
-    (define CARD-MODELS '(tags piles))
-
     ;; Auto-complete plays one card every this many sim ticks (60 a second).
     (define AUTO-TICKS 8)
-
-    ;; Cybersol's pile keys, left to right.
-    (define PILE-KEYS '(a s d f j k l))
-    (define FOUNDATION-KEYS '(u i o p))
-
-    (define (card-model-name m)
-      (case m
-        ((tags) "TAGS")
-        ((piles) "PILES")
-        (else "?")))
 
     ;; A deal is immutable: a change is a copy-construction.
     (define-struct deal
       (game default: #f)
       (seed default: 1)
-      (model default: 'tags)         ; tags | piles
       (labels default: '())          ; ((place . "ab") ...), recomputed when the game changes
-      (labels-shown default: #t)     ; space toggles; both overlays obey it
+      (labels-shown default: #t)     ; space toggles
       (typed default: "")            ; tag letters typed so far
       (auto default: #f)             ; auto-complete is running: every tableau card is up
       (auto-acc default: 0)          ; ticks toward the next auto-complete step
@@ -298,7 +277,6 @@
     (define (deal-retry d)
       (let ((fresh (deal-new (deal-seed d) (game-draw (deal-game d)))))
         (deal-with-mode (deal fresh
-                              model: (deal-model d)
                               labels-shown: (deal-labels-shown d)
                               bank: (deal-bank d)
                               scrambles: (max SCRAMBLE-START (deal-scrambles d)))
@@ -328,19 +306,11 @@
 
     ;; A deal from saved parts ((crash cards save)): the game and the
     ;; settings; the tags are recomputed.
-    (define (deal-restore seed g model labels-shown . rest)
-      (deal-with-model (with-game (deal seed: seed
-                                        labels-shown: labels-shown
-                                        trace: (if (pair? rest) (car rest) (trace-new 'twist)))
-                                  g)
-                       model))
-
-    (define (deal-with-model d model)
-      (if (memq model CARD-MODELS) (deal d model: model typed: "") d))
-
-    (define (next-card-model m)
-      (let ((rest (cdr (memq m CARD-MODELS))))
-        (if (null? rest) (car CARD-MODELS) (car rest))))
+    (define (deal-restore seed g labels-shown . rest)
+      (with-game (deal seed: seed
+                       labels-shown: labels-shown
+                       trace: (if (pair? rest) (car rest) (trace-new 'twist)))
+                 g))
 
     (define (deal-won? d)
       (game-won? (deal-game d)))
@@ -360,7 +330,6 @@
              (vegas? (eq? (game-scoring g) 'vegas))
              (fresh (deal-new (+ 1 (deal-seed d)) (game-draw g))))
         (deal-with-mode (deal fresh
-                              model: (deal-model d)
                               labels-shown: (deal-labels-shown d)
                               bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d))
                               scrambles: (max SCRAMBLE-START (deal-scrambles d)))
@@ -404,14 +373,12 @@
     (define (typing? d)
       (> (string-length (deal-typed d)) 0))
 
-    ;; The commands both models share; #f when the frame holds none.
+    ;; The commands; #f when the frame holds none.
     (define (held? f key) (and (memq key (input-frame-held f)) #t))
 
     (define (step-commands d f)
       (let ((ctrl (held? f 'ctrl)))
-        (cond ((pressed? f 'tab)
-               (deal d model: (next-card-model (deal-model d)) typed: ""))
-              ((pressed? f 'return) (deselect d))
+        (cond ((pressed? f 'return) (deselect d))
               ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
               ((and ctrl (pressed? f 'r)) (deal-retry d))
               ((and ctrl (pressed? f 'n)) (deal-next d))
@@ -449,60 +416,6 @@
                            (let ((place (label->place labels typed)))
                              (loop (cdr keys)
                                    (deal (if place (pick d place) d) typed: "")))))))))))
-
-    (define (pile-key->index key)
-      (let loop ((keys PILE-KEYS) (i 0))
-        (cond ((null? keys) #f)
-              ((eq? (car keys) key) i)
-              (else (loop (cdr keys) (+ i 1))))))
-
-    (define (foundation-key->index key)
-      (let loop ((keys FOUNDATION-KEYS) (i 0))
-        (cond ((null? keys) #f)
-              ((eq? (car keys) key) i)
-              (else (loop (cdr keys) (+ i 1))))))
-
-    ;; A pile key while that pile's card is the selection: the run one
-    ;; deeper, wrapping to the top past the last face-up card (Cybersol's
-    ;; offset cycle). Otherwise the pile's top.
-    (define (pile-place d i)
-      (let* ((g (deal-game d))
-             (sel (game-selected g))
-             (pile (game-pile g i))
-             (up-count (run-length pile)))
-        (if (and sel
-                 (eq? (car sel) 'pile)
-                 (= (cadr sel) i)
-                 (< (+ 1 (caddr sel)) up-count))
-            (list 'pile i (+ 1 (caddr sel)))
-            (list 'pile i 0))))
-
-    (define (step-piles d f)
-      (let loop ((keys (input-frame-pressed f)) (d d))
-        (if (null? keys)
-            d
-            (let ((key (car keys)))
-              (cond ((eq? key 'space)
-                     (loop (cdr keys) (deal d labels-shown: (not (deal-labels-shown d)))))
-                    ((pile-key->index key)
-                     => (lambda (i)
-                          (let ((g (deal-game d))
-                                (place (pile-place d i)))
-                            ;; the same pile again with its top selected:
-                            ;; game-select would send it to a foundation;
-                            ;; here it walks the run instead
-                            (loop (cdr keys)
-                                  (if (and (game-selected g)
-                                           (eq? (car (game-selected g)) 'pile)
-                                           (= (cadr (game-selected g)) i))
-                                      (with-game d (game g selected: place))
-                                      (pick d place))))))
-                    ((foundation-key->index key)
-                     => (lambda (i) (loop (cdr keys) (pick d (list 'foundation i)))))
-                    ((eq? key 'g) (loop (cdr keys) (pick d '(stock))))
-                    ((eq? key 'h) (loop (cdr keys) (pick d '(waste))))
-                    ((eq? key (string->symbol ";")) (loop (cdr keys) (deselect d)))
-                    (else (loop (cdr keys) d)))))))
 
     ;; --- controls and the pointer -----------------------------------------------
 
@@ -548,8 +461,4 @@
       (cond ((step-commands d f) => (lambda (d) d))
             ((held? f 'ctrl) (step-pointer d f g))
             (else
-             (let ((d (step-pointer d f g)))
-               (case (deal-model d)
-                 ((tags) (step-tags d f))
-                 ((piles) (step-piles d f))
-                 (else d))))))))
+             (step-tags (step-pointer d f g) f))))))

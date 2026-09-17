@@ -165,10 +165,31 @@
         (when selected?
           (draw-outline (list (- x 1) (- y 1) (+ w 2) (+ h 2)) C-SELECTED))))
 
-    (define (draw-card r c up? selected?)
-      (if up?
-          (draw-face r c selected?)
-          (draw-back r)))
+    ;; An encrypted packet: the back under a hot veil with a hot strip
+    ;; across its top, the strip labeled, so it reads as the ICE's from
+    ;; the sliver the fan leaves in view (David, 2026-09-18).
+    (define ENCRYPTED-LABEL "ENCRYPTED")
+    (define ENCRYPTED-STRIP 16)
+
+    (define (draw-locked-back r)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (draw-back r)
+        (color-alpha! C-TRACE-HOT 0.3)
+        (draw-filled-rect x y w h)
+        (color! C-TRACE-HOT)
+        (draw-filled-rect x y w ENCRYPTED-STRIP)
+        (color! C-BG)
+        (draw-text-mini ENCRYPTED-LABEL
+                        (+ x (half (- w (text-width-mini ENCRYPTED-LABEL 2))))
+                        (+ y 3)
+                        2)))
+
+    ;; flag: the pile entry's flag, #t face up, #f face down, locked
+    ;; encrypted (the waste and the foundations pass #t).
+    (define (draw-card r c flag selected?)
+      (cond ((eq? flag #t) (draw-face r c selected?))
+            ((eq? flag 'locked) (draw-locked-back r))
+            (else (draw-back r))))
 
     (define (selected-place? game p)
       (equal? (game-selected game) p))
@@ -296,7 +317,7 @@
                                  (r (shaken (pile-card-rect g game i depth) hit)))
                             (draw-card r
                                        (pile-card entry)
-                                       (pile-up? entry)
+                                       (cdr entry)
                                        (in-selected-run? game i depth))
                             (draw-hit-flash r hit))))
                       (draw (- depth 1))))))
@@ -304,10 +325,9 @@
 
     ;; --- the key overlays ---------------------------------------------------------
     ;;
-    ;; TAGS: each place's tag in the 3x5 set, top right of its exposed
-    ;; strip (the rank sits top left), the letters typed so far lit.
-    ;; PILES: Cybersol's letter on each place in the 5x7 set. Both obey
-    ;; the deal's labels-shown.
+    ;; Each place's tag in the 3x5 set, top right of its exposed strip
+    ;; (the rank sits top left), the letters typed so far lit; drawn only
+    ;; while the deal's labels-shown holds.
 
     ;; The rect a place shows: a pile card's own rect (its top strip is
     ;; what the fan leaves visible), else the place's rect.
@@ -364,44 +384,14 @@
               (draw-text-mini label (+ x 2) (+ y 2) 2)))
           (deal-labels d))))
 
-    ;; ((kind i) . "KEY") for each key in order. (A two-list map is
-    ;; refused by the dev bundle at runtime; P1's finding.)
-    (define (keyed kind keys)
-      (let loop ((keys keys) (i 0) (acc '()))
-        (if (null? keys)
-            (reverse acc)
-            (loop (cdr keys)
-                  (+ i 1)
-                  (cons (cons (if (eq? kind 'pile) (list kind i 0) (list kind i))
-                              (string-upcase (symbol->string (car keys))))
-                        acc)))))
-
-    ;; The letter on each of Cybersol's places: the piles' top card or
-    ;; empty slot, the stock, the waste's top, the foundations.
-    (define (draw-pile-keys g game)
-      (let ((letters (append (list (cons '(stock) "G"))
-                             (if (pair? (game-waste game)) (list (cons '(waste) "H")) '())
-                             (keyed 'foundation '(u i o p))
-                             (keyed 'pile PILE-KEYS))))
-        (for-each
-          (lambda (entry)
-            (let* ((r (place-rect g game (car entry)))
-                   (label (cdr entry))
-                   (tw (text-width label 2))
-                   (w (+ 6 tw))
-                   (x (+ (car r) (caddr r) -3 (- w)))
-                   (y (+ (cadr r) 2)))
-              (draw-tag-box x y w 18)
-              (color! C-LABEL-LIT)
-              (draw-text label (+ x 3) (+ y 2) 2)))
-          letters)))
-
     ;; --- HUD ----------------------------------------------------------------------
 
     (define TAGS-LINE
-      "TAGS: TYPE ONE  F PULL  J BUFFER  SPACE HIDE  ENTER CLEAR  TAB STACKS")
-    (define PILES-LINE
-      "STACKS: ASDF JKL (AGAIN: DEEPER)  G PULL  H BUFFER  UIOP CORES  TAB TAGS")
+      "TAGS: TYPE ONE  F PULL  J BUFFER  SPACE HIDE  ENTER CLEAR")
+    ;; With the tags hidden the line says how they come back (David,
+    ;; 2026-09-18, after a session with them gone and no way back in view).
+    (define TAGS-HIDDEN-LINE
+      "TAGS HIDDEN: SPACE SHOWS THEM  F PULL  J BUFFER")
 
     (define (control-label name game d)
       (case name
@@ -514,7 +504,10 @@
                 (draw-text line 8 (+ top 32) 1))
               (begin
                 (color! C-TEXT-DIM)
-                (draw-text (if (eq? (deal-model d) 'tags) TAGS-LINE PILES-LINE) 8 (+ top 32) 1))))
+                (draw-text (if (deal-labels-shown d) TAGS-LINE TAGS-HIDDEN-LINE)
+                           8
+                           (+ top 32)
+                           1))))
         (when (> (string-length (deal-typed d)) 0)
           (color! C-HIGHLIGHT)
           (draw-text (string-append "> " (deal-typed d))
@@ -537,10 +530,7 @@
         (draw-top-row g game x)
         (draw-tableau g game x)
         (when (and (deal-labels-shown d) (not (deal-auto d)) (not (deal-won? d)))
-          (case (deal-model d)
-            ((tags) (draw-tags d g))
-            ((piles) (draw-pile-keys g game))
-            (else #f)))
+          (draw-tags d g))
         (draw-movers g x)
         (draw-cascade g x)
         (let ((glitch (card-fx-glitch x))
