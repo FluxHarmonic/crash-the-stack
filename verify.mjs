@@ -23,8 +23,9 @@
 //               "crash: control undo X Y" boot line gives), then the hint-mode
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
-//   traced      five taps on the SHUF control fill the trace (5 x 60 = TRACE-AT)
-//               -> "crash: shuffle" five times, "crash: trace ... counter 0",
+//   traced      SHUFFLES taps on the SHUF control fill the trace (60 each,
+//               TRACE-AT 200 -> 4) -> "crash: shuffle" that many times, then
+//               "crash: trace ... counter 0" on the next tick,
 //               and within ICE-FIRST + 5 s the first counter-hack:
 //               "crash: trace ... counter 1" with "crash: lock A B" or a sixth
 //               "crash: shuffle" (gate leg 2 on the product)
@@ -344,12 +345,14 @@ else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6)
 else fail("keys-match", keysDetail);
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
-// Each shuffle costs 60 on the trace and TRACE-AT is 300, so the fifth tap
-// completes the trace ("crash: trace V H 5 counter 0"); the first
+// Each shuffle costs SHUFFLE_COST on the trace, so SHUFFLES taps take the
+// value past TRACE_AT and the next tick completes the trace ("crash: trace
+// V H SHUFFLES counter 0"); the first
 // counter-hack fires ICE-FIRST (10 s) later: "crash: trace ... counter 1"
 // with either "crash: lock A B" or one more "crash: shuffle". With
 // forwarding off the control cannot be tapped, so the positive-control run
 // skips this.
+const TRACE_AT = 200, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
 let iceLock = null;
 {
   const ctl = await waitLine(/^crash: control shuf (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
@@ -357,7 +360,7 @@ let iceLock = null;
   else if (!ctl) fail("traced", "no \"crash: control shuf\" boot line");
   else {
     let detail = "";
-    for (let i = 0; i < 5 && !detail; i++) {
+    for (let i = 0; i < SHUFFLES && !detail; i++) {
       mark = consoleLines.length;
       await tap(ctl.m[1], ctl.m[2]);
       const sh = await waitLine(/^crash: shuffle$/, mark, 2000);
@@ -365,8 +368,8 @@ let iceLock = null;
       await sleep(150);
     }
     if (!detail) {
-      const traced = await waitLine(/^crash: trace (\d+) (\d+) 5 counter 0$/, 0, 3000);
-      if (!traced) detail = "five shuffles did not complete the trace (no \"crash: trace V H 5 counter 0\" line)";
+      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, 3000);
+      if (!traced) detail = `${SHUFFLES} shuffles did not complete the trace (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
       else {
         mark = traced.index + 1;
         const ice = await waitLine(/^crash: trace (\d+) (\d+) (\d+) counter 1$/, mark, 16000);
@@ -374,8 +377,8 @@ let iceLock = null;
         else {
           const lock = consoleLines.slice(mark, ice.index + 3).map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
           const shuffles = consoleLines.slice(mark, ice.index + 3).filter((l) => l === "crash: shuffle").length;
-          if (lock) { iceLock = [lock[1], lock[2]]; pass("traced", `traced after 5 shuffles; ICE 1 locked ${lock[1]} ${lock[2]}`); }
-          else if (shuffles) pass("traced", "traced after 5 shuffles; ICE 1 re-dealt the stack");
+          if (lock) { iceLock = [lock[1], lock[2]]; pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 locked ${lock[1]} ${lock[2]}`); }
+          else if (shuffles) pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 remapped the stack`);
           else detail = `ICE 1 fired (${ice.m[0]}) but neither a lock nor a shuffle line followed`;
         }
       }
