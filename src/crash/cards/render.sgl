@@ -1,0 +1,260 @@
+;;; (crash cards render) - Drawing the card table.
+;;;
+;;; Takes a deal and a card geometry and draws one frame with
+;;; sigil-graphics primitives, in the P0 tile shape: each card a flat face
+;;; over a darker side strip, the rank and suit as bitmap glyphs in the
+;;; card's corner (what a fanned column shows) with the suit again large
+;;; in the middle, face-down cards as a dark back, empty places as
+;;; outlines, and the HUD with its tappable controls (rects from (crash
+;;; cards geometry), so a tap lands where the button is drawn). Nothing
+;;; here reads input, a platform or a clock; there is no animation yet
+;;; (the cascade and the card motion come with (crash fx) in a later
+;;; slice). Colors come from (crash palette).
+
+(define-library (crash cards render)
+  (import (sigil struct)
+          (sigil math)
+          (sigil graphics)
+          (crash geometry)
+          (crash cards deck)
+          (crash cards rules)
+          (crash cards geometry)
+          (crash cards input)
+          (crash font)
+          (crash palette))
+
+  (export draw-deal)
+
+  (begin
+    (define SIDE LAYER-OFFSET)
+    (define (half n) (quotient n 2))
+    (define GLYPH-SCALE 2)
+    (define BIG-SUIT-SCALE 6)
+
+    (define (suit-color c)
+      (if (card-red? c) C-SUIT-1 C-BG))
+
+    ;; --- background -----------------------------------------------------------
+
+    (define (draw-background g)
+      (let ((vw (card-geometry-vw g))
+            (vh (card-geometry-vh g)))
+        (color! C-BG)
+        (draw-filled-rect 0 0 vw vh)
+        (let loop ((y -36) (i 0))
+          (when (< y (- vh (card-geometry-hud-h g)))
+            (color! (case (modulo i 3)
+                       ((0) C-BAR-A)
+                       ((1) C-BAR-B)
+                       (else C-BAR-C)))
+            (draw-filled-rect 0 y vw 6)
+            (loop (+ y 12) (+ i 1))))))
+
+    ;; --- cards ------------------------------------------------------------------
+
+    (define (draw-outline r color)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! color)
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)))
+
+    ;; An empty place: a dim outline; the stock's shows a ring, meaning
+    ;; "tap to turn the waste back".
+    (define (draw-slot r ring?)
+      (draw-outline r C-TEXT-DIM)
+      (when ring?
+        (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+               (cx (+ x (half w)))
+               (cy (+ y (half h))))
+          (color! C-TEXT-DIM)
+          (draw-filled-rect (- cx 8) (- cy 8) 16 2)
+          (draw-filled-rect (- cx 8) (+ cy 6) 16 2)
+          (draw-filled-rect (- cx 8) (- cy 8) 2 16)
+          (draw-filled-rect (+ cx 6) (- cy 8) 2 16))))
+
+    (define (draw-sides r)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! C-SIDE-DARK)
+        (draw-filled-rect (- x SIDE) (+ y h) (+ w SIDE) SIDE)
+        (color! C-SIDE)
+        (draw-filled-rect (- x SIDE) y SIDE h)))
+
+    (define (draw-back r)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (draw-sides r)
+        (color! C-SIDE-DARK)
+        (draw-filled-rect x y w h)
+        (color! C-SIDE)
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x y 1 h)
+        (color! C-BAR-C)
+        (draw-filled-rect (+ x 6) (+ y 6) (- w 12) (- h 12))
+        ;; a lattice of dots
+        (color! C-SIDE-DARK)
+        (let loop ((py (+ y 10)))
+          (when (< py (+ y h -8))
+            (let inner ((px (+ x 10)))
+              (when (< px (+ x w -8))
+                (draw-filled-rect px py 2 2)
+                (inner (+ px 8))))
+            (loop (+ py 8))))))
+
+    ;; A face-up card: the tile's face with the rank and suit top-left
+    ;; (the strip a fanned column shows) and the suit large in the middle.
+    (define (draw-face r c selected?)
+      (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (rank (if (= (card-rank c) 10) "10" (string (rank-char c))))
+             (rw (text-width rank GLYPH-SCALE))
+             (gw (* GLYPH-SCALE GLYPH-W))
+             (bw (* BIG-SUIT-SCALE GLYPH-W))
+             (bh (* BIG-SUIT-SCALE GLYPH-H)))
+        (draw-sides r)
+        (color! (if selected? (mix C-SELECTED C-FACE-EDGE 0.3) C-FACE))
+        (draw-filled-rect x y w h)
+        (color! (if selected? C-SELECTED C-FACE-EDGE))
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x y 1 h)
+        (color! (suit-color c))
+        (draw-text rank (+ x 4) (+ y 3) GLYPH-SCALE)
+        (draw-suit (card-suit c) (+ x 4 rw 4) (+ y 3) GLYPH-SCALE)
+        ;; the big suit, when the face is tall enough to hold it under the corner
+        (when (>= h (+ 3 (* GLYPH-SCALE GLYPH-H) bh 6))
+          (draw-suit (card-suit c)
+                     (+ x (half (- w bw)))
+                     (+ y (half (- h bh)) 6)
+                     BIG-SUIT-SCALE))
+        (when selected?
+          (draw-outline (list (- x 1) (- y 1) (+ w 2) (+ h 2)) C-SELECTED))))
+
+    (define (draw-card r c up? selected?)
+      (if up?
+          (draw-face r c selected?)
+          (draw-back r)))
+
+    (define (selected-place? game p)
+      (equal? (game-selected game) p))
+
+    ;; A pile's card at depth is selected when the selection is at that
+    ;; depth or deeper (the run from the selected card up to the top).
+    (define (in-selected-run? game i depth)
+      (let ((sel (game-selected game)))
+        (and sel
+             (eq? (car sel) 'pile)
+             (= (cadr sel) i)
+             (<= depth (caddr sel)))))
+
+    (define (draw-top-row g game)
+      ;; the stock: a back when it has cards, the ring when it is empty
+      (if (pair? (game-stock game))
+          (draw-back (stock-rect g))
+          (draw-slot (stock-rect g) (pair? (game-waste game))))
+      ;; the waste: the top card, fanned by three under draw three
+      (let* ((waste (game-waste game))
+             (shown (min 3 (length waste))))
+        (if (null? waste)
+            (draw-slot (waste-rect g) #f)
+            (let loop ((depth (- shown 1)))
+              (when (>= depth 0)
+                (draw-face (waste-card-rect g game depth)
+                           (list-ref waste depth)
+                           (and (= depth 0) (selected-place? game '(waste))))
+                (loop (- depth 1))))))
+      ;; the foundations
+      (let loop ((i 0))
+        (when (< i FOUNDATIONS)
+          (let ((f (game-foundation game i))
+                (r (foundation-rect g i)))
+            (if (null? f)
+                (draw-slot r #f)
+                (draw-face r (car f) (selected-place? game (list 'foundation i)))))
+          (loop (+ i 1)))))
+
+    (define (draw-tableau g game)
+      (let loop ((i 0))
+        (when (< i PILES)
+          (let* ((pile (game-pile game i))
+                 (n (length pile)))
+            (if (= n 0)
+                (draw-slot (pile-slot-rect g i) #f)
+                ;; bottom card first, so each card covers the one under it
+                (let draw ((depth (- n 1)))
+                  (when (>= depth 0)
+                    (let ((entry (list-ref pile depth)))
+                      (draw-card (pile-card-rect g game i depth)
+                                 (pile-card entry)
+                                 (pile-up? entry)
+                                 (in-selected-run? game i depth)))
+                    (draw (- depth 1))))))
+          (loop (+ i 1)))))
+
+    ;; --- HUD ----------------------------------------------------------------------
+
+    (define KEYS-LINE
+      "TAP A CARD, THEN WHERE IT GOES.  TAP IT AGAIN: TO A FOUNDATION.  TAP THE STOCK: DRAW.")
+
+    (define (control-label name game)
+      (case name
+        ((undo) "UNDO")
+        ((draw) (if (= (game-draw game) 3) "DRAW 3" "DRAW 1"))
+        ((next) "NEXT")
+        (else "?")))
+
+    (define (draw-controls g game)
+      (for-each (lambda (c)
+                  (let* ((name (car c))
+                         (x (cadr c)) (y (caddr c))
+                         (w (cadddr c)) (h (list-ref c 4))
+                         (label (control-label name game))
+                         (tw (text-width label 2)))
+                    (color! C-BAR-C)
+                    (draw-filled-rect x y w h)
+                    (draw-outline (list x y w h) C-TEXT-DIM)
+                    (color! C-TEXT)
+                    (draw-text label
+                               (+ x (exact (floor (/ (- w tw) 2))))
+                               (+ y 3)
+                               2)))
+                (card-controls g)))
+
+    ;; The centred message box, for the state messages (won, stuck).
+    (define (draw-message g message top)
+      (let* ((w (text-width message 3))
+             (x (exact (floor (/ (- (card-geometry-vw g) w) 2))))
+             (y (half top)))
+        (color-alpha! C-BG 0.9)
+        (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
+        (color! C-SELECTED)
+        (draw-text message x (- y 10) 3)))
+
+    (define (draw-hud d g)
+      (let* ((game (deal-game d))
+             (vw (card-geometry-vw g))
+             (vh (card-geometry-vh g))
+             (top (- vh (card-geometry-hud-h g)))
+             (left (string-append "MOVES " (number->string (game-moves game))))
+             (right (string-append "SEED " (number->string (deal-seed d)))))
+        (color! C-BG)
+        (draw-filled-rect 0 top vw (card-geometry-hud-h g))
+        (color! C-TEXT-DIM)
+        (draw-filled-rect 0 top vw 1)
+        (color! C-TEXT)
+        (draw-text left 8 (+ top 7) 2)
+        (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
+        (draw-controls g game)
+        (color! C-TEXT-DIM)
+        (draw-text KEYS-LINE 8 (+ top 32) 1)
+        (let ((message (deal-message d)))
+          (when (and (> (string-length message) 0)
+                     (or (game-won? game) (string=? message MSG-STUCK)))
+            (draw-message g message top)))))
+
+    ;; --- one frame ------------------------------------------------------------------
+
+    (define (draw-deal d g)
+      (let ((game (deal-game d)))
+        (draw-background g)
+        (draw-top-row g game)
+        (draw-tableau g game)
+        (draw-hud d g)))))

@@ -1,0 +1,137 @@
+;;; (crash cards save) - A deal as a datum, and back.
+;;;
+;;; What survives a reload or a restart on the card table: the seed, the
+;;; draw count, the passes and moves, every pile with its face-up flags,
+;;; the foundations, the stock, the waste, the selection and the random
+;;; state. Not the history: undo does not reach across a reload (the same
+;;; P1 limit as the Mahjongg save). datum->deal is strict: anything not
+;;; shaped like a save of this version, or not holding each of the 52
+;;; cards exactly once, answers #f and the caller deals afresh. A
+;;; corrupted save must never trap the game at boot. (crash store) turns
+;;; the datum into text and back; this module reads no platform.
+
+(define-library (crash cards save)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (crash cards deck)
+          (crash cards rules)
+          (crash cards input))
+
+  (export CARDS-SAVE-VERSION deal->datum datum->deal deal-save-due?)
+
+  (begin
+    (define CARDS-SAVE-VERSION 1)
+
+    ;; A save is due whenever the game changed (every move, draw, undo,
+    ;; draw-count flip or new deal changes the game struct).
+    (define (deal-save-due? before after)
+      (not (eq? (deal-game before) (deal-game after))))
+
+    (define (deal->datum d)
+      (let ((g (deal-game d)))
+        (list 'crash-cards
+              CARDS-SAVE-VERSION
+              (cons 'seed (deal-seed d))
+              (cons 'draw (game-draw g))
+              (cons 'passes (game-passes g))
+              (cons 'moves (game-moves g))
+              (cons 'tableau (vector->list (game-tableau g)))
+              (cons 'foundations (vector->list (game-foundations g)))
+              (cons 'stock (game-stock g))
+              (cons 'waste (game-waste g))
+              (cons 'selected (game-selected g))
+              (cons 'rng (game-rng g)))))
+
+    (define (field d key)
+      (let ((entry (assq key (cddr d))))
+        (and entry (cdr entry))))
+
+    (define (card? c)
+      (and (exact? c) (integer? c) (>= c 0) (< c DECK-SIZE)))
+
+    (define (count? n)
+      (and (exact? n) (integer? n) (>= n 0)))
+
+    (define (cards? l)
+      (and (list? l) (every card? l)))
+
+    ;; A pile: entries (card . up?), and if it has a top it is face up.
+    (define (pile? p)
+      (and (list? p)
+           (every (lambda (e) (and (pair? e) (card? (car e)) (boolean? (cdr e)))) p)
+           (or (null? p) (cdr (car p)))))
+
+    ;; Every card exactly once across the table.
+    (define (complete? tableau foundations stock waste)
+      (let ((seen (make-vector DECK-SIZE #f))
+            (all (append (apply append (map (lambda (p) (map car p)) tableau))
+                         (apply append foundations)
+                         stock
+                         waste)))
+        (and (= (length all) DECK-SIZE)
+             (let loop ((cs all))
+               (cond ((null? cs) #t)
+                     ((vector-ref seen (car cs)) #f)
+                     (else
+                      (vector-set! seen (car cs) #t)
+                      (loop (cdr cs))))))))
+
+    (define (place? p tableau foundations waste)
+      (or (not p)
+          (and (list? p)
+               (pair? p)
+               (case (car p)
+                 ((pile) (and (= (length p) 3)
+                              (count? (cadr p))
+                              (< (cadr p) PILES)
+                              (count? (caddr p))
+                              (< (caddr p) (length (list-ref tableau (cadr p))))))
+                 ((waste) (and (= (length p) 1) (pair? waste)))
+                 ((foundation) (and (= (length p) 2)
+                                    (count? (cadr p))
+                                    (< (cadr p) FOUNDATIONS)
+                                    (pair? (list-ref foundations (cadr p)))))
+                 (else #f)))))
+
+    (define (well-formed? d)
+      (and (pair? d)
+           (eq? (car d) 'crash-cards)
+           (pair? (cdr d))
+           (eqv? (cadr d) CARDS-SAVE-VERSION)
+           (list? (cddr d))
+           (every pair? (cddr d))
+           (count? (field d 'seed))
+           (memv (field d 'draw) DRAW-COUNTS)
+           (count? (field d 'passes))
+           (count? (field d 'moves))
+           (let ((tableau (field d 'tableau))
+                 (foundations (field d 'foundations))
+                 (stock (field d 'stock))
+                 (waste (field d 'waste)))
+             (and (list? tableau)
+                  (= (length tableau) PILES)
+                  (every pile? tableau)
+                  (list? foundations)
+                  (= (length foundations) FOUNDATIONS)
+                  (every cards? foundations)
+                  (cards? stock)
+                  (cards? waste)
+                  (complete? tableau foundations stock waste)
+                  (place? (field d 'selected) tableau foundations waste)))
+           (let ((rng (field d 'rng)))
+             (and (exact? rng) (integer? rng) (> rng 0)))))
+
+    ;; A deal from a save datum, or #f when the datum is not one.
+    (define (datum->deal d)
+      (and (well-formed? d)
+           (deal-restore (field d 'seed)
+                         (game tableau: (list->vector (field d 'tableau))
+                               foundations: (list->vector (field d 'foundations))
+                               stock: (field d 'stock)
+                               waste: (field d 'waste)
+                               draw: (field d 'draw)
+                               passes: (field d 'passes)
+                               selected: (field d 'selected)
+                               moves: (field d 'moves)
+                               rng: (field d 'rng)))))))

@@ -7,7 +7,11 @@
 ;;; only this file, and (crash main) picks between the two.
 ;;;
 ;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
-;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
+;;;                   [--cards]
+;;;
+;;; --cards opens the card table (Klondike, P2) instead of the stack; the
+;;; menu that switches between them is P2's next slice. The deal is saved
+;;; under its own store key and restored the same way as the board.
 ;;;
 ;;; The board, the meter and the settings are saved to the user data
 ;;; directory ((crash store): $XDG_DATA_HOME/crash-the-stack) after every
@@ -26,8 +30,6 @@
   (import (sigil struct)
           (sigil math)
           (sigil process)
-          (sigil fs)
-          (sigil io)
           (sigil app)
           (sigil graphics)
           (crash stack layout)
@@ -35,10 +37,12 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
-          (crash editor)
           (crash tween)
           (crash fx)
           (crash render)
+          (crash cards geometry)
+          (crash cards input)
+          (crash cards render)
           (crash shell))
 
   (export native-main)
@@ -145,81 +149,25 @@
                     (else (loop after x))))))
         (gfx-shutdown)))
 
-    ;; --- the layout editor ------------------------------------------------------
-    ;;
-    ;; --edit PATH: the editor over the canvas geometry; ctrl+s writes the
-    ;; layout to PATH in the 2020 format (refused with a message for an odd
-    ;; or empty count, per (crash editor)); ctrl+p play-tests the layout as a
-    ;; board (seed 1) and ctrl+p again returns to the editor; Escape quits.
-
-    (define (write-layout! path e)
-      (let ((d (editor-datum e)))
-        (if d
-            (begin
-              (write-file-string path (with-output-to-string (lambda () (write d) (newline))))
-              (editor e message: (string-append "SAVED " (number->string (editor-count e)) " TILES")))
-            (editor e message: (if (= (editor-count e) 0)
-                                   "NOTHING TO SAVE"
-                                   "ODD TILE COUNT: ADD OR REMOVE ONE")))))
-
-    (define (load-editor path)
-      (if (file-exists? path)
-          (let ((d (with-input-from-file path read)))
-            (editor-from-layout (sexp->layout d)))
-          (editor-new)))
-
-    (define (editor-loop path)
+    ;; The card table: the same window, no effects yet, the deal stepped
+    ;; and drawn each frame and saved when it changed.
+    (define (cards-loop seed fresh?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
         (set-letterbox-color 0.0 0.0 0.0)
-        (let ((canvas (make-canvas-geometry VW VH
-                                            CANVAS-MIN-HX CANVAS-MAX-HX
-                                            CANVAS-MIN-HY CANVAS-MAX-HY
-                                            CANVAS-LAYERS)))
-          ;; play: #f in the editor, else (session . geometry) of the play-test
-          (let loop ((e (load-editor path))
-                     (play #f)
-                     (x (fx-new)))
-            (let* ((dt (wait-frame))
-                   (f (poll-frame))
-                   (ctrl (and (memq 'ctrl (input-frame-held f)) #t))
-                   (x (fx-frame x dt)))
-              (cond
-                ;; ctrl+p toggles the play-test
-                ((and ctrl (memq 'p (input-frame-pressed f)))
-                 (if play
-                     (begin (draw-frame-editor e canvas) (loop e #f x))
-                     (let ((lay (editor-layout e)))
-                       (if lay
-                           (let ((g (make-geometry lay VW VH)))
-                             (loop e (cons (session-new lay 1) g) x))
-                           (loop (editor e message: "ODD OR EMPTY: CANNOT PLAY") #f x)))))
-                (play
-                 (let* ((s (car play))
-                        (g (cdr play))
-                        (after (session-advance (session-step s f g) (clock-steps (fx-clock x))))
-                        (x (fx-observe x s after g)))
-                   (begin-frame)
-                   (draw-session after g #f x)
-                   (end-frame)
-                   (cond ((key-pressed? 'escape) (request-quit))
-                         ((quit-requested?) #t)
-                         (else (loop e (cons after g) x)))))
-                (else
-                 (let ((e (if (and ctrl (memq 's (input-frame-pressed f)))
-                              (write-layout! path e)
-                              (editor-step e f))))
-                   (draw-frame-editor e canvas)
-                   (cond ((key-pressed? 'escape) (request-quit))
-                         ((quit-requested?) #t)
-                         (else (loop e #f x)))))))))
+        (let ((geom (make-card-geometry VW VH)))
+          (let loop ((d (car (boot-deal seed fresh?))))
+            (wait-frame)
+            (let* ((f (poll-frame))
+                   (after (save-deal-after-frame! d (deal-step d f geom))))
+              (begin-frame)
+              (draw-deal after geom)
+              (end-frame)
+              (cond ((key-pressed? 'escape) (request-quit))
+                    ((quit-requested?) #t)
+                    (else (loop after))))))
         (gfx-shutdown)))
-
-    (define (draw-frame-editor e canvas)
-      (begin-frame)
-      (draw-editor e canvas)
-      (end-frame))
 
     (define (native-main . _args)
       (let* ((args (cdr (command-line)))
@@ -236,11 +184,11 @@
              (model (and model-arg (string->symbol model-arg)))
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
-             (edit-path (arg-value args "--edit" #f)))
-        (run-game (if edit-path "Crash The Stack - Editor" "Crash The Stack")
+             (cards? (and (member "--cards" args) #t)))
+        (run-game "Crash The Stack"
                   WINDOW-W
                   WINDOW-H
-                  (if edit-path
-                      (editor-loop edit-path)
+                  (if cards?
+                      (cards-loop seed fresh?)
                       (game-loop seed texture-first? model log-keys? fresh?)))
         0))))

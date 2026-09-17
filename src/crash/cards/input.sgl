@@ -1,0 +1,90 @@
+;;; (crash cards input) - A frame of input becomes a Klondike move.
+;;;
+;;; The card table's counterpart of (crash input): the shell hands in the
+;;; same input-frame (keys pressed, modifiers held, a pointer click in
+;;; virtual coordinates), and deal-step turns it into a new deal. Nothing
+;;; here reads a platform.
+;;;
+;;; A tap lands on a PLACE through (crash cards geometry)'s hit-place and
+;;; ends in game-select, the one door of (crash cards rules): tap-tap,
+;;; with the stock a tap away. The HUD controls (UNDO, DRAW, NEXT) are
+;;; hit-tested first, from the same rects the renderer draws, and each
+;;; is one command here; the keyboard model (Cybersol's asdf jkl piles,
+;;; g draw, h waste, uiop foundations) is a later slice.
+
+(define-library (crash cards input)
+  (import (sigil struct)
+          (sigil math)
+          (crash input)
+          (crash cards deck)
+          (crash cards rules)
+          (crash cards geometry))
+
+  (export deal deal? deal-new deal-restore
+          deal-game deal-seed deal-message deal-won?
+          deal-step deal-undo deal-next deal-toggle-draw
+          MSG-DEALT MSG-WON MSG-STUCK)
+
+  (begin
+    (define MSG-DEALT "JACKED IN. DEAL RUNNING.")
+    (define MSG-WON "DECK CRASHED.")
+    (define MSG-STUCK "NO MOVES LEFT - UNDO OR NEXT")
+
+    ;; A deal is immutable: a change is a copy-construction.
+    (define-struct deal
+      (game default: #f)
+      (seed default: 1)
+      (message default: ""))
+
+    (define (deal-new seed draw)
+      (deal game: (game-new seed draw)
+            seed: seed
+            message: MSG-DEALT))
+
+    ;; A deal from saved parts ((crash cards save)).
+    (define (deal-restore seed g)
+      (deal game: g seed: seed))
+
+    (define (deal-won? d)
+      (game-won? (deal-game d)))
+
+    (define (with-game d g)
+      (deal d
+            game: g
+            message: (cond ((game-won? g) MSG-WON)
+                           ((and (null? (legal-moves g))
+                                 (null? (game-stock g))
+                                 (null? (game-waste g)))
+                            MSG-STUCK)
+                           (else ""))))
+
+    (define (deal-undo d)
+      (with-game d (game-undo (deal-game d))))
+
+    ;; The next seed, the draw count kept.
+    (define (deal-next d)
+      (deal-new (+ 1 (deal-seed d)) (game-draw (deal-game d))))
+
+    ;; One or three: the next draw honors it.
+    (define (deal-toggle-draw d)
+      (let ((g (deal-game d)))
+        (with-game d (game-with-draw g (if (= (game-draw g) 1) 3 1)))))
+
+    (define (pick d place)
+      (with-game d (game-select (deal-game d) place)))
+
+    (define (step-control d name)
+      (case name
+        ((undo) (deal-undo d))
+        ((draw) (deal-toggle-draw d))
+        ((next) (deal-next d))
+        (else d)))
+
+    (define (deal-step d f g)
+      (let ((click (input-frame-click f)))
+        (cond ((not click) d)
+              ((hit-card-control g (car click) (cdr click))
+               => (lambda (name) (step-control d name)))
+              (else
+               (let ((place (hit-place g (deal-game d) (car click) (cdr click))))
+                 (if place (pick d place) d))))))))

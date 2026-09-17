@@ -35,10 +35,6 @@
 ;;;   crash: seed S tiles N pair A AX AY B BX BY   the first solution pair
 ;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
-;;;   crash: tags shown|hidden touch on|off fresh on|off   the boot's inputs
-;;;   crash: update waiting|prompt|apply   the web build's waiting update, as
-;;;                                         the game shows it (ruling D14)
-;;;   crash: control apply X Y             the prompt's APPLY box (with later, update)
 ;;;   crash: control NAME X Y              the centre of each HUD control
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
@@ -47,8 +43,6 @@
 ;;;   crash: removed A B tiles N           a pair left the board
 ;;;   crash: unlock A B                    a locked pair's first match
 ;;;   crash: lock A B                      the ICE locked a pair
-;;;   crash: remap                         the ICE re-dealt the stack
-;;;   crash: ice nothing                   an interval with nothing to hit
 ;;;   crash: trace V H S PHASE ICE         the meter after a hint, a shuffle, a
 ;;;                                         phase change or a counter-hack: value,
 ;;;                                         hints, shuffles, phase, counter-hacks fired
@@ -56,8 +50,24 @@
 ;;;                                         board came back at boot (verify.mjs's
 ;;;                                         reload sub-arm)
 ;;;
+;;;   crash: cards seed S moves N draw D    the card table booted (with ?cards)
+;;;   crash: cards stock X Y                the stock's center
+;;;   crash: cards first SX SY DX DY        the first legal move's source and
+;;;                                         destination centers, or "first none"
+;;;   crash: cards restored moves N          ... from a saved deal
+;;;   crash: cards select PLACE              a card was selected
+;;;   crash: cards deselect
+;;;   crash: cards moved N                   a move landed; N = the move count
+;;;   crash: cards drew N                    a draw; N = cards in the waste
+;;;   crash: cards undo N
+;;;   crash: cards won
+;;;
 ;;; The board is saved to localStorage after every change ((crash store),
 ;;; (crash shell)) and restored at boot; ?fresh deals seed 1 instead.
+;;; ?cards opens the card table (Klondike, P2) in place of the stack, with
+;;; its own saved deal; the menu that switches between them is the next
+;;; slice. ?seed=N starts a fresh deal or board from N (with ?fresh, or
+;;; when nothing is saved).
 
 (define-library (crash shell web)
   (import (sigil struct)
@@ -77,6 +87,10 @@
           (crash tween)
           (crash fx)
           (crash render)
+          (crash cards rules)
+          (crash cards geometry)
+          (crash cards input)
+          (crash cards render)
           (crash shell))
 
   (export web-main web-dispatch)
@@ -85,8 +99,6 @@
     ;; --- state between dispatches ------------------------------------------
     (define *session* #f)
     (define *geom* #f)
-    (define *lay* #f)
-    (define *booted* #f)     ; the table has been booted (on the first frame)
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
@@ -97,8 +109,13 @@
     (define *trace* #f)      ; print the trace lines above
     (define *restored* #f)   ; the boot restored a saved board
     (define *fresh* #f)      ; ?fresh: ignore the saved board
-    (define *touch* #f)      ; the page reports a touch screen: the tags start hidden every launch
+    (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
     (define *announced* #f)  ; the boot lines have been printed for this deal
+    (define *booted* #f)     ; a table has been booted (on the first frame)
+    (define *cards* #f)      ; ?cards: the card table instead of the stack
+    (define *seed* 1)        ; ?seed=N: the seed a fresh deal or board starts from
+    (define *deal* #f)       ; the card table's deal, (crash cards input)
+    (define *card-geom* #f)
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -206,7 +223,7 @@
               ((not (= (trace-ice-count t0) (trace-ice-count t1)))
                (case (trace-last-ice t1)
                  ((lock) (report-lock! b0 b1))
-                 ((remap) (say "remap"))
+                 ((shuffle) (say "shuffle"))
                  (else (say "ice" "nothing"))))
               ((< n1 n0)
                ;; Two tiles left: the selected one and the one just picked.
@@ -261,16 +278,57 @@
                    "pair" a (car ca) (cdr ca)
                    b (car cb) (cdr cb))
               (say "labels" a (slot-tag s a) b (slot-tag s b))))
-        (say "tags"
-             (if (session-labels-shown s) "shown" "hidden")
-             "touch" (if *touch* "on" "off")
-             "fresh" (if *fresh* "on" "off"))
         (for-each (lambda (c)
                     (say "control"
                          (car c)
                          (+ (cadr c) (half (cadddr c)))
                          (+ (caddr c) (half (list-ref c 4)))))
-                  (append (geometry-controls *geom*) (update-controls *geom*)))))
+                  (geometry-controls *geom*))))
+
+    ;; What changed on the card table between two deals, as one line.
+    (define (report-deal-change! before after)
+      (let* ((g0 (deal-game before))
+             (g1 (deal-game after))
+             (m0 (game-moves g0))
+             (m1 (game-moves g1))
+             (h0 (length (game-history g0)))
+             (h1 (length (game-history g1))))
+        (cond ((eq? g0 g1) #f)
+              ((not (= (deal-seed before) (deal-seed after)))
+               (set! *announced* #f)
+               (set! *restored* #f))
+              ((game-won? g1) (say "cards" "won"))
+              ((< h1 h0) (say "cards" "undo" m1))
+              ((> (length (game-waste g1)) (length (game-waste g0)))
+               (say "cards" "drew" (length (game-waste g1))))
+              ((> m1 m0) (say "cards" "moved" m1))
+              ((and (game-selected g1)
+                    (not (equal? (game-selected g0) (game-selected g1))))
+               (apply say "cards" "select" (game-selected g1)))
+              ((and (game-selected g0) (not (game-selected g1)))
+               (say "cards" "deselect")))))
+
+    (define (say-deal d)
+      (let* ((g (deal-game d))
+             (moves (legal-moves g)))
+        (say "cards" "seed" (deal-seed d)
+             "moves" (game-moves g)
+             "draw" (game-draw g))
+        (let ((stock (place-center *card-geom* g '(stock))))
+          (say "cards" "stock" (car stock) (cdr stock)))
+        (if (null? moves)
+            (say "cards" "first" "none")
+            (let ((src (place-center *card-geom* g (car (car moves))))
+                  (dst (place-center *card-geom* g (cdr (car moves)))))
+              (say "cards" "first" (car src) (cdr src) (car dst) (cdr dst)))))
+      (when *restored*
+        (say "cards" "restored" "moves" (game-moves (deal-game d))))
+      (for-each (lambda (c)
+                  (say "control"
+                       (car c)
+                       (+ (cadr c) (half (cadddr c)))
+                       (+ (caddr c) (half (list-ref c 4)))))
+                (card-controls *card-geom*)))
 
     ;; --- one frame -----------------------------------------------------------
 
@@ -294,49 +352,23 @@
         (when ms (set! *last-ms* ms))
         dt))
 
-    ;; Boot the table: the saved board unless ?fresh, tags hidden on a touch
-    ;; screen. Called on the first frame, and again whenever a page
-    ;; parameter (?fresh, the touch flag) lands after that. (The loader
-    ;; calls setInstance before sigil_wasm_init, so a dispatch made there is
-    ;; dropped with "VM not initialized", measured 2026-09-17 by P2 and by
-    ;; this row's touch probe; the page sends its parameters on a later
-    ;; task and the shell boots lazily.)
-    (define (boot!)
-      (let ((booted (boot-session *lay* 1 *fresh*)))
-        (set! *session* (if *touch*
-                            (session (car booted) labels-shown: #f)
-                            (car booted)))
-        (set! *restored* (cdr booted))
-        (set! *announced* #f)
-        (store-remove! UPDATE-KEY)
-        (set! *booted* #t)))
-
-    ;; A page parameter landed: take it, and if the table is already up,
-    ;; boot again with it.
-    (define (param! setter)
-      (setter)
-      (when *booted* (boot!))
-      0)
-
-    ;; The update's state reaches the session; the game draws it and takes
-    ;; the choice ((crash input) step-update). Reported for the arm.
-    (define (update! state)
-      (when *session*
-        (set! *session* (session-with-update *session* state))
-        (say "update" state))
-      0)
-
-    ;; The player's APPLY reaches the page through the store (localStorage,
-    ;; which the page polls): the dispatch ABI's return value cannot carry
-    ;; it (measured 2026-09-17: the page saw 0 whatever the handler
-    ;; answered). The key is cleared at boot and by the page once read.
-    (define UPDATE-KEY "update")
-
-    (define (update-chosen!)
-      (store-set! UPDATE-KEY "apply"))
+    (define (cards-tick)
+      (gles3-resize-to-display)
+      (when (and *trace* (not *announced*))
+        (say-deal *deal*)
+        (set! *announced* #t))
+      (let* ((before *deal*)
+             (after (save-deal-after-frame! before
+                                            (deal-step before (input-this-frame) *card-geom*))))
+        (set! *deal* after)
+        (report-deal-change! before after)
+        (begin-frame)
+        (draw-deal after *card-geom*)
+        (end-frame)))
 
     (define (web-tick dt)
       (unless *booted* (boot!))
+      (when *deal* (cards-tick))
       (when *session*
         (gles3-resize-to-display)
         (ensure-texture!)
@@ -362,9 +394,6 @@
                (x (fx-observe x before after *geom*)))
           (set! *session* after)
           (set! *fx* x)
-          (unless (eq? (session-update before) (session-update after))
-            (say "update" (session-update after))
-            (when (eq? (session-update after) 'apply) (update-chosen!)))
           (report-change! before after)
           (report-trace! before after)
           (when (not (= (session-seed before) (session-seed after)))
@@ -375,6 +404,41 @@
 
     ;; --- entry ---------------------------------------------------------------
 
+    ;; Boot the table the page asked for: the card table with ?cards, else
+    ;; the stack. Called on the first frame, and again whenever a page
+    ;; parameter (?cards, ?fresh, ?seed, the touch flag) lands after that
+    ;; frame, so the order of the page's dispatches against the first
+    ;; frame does not matter. (The page cannot dispatch before the runtime
+    ;; starts: the loader calls setInstance before sigil_wasm_init, and a
+    ;; dispatch there is dropped with "VM not initialized"; measured
+    ;; 2026-09-17, which is why the page sends its parameters on a later
+    ;; task and the shell boots lazily.)
+    (define (boot!)
+      (set! *announced* #f)
+      (if *cards*
+          (let ((booted (boot-deal *seed* *fresh*)))
+            (set! *session* #f)
+            (set! *card-geom* (make-card-geometry VW VH))
+            (set! *deal* (car booted))
+            (set! *restored* (cdr booted)))
+          (let ((lay (turtle-layout)))
+            (set! *deal* #f)
+            (set! *geom* (make-geometry lay VW VH))
+            (let ((booted (boot-session lay *seed* *fresh*)))
+              (set! *session* (if (and *touch* (not (cdr booted)))
+                                  (session (car booted) labels-shown: #f)
+                                  (car booted)))
+              (set! *restored* (cdr booted)))
+            (set! *fx* (fx-new))))
+      (set! *booted* #t))
+
+    ;; A page parameter landed: take it, and if the table is already up,
+    ;; boot again with it.
+    (define (param! setter)
+      (setter)
+      (when *booted* (boot!))
+      0)
+
     (define (web-main)
       (unless (gles3-use-canvas "#stage")
         (error "crash web: no WebGL2 context for #stage. This browser has WebGL2 off or unavailable (Chrome: chrome://gpu, or Settings > System > graphics acceleration)."))
@@ -382,11 +446,6 @@
       (gfx-setup)
       (set-viewport VW VH)
       (set-letterbox-color 0.0 0.0 0.0)
-      ;; the table itself boots on the first frame (boot!), after the page's
-      ;; parameters have had a task to land
-      (set! *lay* (turtle-layout))
-      (set! *geom* (make-geometry *lay* VW VH))
-      (set! *fx* (fx-new))
       (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
       ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
@@ -400,9 +459,10 @@
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
+            ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
+            ((string=? type "seed")
+             (param! (lambda ()
+                       (let ((n (string->number payload)))
+                         (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* n))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
-            ((string=? type "update")
-             (cond ((string=? payload "waiting") (update! 'waiting))
-                   ((string=? payload "prompt") (update! 'prompt))
-                   (else 0)))
             (else 0)))))

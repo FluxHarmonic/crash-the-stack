@@ -1,0 +1,233 @@
+;;; (crash cards geometry) - Where a card lands on the screen, and which
+;;; card a point lands on.
+;;;
+;;; Windows Solitaire's table, kept as it was: seven columns, the stock
+;;; top left with the waste beside it, the four foundations top right,
+;;; the tableau under them with face-down cards packed tight and face-up
+;;; cards fanned so their ranks show, the fan compressing as a column
+;;; grows so the longest column still fits above the HUD. Pure arithmetic
+;;; over a game and the virtual viewport; both (crash cards render) and
+;;; (crash cards input) come here, so what is drawn and what is tapped
+;;; cannot disagree. The knobs David may want to turn are at the top.
+
+(define-library (crash cards geometry)
+  (import (sigil struct)
+          (sigil math)
+          (crash geometry)
+          (crash cards rules))
+
+  (export card-geometry card-geometry?
+          card-geometry-vw card-geometry-vh card-geometry-hud-h
+          card-geometry-card-w card-geometry-card-h card-geometry-origin-x
+          card-geometry-top-y card-geometry-tableau-y
+          make-card-geometry
+          CARD-W CARD-H CARD-GAP UP-OVERLAP DOWN-OVERLAP WASTE-FAN
+          CARD-CONTROL-NAMES
+          column-x stock-rect waste-rect waste-card-rect foundation-rect
+          pile-overlaps pile-card-rect pile-slot-rect
+          hit-place place-center
+          card-controls card-control-rect hit-card-control)
+
+  (begin
+    ;; The card, in virtual pixels: Windows' 71x96 rounded to even.
+    (define CARD-W 72)
+    (define CARD-H 96)
+    (define CARD-GAP 8)
+    ;; A face-up card in a column shows this much of the one under it
+    ;; (rank and suit at glyph scale 2 need 16); face-down ones less.
+    (define UP-OVERLAP 18)
+    (define DOWN-OVERLAP 6)
+    ;; The waste fans its top cards sideways under draw three.
+    (define WASTE-FAN 16)
+    (define TOP-Y 6)
+    (define ROW-GAP 10)
+    ;; The tappable controls in the HUD, left to right, with their widths
+    ;; (DRAW carries its count: "DRAW 3" at glyph scale 2 is 70 px).
+    (define CARD-CONTROL-NAMES '(undo draw next))
+    (define CARD-CONTROL-WIDTHS '(56 80 56))
+    (define CONTROLS-X 122)
+    (define CONTROL-GAP 6)
+    (define CONTROL-Y 4)
+
+    (define-struct card-geometry
+      (vw default: 640)
+      (vh default: 400)
+      (hud-h default: HUD-HEIGHT)
+      (card-w default: CARD-W)
+      (card-h default: CARD-H)
+      (origin-x default: 0)
+      (top-y default: TOP-Y)
+      (tableau-y default: 0))
+
+    (define (make-card-geometry vw vh)
+      (let ((table-w (+ (* PILES CARD-W) (* (- PILES 1) CARD-GAP))))
+        (card-geometry vw: vw
+                       vh: vh
+                       origin-x: (exact (floor (/ (- vw table-w) 2)))
+                       tableau-y: (+ TOP-Y CARD-H ROW-GAP))))
+
+    (define (column-x g i)
+      (+ (card-geometry-origin-x g) (* i (+ (card-geometry-card-w g) CARD-GAP))))
+
+    (define (top-rect g column)
+      (list (column-x g column)
+            (card-geometry-top-y g)
+            (card-geometry-card-w g)
+            (card-geometry-card-h g)))
+
+    (define (stock-rect g) (top-rect g 0))
+    (define (waste-rect g) (top-rect g 1))
+
+    ;; Foundations sit in the last four columns.
+    (define (foundation-rect g i)
+      (top-rect g (+ i (- PILES FOUNDATIONS))))
+
+    ;; The waste's card at depth (0 = the top), fanned under draw three:
+    ;; the top card sits rightmost, the two under it stepped left.
+    (define (waste-card-rect g game depth)
+      (let* ((r (waste-rect g))
+             (shown (min 3 (length (game-waste game))))
+             (fan (if (= (game-draw game) 3)
+                      (* WASTE-FAN (- shown 1 depth))
+                      0)))
+        (list (+ (car r) fan) (cadr r) (caddr r) (cadddr r))))
+
+    ;; (down . up): the overlaps a pile is drawn with. Face-down cards
+    ;; keep DOWN-OVERLAP; face-up cards fan by UP-OVERLAP unless the column
+    ;; would run past the HUD, in which case the fan compresses (never
+    ;; below the face-down spacing).
+    (define (pile-overlaps g pile)
+      (let* ((n (length pile))
+             (ups (length (filter pile-up? pile)))
+             (downs (- n ups))
+             (budget (- (card-geometry-vh g)
+                        (card-geometry-hud-h g)
+                        (card-geometry-tableau-y g)
+                        4
+                        (card-geometry-card-h g)
+                        (* downs DOWN-OVERLAP)))
+             (up (if (<= ups 1)
+                     UP-OVERLAP
+                     (max DOWN-OVERLAP
+                          (min UP-OVERLAP (exact (floor (/ budget (- ups 1)))))))))
+        (cons DOWN-OVERLAP up)))
+
+    ;; The y of a pile's card at depth from the top: the bottom card of
+    ;; the pile sits at tableau-y and each card above it is stepped by the
+    ;; overlap of the card under it.
+    (define (pile-card-y g pile depth)
+      (let* ((ov (pile-overlaps g pile))
+             (n (length pile)))
+        (let loop ((i (- n 1)) (y (card-geometry-tableau-y g)))
+          (if (<= i depth)
+              y
+              (loop (- i 1)
+                    (+ y (if (pile-up? (list-ref pile i)) (cdr ov) (car ov))))))))
+
+    ;; (x y w h) of the card at depth in pile i.
+    (define (pile-card-rect g game i depth)
+      (list (column-x g i)
+            (pile-card-y g (game-pile game i) depth)
+            (card-geometry-card-w g)
+            (card-geometry-card-h g)))
+
+    ;; The empty pile's outline.
+    (define (pile-slot-rect g i)
+      (list (column-x g i)
+            (card-geometry-tableau-y g)
+            (card-geometry-card-w g)
+            (card-geometry-card-h g)))
+
+    ;; The column under x, or #f.
+    (define (column-at g x)
+      (let loop ((i 0))
+        (cond ((= i PILES) #f)
+              ((and (>= x (column-x g i))
+                    (< x (+ (column-x g i) (card-geometry-card-w g))))
+               i)
+              (else (loop (+ i 1))))))
+
+    ;; The place under a point, or #f: the stock (empty or not: a tap
+    ;; there always means draw), the waste's top when it has one, a
+    ;; foundation (empty or not), a tableau card by the strip of it that
+    ;; shows (the top card by its whole face), or the pile itself for a
+    ;; tap in its column under the cards.
+    (define (hit-place g game x y)
+      (let ((column (column-at g x)))
+        (cond ((< y (card-geometry-tableau-y g))
+               ;; the waste's top card is tested before the columns: fanned
+               ;; under draw three, it crosses into the next column
+               (cond ((rect-contains? (stock-rect g) x y) '(stock))
+                     ((and (pair? (game-waste game))
+                           (rect-contains? (waste-card-rect g game 0) x y))
+                      '(waste))
+                     ((and column (>= column (- PILES FOUNDATIONS)))
+                      (list 'foundation (- column (- PILES FOUNDATIONS))))
+                     (else #f)))
+              ((not column) #f)
+              (else
+               (let* ((pile (game-pile game column))
+                      (n (length pile)))
+                 (let loop ((depth 0))
+                   (cond ((= depth n) (list 'pile column))
+                         (else
+                          (let* ((top (pile-card-y g pile depth))
+                                 (bottom (if (= depth 0)
+                                             (+ top (card-geometry-card-h g))
+                                             (pile-card-y g pile (- depth 1)))))
+                            (if (and (>= y top) (< y bottom))
+                                (list 'pile column depth)
+                                (loop (+ depth 1))))))))))))
+
+    ;; (x . y) of the visible part of a place: a pile card's exposed strip
+    ;; (the whole face for the top card), the waste's top, a foundation,
+    ;; the stock, an empty pile's slot. The inverse of hit-place for the
+    ;; browser arm, which taps what the boot line names.
+    (define (place-center g game p)
+      (let ((center (lambda (r)
+                      (cons (+ (car r) (quotient (caddr r) 2))
+                            (+ (cadr r) (quotient (cadddr r) 2))))))
+        (case (car p)
+          ((stock) (center (stock-rect g)))
+          ((waste) (center (waste-card-rect g game 0)))
+          ((foundation) (center (foundation-rect g (cadr p))))
+          ((pile)
+           (let* ((i (cadr p))
+                  (pile (game-pile game i))
+                  (depth (if (pair? (cddr p)) (caddr p) 0)))
+             (if (>= depth (length pile))
+                 (center (pile-slot-rect g i))
+                 (let* ((top (pile-card-y g pile depth))
+                        (bottom (if (= depth 0)
+                                    (+ top (card-geometry-card-h g))
+                                    (pile-card-y g pile (- depth 1)))))
+                   (cons (+ (column-x g i) (quotient (card-geometry-card-w g) 2))
+                         (+ top (quotient (- bottom top) 2)))))))
+          (else (cons 0 0)))))
+
+    ;; --- the HUD controls -----------------------------------------------------
+
+    ;; ((name x y w h) ...), the same shape as (crash geometry)'s.
+    (define (card-controls g)
+      (let ((top (- (card-geometry-vh g) (card-geometry-hud-h g))))
+        (let loop ((names CARD-CONTROL-NAMES)
+                   (widths CARD-CONTROL-WIDTHS)
+                   (x CONTROLS-X)
+                   (acc '()))
+          (if (null? names)
+              (reverse acc)
+              (loop (cdr names)
+                    (cdr widths)
+                    (+ x (car widths) CONTROL-GAP)
+                    (cons (list (car names) x (+ top CONTROL-Y) (car widths) CONTROL-H)
+                          acc))))))
+
+    (define (card-control-rect g name)
+      (let ((entry (assq name (card-controls g))))
+        (and entry (cdr entry))))
+
+    (define (hit-card-control g x y)
+      (let loop ((cs (card-controls g)))
+        (cond ((null? cs) #f)
+              ((rect-contains? (cdr (car cs)) x y) (car (car cs)))
+              (else (loop (cdr cs))))))))
