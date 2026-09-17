@@ -535,8 +535,8 @@
                 (if (= i PILES)
                     (cons (game g
                                 tableau: tableau
-                                stock: (let rest ((k k) (acc '()))
-                                         (if (= k n) (reverse acc) (rest (+ k 1) (cons (vector-ref pool k) acc))))
+                                stock: (let rest ((j k) (acc '()))
+                                         (if (= j n) (reverse acc) (rest (+ j 1) (cons (vector-ref pool j) acc))))
                                 waste: '()
                                 corrupt: #f
                                 selected: #f)
@@ -546,10 +546,10 @@
                            (downs (list-ref down-counts i)))
                       (vector-set! tableau i
                                    (append ups
-                                           (let fill ((m 0) (k k) (acc '()))
+                                           (let fill ((m 0) (j k) (acc '()))
                                              (if (= m downs)
                                                  (reverse acc)
-                                                 (fill (+ m 1) (+ k 1) (cons (cons (vector-ref pool k) #f) acc))))))
+                                                 (fill (+ m 1) (+ j 1) (cons (cons (vector-ref pool j) #f) acc))))))
                       (deal (+ i 1) (+ k downs) tableau))))))))
 
     ;; The scramble: shuffle-hidden with the game's random stream until
@@ -619,8 +619,8 @@
     ;; times (measured 2026-09-17: 15 minutes the slow way).
     (define (legal-moves g)
       (let* ((pile-tops (map (lambda (i) (place-card g (list 'pile i 0))) (iota PILES)))
-             (foundation-dests (foundation-dests g))
-             (foundation-tops (map (lambda (dst) (place-card g dst)) foundation-dests))
+             (fdests (foundation-dests g))
+             (foundation-tops (map (lambda (dst) (place-card g dst)) fdests))
              (corrupted? (game-corrupted? g))
              ;; the destinations a single card (top first in its run) may take
              (dests-for
@@ -637,7 +637,7 @@
                             (loop (+ i 1) (cdr tops) (cons (cons src (list 'pile i)) acc)))
                            (else (loop (+ i 1) (cdr tops) acc))))
                    (if single?
-                       (let loop ((ds foundation-dests) (tops foundation-tops) (acc '()))
+                       (let loop ((ds fdests) (tops foundation-tops) (acc '()))
                          (cond ((null? ds) (reverse acc))
                                ((valid-foundation-move? bottom (car tops))
                                 (loop (cdr ds) (cdr tops) (cons (cons src (car ds)) acc)))
@@ -669,262 +669,6 @@
               ((null? (game-foundation g i))
                (loop (+ i 1) #t (if empty-seen? acc (cons (list 'foundation i) acc))))
               (else (loop (+ i 1) empty-seen? (cons (list 'foundation i) acc))))))
-
-    ;; --- what the ICE can do to the table (the members live in (crash cards trace)) ---
-
-    ;; The waste's top card is unplayable for draws draws. No history
-    ;; entry: the counter-hacks cut the history themselves.
-    (define (game-corrupt-waste g draws)
-      (if (pair? (game-waste g))
-          (game g corrupt: (cons (car (game-waste g)) draws) selected: #f)
-          g))
-
-    ;; Every face-up tableau card with at least one card on top of it:
-    ;; what encrypt may turn face down (the uncovered flip brings it back).
-    (define (encryptable-places g)
-      (apply append
-             (map (lambda (i)
-                    (let ((pile (game-pile g i)))
-                      (let loop ((depth 1) (acc '()))
-                        (if (or (>= depth (length pile))
-                                (not (pile-up? (list-ref pile depth))))
-                            (reverse acc)
-                            (loop (+ depth 1) (cons (list 'pile i depth) acc))))))
-                  (iota PILES))))
-
-    ;; The card at a pile place turned face down.
-    (define (game-encrypt g p)
-      (let* ((i (cadr p))
-             (depth (caddr p))
-             (pile (game-pile g i)))
-        (if (or (>= depth (length pile)) (= depth 0))
-            g
-            (game g
-                  tableau: (vector-with (game-tableau g)
-                                        i
-                                        (append (take pile depth)
-                                                (list (cons (pile-card (list-ref pile depth)) #f))
-                                                (drop-n pile (+ depth 1))))
-                  selected: #f))))
-
-    ;; The stock and the waste shuffled together into a new stock with
-    ;; the given random state (the caller advances it); the waste empty,
-    ;; the passes untouched. Returns (cons game rng).
-    (define (game-churn g rng)
-      (let* ((cards (list->vector (append (game-stock g) (reverse (game-waste g)))))
-             (n (vector-length cards)))
-        (let loop ((i (- n 1)) (rng rng))
-          (if (< i 1)
-              (cons (game g stock: (vector->list cards) waste: '() corrupt: #f selected: #f) rng)
-              (let* ((rng (prng-next rng))
-                     (j (prng-index rng (+ i 1)))
-                     (tmp (vector-ref cards i)))
-                (vector-set! cards i (vector-ref cards j))
-                (vector-set! cards j tmp)
-                (loop (- i 1) rng))))))
-
-    ;; --- the scramble ----------------------------------------------------------
-
-    ;; Attempts at a scramble that leaves a move before it is refused.
-    (define SCRAMBLE-TRIES 50)
-
-    ;; The legal moves that get somewhere: a card to a foundation, the
-    ;; waste's top to the tableau, or a run whose move turns the card
-    ;; under it face up. Shuttling a run between two piles is legal and
-    ;; leads nowhere, so it does not count: a table with only such moves
-    ;; is what a player calls stuck.
-    (define (progress-moves g)
-      (filter (lambda (m)
-                (let ((src (car m)) (dst (cdr m)))
-                  (or (eq? (place-kind dst) 'foundation)
-                      (eq? (place-kind src) 'waste)
-                      (let* ((pile (game-pile g (cadr src)))
-                             (under (drop-n pile (+ 1 (caddr src)))))
-                        (and (pair? under) (not (pile-up? (car under))))))))
-              (legal-moves g)))
-
-    ;; Is the player out of moves: no progress move on the table now, and
-    ;; no card in the stock or the waste that a pile or a foundation would
-    ;; take (under either draw count every card there comes round in some
-    ;; pass; Vegas's pass limit is not modelled here, so a Vegas deal out
-    ;; of passes reads as not stuck while a playable card sits in the
-    ;; stock). The scanner the scramble guarantee and the dead-position
-    ;; control share.
-    (define (game-stuck? g)
-      (and (null? (progress-moves g))
-           (let ((tops (append (map (lambda (i) (place-card g (list 'pile i 0))) (iota PILES))))
-                 (foundation-tops (map (lambda (i) (place-card g (list 'foundation i))) (iota FOUNDATIONS))))
-             (not (any (lambda (card)
-                         (or (any (lambda (top) (valid-pile-move? card top)) tops)
-                             (any (lambda (top) (valid-foundation-move? card top)) foundation-tops)))
-                       (append (game-stock g) (game-waste g)))))))
-
-    ;; One shuffle of the hidden cards (every face-down tableau card, the
-    ;; stock and the waste) back into the same face-down slots and a new
-    ;; stock, with the given random state; face-up cards, foundations and
-    ;; passes untouched. Returns (cons game rng).
-    (define (shuffle-hidden g rng)
-      (let* ((down-counts (map (lambda (i) (length (filter (lambda (e) (not (pile-up? e))) (game-pile g i))))
-                               (iota PILES)))
-             (pool (list->vector
-                     (append (apply append
-                                    (map (lambda (i) (map pile-card (filter (lambda (e) (not (pile-up? e))) (game-pile g i))))
-                                         (iota PILES)))
-                             (game-stock g)
-                             (reverse (game-waste g)))))
-             (n (vector-length pool)))
-        (let loop ((i (- n 1)) (rng rng))
-          (if (>= i 1)
-              (let* ((rng (prng-next rng))
-                     (j (prng-index rng (+ i 1)))
-                     (tmp (vector-ref pool i)))
-                (vector-set! pool i (vector-ref pool j))
-                (vector-set! pool j tmp)
-                (loop (- i 1) rng))
-              (let deal ((i 0) (k 0) (tableau (vector-copy (game-tableau g))))
-                (if (= i PILES)
-                    (cons (game g
-                                tableau: tableau
-                                stock: (let rest ((k k) (acc '()))
-                                         (if (= k n) (reverse acc) (rest (+ k 1) (cons (vector-ref pool k) acc))))
-                                waste: '()
-                                corrupt: #f
-                                selected: #f)
-                          rng)
-                    (let* ((pile (game-pile g i))
-                           (ups (filter pile-up? pile))
-                           (downs (list-ref down-counts i)))
-                      (vector-set! tableau i
-                                   (append ups
-                                           (let fill ((m 0) (k k) (acc '()))
-                                             (if (= m downs)
-                                                 (reverse acc)
-                                                 (fill (+ m 1) (+ k 1) (cons (cons (vector-ref pool k) #f) acc))))))
-                      (deal (+ i 1) (+ k downs) tableau))))))))
-
-    ;; The scramble: shuffle-hidden with the game's random stream until
-    ;; the result is not stuck, up to SCRAMBLE-TRIES times; #f when no try
-    ;; found a move (the caller refuses the scramble). With the stock and
-    ;; the waste both empty no shuffle can help (the face-down cards go
-    ;; back under the same face-up ones), so that is refused at once.
-    ;; The history is cut: a scramble is not undone.
-    (define (game-scramble g)
-      (if (and (null? (game-stock g)) (null? (game-waste g)))
-          #f
-          (let loop ((k 0) (rng (prng-next (game-rng g))))
-            (if (= k SCRAMBLE-TRIES)
-                #f
-                (let* ((r (shuffle-hidden g rng))
-                       (candidate (car r)))
-                  (if (game-stuck? candidate)
-                      (loop (+ k 1) (prng-next (cdr r)))
-                      (game candidate rng: (cdr r) history: '() moves: (+ 1 (game-moves g)))))))))
-
-    ;; --- the state of play ---------------------------------------------------
-
-    (define (game-won? g)
-      (let loop ((i 0))
-        (cond ((= i FOUNDATIONS) #t)
-              ((= (length (game-foundation g i)) RANKS) (loop (+ i 1)))
-              (else #f))))
-
-    (define (game-face-down-count g)
-      (let loop ((i 0) (n 0))
-        (if (= i PILES)
-            n
-            (loop (+ i 1)
-                  (+ n (length (filter (lambda (e) (not (pile-up? e)))
-                                       (game-pile g i))))))))
-
-    ;; Every tableau card face up: what auto-complete waits for.
-    (define (game-all-up? g)
-      (= 0 (game-face-down-count g)))
-
-    ;; One step of auto-complete: the first pile top or the waste's top
-    ;; that a foundation takes goes there; else a draw (which turns the
-    ;; waste back when the stock is out). With every tableau card face up
-    ;; some card is always reachable this way, so repeating it wins. A
-    ;; won game is returned as it is.
-    (define (game-auto-step g)
-      (if (game-won? g)
-          g
-          (let ((sources (append (filter (lambda (p) (pair? (game-pile g (cadr p))))
-                                         (map (lambda (i) (list 'pile i 0)) (iota PILES)))
-                                 (if (pair? (game-waste g)) (list (list 'waste)) '()))))
-            (let loop ((sources sources))
-              (cond ((null? sources) (game-draw! g))
-                    ((foundation-for g (place-card g (car sources)))
-                     => (lambda (dst) (game-move g (car sources) dst)))
-                    (else (loop (cdr sources))))))))
-
-    ;; Every move the player could make now, as (src . dst) places, from
-    ;; the piles' face-up runs and the waste's top to a pile or a
-    ;; foundation. Left out: moves from a foundation (never progress), and
-    ;; a king that already heads its pile moving to another empty pile
-    ;; (the same position over again). The stock is not a move here; a
-    ;; caller that asks "is the player stuck" also looks at the stock and
-    ;; the waste.
-    ;; Computed with the tops in hand rather than through move-legal?
-    ;; pair by pair: the scramble leg calls this tens of thousands of
-    ;; times (measured 2026-09-17: 15 minutes the slow way).
-    (define (legal-moves g)
-      (let* ((pile-tops (map (lambda (i) (place-card g (list 'pile i 0))) (iota PILES)))
-             (foundation-dests (foundation-dests g))
-             (foundation-tops (map (lambda (dst) (place-card g dst)) foundation-dests))
-             (corrupted? (game-corrupted? g))
-             ;; the destinations a single card (top first in its run) may take
-             (dests-for
-               (lambda (src bottom single? from-pile)
-                 (append
-                   (let loop ((i 0) (tops pile-tops) (acc '()))
-                     (cond ((= i PILES) (reverse acc))
-                           ((and (not (eqv? i from-pile))
-                                 (valid-pile-move? bottom (car tops))
-                                 (not (and (not (car tops))
-                                           from-pile
-                                           ;; a king heading its pile to another empty pile
-                                           (= (+ 1 (caddr src)) (length (game-pile g from-pile))))))
-                            (loop (+ i 1) (cdr tops) (cons (cons src (list 'pile i)) acc)))
-                           (else (loop (+ i 1) (cdr tops) acc))))
-                   (if single?
-                       (let loop ((ds foundation-dests) (tops foundation-tops) (acc '()))
-                         (cond ((null? ds) (reverse acc))
-                               ((valid-foundation-move? bottom (car tops))
-                                (loop (cdr ds) (cdr tops) (cons (cons src (car ds)) acc)))
-                               (else (loop (cdr ds) (cdr tops) acc))))
-                       '())))))
-        (append
-          (apply append
-                 (map (lambda (i)
-                        (let loop ((depth 0) (entries (game-pile g i)) (acc '()))
-                          (if (or (null? entries) (not (pile-up? (car entries))))
-                              (apply append (reverse acc))
-                              (loop (+ depth 1)
-                                    (cdr entries)
-                                    (cons (dests-for (list 'pile i depth)
-                                                     (pile-card (car entries))
-                                                     (= depth 0)
-                                                     i)
-                                          acc)))))
-                      (iota PILES)))
-          (if (and (pair? (game-waste g)) (not corrupted?))
-              (dests-for '(waste) (car (game-waste g)) #t #f)
-              '()))))
-
-    ;; The foundations as destinations, with only the first empty one
-    ;; listed: an ace to any empty foundation is one move, not four.
-    (define (foundation-dests g)
-      (let loop ((i 0) (empty-seen? #f) (acc '()))
-        (cond ((= i FOUNDATIONS) (reverse acc))
-              ((null? (game-foundation g i))
-               (loop (+ i 1) #t (if empty-seen? acc (cons (list 'foundation i) acc))))
-              (else (loop (+ i 1) empty-seen? (cons (list 'foundation i) acc))))))
-
-    (define (pointless-king? g src dst)
-      (and (eq? (place-kind src) 'pile)
-           (eq? (place-kind dst) 'pile)
-           (not (place-card g (list 'pile (cadr dst) 0)))
-           (= (+ 1 (caddr src)) (length (game-pile g (cadr src))))))
 
     ;; --- structural equality -------------------------------------------------
 
