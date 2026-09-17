@@ -21,6 +21,7 @@
           (crash cards geometry)
           (crash cards input)
           (crash cards fx)
+          (crash stack prng)
           (crash trace)
           (crash cards trace)
           (crash render)
@@ -183,33 +184,79 @@
 
     ;; x: the frame's effects; a cascading foundation shows the card under
     ;; the ones it has launched.
+    ;; A rect shifted sideways by a hit's shake.
+    (define (shaken r hit)
+      (if hit
+          (list (+ (car r) (exact (round (car hit)))) (cadr r) (caddr r) (cadddr r))
+          r))
+
+    ;; The flash over a packet the ICE just hit: hot, fading with the hit.
+    (define (draw-hit-flash r hit)
+      (when hit
+        (color-alpha! C-TRACE-HOT (* 0.55 (cdr hit)))
+        (draw-filled-rect (car r) (cadr r) (caddr r) (cadddr r))))
+
+    ;; The corrupted buffer top, for as long as the corruption holds: a
+    ;; hot veil and a few flickering slices from the table's random
+    ;; stream (David, 2026-09-18: "something visual to make that clear").
+    (define (draw-corrupt-veil r ticks)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color-alpha! C-TRACE-HOT 0.35)
+        (draw-filled-rect x y w h)
+        (let loop ((k 0) (rng (prng-seed (+ 29 (quotient ticks 3)))))
+          (when (< k 5)
+            (let* ((r1 (prng-next rng))
+                   (r2 (prng-next r1))
+                   (r3 (prng-next r2)))
+              (color-alpha! (if (even? k) C-TRACE-HOT C-BG) 0.6)
+              (draw-filled-rect (+ x (- (prng-index r3 8) 4))
+                                (+ y (prng-index r1 (max 1 (- h 3))))
+                                w
+                                (+ 1 (prng-index r2 3)))
+              (loop (+ k 1) r3))))))
+
     (define (draw-top-row g game x)
-      ;; the stock: a back when it has cards, the ring when it is empty
-      (if (pair? (game-stock game))
-          (draw-back (stock-rect g))
-          (draw-slot (stock-rect g) (pair? (game-waste game))))
-      ;; the waste: the top card, fanned by three under draw three
-      (let* ((waste (game-waste game))
-             (shown (min 3 (length waste))))
-        (if (null? waste)
-            (draw-slot (waste-rect g) #f)
-            (let loop ((depth (- shown 1)))
-              (when (>= depth 0)
-                (draw-face (waste-card-rect g game depth)
-                           (list-ref waste depth)
-                           (and (= depth 0) (selected-place? game '(waste))))
-                (loop (- depth 1))))))
-      ;; the foundations
-      (let loop ((i 0))
-        (when (< i FOUNDATIONS)
-          (let* ((f (game-foundation game i))
-                 (r (foundation-rect g i))
-                 (gone (if (card-fx-idle? x) 0 (vector-ref (card-fx-launched x) i)))
-                 (f (if (> gone 0) (drop-n f (min gone (length f))) f)))
-            (if (null? f)
-                (draw-slot r #f)
-                (draw-face r (car f) (selected-place? game (list 'foundation i)))))
-          (loop (+ i 1)))))
+      (let ((skip (card-fx-moving-cards x)))
+        ;; the stock: a back when it has cards, the ring when it is empty
+        (if (pair? (game-stock game))
+            (draw-back (stock-rect g))
+            (draw-slot (stock-rect g) (pair? (game-waste game))))
+        ;; the waste: the top card, fanned by three under draw three
+        (let* ((waste (game-waste game))
+               (shown (min 3 (length waste))))
+          (if (null? waste)
+              (draw-slot (waste-rect g) #f)
+              (let loop ((depth (- shown 1)))
+                (when (>= depth 0)
+                  (unless (memv (list-ref waste depth) skip)
+                    (let* ((hit (and (= depth 0) (card-fx-hit x '(waste 0))))
+                           (r (shaken (waste-card-rect g game depth) hit)))
+                      (draw-face r
+                                 (list-ref waste depth)
+                                 (and (= depth 0) (selected-place? game '(waste))))
+                      (when (and (= depth 0) (game-corrupted? game))
+                        (draw-corrupt-veil r (card-fx-ticks x)))
+                      (draw-hit-flash r hit)))
+                  (loop (- depth 1))))))
+        ;; the foundations
+        (let loop ((i 0))
+          (when (< i FOUNDATIONS)
+            (let* ((f (game-foundation game i))
+                   (r (foundation-rect g i))
+                   (gone (if (card-fx-idle? x) 0 (vector-ref (card-fx-launched x) i)))
+                   (f (if (> gone 0) (drop-n f (min gone (length f))) f))
+                   (f (let drop-moving ((f f)) (if (and (pair? f) (memv (car f) skip)) (drop-moving (cdr f)) f))))
+              (if (null? f)
+                  (draw-slot r #f)
+                  (draw-face r (car f) (selected-place? game (list 'foundation i)))))
+            (loop (+ i 1))))))
+
+    ;; The cards sliding to their new places, drawn last so they pass
+    ;; over everything.
+    (define (draw-movers g x)
+      (for-each (lambda (m)
+                  (draw-card (cadr m) (car m) (caddr m) #f))
+                (card-fx-movers x)))
 
     ;; The cascade: each flying card over its trail (the placeholder for
     ;; P3's glyph streams), on the board area only.
@@ -232,23 +279,28 @@
                                #f))
                   (reverse (card-fx-flying x)))))
 
-    (define (draw-tableau g game)
-      (let loop ((i 0))
-        (when (< i PILES)
-          (let* ((pile (game-pile game i))
-                 (n (length pile)))
-            (if (= n 0)
-                (draw-slot (pile-slot-rect g i) #f)
-                ;; bottom card first, so each card covers the one under it
-                (let draw ((depth (- n 1)))
-                  (when (>= depth 0)
-                    (let ((entry (list-ref pile depth)))
-                      (draw-card (pile-card-rect g game i depth)
-                                 (pile-card entry)
-                                 (pile-up? entry)
-                                 (in-selected-run? game i depth)))
-                    (draw (- depth 1))))))
-          (loop (+ i 1)))))
+    (define (draw-tableau g game x)
+      (let ((skip (card-fx-moving-cards x)))
+        (let loop ((i 0))
+          (when (< i PILES)
+            (let* ((pile (game-pile game i))
+                   (n (length pile)))
+              (if (= n 0)
+                  (draw-slot (pile-slot-rect g i) #f)
+                  ;; bottom card first, so each card covers the one under it
+                  (let draw ((depth (- n 1)))
+                    (when (>= depth 0)
+                      (let ((entry (list-ref pile depth)))
+                        (unless (memv (pile-card entry) skip)
+                          (let* ((hit (card-fx-hit x (list 'pile i depth)))
+                                 (r (shaken (pile-card-rect g game i depth) hit)))
+                            (draw-card r
+                                       (pile-card entry)
+                                       (pile-up? entry)
+                                       (in-selected-run? game i depth))
+                            (draw-hit-flash r hit))))
+                      (draw (- depth 1))))))
+            (loop (+ i 1))))))
 
     ;; --- the key overlays ---------------------------------------------------------
     ;;
@@ -483,12 +535,13 @@
       (let ((game (deal-game d)))
         (draw-background g)
         (draw-top-row g game x)
-        (draw-tableau g game)
+        (draw-tableau g game x)
         (when (and (deal-labels-shown d) (not (deal-auto d)) (not (deal-won? d)))
           (case (deal-model d)
             ((tags) (draw-tags d g))
             ((piles) (draw-pile-keys g game))
             (else #f)))
+        (draw-movers g x)
         (draw-cascade g x)
         (let ((glitch (card-fx-glitch x))
               (top (- (card-geometry-vh g) (card-geometry-hud-h g))))

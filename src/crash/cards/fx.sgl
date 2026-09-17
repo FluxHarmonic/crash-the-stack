@@ -33,7 +33,8 @@
           card-fx-frame card-fx-observe card-fx-idle?
           card-fx-flying card-fx-launched card-fx-cascading? card-fx-ticks
           card-fx-glitch card-fx-toast
-          GLITCH-TICKS TOAST-TICKS TOAST-HOLD
+          card-fx-movers card-fx-moving-cards card-fx-hit
+          GLITCH-TICKS TOAST-TICKS TOAST-HOLD MOVE-TICKS MOVE-MAX HIT-TICKS HIT-SHAKE
           flyer flyer-card flyer-x flyer-y flyer-trail
           CASCADE-GAP GRAVITY BOUNCE TRAIL LAUNCH-VX-MIN LAUNCH-VX-MAX)
 
@@ -48,6 +49,11 @@
     (define LAUNCH-VX-MAX 4.2)
     (define LAUNCH-VY -1.5)         ; a small hop off the foundation
     (define GLITCH-TICKS 45)        ; the full-screen glitch when the trace completes
+    (define HIT-TICKS 36)           ; a packet the ICE hit shakes and flashes this long
+    (define HIT-SHAKE 4.0)          ; pixels of sideways shake, 6 Hz like the stack's mismatch
+    (define MOVE-TICKS 10)          ; a card slides to its new place over this many ticks
+    (define MOVE-MAX 13)            ; more cards than this moving at once (a scramble, a churn,
+                                    ; a turn of the waste) is not a slide but a new picture
     (define TOAST-TICKS 130)        ; a message: held, then it slides up and fades
     (define TOAST-HOLD 0.7)         ; the fraction of TOAST-TICKS it holds still
 
@@ -70,7 +76,9 @@
       (flying default: '())
       (rng default: 1)
       (glitch-ticks default: 0)              ; ticks of glitch left
-      (toast-state default: #f))             ; (message . ticks-left), or #f
+      (toast-state default: #f)              ; (message . ticks-left), or #f
+      (moving default: '())                  ; cards sliding: (card from-rect to-rect up? ticks-left)
+      (hits default: '()))                   ; places the ICE just hit: (place . ticks-left)
 
     (define (card-fx-new)
       (card-fx clock: (clock-new)))
@@ -79,7 +87,138 @@
       (and (not (card-fx-cascading? x))
            (null? (card-fx-flying x))
            (= 0 (card-fx-glitch-ticks x))
-           (not (card-fx-toast-state x))))
+           (not (card-fx-toast-state x))
+           (null? (card-fx-moving x))
+           (null? (card-fx-hits x))))
+
+    ;; The places a counter-hack just landed on: the pile card that went
+    ;; face down (encrypt), the waste's top (corrupt). Nothing for churn:
+    ;; the whole stock changed and the ICE line says so.
+    (define (hit-places g0 g1 last-ice)
+      (case last-ice
+        ((corrupt) (if (pair? (game-waste g1)) (list '(waste 0)) '()))
+        ((encrypt)
+         (apply append
+                (map (lambda (i)
+                       (let loop ((a (game-pile g0 i)) (b (game-pile g1 i)) (depth 0) (acc '()))
+                         (if (or (null? a) (null? b))
+                             (reverse acc)
+                             (loop (cdr a) (cdr b) (+ depth 1)
+                                   (if (and (pile-up? (car a)) (not (pile-up? (car b)))
+                                            (eqv? (pile-card (car a)) (pile-card (car b))))
+                                       (cons (list 'pile i depth) acc)
+                                       acc)))))
+                     (iota PILES))))
+        (else '())))
+
+    ;; (dx . flash) for a place the ICE hit, or #f: a 6 Hz sideways shake
+    ;; and a flash fading over the hit's life.
+    (define (card-fx-hit x p)
+      (let ((entry (find (lambda (h) (equal? (car h) p)) (card-fx-hits x))))
+        (and entry
+             (let* ((left (cdr entry))
+                    (age (- HIT-TICKS left))
+                    (life (/ left HIT-TICKS)))
+               (cons (* HIT-SHAKE life (sin (* 6.283185307179586 6.0 (/ age 60.0))))
+                     life)))))
+
+    ;; --- card moves ------------------------------------------------------------
+    ;;
+    ;; A move is two games; the cards whose place changed slide from where
+    ;; they were drawn to where they are drawn now (David, 2026-09-18: hard
+    ;; to track where cards go). The renderer draws a sliding card at its
+    ;; interpolated rect and leaves its slot empty meanwhile.
+
+    ;; ((card . place) ...) for every card that is drawn somewhere: the
+    ;; piles' cards, the foundations' tops, the waste's top three.
+    (define (drawn-places g)
+      (append
+        (apply append
+               (map (lambda (i)
+                      (let loop ((entries (game-pile g i)) (depth 0) (acc '()))
+                        (if (null? entries)
+                            (reverse acc)
+                            (loop (cdr entries)
+                                  (+ depth 1)
+                                  (cons (cons (pile-card (car entries)) (list 'pile i depth)) acc)))))
+                    (iota PILES)))
+        (apply append
+               (map (lambda (i)
+                      (let ((f (game-foundation g i)))
+                        (if (pair? f) (list (cons (car f) (list 'foundation i))) '())))
+                    (iota FOUNDATIONS)))
+        (let loop ((waste (game-waste g)) (depth 0) (acc '()))
+          (if (or (null? waste) (= depth 3))
+              (reverse acc)
+              (loop (cdr waste) (+ depth 1) (cons (cons (car waste) (list 'waste depth)) acc))))))
+
+    ;; The rect a drawn place has under a game.
+    (define (drawn-rect g game p)
+      (case (car p)
+        ((pile) (pile-card-rect g game (cadr p) (caddr p)))
+        ((foundation) (foundation-rect g (cadr p)))
+        ((waste) (waste-card-rect g game (cadr p)))
+        (else (stock-rect g))))
+
+    ;; Is the card face up at its new place (a pile entry's flag; the rest
+    ;; are always up)?
+    (define (up-at? game p)
+      (if (eq? (car p) 'pile)
+          (pile-up? (list-ref (game-pile game (cadr p)) (caddr p)))
+          #t))
+
+    ;; A place without its depth: a card that stays in its pile (or on
+    ;; its foundation, or in the waste) and only shifts within it has not
+    ;; moved.
+    (define (home p)
+      (case (car p)
+        ((pile foundation) (list (car p) (cadr p)))
+        (else (list (car p)))))
+
+    ;; The slides a step from g0 to g1 starts: every card drawn in g1 in a
+    ;; home other than the one it had in g0 (a card from the stock starts
+    ;; at the stock). None when the step moved more than MOVE-MAX cards.
+    (define (moves-between g0 g1 g)
+      (let* ((before (drawn-places g0))
+             (after (drawn-places g1))
+             (movers (filter (lambda (entry)
+                               (let ((was (assv (car entry) before)))
+                                 (not (and was (equal? (home (cdr was)) (home (cdr entry)))))))
+                             after)))
+        (if (> (length movers) MOVE-MAX)
+            '()
+            (map (lambda (entry)
+                   (let* ((card (car entry))
+                          (to (cdr entry))
+                          (was (assv card before))
+                          (from (if was (cdr was) '(stock))))
+                     (list card
+                           (drawn-rect g g0 from)
+                           (drawn-rect g g1 to)
+                           (up-at? g1 to)
+                           MOVE-TICKS)))
+                 movers))))
+
+    ;; (card rect up?) for every sliding card, at the eased position.
+    (define (card-fx-movers x)
+      (map (lambda (m)
+             (let* ((card (car m))
+                    (from (cadr m))
+                    (to (caddr m))
+                    (up? (cadddr m))
+                    (left (list-ref m 4))
+                    (t (ease 'out-quad (- 1.0 (/ left MOVE-TICKS)))))
+               (list card
+                     (list (exact (floor (+ (car from) (* t (- (car to) (car from))))))
+                           (exact (floor (+ (cadr from) (* t (- (cadr to) (cadr from))))))
+                           (caddr to)
+                           (cadddr to))
+                     up?)))
+           (card-fx-moving x)))
+
+    ;; The cards the renderer must not draw in their slots this frame.
+    (define (card-fx-moving-cards x)
+      (map car (card-fx-moving x)))
 
     ;; The glitch's progress 0..1, or #f.
     (define (card-fx-glitch x)
@@ -119,6 +258,20 @@
                          (not (eq? (trace-phase (deal-trace before)) 'counter)))
                     (card-fx x glitch-ticks: GLITCH-TICKS)
                     x))
+             ;; a counter-hack landed: the packets it hit shake and flash
+             (x (if (not (= (trace-ice-count (deal-trace before)) (trace-ice-count (deal-trace after))))
+                    (card-fx x hits: (append (map (lambda (p) (cons p HIT-TICKS))
+                                                  (hit-places (deal-game before) (deal-game after)
+                                                              (trace-last-ice (deal-trace after))))
+                                             (card-fx-hits x)))
+                    x))
+             ;; the cards that changed place slide there
+             (x (if (and (not (eq? (deal-game before) (deal-game after)))
+                         (= (deal-seed before) (deal-seed after))
+                         (not (deal-won? after)))
+                    (card-fx x moving: (append (moves-between (deal-game before) (deal-game after) g)
+                                               (card-fx-moving x)))
+                    (card-fx x moving: '())))
              ;; a new message: a toast
              (m (deal-message after)))
         (if (and (> (string-length m) 0)
@@ -195,7 +348,13 @@
              (x (let ((t (card-fx-toast-state x)))
                   (cond ((not t) x)
                         ((<= (cdr t) 1) (card-fx x toast-state: #f))
-                        (else (card-fx x toast-state: (cons (car t) (- (cdr t) 1))))))))
+                        (else (card-fx x toast-state: (cons (car t) (- (cdr t) 1)))))))
+             (x (card-fx x hits: (filter (lambda (h) (> (cdr h) 0))
+                                         (map (lambda (h) (cons (car h) (- (cdr h) 1))) (card-fx-hits x)))))
+             (x (card-fx x moving: (filter (lambda (m) (> (list-ref m 4) 0))
+                                           (map (lambda (m)
+                                                  (list (car m) (cadr m) (caddr m) (cadddr m) (- (list-ref m 4) 1)))
+                                                (card-fx-moving x))))))
         (if (not (card-fx-cascading? x))
             x
             (let ((until (- (card-fx-until-launch x) 1)))

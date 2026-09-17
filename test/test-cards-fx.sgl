@@ -96,3 +96,60 @@
       (assert-equal "HELLO." (car (card-fx-toast x)))
       (assert-true (and (card-fx-toast (frames* x (- TOAST-TICKS 1))) #t))
       (assert-false (card-fx-toast (frames* x TOAST-TICKS))))))
+
+(test-group "card slides"
+  (let* ((d0 (deal-restore 1 (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'tags #t (trace-new 'twist)))
+         (g0 (deal-game d0))
+         (d1 (deal-restore 1 (game-select (game-select g0 '(pile 0 0)) '(pile 2)) 'tags #t (deal-trace d0)))
+         (x (card-fx-observe (card-fx-new) d0 d1 geom)))
+    (test "the moved card slides from its old rect to its new one"
+      (let ((movers (card-fx-movers x)))
+        (assert-equal 1 (length movers))
+        (assert-equal "S2" (card-string (car (car movers))))
+        (assert-equal (list (make-card 0 2)) (card-fx-moving-cards x))
+        ;; at the start it sits where pile 0's top was
+        (assert-equal (pile-card-rect geom g0 0 0) (cadr (car movers)))
+        (assert-true (caddr (car movers)))))
+    (test "after MOVE-TICKS it has arrived and is gone from the slides"
+      (let* ((x1 (frames* x (- MOVE-TICKS 1)))
+             (x2 (frames* x MOVE-TICKS)))
+        (assert-equal 1 (length (card-fx-movers x1)))
+        (assert-equal '() (card-fx-movers x2))
+        (assert-true (card-fx-idle? x2))))
+    (test "a card drawn from the stock slides from the stock"
+      (let* ((d2 (deal-restore 1 (game-select g0 '(stock)) 'tags #t (deal-trace d0)))
+             (x (card-fx-observe (card-fx-new) d0 d2 geom))
+             (m (car (card-fx-movers x))))
+        (assert-equal "S7" (card-string (car m)))
+        (assert-equal (stock-rect geom) (cadr m))))
+    (test "a turn of the waste (24 cards) is not a slide"
+      (let* ((g24 (fold (lambda (g _) (game-draw! g)) g0 (iota 24)))
+             (g25 (game-draw! g24))
+             (x (card-fx-observe (card-fx-new)
+                                 (deal-restore 1 g24 'tags #t (deal-trace d0))
+                                 (deal-restore 1 g25 'tags #t (deal-trace d0))
+                                 geom)))
+        (assert-equal '() (card-fx-movers x))))))
+
+(test-group "the ICE's hits"
+  (let* ((d0 (deal-restore 1 (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'tags #t (trace-new 'twist)))
+         (g (game-select (game-select (game-select (deal-game d0) '(pile 0 0)) '(pile 2)) '(stock)))
+         (d (deal-restore 1 g 'tags #t (deal-trace d0)))
+         (tr-hit (lambda (name) (trace (deal-trace d) ice-count: 1 last-ice: name))))
+    (test "corrupt: the waste's top shakes and flashes for HIT-TICKS"
+      (let* ((c (game-corrupt-waste g 3))
+             (dc (deal-restore 1 c 'tags #t (tr-hit 'corrupt)))
+             (x (card-fx-observe (card-fx-new) d dc geom))
+             (hit (card-fx-hit x '(waste 0))))
+        (assert-true (and hit #t))
+        (assert-true (<= (abs (car hit)) HIT-SHAKE))
+        (assert-true (= 1 (cdr hit)))
+        (assert-false (card-fx-hit x '(pile 2 1)))
+        (assert-false (card-fx-hit (frames* x HIT-TICKS) '(waste 0)))))
+    (test "encrypt: the packet that went face down shakes and flashes"
+      (let* ((e (game-encrypt g '(pile 2 1)))
+             (de (deal-restore 1 e 'tags #t (tr-hit 'encrypt)))
+             (x (card-fx-observe (card-fx-new) d de geom)))
+        (assert-true (and (card-fx-hit x '(pile 2 1)) #t))
+        (assert-false (card-fx-hit x '(pile 2 0)))
+        (assert-false (card-fx-hit x '(waste 0)))))))

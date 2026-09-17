@@ -128,38 +128,61 @@
       (deal default: #f)          ; the card table, once opened
       (card-fx default: #f))
 
-    ;; The stack, opened from the store or the flags.
-    (define (open-stack a lay seed fresh? texture-first? model)
-      (if (stage-session a)
-          (stage a screen: 'stack)
-          (let ((s (car (boot-session lay seed fresh?))))
-            (stage a
-                 screen: 'stack
-                 session: (session (if model (session-with-model s model) s)
-                                   render-mode: (if texture-first?
-                                                    'texture
-                                                    (session-render-mode s)))
-                 fx: (fx-new)))))
+    ;; The stack. CONTINUE (resume?) returns to the table in memory, or
+    ;; the saved one; STACK deals a NEW board: the next seed after the
+    ;; one in memory or in the store, else the flags' (David, 2026-09-18:
+    ;; going "fresh" into a game put him back in the previous one).
+    (define (open-stack a lay seed fresh? texture-first? model resume?)
+      (let* ((held (stage-session a))
+             (s (cond ((and resume? held) held)
+                      (else
+                       (let ((booted (boot-session lay seed fresh?)))
+                         (cond (resume? (car booted))
+                               (held (session-next held))
+                               ((cdr booted) (session-next (car booted)))
+                               (else (car booted)))))))
+             (s (if (eq? s held)
+                    s
+                    (session (if model (session-with-model s model) s)
+                             render-mode: (if texture-first?
+                                              'texture
+                                              (session-render-mode s))))))
+        (stage a screen: 'stack session: s fx: (if (eq? s held) (stage-fx a) (fx-new)))))
 
-    (define (open-cards a seed fresh?)
-      (if (stage-deal a)
-          (stage a screen: 'cards)
-          (stage a
-                 screen: 'cards
-                 deal: (car (boot-deal seed fresh?))
-                 card-fx: (card-fx-new))))
+    (define (open-cards a seed fresh? resume?)
+      (let* ((held (stage-deal a))
+             (d (cond ((and resume? held) held)
+                      (else
+                       (let ((booted (boot-deal seed fresh?)))
+                         (cond (resume? (car booted))
+                               (held (deal-next held))
+                               ((cdr booted) (deal-next (car booted)))
+                               (else (car booted))))))))
+        (stage a
+               screen: 'cards
+               deal: d
+               card-fx: (if (eq? d held) (stage-card-fx a) (card-fx-new)))))
 
     (define (open-menu a)
-      (stage a screen: 'menu menu: (launch-menu #f)))
+      (stage a
+             screen: 'menu
+             menu: (launch-menu #f
+                                (and (case (active-game)
+                                       ((stack) (stage-session a))
+                                       ((cards) (stage-deal a))
+                                       (else #f))
+                                     #t))))
 
-    ;; A menu choice: which table to open (CONTINUE is the active one).
+    ;; A menu choice: CONTINUE resumes the active table; STACK and DEFRAG
+    ;; start a new game of theirs.
     (define (choose a choice lay seed fresh? texture-first? model)
-      (let ((id (if (eq? choice 'continue) (active-game) choice)))
+      (let* ((resume? (eq? choice 'continue))
+             (id (if resume? (active-game) choice)))
         (case id
           ((stack) (set-active-game! 'stack)
-                   (open-stack a lay seed fresh? texture-first? model))
+                   (open-stack a lay seed fresh? texture-first? model resume?))
           ((cards) (set-active-game! 'cards)
-                   (open-cards a seed fresh?))
+                   (open-cards a seed fresh? resume?))
           (else a))))
 
     (define (step-stack a f dt geom log-keys?)
@@ -202,7 +225,7 @@
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
           (let loop ((a (if cards?
-                            (open-cards (open-menu (stage)) seed fresh?)
+                            (open-cards (open-menu (stage)) seed fresh? #t)
                             (open-menu (stage)))))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))

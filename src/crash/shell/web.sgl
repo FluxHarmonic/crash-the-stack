@@ -554,32 +554,46 @@
     (define (open-menu!)
       (set! *screen* 'menu)
       (set! *announced* #f)
-      (set! *menu* (launch-menu *update*)))
+      (set! *menu* (launch-menu *update*
+                                (and (case (active-game)
+                                       ((stack) *session*)
+                                       ((cards) *deal*)
+                                       (else #f))
+                                     #t))))
 
-    (define (open-stack!)
+    ;; The stack. CONTINUE (resume?) returns to the table in memory, or
+    ;; the saved one; STACK deals a NEW board: the next seed after the
+    ;; one in memory or in the store, else ?seed (David, 2026-09-18:
+    ;; going "fresh" into a game put him back in the previous one, trace
+    ;; and all).
+    (define (open-stack! resume?)
       (set! *screen* 'stack)
       (set! *announced* #f)
-      (unless *session*
-        (let ((lay (turtle-layout)))
-          (set! *geom* (make-geometry lay VW VH))
-          (let ((booted (boot-session lay *seed* *fresh*)))
-            (set! *session* (if *touch*
-                                (session (car booted) labels-shown: #f)
-                                (car booted)))
-            (set! *restored* (cdr booted)))
-          (set! *fx* (fx-new)))))
+      (let ((lay (turtle-layout)))
+        (unless *geom* (set! *geom* (make-geometry lay VW VH)))
+        (unless (and resume? *session*)
+          (let* ((booted (boot-session lay *seed* *fresh*))
+                 (s (cond (resume? (car booted))
+                          (*session* (session-next *session*))
+                          ((cdr booted) (session-next (car booted)))
+                          (else (car booted)))))
+            (set! *session* (if *touch* (session s labels-shown: #f) s))
+            (set! *restored* (and resume? (cdr booted)))
+            (set! *fx* (fx-new))))))
 
-    (define (open-cards!)
+    (define (open-cards! resume?)
       (set! *screen* 'cards)
       (set! *announced* #f)
-      (unless *deal*
-        (let ((booted (boot-deal *seed* *fresh*)))
-          (set! *card-geom* (make-card-geometry VW VH))
-          (set! *deal* (if *touch*
-                           (deal (car booted) labels-shown: #f)
-                           (car booted)))
-          (set! *card-fx* (card-fx-new))
-          (set! *restored* (cdr booted)))))
+      (unless *card-geom* (set! *card-geom* (make-card-geometry VW VH)))
+      (unless (and resume? *deal*)
+        (let* ((booted (boot-deal *seed* *fresh*))
+               (d (cond (resume? (car booted))
+                        (*deal* (deal-next *deal*))
+                        ((cdr booted) (deal-next (car booted)))
+                        (else (car booted)))))
+          (set! *deal* (if *touch* (deal d labels-shown: #f) d))
+          (set! *restored* (and resume? (cdr booted)))
+          (set! *card-fx* (card-fx-new)))))
 
     ;; The update's state reaches the stack's session (the game draws it
     ;; and takes the choice, (crash input) step-update) and the menu (its
@@ -604,20 +618,23 @@
     ;; A menu choice. UPDATE applies the waiting version the same way the
     ;; in-game prompt does.
     (define (choose! choice)
-      (let ((id (if (eq? choice 'continue) (active-game) choice)))
+      (let* ((resume? (eq? choice 'continue))
+             (id (if resume? (active-game) choice)))
         (case id
-          ((stack) (set-active-game! 'stack) (open-stack!))
-          ((cards) (set-active-game! 'cards) (open-cards!))
+          ((stack) (set-active-game! 'stack) (open-stack! resume?))
+          ((cards) (set-active-game! 'cards) (open-cards! resume?))
           ((update) (update-chosen!))
           (else #f))))
 
+    ;; ?stack and ?cards open their table as CONTINUE would (the saved
+    ;; game, or a fresh one), which is what the arms and a bookmark want.
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
       (set! *booted* #t)
       (store-remove! UPDATE-KEY)
-      (cond (*cards* (open-cards!))
-            (*stack* (open-stack!))
+      (cond (*cards* (open-cards! #t))
+            (*stack* (open-stack! #t))
             (else (open-menu!))))
 
     ;; A page parameter landed: take it, and if the table is already up,
