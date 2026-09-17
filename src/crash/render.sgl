@@ -22,15 +22,15 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
-          (crash editor)
           (crash trace)
           (crash stack prng)
           (crash tween)
           (crash fx)
           (crash font)
-          (crash palette))
+          (crash palette)
+          (crash menu))
 
-  (export draw-session draw-editor draw-frame-ms
+  (export draw-session draw-frame-ms draw-menu
           TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
 
   (begin
@@ -329,19 +329,14 @@
     ;; Row 2 under the ICE and after the sever, in place of the keys line
     ;; (David, 2026-09-17: make the phase unmistakable, and say that being
     ;; traced does not end the game).
-    (define (lock-line b now)
-      (let ((locked (board-locked-slots b)))
-        (cond ((null? locked) " CRASH THE STACK TO ESCAPE.")
-              ((any (lambda (id) (lock-weak? b id now)) locked)
-               " A LOCK IS WEAK: TAP IT TO BREAK.")
-              (else " A STRONG LOCK HOLDS UNTIL IT WEAKENS."))))
-
     (define (phase-line tr b)
       (case (trace-phase tr)
         ((counter)
          (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
                         ". LINK SEVERS IN " (trace-countdown-string tr) "."
-                        (lock-line b (trace-ticks tr))))
+                        (if (pair? (board-locked-slots b))
+                            " A STRONG LOCK HOLDS UNTIL IT WEAKENS."
+                            " CRASH THE STACK TO WIN.")))
         ((severed)
          "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
         (else #f)))
@@ -352,6 +347,7 @@
         ((shuf) "SHUF")
         ((hint) "HINT")
         ((next) "NEXT")
+        ((menu) "MENU")
         (else "?")))
 
     (define (draw-controls g)
@@ -414,39 +410,6 @@
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
               (draw-text text (+ x 4) (+ y 3) 2)))))
 
-    ;; A box with a label, the shape of every control.
-    (define (draw-box r label fill edge ink)
-      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-        (color! fill)
-        (draw-filled-rect x y w h)
-        (color! edge)
-        (draw-filled-rect x y w 1)
-        (draw-filled-rect x (+ y h -1) w 1)
-        (draw-filled-rect x y 1 h)
-        (draw-filled-rect (+ x w -1) y 1 h)
-        (color! ink)
-        (draw-text label
-                   (+ x (exact (floor (/ (- w (text-width label 2)) 2))))
-                   (+ y (exact (floor (/ (- h 14) 2))))
-                   2)))
-
-    ;; The web build's waiting update (ruling D14): the mark in the HUD
-    ;; while a version waits, the prompt's two boxes above the HUD.
-    (define (draw-update-mark g)
-      (draw-box (cdr (assq 'update (update-controls g))) "UPDATE" C-BAR-C C-SELECTED C-SELECTED))
-
-    (define (draw-update-prompt g)
-      (let* ((vw (geometry-vw g))
-             (top (- (geometry-vh g) (geometry-hud-h g)))
-             (title "NEW VERSION READY")
-             (tw (text-width title 2)))
-        (color-alpha! C-BG 0.9)
-        (draw-filled-rect (- (half vw) 150) (- top 74) 300 62)
-        (color! C-SELECTED)
-        (draw-text title (- (half vw) (half tw)) (- top 68) 2)
-        (draw-box (cdr (assq 'apply (update-controls g))) "APPLY" C-BAR-C C-SELECTED C-TEXT)
-        (draw-box (cdr (assq 'later (update-controls g))) "NOT NOW" C-BAR-C C-TEXT-DIM C-TEXT)))
-
     ;; The centred message box. rise: 0..1 slides it in from below and fades
     ;; it up (the cleared sequence); fade: 0..1 slides it up and fades it
     ;; out (a toast leaving). A state message passes 1 and 0.
@@ -462,35 +425,11 @@
         (color-alpha! C-SELECTED a)
         (draw-text message x (- y 10) 3)))
 
-    ;; A toast: slides in from the right edge to sit just above the HUD,
-    ;; holds, then slides out to the right (David, 2026-09-17: not over the
-    ;; tiles; the terminal states keep the middle of the screen). The slide
-    ;; in takes the first TOAST-SLIDE of its life, the slide out the last.
-    (define TOAST-SLIDE 0.12)
-
-    (define (draw-toast g text top p)
-      (let* ((vw (geometry-vw g))
-             (w (+ 16 (text-width text 2)))
-             (h 24)
-             (slide (cond ((< p TOAST-SLIDE) (- 1.0 (ease 'out-quad (/ p TOAST-SLIDE))))
-                          ((> p (- 1.0 TOAST-SLIDE))
-                           (ease 'in-out-quad (/ (- p (- 1.0 TOAST-SLIDE)) TOAST-SLIDE)))
-                          (else 0.0)))
-             (x (exact (floor (+ (- vw w 8) (* slide (+ w 8))))))
-             (y (- top 14))
-             ;; a short flash as it lands
-             (flash (if (and (>= p TOAST-SLIDE) (< p (* 2.5 TOAST-SLIDE)))
-                        (if (even? (exact (floor (* p 60)))) 1.0 0.0)
-                        0.0)))
-        (color! (mix C-BG C-SELECTED (* 0.5 flash)))
-        (draw-filled-rect x y w h)
-        (color! C-SELECTED)
-        (draw-filled-rect x y w 1)
-        (draw-filled-rect x (+ y h -1) w 1)
-        (draw-filled-rect x y 1 h)
-        (draw-filled-rect (+ x w -1) y 1 h)
-        (color! (mix C-SELECTED C-TEXT flash))
-        (draw-text text (+ x 8) (+ y 5) 2)))
+    ;; A toast's fade: nothing through TOAST-HOLD of its life, then out.
+    (define (toast-fade p)
+      (if (< p TOAST-HOLD)
+          0.0
+          (/ (- p TOAST-HOLD) (- 1.0 TOAST-HOLD))))
 
     (define (draw-hud s g x)
       (let* ((b (session-board s))
@@ -506,18 +445,20 @@
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
         (draw-text left 8 (+ top 7) 2)
-        (if (memq (session-update s) '(waiting prompt))
-            (draw-update-mark g)
-            (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2))
+        (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
         (draw-controls g)
         (draw-meter g (session-trace s))
-        ;; row 2, centered (David, 2026-09-17)
-        (let* ((line (phase-line (session-trace s) b))
-               (text (or line
-                         (if (eq? (session-model s) 'hint) HINT-KEYS-LINE CURSOR-KEYS-LINE)))
-               (x (max 8 (exact (floor (/ (- vw (text-width text 1)) 2))))))
-          (color! (if line C-HIGHLIGHT C-TEXT-DIM))
-          (draw-text text x (+ top 32) 1))
+        (let ((line (phase-line (session-trace s) b)))
+          (if line
+              (begin
+                (color! C-HIGHLIGHT)
+                (draw-text line 8 (+ top 32) 1))
+              (begin
+                (color! C-TEXT-DIM)
+                (draw-text (if (eq? (session-model s) 'hint)
+                               HINT-KEYS-LINE
+                               CURSOR-KEYS-LINE)
+                           8 (+ top 32) 1))))
         (when (> (string-length (session-typed s)) 0)
           (color! C-HIGHLIGHT)
           (draw-text (string-append "> " (session-typed s))
@@ -543,7 +484,7 @@
                                                1.0)
                                0.0))
                 ((and toast (not (trace-severed? tr)))
-                 (draw-toast g (car toast) top (cdr toast)))))))
+                 (draw-message g (car toast) top 1.0 (toast-fade (cdr toast))))))))
 
     ;; --- the trace's screens -------------------------------------------------
 
@@ -609,6 +550,49 @@
                           (cons "NEW STACK" (+ third (half third)))
                           (cons "JACK OUT" (+ (* 2 third) (half third))))))))
 
+    ;; --- the menu -------------------------------------------------------------
+
+    ;; The first screen (P2, ruling D14's placeholder): the title, the
+    ;; entries from (crash menu) in their rects, the highlighted one lit.
+    ;; version: a short string for the corner, or #f.
+    (define (draw-menu m vw vh version)
+      (color! C-BG)
+      (draw-filled-rect 0 0 vw vh)
+      (let loop ((y -36) (i 0))
+        (when (< y vh)
+          (color! (case (modulo i 3)
+                     ((0) C-BAR-A)
+                     ((1) C-BAR-B)
+                     (else C-BAR-C)))
+          (draw-filled-rect 0 y vw 6)
+          (loop (+ y 12) (+ i 1))))
+      (let ((tw (text-width MENU-TITLE 4)))
+        (color! C-SELECTED)
+        (draw-text MENU-TITLE (exact (floor (/ (- vw tw) 2))) 60 4))
+      (let loop ((ids (menu-entries m)) (i 0))
+        (unless (null? ids)
+          (let* ((r (menu-entry-rect i vw vh))
+                 (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+                 (label (menu-label (car ids)))
+                 (lit? (= i (menu-highlight m)))
+                 (tw (text-width label 3)))
+            (color! (if lit? C-BAR-C C-BG))
+            (draw-filled-rect x y w h)
+            (color! (if lit? C-SELECTED C-TEXT-DIM))
+            (draw-filled-rect x y w 1)
+            (draw-filled-rect x (+ y h -1) w 1)
+            (draw-filled-rect x y 1 h)
+            (draw-filled-rect (+ x w -1) y 1 h)
+            (color! (if lit? C-SELECTED C-TEXT))
+            (draw-text label (+ x (exact (floor (/ (- w tw) 2)))) (+ y 5) 3)
+            (when lit?
+              (draw-text ">" (- x 20) (+ y 5) 3)))
+          (loop (cdr ids) (+ i 1))))
+      (color! C-TEXT-DIM)
+      (draw-text "ARROWS OR TAP. ENTER PICKS." 8 (- vh 14) 1)
+      (when version
+        (draw-text version (- vw 8 (text-width version 1)) (- vh 14) 1)))
+
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.
     (define (draw-frame-ms ms)
       (let ((text (string-append "MS " (number->string (exact (round ms))))))
@@ -616,78 +600,6 @@
         (draw-text text (- 640 8 (text-width text 2)) 6 2)))
 
     ;; --- one frame ------------------------------------------------------------
-
-    ;; --- the editor -----------------------------------------------------------
-    ;;
-    ;; Blank faces on the canvas geometry, the layers above the cursor's
-    ;; drawn per the editor's dim mode, the cursor as a ring (selected color
-    ;; where a tile can go, highlight where it cannot), and a status line.
-
-    (define (draw-editor e g)
-      (let* ((c (editor-cursor e))
-             (cl (car c))
-             (dim (editor-dim e))
-             (vw (geometry-vw g))
-             (vh (geometry-vh g))
-             (top (- vh (geometry-hud-h g)))
-             (alpha-for (lambda (layer)
-                          (cond ((<= layer cl) 1.0)
-                                ((eq? dim 'full) 1.0)
-                                ((eq? dim 'dim) 0.35)
-                                (else 0.0)))))
-        (draw-background g 0.0)
-        (let loop ((layer 0))
-          (when (< layer CANVAS-LAYERS)
-            (let ((a (alpha-for layer))
-                  (on-layer (filter (lambda (p) (= (car p) layer)) (editor-slots e))))
-              (when (> a 0.0)
-                (for-each (lambda (p)
-                            (let* ((r (cell-rect g layer (cadr p) (caddr p)))
-                                   (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-                                   (side (geometry-side g)))
-                              (color-alpha! C-SIDE-DARK a)
-                              (draw-filled-rect (- x side) (+ y h) (+ w side) side)
-                              (color-alpha! C-SIDE a)
-                              (draw-filled-rect (- x side) y side h)))
-                          on-layer)
-                (for-each (lambda (p)
-                            (let* ((r (cell-rect g layer (cadr p) (caddr p)))
-                                   (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-                              (color-alpha! (if (= layer cl) C-FACE (mix C-FACE C-BAR-C 0.25)) a)
-                              (draw-filled-rect x y w h)
-                              (color-alpha! C-FACE-EDGE a)
-                              (draw-filled-rect x y w 1)
-                              (draw-filled-rect x y 1 h)))
-                          on-layer)))
-            (loop (+ layer 1))))
-        ;; the cursor
-        (let* ((r (cell-rect g cl (cadr c) (caddr c)))
-               (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-               (here? (and (member c (editor-slots e)) #t))
-               (ok? (or here? (placeable? e c))))
-          (color! (if ok? C-SELECTED C-HIGHLIGHT))
-          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
-          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
-          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))
-        ;; the HUD
-        (color! C-BG)
-        (draw-filled-rect 0 top vw (geometry-hud-h g))
-        (color! C-TEXT-DIM)
-        (draw-filled-rect 0 top vw 1)
-        (color! C-TEXT)
-        (draw-text (string-append "EDIT  TILES " (number->string (editor-count e))
-                                  "  LAYER " (number->string cl)
-                                  "  AT " (number->string (cadr c)) "," (number->string (caddr c))
-                                  "  ABOVE " (case dim ((full) "FULL") ((dim) "DIM") (else "HIDDEN"))
-                                  "  TRACE " (number->string (editor-trace-at e))
-                                  "  ICE " (number->string (editor-sever-at e)))
-                   8 (+ top 7) 2)
-        (color! C-TEXT-DIM)
-        (draw-text "ARROWS/HJKL MOVE  SHIFT HALF  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM  1/2 TRACE  3/4 ICE  ^S SAVE  ^P PLAY  ESC QUIT"
-                   8 (+ top 32) 1)
-        (unless (string=? (editor-message e) "")
-          (draw-message g (editor-message e) top 1.0 0.0))))
 
     ;; x: the frame's effects from (crash fx), already advanced.
     (define (draw-session s g tex x)
@@ -699,5 +611,4 @@
           (draw-hint-labels s g))
         (when glitch (draw-glitch g x glitch))
         (when (trace-severed? (session-trace s)) (draw-severed g x))
-        (draw-hud s g x)
-        (when (eq? (session-update s) 'prompt) (draw-update-prompt g))))))
+        (draw-hud s g x)))))

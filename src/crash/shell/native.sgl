@@ -9,9 +9,12 @@
 ;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
 ;;;                   [--cards]
 ;;;
-;;; --cards opens the card table (Klondike, P2) instead of the stack; the
-;;; menu that switches between them is P2's next slice. The deal is saved
-;;; under its own store key and restored the same way as the board.
+;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
+;;; placeholder until P4's real one); --cards skips it straight to the
+;;; card table, which is saved under its own store key and restored the
+;;; same way as the board. The MENU control in either HUD, ctrl+e, or a
+;;; severed stack's JACK OUT come back to the menu; the table's state
+;;; stays in memory meanwhile.
 ;;;
 ;;; The board, the meter and the settings are saved to the user data
 ;;; directory ((crash store): $XDG_DATA_HOME/crash-the-stack) after every
@@ -43,6 +46,7 @@
           (crash cards geometry)
           (crash cards input)
           (crash cards render)
+          (crash menu)
           (crash shell))
 
   (export native-main)
@@ -103,70 +107,120 @@
     ;; Last frame's wall time in ms, shown in the HUD under --log-keys.
     (define *frame-ms* 0.0)
 
-    (define (game-loop seed texture-first? model log-keys? fresh?)
+    ;; --- the three screens ----------------------------------------------------
+    ;;
+    ;; One loop, one screen at a time: the menu, the stack or the card
+    ;; table. A table's state stays in memory while the menu is up, so
+    ;; CONTINUE (or the same table's entry) returns to it; a table that
+    ;; was never opened this run boots from the store. Each frame: poll,
+    ;; hand the frame to the screen, draw it.
+
+    (define-struct stage
+      (screen default: 'menu)     ; menu | stack | cards
+      (menu default: #f)
+      (session default: #f)       ; the stack, once opened
+      (fx default: #f)
+      (deal default: #f))         ; the card table, once opened
+
+    ;; The stack, opened from the store or the flags.
+    (define (open-stack a lay seed fresh? texture-first? model)
+      (if (stage-session a)
+          (stage a screen: 'stack)
+          (let ((s (car (boot-session lay seed fresh?))))
+            (stage a
+                 screen: 'stack
+                 session: (session (if model (session-with-model s model) s)
+                                   render-mode: (if texture-first?
+                                                    'texture
+                                                    (session-render-mode s)))
+                 fx: (fx-new)))))
+
+    (define (open-cards a seed fresh?)
+      (if (stage-deal a)
+          (stage a screen: 'cards)
+          (stage a screen: 'cards deal: (car (boot-deal seed fresh?)))))
+
+    (define (open-menu a)
+      (stage a screen: 'menu menu: (launch-menu #f)))
+
+    ;; A menu choice: which table to open (CONTINUE is the active one).
+    (define (choose a choice lay seed fresh? texture-first? model)
+      (let ((id (if (eq? choice 'continue) (active-game) choice)))
+        (case id
+          ((stack) (set-active-game! 'stack)
+                   (open-stack a lay seed fresh? texture-first? model))
+          ((cards) (set-active-game! 'cards)
+                   (open-cards a seed fresh?))
+          (else a))))
+
+    (define (step-stack a f dt geom log-keys?)
+      (let* ((s (stage-session a))
+             (x (fx-frame (stage-fx a) dt))
+             (after (save-after-frame!
+                      s
+                      (session-advance (session-step s f geom)
+                                       (clock-steps (fx-clock x)))))
+             (x (fx-observe x s after geom)))
+        (when log-keys?
+          (set! *frame-ms* (* 1000.0 dt))
+          (when (pair? (input-frame-pressed f))
+            (display "keys: ")
+            (write (input-frame-pressed f))
+            (display " held: ")
+            (write (input-frame-held f))
+            (newline)))
+        (stage a session: after fx: x)))
+
+    (define (step-cards a f geom)
+      (let ((d (stage-deal a)))
+        (stage a deal: (save-deal-after-frame! d (deal-step d f geom)))))
+
+    (define (stage-loop seed texture-first? model log-keys? fresh? cards?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
         (set-letterbox-color 0.0 0.0 0.0)
         (let* ((lay (turtle-layout))
                (geom (make-geometry lay VW VH))
-               (tex (load-test-tile)))
-          (let loop ((s (let ((s (car (boot-session lay seed fresh?))))
-                          ;; --texture starts in the test-tile renderer; --keys
-                          ;; picks the model; a restored board keeps its own
-                          ;; settings unless the flags say otherwise
-                          (session (if model (session-with-model s model) s)
-                                   render-mode: (if texture-first?
-                                                    'texture
-                                                    (session-render-mode s)))))
-                     (x (fx-new)))
+               (card-geom (make-card-geometry VW VH))
+               (tex (load-test-tile))
+               (open (lambda (a choice)
+                       (choose a choice lay seed fresh? texture-first? model))))
+          (let loop ((a (if cards?
+                            (open-cards (open-menu (stage)) seed fresh?)
+                            (open-menu (stage)))))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))
                    (f (poll-frame))
-                   (x (fx-frame x dt))
-                   (after (save-after-frame!
-                            s
-                            (session-advance (session-step s f geom)
-                                             (clock-steps (fx-clock x)))))
-                   (x (fx-observe x s after geom)))
-              (when log-keys?
-                (set! *frame-ms* (* 1000.0 dt))
-                (when (pair? (input-frame-pressed f))
-                  (display "keys: ")
-                  (write (input-frame-pressed f))
-                  (display " held: ")
-                  (write (input-frame-held f))
-                  (newline)))
-
+                   (click (input-frame-click f))
+                   (a (case (stage-screen a)
+                        ((menu)
+                         (let ((r (menu-step (stage-menu a) f VW VH)))
+                           (if (cdr r)
+                               (open (stage a menu: (car r)) (cdr r))
+                               (stage a menu: (car r)))))
+                        ((stack)
+                         (cond ((menu-frame? f (and click (hit-control geom (car click) (cdr click))))
+                                (open-menu a))
+                               ((jack-out? (stage-session a) f VW VH (geometry-hud-h geom))
+                                (open-menu a))
+                               (else (step-stack a f dt geom log-keys?))))
+                        (else
+                         (if (menu-frame? f (and click (hit-card-control card-geom (car click) (cdr click))))
+                             (open-menu a)
+                             (step-cards a f card-geom))))))
               (begin-frame)
-              (draw-session after geom tex x)
-              (when log-keys?
-                (draw-frame-ms *frame-ms*))
-              (end-frame)
-
-              (cond ((key-pressed? 'escape) (request-quit))
-                    ((quit-requested?) #t)
-                    (else (loop after x))))))
-        (gfx-shutdown)))
-
-    ;; The card table: the same window, no effects yet, the deal stepped
-    ;; and drawn each frame and saved when it changed.
-    (define (cards-loop seed fresh?)
-      (lambda ()
-        (gfx-setup)
-        (set-viewport VW VH)
-        (set-letterbox-color 0.0 0.0 0.0)
-        (let ((geom (make-card-geometry VW VH)))
-          (let loop ((d (car (boot-deal seed fresh?))))
-            (wait-frame)
-            (let* ((f (poll-frame))
-                   (after (save-deal-after-frame! d (deal-step d f geom))))
-              (begin-frame)
-              (draw-deal after geom)
+              (case (stage-screen a)
+                ((menu) (draw-menu (stage-menu a) VW VH #f))
+                ((stack)
+                 (draw-session (stage-session a) geom tex (stage-fx a))
+                 (when log-keys?
+                   (draw-frame-ms *frame-ms*)))
+                (else (draw-deal (stage-deal a) card-geom)))
               (end-frame)
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
-                    (else (loop after))))))
+                    (else (loop a))))))
         (gfx-shutdown)))
 
     (define (native-main . _args)
@@ -188,7 +242,5 @@
         (run-game "Crash The Stack"
                   WINDOW-W
                   WINDOW-H
-                  (if cards?
-                      (cards-loop seed fresh?)
-                      (game-loop seed texture-first? model log-keys? fresh?)))
+                  (stage-loop seed texture-first? model log-keys? fresh? cards?))
         0))))

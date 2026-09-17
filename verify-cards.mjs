@@ -8,7 +8,11 @@
 // computed from virtual coordinates through the letterbox), opened with
 // ?cards so the web shell boots the Klondike table, and these sub-arms:
 //
-//   boot        "crash: cards seed S moves 0 draw 1" and the first legal
+//   menu        the page without ?cards or ?stack opens on the menu:
+//               "crash: menu stack X Y cards X Y" (no CONTINUE on a fresh
+//               origin); a tap at CARDS' center -> "crash: menu chose cards"
+//               and the card table's boot line
+//   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
 //               move's centers, "crash: cards first SX SY DX DY"
 //   render      the table region is drawn: many lit pixels in several bins
 //   draw        a tap on the stock, at the center the "crash: cards stock X Y"
@@ -47,7 +51,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["boot", "render", "draw", "two-tap", "undo", "reload", "console"];
+const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "reload", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -153,13 +157,38 @@ async function tap(vx, vy) {
   })()`);
 }
 
+// ---- menu -------------------------------------------------------------------
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+const menu = await waitLine(/^crash: menu (.+)$/, 0, 20000);
+if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu"); await new Promise(() => {}); }
+{
+  const parts = menu.m[1].split(" ");
+  const entries = {};
+  for (let i = 0; i + 2 < parts.length; i += 3) entries[parts[i]] = [parts[i + 1], parts[i + 2]];
+  const ids = Object.keys(entries).join(",");
+  if (!entries.cards || !entries.stack) fail("menu", `expected stack and cards entries, got ${ids}`);
+  else if (entries.continue) fail("menu", `a fresh origin has nothing to CONTINUE, got ${ids}`);
+  else {
+    await sleep(800);
+    let m0 = consoleLines.length;
+    await tap(entries.cards[0], entries.cards[1]);
+    const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
+    const booted = chose && await waitLine(/^crash: cards seed /, m0, 5000);
+    if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
+    else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
+    else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
+    else pass("menu", `entries ${ids}; tap on CARDS -> ${chose.m[0]}, table booted`);
+  }
+}
+
 // ---- boot -------------------------------------------------------------------
-const URL = `http://127.0.0.1:${PORT}/index.html?trace&cards&seed=${SEED}`;
+const URL = `http://127.0.0.1:${PORT}/index.html?trace&cards&fresh&seed=${SEED}`;
+const bootMark = consoleLines.length;
 await send("Page.navigate", { url: URL });
 const BOOT_RE = /^crash: cards seed (\d+) moves (\d+) draw (\d+)$/;
-const boot = await waitLine(BOOT_RE, 0, 20000);
+const boot = await waitLine(BOOT_RE, bootMark, 20000);
 if (!boot) { fail("boot", "no card-table boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
-const first = await waitLine(/^crash: cards first (?:(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)|none)$/, 0, 3000);
+const first = await waitLine(/^crash: cards first (?:(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)|none)$/, bootMark, 3000);
 if (boot.m[2] !== "0") fail("boot", `expected a fresh deal (moves 0), got moves ${boot.m[2]}`);
 else if (!first) fail("boot", "no \"crash: cards first\" line");
 else if (!first.m[1]) fail("boot", `seed ${SEED} deals no legal move; pick another --seed`);
@@ -190,7 +219,7 @@ if (SHOT) {
 
 // ---- draw ---------------------------------------------------------------------
 let mark = consoleLines.length;
-const stock = await waitLine(/^crash: cards stock (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+const stock = await waitLine(/^crash: cards stock (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
 let drew = null;
 if (!stock) fail("draw", "no \"crash: cards stock\" boot line");
 else { await tap(stock.m[1], stock.m[2]); drew = await waitLine(/^crash: cards drew (\d+)$/, mark, 3000); }
@@ -220,7 +249,7 @@ if (first && first.m[1]) {
 } else fail("two-tap", "no first move to play");
 
 // ---- undo ------------------------------------------------------------------------
-const ctl = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+const ctl = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
 if (!ctl) fail("undo", "no \"crash: control undo\" boot line");
 else {
   mark = consoleLines.length;
@@ -233,7 +262,7 @@ else {
 
 // ---- reload --------------------------------------------------------------------------
 mark = consoleLines.length;
-await send("Page.navigate", { url: URL });
+await send("Page.navigate", { url: URL.replace("&fresh", "") });
 const restored = await waitLine(/^crash: cards restored moves (\d+)$/, mark, 20000);
 if (!restored) fail("reload", "no \"crash: cards restored\" line within 20 s of a reload");
 else if (restored.m[1] !== "1") fail("reload", `expected the saved deal at move 1, got "${restored.m[0]}"`);

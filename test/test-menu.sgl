@@ -1,0 +1,70 @@
+;;; P2 - the menu.
+;;;
+;;; The first screen's entries are data; this checks the shown set keeps
+;;; the canonical order and drops unknown ids, the highlight lands where
+;;; asked, up/down wrap, Enter and Space pick the highlight, a tap on an
+;;; entry's rect picks that entry at once and a tap elsewhere picks
+;;; nothing.
+
+(import (sigil test)
+        (sigil math)
+        (crash input)
+        (crash menu))
+
+(define VW 640)
+(define VH 400)
+
+(define (frame pressed) (make-input-frame pressed '() #f))
+(define (click-frame xy) (make-input-frame '() '() xy))
+
+(define (center i)
+  (let ((r (menu-entry-rect i VW VH)))
+    (cons (+ (car r) (quotient (caddr r) 2))
+          (+ (cadr r) (quotient (cadddr r) 2)))))
+
+(test-group "the entries shown"
+  (test "the canonical order is kept whatever order the ids come in"
+    (assert-equal '(continue stack cards update)
+                  (menu-entries (menu-new '(update cards stack continue)))))
+  (test "unknown ids are dropped"
+    (assert-equal '(stack cards) (menu-entries (menu-new '(stack bogus cards)))))
+  (test "the highlight starts on the entry asked for when it is shown, else the first"
+    (assert-equal 1 (menu-highlight (menu-new '(stack cards) 'cards)))
+    (assert-equal 0 (menu-highlight (menu-new '(stack cards) 'continue)))
+    (assert-equal 0 (menu-highlight (menu-new '(continue stack cards) 'continue))))
+  (test "labels"
+    (assert-equal "CONTINUE" (menu-label 'continue))
+    (assert-equal "CARDS" (menu-label 'cards))))
+
+(test-group "keys"
+  (let ((m (menu-new '(stack cards update))))
+    (test "down moves, up moves back, both wrap"
+      (assert-equal 1 (menu-highlight (car (menu-step m (frame '(down)) VW VH))))
+      (assert-equal 2 (menu-highlight (car (menu-step m (frame '(up)) VW VH))))
+      (assert-equal 0 (menu-highlight
+                        (car (menu-step (car (menu-step (car (menu-step m (frame '(j)) VW VH))
+                                                        (frame '(j)) VW VH))
+                                        (frame '(j)) VW VH)))))
+    (test "a move picks nothing"
+      (assert-false (cdr (menu-step m (frame '(down)) VW VH))))
+    (test "Enter picks the highlight; Space too"
+      (assert-equal 'stack (cdr (menu-step m (frame '(return)) VW VH)))
+      (assert-equal 'cards (cdr (menu-step (car (menu-step m (frame '(down)) VW VH))
+                                           (frame '(space)) VW VH))))
+    (test "a frame with nothing relevant changes nothing"
+      (let ((r (menu-step m (frame '(x)) VW VH)))
+        (assert-false (cdr r))
+        (assert-equal 0 (menu-highlight (car r)))))))
+
+(test-group "taps"
+  (let ((m (menu-new '(continue stack cards))))
+    (test "a tap on an entry picks it and moves the highlight there"
+      (let ((r (menu-step m (click-frame (center 2)) VW VH)))
+        (assert-equal 'cards (cdr r))
+        (assert-equal 2 (menu-highlight (car r)))))
+    (test "the hit-test agrees with the rects"
+      (assert-equal 0 (menu-hit m VW VH (car (center 0)) (cdr (center 0))))
+      (assert-equal 1 (menu-hit m VW VH (car (center 1)) (cdr (center 1)))))
+    (test "a tap between entries or off to the side picks nothing"
+      (assert-false (menu-hit m VW VH 320 (+ ENTRIES-Y ENTRY-H 2)))
+      (assert-false (cdr (menu-step m (click-frame (cons 10 10)) VW VH))))))

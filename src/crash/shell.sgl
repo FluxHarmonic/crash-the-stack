@@ -17,12 +17,15 @@
           (crash save)
           (crash store)
           (crash cards input)
-          (crash cards save))
+          (crash cards save)
+          (crash menu))
 
   (export VW VH TEST-TILE-PATH MODIFIERS
-          BOARD-KEY BEST-KEY CARDS-KEY
+          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY UPDATE-KEY
           boot-session save-after-frame!
-          boot-deal save-deal-after-frame!)
+          boot-deal save-deal-after-frame!
+          active-game set-active-game! saved-game?
+          launch-menu menu-frame? jack-out?)
 
   (begin
     (define VW 640)
@@ -33,6 +36,12 @@
     (define BOARD-KEY "board")
     (define BEST-KEY "best")
     (define CARDS-KEY "cards")
+    ;; The game last chosen from the menu: stack | cards.
+    (define ACTIVE-KEY "active")
+    ;; The web page's mailbox for the menu's UPDATE entry (a stopgap until
+    ;; the update prompt moves into the game with a bridge): the shell
+    ;; writes "apply", the page reads it and applies the waiting version.
+    (define UPDATE-KEY "crash-update")
 
     ;; (cons session restored?): the saved session if there is one and
     ;; fresh? is #f, else a new deal of seed; the best result comes along
@@ -74,4 +83,47 @@
     (define (save-deal-after-frame! before after)
       (when (deal-save-due? before after)
         (store-write-datum! CARDS-KEY (deal->datum after)))
-      after)))
+      after)
+
+    ;; --- the menu -------------------------------------------------------------
+
+    (define (active-game)
+      (let ((d (store-read-datum ACTIVE-KEY)))
+        (if (memq d '(stack cards)) d 'stack)))
+
+    (define (set-active-game! id)
+      (store-write-datum! ACTIVE-KEY id))
+
+    ;; Does the store hold a game to continue for this table?
+    (define (saved-game? id)
+      (case id
+        ((stack) (and (datum->session (store-read-datum BOARD-KEY)) #t))
+        ((cards) (and (datum->deal (store-read-datum CARDS-KEY)) #t))
+        (else #f)))
+
+    ;; The menu at launch or from a HUD control: CONTINUE when the active
+    ;; game has a save (and is highlighted then), STACK, CARDS, UPDATE when
+    ;; the page says one is waiting.
+    (define (launch-menu update-waiting?)
+      (let ((continue? (saved-game? (active-game))))
+        (menu-new (append (if continue? '(continue) '())
+                          '(stack cards)
+                          (if update-waiting? '(update) '()))
+                  (if continue? 'continue 'stack))))
+
+    ;; Does this frame ask for the menu: a tap on a MENU control (its
+    ;; name from either table's hit-test, passed in), or ctrl+e?
+    (define (menu-frame? f control)
+      (or (eq? control 'menu)
+          (and (memq 'ctrl (input-frame-held f))
+               (memq 'e (input-frame-pressed f))
+               #t)))
+
+    ;; A severed stack's third choice, JACK OUT: the right third of the
+    ;; board area (see (crash input) step-pointer for the other two).
+    (define (jack-out? s f vw vh hud-h)
+      (let ((click (input-frame-click f)))
+        (and click
+             (trace-severed? (session-trace s))
+             (< (cdr click) (- vh hud-h))
+             (>= (car click) (* 2 (quotient vw 3))))))))

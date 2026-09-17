@@ -231,7 +231,7 @@ function timedOut(name) {
 
 // ---- 2. boot ----------------------------------------------------------------
 // ?trace switches on the game's console lines; a player's page prints nothing.
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -415,7 +415,7 @@ let iceLock = null;
   else if (!tracedOk) skip("reload", "the traced sub-arm did not reach a state to restore");
   else {
     mark = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
     const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
     if (!restored) fail("reload", `no "crash: restored" line within 20 s of the reload`);
     else {
@@ -464,7 +464,7 @@ let iceLock = null;
     if (!detail) {
       // the next launch: the prompt, then a tap on the game's APPLY box
       mark = consoleLines.length;
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
       const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 10000) : null;
       const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;

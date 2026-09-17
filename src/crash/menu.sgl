@@ -1,0 +1,101 @@
+;;; (crash menu) - The first screen: which table, and the update.
+;;;
+;;; A menu is a list of entries, each an id and its label, with one
+;;; highlighted. The shell decides which entries are shown (CONTINUE only
+;;; when a saved game exists, UPDATE only when the page says one is
+;;; waiting) and what a choice does; this module holds the entries as
+;;; data, moves the highlight on keys, picks on Enter, Space or a tap, and
+;;; says where each entry is drawn so (crash render) and the tap agree.
+;;; Plain primitives look; P4 restyles it into the DOOM/Quake-style menu
+;;; (ruling D14) without changing this shape. Nothing here reads a
+;;; platform.
+
+(define-library (crash menu)
+  (import (sigil struct)
+          (sigil math)
+          (crash input))
+
+  (export menu menu? menu-new menu-entries menu-highlight
+          menu-step menu-entry-rect menu-hit
+          menu-label MENU-ENTRIES MENU-TITLE
+          ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y)
+
+  (begin
+    (define MENU-TITLE "CRASH THE STACK")
+
+    ;; Every entry the menu can show, in order, with its label.
+    (define MENU-ENTRIES
+      '((continue "CONTINUE")
+        (stack "STACK")
+        (cards "CARDS")
+        (update "UPDATE")))
+
+    (define ENTRY-W 220)
+    (define ENTRY-H 30)
+    (define ENTRY-GAP 12)
+    (define ENTRIES-Y 150)
+
+    (define-struct menu
+      (entries default: '())     ; the ids shown, in order
+      (highlight default: 0))    ; index into entries
+
+    (define (menu-label id)
+      (let ((entry (assq id MENU-ENTRIES)))
+        (if entry (cadr entry) "?")))
+
+    ;; The menu over the ids that are shown (unknown ids dropped, the
+    ;; canonical order kept), highlighting the first of them, or the id
+    ;; asked for when it is shown.
+    (define (menu-new shown . rest)
+      (let* ((ids (filter (lambda (e) (memq (car e) shown)) MENU-ENTRIES))
+             (ids (map car ids))
+             (want (and (pair? rest) (car rest)))
+             (at (let loop ((ids ids) (i 0))
+                   (cond ((null? ids) 0)
+                         ((eq? (car ids) want) i)
+                         (else (loop (cdr ids) (+ i 1)))))))
+        (menu entries: ids highlight: at)))
+
+    ;; (x y w h) of the index-th entry, centered on the viewport.
+    (define (menu-entry-rect index vw vh)
+      (list (quotient (- vw ENTRY-W) 2)
+            (+ ENTRIES-Y (* index (+ ENTRY-H ENTRY-GAP)))
+            ENTRY-W
+            ENTRY-H))
+
+    (define (rect-contains? r x y)
+      (and (>= x (car r)) (< x (+ (car r) (caddr r)))
+           (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
+
+    ;; The index of the entry under a point, or #f.
+    (define (menu-hit m vw vh x y)
+      (let loop ((i 0))
+        (cond ((= i (length (menu-entries m))) #f)
+              ((rect-contains? (menu-entry-rect i vw vh) x y) i)
+              (else (loop (+ i 1))))))
+
+    (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+
+    (define (move m delta)
+      (let ((n (length (menu-entries m))))
+        (if (= n 0)
+            m
+            (menu m highlight: (modulo (+ (menu-highlight m) delta) n)))))
+
+    (define (highlighted m)
+      (let ((ids (menu-entries m)))
+        (and (pair? ids) (list-ref ids (menu-highlight m)))))
+
+    ;; One frame: (cons menu choice), choice the chosen id or #f. Up/down
+    ;; (or k/j) move, Enter or Space pick the highlight, a tap on an entry
+    ;; picks it at once.
+    (define (menu-step m f vw vh)
+      (let ((click (input-frame-click f)))
+        (cond ((and click (menu-hit m vw vh (car click) (cdr click)))
+               => (lambda (i)
+                    (let ((m (menu m highlight: i)))
+                      (cons m (highlighted m)))))
+              ((or (pressed? f 'up) (pressed? f 'k)) (cons (move m -1) #f))
+              ((or (pressed? f 'down) (pressed? f 'j)) (cons (move m 1) #f))
+              ((or (pressed? f 'return) (pressed? f 'space)) (cons m (highlighted m)))
+              (else (cons m #f)))))))

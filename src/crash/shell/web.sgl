@@ -64,10 +64,16 @@
 ;;;
 ;;; The board is saved to localStorage after every change ((crash store),
 ;;; (crash shell)) and restored at boot; ?fresh deals seed 1 instead.
-;;; ?cards opens the card table (Klondike, P2) in place of the stack, with
-;;; its own saved deal; the menu that switches between them is the next
-;;; slice. ?seed=N starts a fresh deal or board from N (with ?fresh, or
-;;; when nothing is saved).
+;;; The game opens on the menu (STACK / CARDS / CONTINUE / UPDATE, P2);
+;;; ?stack and ?cards go straight to a table (the arms' doors). The card
+;;; table has its own saved deal. ?seed=N starts a fresh deal or board
+;;; from N (with ?fresh, or when nothing is saved). The MENU control in
+;;; either HUD, ctrl+e, or a severed stack's JACK OUT come back to the
+;;; menu; the table stays in memory meanwhile. The menu's UPDATE entry
+;;; leaves "apply" in the localStorage key crash-update, which the page
+;;; polls while a version is waiting.
+;;;   crash: menu ID X Y ...                the menu's entries and their centers
+;;;   crash: menu chose ID
 
 (define-library (crash shell web)
   (import (sigil struct)
@@ -91,6 +97,7 @@
           (crash cards geometry)
           (crash cards input)
           (crash cards render)
+          (crash menu)
           (crash shell))
 
   (export web-main web-dispatch)
@@ -112,7 +119,11 @@
     (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
-    (define *cards* #f)      ; ?cards: the card table instead of the stack
+    (define *screen* 'menu)  ; menu | stack | cards
+    (define *menu* #f)       ; the first screen, (crash menu)
+    (define *update* #f)     ; the page says a new version is waiting
+    (define *cards* #f)      ; ?cards: straight to the card table
+    (define *stack* #f)      ; ?stack: straight to the stack
     (define *seed* 1)        ; ?seed=N: the seed a fresh deal or board starts from
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
@@ -332,8 +343,13 @@
 
     ;; --- one frame -----------------------------------------------------------
 
+    ;; Keys that went down since the last frame are kept newest first;
+    ;; they are handed over oldest first, so two tag letters landing in
+    ;; one slow frame still spell their tag in the order they were typed
+    ;; (measured 2026-09-17: under load "dr" arrived as "rd" and picked
+    ;; nothing).
     (define (input-this-frame)
-      (let ((f (make-input-frame *pressed*
+      (let ((f (make-input-frame (reverse *pressed*)
                                  (filter (lambda (k) (memq k MODIFIERS))
                                          *keys*)
                                  *click*)))
@@ -352,55 +368,99 @@
         (when ms (set! *last-ms* ms))
         dt))
 
-    (define (cards-tick)
-      (gles3-resize-to-display)
+    (define (cards-tick f)
       (when (and *trace* (not *announced*))
         (say-deal *deal*)
         (set! *announced* #t))
       (let* ((before *deal*)
-             (after (save-deal-after-frame! before
-                                            (deal-step before (input-this-frame) *card-geom*))))
+             (after (save-deal-after-frame! before (deal-step before f *card-geom*))))
         (set! *deal* after)
         (report-deal-change! before after)
         (begin-frame)
         (draw-deal after *card-geom*)
         (end-frame)))
 
+    (define (stack-tick f dt)
+      (ensure-texture!)
+      ;; The boot lines wait for trace to be switched on, and repeat after
+      ;; a new deal.
+      (when (and *trace* (not *announced*))
+        (say-first-pair *session*)
+        (when *restored*
+          (let ((b (session-board *session*)))
+            (apply say "restored"
+                   "tiles" (board-tile-count b)
+                   "trace" (exact (floor (trace-value (session-trace *session*))))
+                   "phase" (trace-phase (session-trace *session*))
+                   "ice" (trace-ice-count (session-trace *session*))
+                   "locked" (board-locked-slots b))))
+        (set! *announced* #t))
+      (let* ((before *session*)
+             (x (fx-frame *fx* dt))
+             (after (save-after-frame!
+                      before
+                      (session-advance (session-step before f *geom*)
+                                       (clock-steps (fx-clock x)))))
+             (x (fx-observe x before after *geom*)))
+        (set! *session* after)
+        (set! *fx* x)
+        (report-change! before after)
+        (report-trace! before after)
+        (when (not (= (session-seed before) (session-seed after)))
+          (set! *announced* #f))
+        (begin-frame)
+        (draw-session after *geom* *texture* x)
+        (end-frame)))
+
+    ;; The menu's boot line: each shown entry with its center.
+    (define (say-menu m)
+      (apply say "menu"
+             (let loop ((ids (menu-entries m)) (i 0) (acc '()))
+               (if (null? ids)
+                   (reverse acc)
+                   (let ((r (menu-entry-rect i VW VH)))
+                     (loop (cdr ids)
+                           (+ i 1)
+                           (cons (+ (cadr r) (half (cadddr r)))
+                                 (cons (+ (car r) (half (caddr r)))
+                                       (cons (car ids) acc)))))))))
+
+    ;; A choice opens its table and draws it this same frame (with an
+    ;; empty input frame), so no frame goes undrawn.
+    (define (menu-tick f dt)
+      (when (and *trace* (not *announced*))
+        (say-menu *menu*)
+        (set! *announced* #t))
+      (let ((r (menu-step *menu* f VW VH)))
+        (set! *menu* (car r))
+        (when (cdr r)
+          (say "menu" "chose" (cdr r))
+          (choose! (cdr r)))
+        (if (eq? *screen* 'menu)
+            (begin
+              (begin-frame)
+              (draw-menu *menu* VW VH #f)
+              (end-frame))
+            (tick-screen (make-input-frame '() '() #f) dt))))
+
     (define (web-tick dt)
       (unless *booted* (boot!))
-      (when *deal* (cards-tick))
-      (when *session*
-        (gles3-resize-to-display)
-        (ensure-texture!)
-        ;; The boot lines wait for trace to be switched on, and repeat after
-        ;; a new deal.
-        (when (and *trace* (not *announced*))
-          (say-first-pair *session*)
-          (when *restored*
-            (let ((b (session-board *session*)))
-              (apply say "restored"
-                     "tiles" (board-tile-count b)
-                     "trace" (exact (floor (trace-value (session-trace *session*))))
-                     "phase" (trace-phase (session-trace *session*))
-                     "ice" (trace-ice-count (session-trace *session*))
-                     "locked" (board-locked-slots b))))
-          (set! *announced* #t))
-        (let* ((before *session*)
-               (x (fx-frame *fx* dt))
-               (after (save-after-frame!
-                        before
-                        (session-advance (session-step before (input-this-frame) *geom*)
-                                         (clock-steps (fx-clock x)))))
-               (x (fx-observe x before after *geom*)))
-          (set! *session* after)
-          (set! *fx* x)
-          (report-change! before after)
-          (report-trace! before after)
-          (when (not (= (session-seed before) (session-seed after)))
-            (set! *announced* #f))
-          (begin-frame)
-          (draw-session after *geom* *texture* x)
-          (end-frame))))
+      (gles3-resize-to-display)
+      (tick-screen (input-this-frame) dt))
+
+    (define (tick-screen f dt)
+      (let ((click (input-frame-click f)))
+        (case *screen*
+          ((menu) (menu-tick f dt))
+          ((stack)
+           (cond ((or (menu-frame? f (and click (hit-control *geom* (car click) (cdr click))))
+                      (jack-out? *session* f VW VH (geometry-hud-h *geom*)))
+                  (open-menu!))
+                 (else (stack-tick f dt))))
+          (else
+           (if (menu-frame? f (and click (hit-card-control *card-geom* (car click) (cdr click))))
+               (open-menu!)
+               (cards-tick f))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -413,24 +473,51 @@
     ;; dispatch there is dropped with "VM not initialized"; measured
     ;; 2026-09-17, which is why the page sends its parameters on a later
     ;; task and the shell boots lazily.)
-    (define (boot!)
+    (define (open-menu!)
+      (set! *screen* 'menu)
       (set! *announced* #f)
-      (if *cards*
-          (let ((booted (boot-deal *seed* *fresh*)))
-            (set! *session* #f)
-            (set! *card-geom* (make-card-geometry VW VH))
-            (set! *deal* (car booted))
+      (set! *menu* (launch-menu *update*)))
+
+    (define (open-stack!)
+      (set! *screen* 'stack)
+      (set! *announced* #f)
+      (unless *session*
+        (let ((lay (turtle-layout)))
+          (set! *geom* (make-geometry lay VW VH))
+          (let ((booted (boot-session lay *seed* *fresh*)))
+            (set! *session* (if (and *touch* (not (cdr booted)))
+                                (session (car booted) labels-shown: #f)
+                                (car booted)))
             (set! *restored* (cdr booted)))
-          (let ((lay (turtle-layout)))
-            (set! *deal* #f)
-            (set! *geom* (make-geometry lay VW VH))
-            (let ((booted (boot-session lay *seed* *fresh*)))
-              (set! *session* (if (and *touch* (not (cdr booted)))
-                                  (session (car booted) labels-shown: #f)
-                                  (car booted)))
-              (set! *restored* (cdr booted)))
-            (set! *fx* (fx-new))))
-      (set! *booted* #t))
+          (set! *fx* (fx-new)))))
+
+    (define (open-cards!)
+      (set! *screen* 'cards)
+      (set! *announced* #f)
+      (unless *deal*
+        (let ((booted (boot-deal *seed* *fresh*)))
+          (set! *card-geom* (make-card-geometry VW VH))
+          (set! *deal* (car booted))
+          (set! *restored* (cdr booted)))))
+
+    ;; A menu choice. UPDATE: the page owns the service worker; the shell
+    ;; leaves "apply" in the page's mailbox key and the page applies it
+    ;; (a stopgap until the update prompt moves into the game).
+    (define (choose! choice)
+      (let ((id (if (eq? choice 'continue) (active-game) choice)))
+        (case id
+          ((stack) (set-active-game! 'stack) (open-stack!))
+          ((cards) (set-active-game! 'cards) (open-cards!))
+          ((update) (store-set! UPDATE-KEY "apply"))
+          (else #f))))
+
+    (define (boot!)
+      (set! *session* #f)
+      (set! *deal* #f)
+      (set! *booted* #t)
+      (cond (*cards* (open-cards!))
+            (*stack* (open-stack!))
+            (else (open-menu!))))
 
     ;; A page parameter landed: take it, and if the table is already up,
     ;; boot again with it.
@@ -460,6 +547,11 @@
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
+            ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))
+            ((string=? type "update")
+             (set! *update* (string=? payload "waiting"))
+             (when (and *booted* (eq? *screen* 'menu)) (open-menu!))
+             0)
             ((string=? type "seed")
              (param! (lambda ()
                        (let ((n (string->number payload)))
