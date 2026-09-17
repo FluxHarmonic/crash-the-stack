@@ -1,0 +1,149 @@
+;;; (crash tween) - Values that change over time, on a fixed clock.
+;;;
+;;; Animations in this game are transitions, not a simulation, but they
+;;; still have to look the same at 30 frames a second on a phone and at 144
+;;; on a desktop. So time is counted in SIM TICKS of 1/60 s, the way
+;;; Cinder's engine.sgl does (Gaffer's "Fix Your Timestep"): a clock turns
+;;; each render frame's wall dt into a whole number of ticks and keeps the
+;;; remainder for the next frame, every tween advances by that number of
+;;; ticks and nothing else, and the remainder (alpha, a fraction of one
+;;; tick) only interpolates what is drawn. A tween's state after N ticks is
+;;; the same whatever the frame rate delivered them; test/test-tween.sgl
+;;; asserts it at two rates.
+;;;
+;;; A frame that arrives very late (the tab was hidden, the box stalled)
+;;; would otherwise owe hundreds of ticks; after MAX-STEPS-PER-FRAME the
+;;; clock drops the rest and says how much it dropped, so a hiccup costs
+;;; one visible skip rather than a catch-up spiral. The positive control in
+;;; the test reads that report.
+;;;
+;;; Everything here is immutable and copy-constructed; nothing reads a
+;;; platform. The shells feed the clock: wait-frame's dt natively, the
+;;; difference between requestAnimationFrame timestamps on the web.
+
+(define-library (crash tween)
+  (import (sigil struct)
+          (sigil math))
+
+  (export TICKS-PER-SECOND SIM-STEP MAX-STEPS-PER-FRAME
+          seconds->ticks
+          clock clock? clock-new
+          clock-acc clock-ticks clock-steps clock-dropped clock-alpha clock-dt
+          clock-advance
+          tween tween? tween-new
+          tween-from tween-to tween-ticks tween-at tween-ease
+          tween-tick tween-advance tween-after-frame
+          tween-value tween-progress tween-done?
+          ease)
+
+  (begin
+    (define TICKS-PER-SECOND 60)
+    (define SIM-STEP (/ 1.0 TICKS-PER-SECOND))
+    ;; Cap on catch-up ticks in one frame: about 100 ms of animation.
+    (define MAX-STEPS-PER-FRAME 6)
+
+    (define (seconds->ticks s)
+      (max 1 (exact (round (* s TICKS-PER-SECOND)))))
+
+    ;; --- the clock -----------------------------------------------------------
+
+    ;; acc: wall seconds not yet turned into ticks (always below SIM-STEP
+    ;; after an advance). ticks: every tick ever run. steps: the ticks the
+    ;; last advance produced, which is what the frame's tweens advance by.
+    ;; dropped: seconds discarded at the cap, cumulative. alpha: acc as a
+    ;; fraction of a tick, for interpolating a drawn value between ticks.
+    ;; dt: the last frame's wall dt as given, kept for the record.
+    (define-struct clock
+      (acc default: 0.0)
+      (ticks default: 0)
+      (steps default: 0)
+      (dropped default: 0.0)
+      (alpha default: 0.0)
+      (dt default: 0.0))
+
+    (define (clock-new) (clock))
+
+    ;; One render frame of dt seconds: the clock after draining as many
+    ;; whole ticks as the accumulated time covers, up to the cap. A
+    ;; negative dt (a clock that went backwards) counts as zero.
+    (define (clock-advance c dt)
+      (let ((dt (max 0.0 dt)))
+        (let loop ((acc (+ (clock-acc c) dt))
+                   (steps 0))
+          (cond ((>= steps MAX-STEPS-PER-FRAME)
+                 (clock c
+                        acc: 0.0
+                        ticks: (+ (clock-ticks c) steps)
+                        steps: steps
+                        dropped: (+ (clock-dropped c) acc)
+                        alpha: 0.0
+                        dt: dt))
+                ((>= acc SIM-STEP)
+                 (loop (- acc SIM-STEP) (+ steps 1)))
+                (else
+                 (clock c
+                        acc: acc
+                        ticks: (+ (clock-ticks c) steps)
+                        steps: steps
+                        alpha: (/ acc SIM-STEP)
+                        dt: dt))))))
+
+    ;; --- easing --------------------------------------------------------------
+
+    ;; p in 0..1 -> 0..1. out-back overshoots past 1 on the way in, for
+    ;; things that should land with a little bounce.
+    (define (ease name p)
+      (case name
+        ((out-quad) (- 1.0 (square (- 1.0 p))))
+        ((in-out-quad) (if (< p 0.5)
+                           (* 2.0 p p)
+                           (- 1.0 (/ (square (- 2.0 (* 2.0 p))) 2.0))))
+        ((out-back) (let ((c1 1.70158)
+                          (q (- p 1.0)))
+                      (+ 1.0
+                         (* (+ c1 1.0) q q q)
+                         (* c1 q q))))
+        (else p)))
+
+    ;; --- tweens ---------------------------------------------------------------
+
+    ;; from, to: numbers. ticks: duration in sim ticks (at least 1). at: ticks
+    ;; elapsed. ease: a name ease understands.
+    (define-struct tween
+      (from default: 0.0)
+      (to default: 1.0)
+      (ticks default: 1)
+      (at default: 0)
+      (ease default: 'linear))
+
+    (define (tween-new from to ticks ease-name)
+      (tween from: from
+             to: to
+             ticks: (max 1 ticks)
+             ease: ease-name))
+
+    (define (tween-advance t n)
+      (tween t at: (min (tween-ticks t) (+ (tween-at t) n))))
+
+    (define (tween-tick t)
+      (tween-advance t 1))
+
+    ;; The tween after a frame: it moves by the ticks the clock drained and
+    ;; by nothing else. Every effect goes through here (and so does the
+    ;; gate), which is what keeps the frame rate out of the animation.
+    (define (tween-after-frame t c)
+      (tween-advance t (clock-steps c)))
+
+    (define (tween-done? t)
+      (>= (tween-at t) (tween-ticks t)))
+
+    ;; Eased progress in 0..1 at (at + alpha) ticks; alpha is the clock's
+    ;; fraction of a tick, 0 for the exact tick value.
+    (define (tween-progress t alpha)
+      (let ((p (/ (+ (tween-at t) alpha) (tween-ticks t))))
+        (ease (tween-ease t) (min 1.0 (max 0.0 p)))))
+
+    (define (tween-value t alpha)
+      (+ (tween-from t)
+         (* (- (tween-to t) (tween-from t))
+            (tween-progress t alpha))))))

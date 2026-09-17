@@ -1,0 +1,128 @@
+;;; Gate leg 1 - tween determinism, and the clock's drop report.
+;;;
+;;; One tween driven through the clock at two render rates (16 ms and 33 ms
+;;; frames, neither a multiple of the 16.67 ms tick) for one second each,
+;;; one tween-after-frame per frame exactly as (crash fx) does it. The value
+;;; is recorded after every frame together with the clock's tick count; the
+;;; two drives must agree on every tick count they both reached, within
+;;; 1e-6, and both must finish. An end-state assertion alone would stay
+;;; green when a tween advances by render dt (both drives still reach the
+;;; end), so the shared-tick samples are the leg.
+;;;
+;;; Positive control: a frame larger than the cap runs MAX-STEPS-PER-FRAME
+;;; ticks and the clock reports exactly the residual it dropped; a small
+;;; frame reports nothing dropped. So the leg is shown to be reading a
+;;; clock that can lose time, not a mirror of the frame count.
+
+(import (sigil test)
+        (sigil math)
+        (crash tween))
+
+(define TOLERANCE 1e-6)
+
+(define (close? a b)
+  (< (abs (- a b)) TOLERANCE))
+
+;; Drive a tween for `frames` frames of `dt` seconds through a clock: one
+;; tween-after-frame per frame with that frame's clock. Records
+;; (ticks-so-far . value) after every frame. Returns (list samples tween clock).
+(define (drive t dt frames)
+  (let loop ((frame 0)
+             (c (clock-new))
+             (t t)
+             (samples '()))
+    (if (= frame frames)
+        (list (reverse samples) t c)
+        (let* ((c (clock-advance c dt))
+               (t (tween-after-frame t c)))
+          (loop (+ frame 1)
+                c
+                t
+                (cons (cons (clock-ticks c) (tween-value t 0.0))
+                      samples))))))
+
+;; The samples of a and b taken at the same tick count: ((tick va vb) ...).
+(define (common-ticks a b)
+  (let loop ((a a) (acc '()))
+    (cond ((null? a) (reverse acc))
+          ((assv (car (car a)) b)
+           => (lambda (hit)
+                (loop (cdr a)
+                      (cons (list (car (car a)) (cdr (car a)) (cdr hit)) acc))))
+          (else (loop (cdr a) acc)))))
+
+(test-group "tween: two render rates, one animation"
+  (let* ((t (tween-new 0.0 100.0 30 'out-quad))
+         (fast (drive t 0.016 63))     ; 1.008 s
+         (slow (drive t 0.033 31))     ; 1.023 s
+         (fast-samples (car fast))
+         (slow-samples (car slow))
+         (pairs (common-ticks fast-samples slow-samples)))
+    (test "the drives share at least twenty-five tick counts"
+      (assert-true (>= (length pairs) 25)))
+    (test "every shared tick has the same value within 1e-6"
+      (for-each (lambda (p)
+                  (unless (close? (cadr p) (caddr p))
+                    (error "tween differs at tick" (car p) (cadr p) (caddr p))))
+                pairs)
+      (assert-true #t))
+    (test "tick 15 is the eased half-way value in both drives"
+      (let ((fast15 (assv 15 fast-samples))
+            (slow15 (assv 15 slow-samples)))
+        (assert-true (and fast15 #t))
+        (assert-true (and slow15 #t))
+        (assert-true (close? (cdr fast15) (* 100.0 (ease 'out-quad 0.5))))
+        (assert-true (close? (cdr slow15) (* 100.0 (ease 'out-quad 0.5))))))
+    (test "both drives finish at the target"
+      (assert-true (tween-done? (cadr fast)))
+      (assert-true (tween-done? (cadr slow)))
+      (assert-true (close? 100.0 (tween-value (cadr fast) 0.0)))
+      (assert-true (close? 100.0 (tween-value (cadr slow) 0.0))))
+    (test "the clocks ran the ticks their wall time covers"
+      (assert-equal 60 (clock-ticks (caddr fast)))
+      (assert-equal 61 (clock-ticks (caddr slow))))))
+
+(test-group "tween: interpolation and easing"
+  (let ((t (tween-new 10.0 20.0 10 'linear)))
+    (test "alpha interpolates between ticks"
+      (let ((t5 (tween-advance t 5)))
+        (assert-true (close? 15.0 (tween-value t5 0.0)))
+        (assert-true (close? 15.5 (tween-value t5 0.5)))))
+    (test "a finished tween clamps at the target whatever alpha says"
+      (assert-true (close? 20.0 (tween-value (tween-advance t 10) 0.9)))
+      (assert-true (close? 20.0 (tween-value (tween-advance t 50) 0.0))))
+    (test "easings start at 0 and end at 1"
+      (for-each (lambda (name)
+                  (assert-true (close? 0.0 (ease name 0.0)))
+                  (assert-true (close? 1.0 (ease name 1.0))))
+                '(linear out-quad in-out-quad out-back)))
+    (test "out-back overshoots on the way in"
+      (assert-true (> (ease 'out-back 0.8) 1.0)))
+    (test "seconds->ticks rounds to whole ticks, never below one"
+      (assert-equal 30 (seconds->ticks 0.5))
+      (assert-equal 1 (seconds->ticks 0.001)))))
+
+(test-group "clock: the spiral-of-death cap reports what it drops"
+  (test "a 250 ms frame runs the cap and drops the rest"
+    (let ((c (clock-advance (clock-new) 0.25)))
+      (assert-equal MAX-STEPS-PER-FRAME (clock-steps c))
+      (assert-equal MAX-STEPS-PER-FRAME (clock-ticks c))
+      (assert-true (close? (- 0.25 (* MAX-STEPS-PER-FRAME SIM-STEP))
+                           (clock-dropped c)))
+      (assert-true (close? 0.0 (clock-acc c)))))
+  (test "a 50 ms frame drops nothing and keeps its remainder"
+    (let ((c (clock-advance (clock-new) 0.05)))
+      (assert-equal 3 (clock-steps c))
+      (assert-true (close? 0.0 (clock-dropped c)))
+      (assert-true (close? (- 0.05 (* 3 SIM-STEP)) (clock-acc c)))
+      (assert-true (close? (/ (clock-acc c) SIM-STEP) (clock-alpha c)))))
+  (test "the remainder carries into the next frame"
+    (let* ((c1 (clock-advance (clock-new) 0.01))
+           (c2 (clock-advance c1 0.01)))
+      (assert-equal 0 (clock-steps c1))
+      (assert-equal 1 (clock-steps c2))
+      (assert-equal 1 (clock-ticks c2))))
+  (test "a backwards frame counts as zero"
+    (let ((c (clock-advance (clock-new) -1.0)))
+      (assert-equal 0 (clock-steps c))
+      (assert-true (close? 0.0 (clock-dropped c))))))
