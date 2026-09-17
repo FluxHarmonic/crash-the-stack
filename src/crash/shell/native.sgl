@@ -46,6 +46,7 @@
           (crash cards geometry)
           (crash cards input)
           (crash cards render)
+          (crash cards fx)
           (crash menu)
           (crash shell))
 
@@ -120,7 +121,8 @@
       (menu default: #f)
       (session default: #f)       ; the stack, once opened
       (fx default: #f)
-      (deal default: #f))         ; the card table, once opened
+      (deal default: #f)          ; the card table, once opened
+      (card-fx default: #f))
 
     ;; The stack, opened from the store or the flags.
     (define (open-stack a lay seed fresh? texture-first? model)
@@ -138,7 +140,10 @@
     (define (open-cards a seed fresh?)
       (if (stage-deal a)
           (stage a screen: 'cards)
-          (stage a screen: 'cards deal: (car (boot-deal seed fresh?)))))
+          (stage a
+                 screen: 'cards
+                 deal: (car (boot-deal seed fresh?))
+                 card-fx: (card-fx-new))))
 
     (define (open-menu a)
       (stage a screen: 'menu menu: (launch-menu #f)))
@@ -171,9 +176,15 @@
             (newline)))
         (stage a session: after fx: x)))
 
-    (define (step-cards a f geom)
-      (let ((d (stage-deal a)))
-        (stage a deal: (save-deal-after-frame! d (deal-step d f geom)))))
+    (define (step-cards a f dt geom)
+      (let* ((d (stage-deal a))
+             (x (card-fx-frame (stage-card-fx a) dt geom))
+             (after (save-deal-after-frame!
+                      d
+                      (deal-advance (deal-step d f geom)
+                                    (clock-steps (card-fx-clock x)))))
+             (x (card-fx-observe x d after geom)))
+        (stage a deal: after card-fx: x)))
 
     (define (stage-loop seed texture-first? model log-keys? fresh? cards?)
       (lambda ()
@@ -208,7 +219,7 @@
                         (else
                          (if (menu-frame? f (and click (hit-card-control card-geom (car click) (cdr click))))
                              (open-menu a)
-                             (step-cards a f card-geom))))))
+                             (step-cards a f dt card-geom))))))
               (begin-frame)
               (case (stage-screen a)
                 ((menu) (draw-menu (stage-menu a) VW VH #f))
@@ -216,7 +227,7 @@
                  (draw-session (stage-session a) geom tex (stage-fx a))
                  (when log-keys?
                    (draw-frame-ms *frame-ms*)))
-                (else (draw-deal (stage-deal a) card-geom)))
+                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a))))
               (end-frame)
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)

@@ -62,7 +62,8 @@
 ;;;   crash: cards moved N                   a move landed; N = the move count
 ;;;   crash: cards drew N                    a draw; N = cards in the waste
 ;;;   crash: cards undo N
-;;;   crash: cards won
+;;;   crash: cards auto                      auto-complete armed (every tableau card up)
+;;;   crash: cards won moves N
 ;;;
 ;;; The board is saved to localStorage after every change ((crash store),
 ;;; (crash shell)) and restored at boot; ?fresh deals seed 1 instead.
@@ -99,6 +100,7 @@
           (crash cards geometry)
           (crash cards input)
           (crash cards render)
+          (crash cards fx)
           (crash menu)
           (crash shell))
 
@@ -129,6 +131,7 @@
     (define *seed* 1)        ; ?seed=N: the seed a fresh deal or board starts from
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
+    (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -312,7 +315,8 @@
               ((not (= (deal-seed before) (deal-seed after)))
                (set! *announced* #f)
                (set! *restored* #f))
-              ((game-won? g1) (say "cards" "won"))
+              ((game-won? g1) (say "cards" "won" "moves" m1))
+              ((and (deal-auto after) (not (deal-auto before))) (say "cards" "auto"))
               ((< h1 h0) (say "cards" "undo" m1))
               ((> (length (game-waste g1)) (length (game-waste g0)))
                (say "cards" "drew" (length (game-waste g1))))
@@ -354,6 +358,8 @@
               (say "cards" "keys" (pile-key (car (car moves))) (pile-key dst-place)))))
       (when *restored*
         (say "cards" "restored" "moves" (game-moves (deal-game d))))
+      (when (deal-auto d)
+        (say "cards" "auto"))
       (for-each (lambda (c)
                   (say "control"
                        (car c)
@@ -388,16 +394,22 @@
         (when ms (set! *last-ms* ms))
         dt))
 
-    (define (cards-tick f)
+    (define (cards-tick f dt)
       (when (and *trace* (not *announced*))
         (say-deal *deal*)
         (set! *announced* #t))
       (let* ((before *deal*)
-             (after (save-deal-after-frame! before (deal-step before f *card-geom*))))
+             (x (card-fx-frame *card-fx* dt *card-geom*))
+             (after (save-deal-after-frame!
+                      before
+                      (deal-advance (deal-step before f *card-geom*)
+                                    (clock-steps (card-fx-clock x)))))
+             (x (card-fx-observe x before after *card-geom*)))
         (set! *deal* after)
+        (set! *card-fx* x)
         (report-deal-change! before after)
         (begin-frame)
-        (draw-deal after *card-geom*)
+        (draw-deal after *card-geom* x)
         (end-frame)))
 
     (define (stack-tick f dt)
@@ -480,7 +492,7 @@
           (else
            (if (menu-frame? f (and click (hit-card-control *card-geom* (car click) (cdr click))))
                (open-menu!)
-               (cards-tick f))))))
+               (cards-tick f dt))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -520,6 +532,7 @@
           (set! *deal* (if (and *touch* (not (cdr booted)))
                            (deal (car booted) labels-shown: #f)
                            (car booted)))
+          (set! *card-fx* (card-fx-new))
           (set! *restored* (cdr booted)))))
 
     ;; A menu choice. UPDATE: the page owns the service worker; the shell

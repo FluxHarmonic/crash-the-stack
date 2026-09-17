@@ -29,6 +29,13 @@
 //   reload      the page is reloaded and the deal comes back from
 //               localStorage: "crash: cards restored moves 1" (the keys
 //               sub-arm's last move)
+//   won         a save with every card on a foundation but the king of spades,
+//               face up on pile 0, is written to localStorage and the page
+//               reloaded: the deal restores, auto-complete arms at once
+//               ("crash: cards auto"), the king goes up ("crash: cards won
+//               moves 1"), and the cascade moves: two canvas samples 400 ms
+//               apart differ in the board region (gate leg 4 on the web build,
+//               and the cascade's presence)
 //   console     zero error-level console entries and zero exceptions
 //
 // Every sub-arm anchors on a line the passing path of the OTHER arm cannot
@@ -58,7 +65,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "reload", "console"];
+const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "reload", "won", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -323,6 +330,44 @@ const restored = await waitLine(/^crash: cards restored moves (\d+)$/, mark, 200
 if (!restored) fail("reload", "no \"crash: cards restored\" line within 20 s of a reload");
 else if (restored.m[1] !== "1") fail("reload", `expected the saved deal at move 1 (the keys sub-arm's last move), got "${restored.m[0]}"`);
 else pass("reload", restored.m[0]);
+
+// ---- won -----------------------------------------------------------------------------------
+{
+  // (crash cards save)'s datum, as (write) prints it: cards are 0..51 by
+  // suit (S H D C) then rank; foundations top first.
+  const found = (suit) => Array.from({ length: 13 }, (_, k) => suit * 13 + 12 - k);
+  const spades = found(0).slice(1); // without the king (12), which sits on pile 0
+  const datum = `(crash-cards 1 (seed . 1) (draw . 1) (passes . 0) (moves . 0) (tableau ((12 . #t)) () () () () () ()) (foundations (${spades.join(" ")}) (${found(1).join(" ")}) (${found(2).join(" ")}) (${found(3).join(" ")})) (stock) (waste) (selected . #f) (rng . 1) (settings tags #t))`;
+  await evalJS(`localStorage.setItem("cards", ${JSON.stringify(datum)})`);
+  mark = consoleLines.length;
+  await send("Page.navigate", { url: URL.replace("&fresh", "") });
+  const restored = await waitLine(/^crash: cards restored moves 0$/, mark, 20000);
+  const armed = restored && await waitLine(/^crash: cards auto$/, mark, 5000);
+  const won = armed && await waitLine(/^crash: cards won moves (\d+)$/, mark, 5000);
+  if (!restored) fail("won", "the near-won save did not restore (no \"crash: cards restored moves 0\")");
+  else if (!armed) fail("won", "restored but auto-complete did not arm");
+  else if (!won) fail("won", "armed but no \"crash: cards won\" line within 5 s");
+  else {
+    const sample = () => evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+      const c = document.getElementById("stage");
+      const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+      const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      let h = 0;
+      for (let y = Math.floor(c.height * 0.3); y < Math.floor(c.height * 0.8); y += 3)
+        for (let x = 0; x < c.width; x += 3) { const i = (y * c.width + x) * 4; h = (h * 31 + d[i] + d[i + 1] + d[i + 2]) | 0; }
+      resolve(h);
+    }))`);
+    const a = await sample(); await sleep(400); const b = await sample();
+    if (SHOT) {
+      await sleep(600);
+      const shot = await send("Page.captureScreenshot", { format: "png" });
+      fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-won.png", Buffer.from(shot.data, "base64"));
+    }
+    if (a === b) fail("won", `${won.m[0]}, but the board region did not change over 400 ms (no cascade)`);
+    else pass("won", `${won.m[0]}; the cascade moves (board hash ${a} -> ${b})`);
+  }
+}
 
 // ---- console ---------------------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);

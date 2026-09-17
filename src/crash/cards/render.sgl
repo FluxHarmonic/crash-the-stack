@@ -20,6 +20,7 @@
           (crash cards rules)
           (crash cards geometry)
           (crash cards input)
+          (crash cards fx)
           (crash font)
           (crash palette))
 
@@ -145,7 +146,9 @@
              (= (cadr sel) i)
              (<= depth (caddr sel)))))
 
-    (define (draw-top-row g game)
+    ;; x: the frame's effects; a cascading foundation shows the card under
+    ;; the ones it has launched.
+    (define (draw-top-row g game x)
       ;; the stock: a back when it has cards, the ring when it is empty
       (if (pair? (game-stock game))
           (draw-back (stock-rect g))
@@ -164,12 +167,35 @@
       ;; the foundations
       (let loop ((i 0))
         (when (< i FOUNDATIONS)
-          (let ((f (game-foundation game i))
-                (r (foundation-rect g i)))
+          (let* ((f (game-foundation game i))
+                 (r (foundation-rect g i))
+                 (gone (if (card-fx-idle? x) 0 (vector-ref (card-fx-launched x) i)))
+                 (f (if (> gone 0) (drop-n f (min gone (length f))) f)))
             (if (null? f)
                 (draw-slot r #f)
                 (draw-face r (car f) (selected-place? game (list 'foundation i)))))
           (loop (+ i 1)))))
+
+    ;; The cascade: each flying card over its trail (the placeholder for
+    ;; P3's glyph streams), on the board area only.
+    (define (draw-cascade g x)
+      (let ((w (card-geometry-card-w g))
+            (h (card-geometry-card-h g)))
+        (for-each (lambda (f)
+                    (let loop ((trail (reverse (flyer-trail f))) (k 0))
+                      (unless (null? trail)
+                        (draw-face (list (exact (floor (car (car trail))))
+                                         (exact (floor (cdr (car trail))))
+                                         w h)
+                                   (flyer-card f)
+                                   #f)
+                        (loop (cdr trail) (+ k 1))))
+                    (draw-face (list (exact (floor (flyer-x f)))
+                                     (exact (floor (flyer-y f)))
+                                     w h)
+                               (flyer-card f)
+                               #f))
+                  (reverse (card-fx-flying x)))))
 
     (define (draw-tableau g game)
       (let loop ((i 0))
@@ -332,19 +358,21 @@
                      2))
         (let ((message (deal-message d)))
           (when (and (> (string-length message) 0)
-                     (or (game-won? game) (string=? message MSG-STUCK)))
+                     (or (game-won? game) (string=? message MSG-STUCK) (string=? message MSG-AUTO)))
             (draw-message g message top)))))
 
     ;; --- one frame ------------------------------------------------------------------
 
-    (define (draw-deal d g)
+    ;; x: the frame's effects from (crash cards fx), already advanced.
+    (define (draw-deal d g x)
       (let ((game (deal-game d)))
         (draw-background g)
-        (draw-top-row g game)
+        (draw-top-row g game x)
         (draw-tableau g game)
-        (when (deal-labels-shown d)
+        (when (and (deal-labels-shown d) (not (deal-auto d)) (not (deal-won? d)))
           (case (deal-model d)
             ((tags) (draw-tags d g))
             ((piles) (draw-pile-keys g game))
             (else #f)))
+        (draw-cascade g x)
         (draw-hud d g)))))

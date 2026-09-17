@@ -1,0 +1,172 @@
+;;; (crash cards fx) - What moves on the card table: the cascade.
+;;;
+;;; Windows Solitaire's win: the finished foundations bounce and stream
+;;; down the screen, one card at a time, each leaving a trail because the
+;;; screen is never cleared. This is that, in placeholder form on the
+;;; fixed clock of (crash tween): when a deal is observed to be won, the
+;;; foundations launch their cards top first, one every CASCADE-GAP
+;;; ticks, cycling the four; a card flies with a random sideways
+;;; velocity from the table's own random stream, falls under GRAVITY,
+;;; bounces off the bottom edge losing BOUNCE of its speed, and is gone
+;;; once it leaves the screen sideways. The trail is the card's last
+;;; TRAIL positions, drawn behind it. P3 turns the trail into glyph
+;;; streams; the physics stays.
+;;;
+;;; fx-frame advances the clock and the flight; fx-observe watches the
+;;; deal before and after a step and starts the cascade on the win. The
+;;; renderer reads the flying cards and how many each foundation has
+;;; launched, and never advances anything. Everything is immutable and
+;;; copy-constructed; nothing reads a platform.
+
+(define-library (crash cards fx)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack prng)
+          (crash tween)
+          (crash cards deck)
+          (crash cards rules)
+          (crash cards geometry)
+          (crash cards input))
+
+  (export card-fx card-fx? card-fx-new card-fx-clock
+          card-fx-frame card-fx-observe card-fx-idle?
+          card-fx-flying card-fx-launched card-fx-cascading? card-fx-ticks
+          flyer flyer-card flyer-x flyer-y flyer-trail
+          CASCADE-GAP GRAVITY BOUNCE TRAIL LAUNCH-VX-MIN LAUNCH-VX-MAX)
+
+  (begin
+    ;; --- knobs ---------------------------------------------------------------
+
+    (define CASCADE-GAP 6)          ; ticks between launches
+    (define GRAVITY 0.35)           ; pixels per tick per tick
+    (define BOUNCE 0.78)            ; the fraction of speed kept off the bottom edge
+    (define TRAIL 14)               ; positions kept behind a flying card
+    (define LAUNCH-VX-MIN 1.6)      ; sideways speed, pixels per tick, either way
+    (define LAUNCH-VX-MAX 4.2)
+    (define LAUNCH-VY -1.5)         ; a small hop off the foundation
+
+    ;; A flying card: where it is, where it goes, where it was.
+    (define-struct flyer
+      (card default: 0)
+      (x default: 0.0)
+      (y default: 0.0)
+      (vx default: 0.0)
+      (vy default: 0.0)
+      (trail default: '()))         ; ((x . y) ...) newest first
+
+    (define-struct card-fx
+      (clock default: #f)
+      (cascading? default: #f)
+      (launched default: (vector 0 0 0 0))   ; cards launched per foundation
+      (next-foundation default: 0)
+      (until-launch default: 0)              ; ticks until the next launch
+      (game default: #f)                     ; the won game, for what to launch
+      (flying default: '())
+      (rng default: 1))
+
+    (define (card-fx-new)
+      (card-fx clock: (clock-new)))
+
+    (define (card-fx-idle? x)
+      (and (not (card-fx-cascading? x)) (null? (card-fx-flying x))))
+
+    (define (card-fx-ticks x)
+      (clock-ticks (card-fx-clock x)))
+
+    ;; --- observing -------------------------------------------------------------
+
+    ;; The step from before to after won the game: start the cascade from
+    ;; the foundations as they stand. A new deal stops it.
+    (define (card-fx-observe x before after g)
+      (cond ((and (deal-won? after) (not (deal-won? before)))
+             (card-fx x
+                      cascading?: #t
+                      launched: (vector 0 0 0 0)
+                      next-foundation: 0
+                      until-launch: CASCADE-GAP
+                      game: (deal-game after)
+                      flying: '()
+                      rng: (prng-seed (+ 7 (card-fx-ticks x)))))
+            ((not (= (deal-seed before) (deal-seed after)))
+             (card-fx x cascading?: #f flying: '() game: #f))
+            (else x)))
+
+    ;; --- advancing ----------------------------------------------------------------
+
+    ;; The next foundation with a card still to launch, from i, or #f.
+    (define (next-with-cards x i)
+      (let ((game (card-fx-game x))
+            (launched (card-fx-launched x)))
+        (let loop ((k 0) (i i))
+          (cond ((= k FOUNDATIONS) #f)
+                ((< (vector-ref launched i) (length (game-foundation game i))) i)
+                (else (loop (+ k 1) (modulo (+ i 1) FOUNDATIONS)))))))
+
+    ;; Launch the next card: the top of the next foundation with cards.
+    (define (launch x g)
+      (let ((i (next-with-cards x (card-fx-next-foundation x))))
+        (if (not i)
+            (card-fx x cascading?: #f)
+            (let* ((game (card-fx-game x))
+                   (n (vector-ref (card-fx-launched x) i))
+                   (card (list-ref (game-foundation game i) n))
+                   (r (foundation-rect g i))
+                   (r1 (prng-next (card-fx-rng x)))
+                   (r2 (prng-next r1))
+                   (speed (+ LAUNCH-VX-MIN
+                             (* (- LAUNCH-VX-MAX LAUNCH-VX-MIN)
+                                (/ (prng-index r1 1000) 1000.0))))
+                   (vx (if (even? (prng-index r2 2)) speed (- speed)))
+                   (launched (vector-copy (card-fx-launched x))))
+              (vector-set! launched i (+ n 1))
+              (card-fx x
+                       launched: launched
+                       next-foundation: (modulo (+ i 1) FOUNDATIONS)
+                       until-launch: CASCADE-GAP
+                       rng: r2
+                       flying: (cons (flyer card: card
+                                            x: (inexact (car r))
+                                            y: (inexact (cadr r))
+                                            vx: vx
+                                            vy: LAUNCH-VY)
+                                     (card-fx-flying x)))))))
+
+    ;; One tick of flight for every card; a card off the sides is dropped.
+    (define (fly x g)
+      (let ((vw (card-geometry-vw g))
+            (floor-y (- (card-geometry-vh g) (card-geometry-hud-h g) (card-geometry-card-h g)))
+            (w (card-geometry-card-w g)))
+        (card-fx x
+                 flying: (filter (lambda (f) (and (> (+ (flyer-x f) w) 0) (< (flyer-x f) vw)))
+                                 (map (lambda (f)
+                                        (let* ((vy (+ (flyer-vy f) GRAVITY))
+                                               (y (+ (flyer-y f) vy))
+                                               (bounce? (> y floor-y))
+                                               (trail (take (cons (cons (flyer-x f) (flyer-y f))
+                                                                  (flyer-trail f))
+                                                            (min TRAIL (+ 1 (length (flyer-trail f)))))))
+                                          (flyer f
+                                                 x: (+ (flyer-x f) (flyer-vx f))
+                                                 y: (if bounce? (inexact floor-y) y)
+                                                 vy: (if bounce? (- (* vy BOUNCE)) vy)
+                                                 trail: trail)))
+                                      (card-fx-flying x))))))
+
+    (define (tick x g)
+      (let ((x (fly x g)))
+        (if (not (card-fx-cascading? x))
+            x
+            (let ((until (- (card-fx-until-launch x) 1)))
+              (if (<= until 0)
+                  (launch x g)
+                  (card-fx x until-launch: until))))))
+
+    ;; Advance the clock by the frame's wall dt and the cascade by the
+    ;; ticks that produced.
+    (define (card-fx-frame x dt g)
+      (let* ((c (clock-advance (card-fx-clock x) dt))
+             (x (card-fx x clock: c)))
+        (if (card-fx-idle? x)
+            x
+            (let loop ((n (clock-steps c)) (x x))
+              (if (= n 0) x (loop (- n 1) (tick x g)))))))))

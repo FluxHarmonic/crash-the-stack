@@ -39,18 +39,23 @@
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
-          deal-model deal-labels deal-labels-shown deal-typed
-          deal-step deal-undo deal-next deal-toggle-draw deal-with-model
+          deal-model deal-labels deal-labels-shown deal-typed deal-auto
+          deal-step deal-advance deal-undo deal-next deal-toggle-draw deal-with-model
+          AUTO-TICKS
           deal-places tag-places pile-key->index PILE-KEYS
           CARD-MODELS card-model-name
-          MSG-DEALT MSG-WON MSG-STUCK)
+          MSG-DEALT MSG-WON MSG-STUCK MSG-AUTO)
 
   (begin
     (define MSG-DEALT "JACKED IN. DEAL RUNNING.")
     (define MSG-WON "DECK CRASHED.")
     (define MSG-STUCK "NO MOVES LEFT - UNDO OR NEXT")
+    (define MSG-AUTO "AUTO-COMPLETING.")
 
     (define CARD-MODELS '(tags piles))
+
+    ;; Auto-complete plays one card every this many sim ticks (60 a second).
+    (define AUTO-TICKS 8)
 
     ;; Cybersol's pile keys, left to right.
     (define PILE-KEYS '(a s d f j k l))
@@ -70,6 +75,8 @@
       (labels default: '())          ; ((place . "ab") ...), recomputed when the game changes
       (labels-shown default: #t)     ; space toggles; both overlays obey it
       (typed default: "")            ; tag letters typed so far
+      (auto default: #f)             ; auto-complete is running: every tableau card is up
+      (auto-acc default: 0)          ; ticks toward the next auto-complete step
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -112,22 +119,47 @@
     ;; --- construction ---------------------------------------------------------
 
     ;; Everything that must follow a game change: the tags, the message,
-    ;; the typed text.
+    ;; the typed text, and auto-complete arming itself the moment every
+    ;; tableau card is face up (the history is cut then: the run is not
+    ;; undone, like an ICE event).
     (define (with-game d g)
-      (deal d
-            game: g
-            labels: (tag-places g)
-            typed: ""
-            message: (cond ((game-won? g) MSG-WON)
-                           ((and (null? (legal-moves g))
-                                 (null? (game-stock g))
-                                 (null? (game-waste g)))
-                            MSG-STUCK)
-                           (else ""))))
+      (let* ((arm? (and (not (deal-auto d))
+                        (not (game-won? g))
+                        (game-all-up? g)))
+             (g (if arm? (game g history: '() selected: #f) g)))
+        (deal d
+              game: g
+              labels: (tag-places g)
+              typed: ""
+              auto: (or (deal-auto d) arm?)
+              message: (cond ((game-won? g) MSG-WON)
+                             ((or arm? (deal-auto d)) MSG-AUTO)
+                             ((and (null? (legal-moves g))
+                                   (null? (game-stock g))
+                                   (null? (game-waste g)))
+                              MSG-STUCK)
+                             (else "")))))
+
+    ;; The frame's sim ticks: while auto-complete runs, one card every
+    ;; AUTO-TICKS until the game is won.
+    (define (deal-advance d ticks)
+      (if (or (not (deal-auto d)) (deal-won? d) (= ticks 0))
+          d
+          (let loop ((d d) (acc (+ (deal-auto-acc d) ticks)))
+            (cond ((deal-won? d) (deal d auto-acc: 0))
+                  ((< acc AUTO-TICKS) (deal d auto-acc: acc))
+                  (else
+                   (loop (with-game d (game-auto-step (deal-game d)))
+                         (- acc AUTO-TICKS)))))))
 
     (define (deal-new seed draw)
       (deal (with-game (deal seed: seed) (game-new seed draw))
             message: MSG-DEALT))
+
+    ;; While auto-complete runs (or the game is won) the table takes no
+    ;; move: only NEXT and the menu.
+    (define (busy? d)
+      (or (deal-auto d) (deal-won? d)))
 
     ;; A deal from saved parts ((crash cards save)): the game and the
     ;; settings; the tags are recomputed.
@@ -146,7 +178,7 @@
       (game-won? (deal-game d)))
 
     (define (deal-undo d)
-      (with-game d (game-undo (deal-game d))))
+      (if (busy? d) d (with-game d (game-undo (deal-game d)))))
 
     ;; The next seed, the draw count and settings kept.
     (define (deal-next d)
@@ -157,10 +189,12 @@
     ;; One or three: the next draw honors it.
     (define (deal-toggle-draw d)
       (let ((g (deal-game d)))
-        (with-game d (game-with-draw g (if (= (game-draw g) 1) 3 1)))))
+        (if (busy? d)
+            d
+            (with-game d (game-with-draw g (if (= (game-draw g) 1) 3 1))))))
 
     (define (pick d place)
-      (with-game d (game-select (deal-game d) place)))
+      (if (busy? d) d (with-game d (game-select (deal-game d) place))))
 
     (define (deselect d)
       (let ((g (deal-game d)))
