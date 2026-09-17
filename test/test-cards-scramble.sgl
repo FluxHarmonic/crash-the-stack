@@ -1,0 +1,167 @@
+;;; Gate leg 6 (P2) - the scramble and its guarantee.
+;;;
+;;; For seeds 1..200, a deal is played greedily (the first progress move:
+;;; a card to a foundation, the waste to the tableau, a run whose move
+;;; turns a card over; else a draw) until the scanner reports it stuck,
+;;; won, or the step bound runs out; the three classes are counted and
+;;; printed. For every stuck state the scramble yields a game the same
+;;; scanner reports as not stuck, and leaves every face-up tableau card,
+;;; every foundation and the pass count exactly as they were, with the
+;;; same 52 cards on the table. Positive control: a hand-built dead
+;;; position (no legal move, the stock and the waste empty) is reported
+;;; stuck by the same scanner, and the scramble refuses it (the hidden
+;;; cards all sit under the tops, so no reshuffle can help). Sabotage S2
+;;; removes the retry loop (one shuffle, no guarantee) and must redden
+;;; the guarantee on some seed, named.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash cards deck)
+        (crash cards rules))
+
+(define SEEDS 200)
+(define STEP-BOUND 300)
+
+;; A pile's face-up prefix, top first.
+(define (ups g i)
+  (list-take-while pile-up? (game-pile g i)))
+
+(define (visible g)
+  (list (map (lambda (i) (ups g i)) (iota PILES))
+        (vector->list (game-foundations g))
+        (game-passes g)))
+
+;; A stuck state no scramble can help: the stock and the waste are empty
+;; (the hidden cards go back under the same face-up ones), or no hidden
+;; card fits any top or foundation, so no arrangement of the stock holds
+;; a playable card. The scramble must refuse exactly these.
+(define (dead? g)
+  (or (and (null? (game-stock g)) (null? (game-waste g)))
+      (let ((tops (map (lambda (i) (place-card g (list 'pile i 0))) (iota PILES)))
+            (ftops (map (lambda (i) (place-card g (list 'foundation i))) (iota FOUNDATIONS)))
+            (hidden (append (apply append
+                                   (map (lambda (i) (map pile-card (filter (lambda (e) (not (pile-up? e))) (game-pile g i))))
+                                        (iota PILES)))
+                            (game-stock g)
+                            (game-waste g))))
+        (not (any (lambda (card)
+                    (or (any (lambda (top) (valid-pile-move? card top)) tops)
+                        (any (lambda (top) (valid-foundation-move? card top)) ftops)))
+                  hidden)))))
+
+(define (all-cards g)
+  (list-sort < (append (apply append (map (lambda (i) (map pile-card (game-pile g i))) (iota PILES)))
+                       (apply append (vector->list (game-foundations g)))
+                       (game-stock g)
+                       (game-waste g))))
+
+;; Play until stuck, won, or out of steps: (cons class game), class
+;; one of stuck won bounded. Foundation moves first, so the line makes
+;; progress instead of shuttling a run between piles.
+(define (play-out seed)
+  (let loop ((g (game-new seed 1)) (steps 0))
+    (cond ((game-won? g) (cons 'won g))
+          ((game-stuck? g) (cons 'stuck g))
+          ((>= steps STEP-BOUND) (cons 'bounded g))
+          (else
+           (let* ((moves (progress-moves g))
+                  (up (find (lambda (m) (eq? (car (cdr m)) 'foundation)) moves))
+                  (m (or up (and (pair? moves) (car moves)))))
+             (loop (if m (game-move g (car m) (cdr m)) (game-draw! g))
+                   (+ steps 1)))))))
+
+(test-group "leg 6: the scramble guarantee over seeds 1..200"
+  (let loop ((seed 1) (stuck 0) (won 0) (bounded 0) (dead '()) (refused '()) (bad '()))
+    (if (> seed SEEDS)
+        (begin
+          (display "  seeds: ") (display SEEDS)
+          (display "  stuck: ") (display stuck)
+          (display "  won: ") (display won)
+          (display "  bounded-out: ") (display bounded)
+          (display "  dead (no scramble can help): ") (write (reverse dead))
+          (display "  refused: ") (write (reverse refused))
+          (display "  broke: ") (write (reverse bad))
+          (newline)
+          (test "every seed was classified"
+            (assert-equal SEEDS (+ stuck won bounded)))
+          (test "the population has stuck states to scramble (a floor, so a dead scanner cannot pass)"
+            (assert-true (>= (- stuck (length dead)) 20)))
+          (test "no stuck state broke the guarantee (a scramble that left the table stuck, or moved a face-up card; seeds named)"
+            (assert-equal '() bad))
+          (test "every refusal is a dead state (seeds named), and every dead state is refused"
+            (assert-equal (reverse dead) (reverse refused))))
+        (let* ((r (play-out seed))
+               (class (car r))
+               (g (cdr r))
+               (dead (if (and (eq? class 'stuck) (dead? g)) (cons seed dead) dead)))
+          (if (eq? class 'stuck)
+              (let ((s (game-scramble g)))
+                (cond ((not s)
+                       (loop (+ seed 1) (+ stuck 1) won bounded dead (cons seed refused) bad))
+                      ((and (not (game-stuck? s))
+                            (equal? (visible g) (visible s))
+                            (equal? (all-cards g) (all-cards s))
+                            (null? (game-history s))
+                            (null? (game-waste s)))
+                       (loop (+ seed 1) (+ stuck 1) won bounded dead refused bad))
+                      (else
+                       (loop (+ seed 1) (+ stuck 1) won bounded dead refused (cons seed bad)))))
+              (loop (+ seed 1)
+                    stuck
+                    (if (eq? class 'won) (+ won 1) won)
+                    (if (eq? class 'bounded) (+ bounded 1) bounded)
+                    dead
+                    refused
+                    bad))))))
+
+(test-group "the scanner"
+  (test "the fixture deal is not stuck (S2 goes onto D3)"
+    (assert-false (game-stuck? (game-from-deck (deck-string->cards FIXTURE-DECK) 1))))
+  (test "positive control: a hand-built dead position is stuck, and the scramble refuses it"
+    ;; four kings alone on four piles, the queens on the other three
+    ;; over face-down aces... no: every card must be somewhere. Dead:
+    ;; foundations empty, piles: SK | HK | DK | CK | S2 over S3..SQ down |
+    ;; H2 over H3..HQ down | the rest face down under D2 and C2; stock and
+    ;; waste empty. Tops: SK HK DK CK S2 H2 D2 -> no pile takes any (a two
+    ;; onto a three? none is a top), no ace is up: no legal move.
+    (let* ((c make-card)
+           (down (lambda (cards) (map (lambda (x) (cons x #f)) cards)))
+           (ranks (lambda (s lo hi) (map (lambda (r) (c s r)) (iota (+ 1 (- hi lo)) lo))))
+           (dead (game tableau: (vector (list (cons (c 0 13) #t))
+                                        (list (cons (c 1 13) #t))
+                                        (list (cons (c 2 13) #t))
+                                        (list (cons (c 3 13) #t))
+                                        (cons (cons (c 0 2) #t) (down (append (ranks 0 3 12) (list (c 0 1)))))
+                                        (cons (cons (c 1 2) #t) (down (append (ranks 1 3 12) (list (c 1 1)))))
+                                        (cons (cons (c 2 2) #t)
+                                              (down (append (ranks 2 3 12) (list (c 2 1))
+                                                            (list (c 3 2)) (ranks 3 3 12) (list (c 3 1))))))
+                       foundations: (make-vector FOUNDATIONS '())
+                       stock: '()
+                       waste: '())))
+      (assert-equal 52 (length (all-cards dead)))
+      (assert-equal '() (legal-moves dead))
+      (assert-true (game-stuck? dead))
+      ;; every hidden card is under a two: no reshuffle uncovers a move
+      ;; (the tops never change), so the scramble refuses
+      (assert-false (game-scramble dead))))
+  (test "the scanner sees a playable card in the stock"
+    ;; the dead position with the ace of spades in the stock instead:
+    ;; a foundation would take it
+    (let* ((c make-card)
+           (g (game tableau: (vector (list (cons (c 0 13) #t)) '() '() '() '() '() '())
+                    foundations: (make-vector FOUNDATIONS '())
+                    stock: (list (c 0 1))
+                    waste: '())))
+      (assert-false (game-stuck? g))))
+  (test "the scramble keeps the face-up cards and shuffles the hidden ones (fixture, after S2 onto D3)"
+    (let* ((g (game-select (game-select (game-from-deck (deck-string->cards FIXTURE-DECK) 1) '(pile 0 0)) '(pile 2)))
+           (s (game-scramble g)))
+      (assert-true (and s #t))
+      (assert-equal (visible g) (visible s))
+      (assert-equal (all-cards g) (all-cards s))
+      (assert-false (game-stuck? s))
+      (assert-equal 1 (game-moves g))
+      (assert-equal 2 (game-moves s))
+      (assert-equal '() (game-history s)))))

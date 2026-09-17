@@ -48,6 +48,8 @@
           deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
           deal-step deal-advance deal-undo deal-next deal-toggle-draw deal-with-model
           deal-toggle-scoring deal-with-bank deal-toggle-mode deal-with-mode
+          deal-scrambles deal-with-scrambles deal-scramble
+          SCRAMBLE-START SCRAMBLE-MAX MSG-SCRAMBLED MSG-NO-SCRAMBLE MSG-SCRAMBLE-FAILED
           jack-out-tap?
           AUTO-TICKS
           deal-places tag-places pile-key->index PILE-KEYS STOCK-KEY WASTE-KEY
@@ -57,10 +59,20 @@
   (begin
     (define MSG-DEALT "JACKED IN. DEAL RUNNING.")
     (define MSG-WON "DECK CRASHED.")
-    (define MSG-STUCK "NO MOVES LEFT - UNDO OR NEXT")
+    (define MSG-STUCK "NO MOVES LEFT. UNDO, SCRAM OR NEXT.")
     (define MSG-AUTO "AUTO-COMPLETING.")
     (define MSG-TOO-LATE "TOO LATE TO SWITCH.")
     (define MSG-NO-PASSES "NO PASSES LEFT.")
+    (define MSG-SCRAMBLED "SCRAMBLED THE HIDDEN CARDS.")
+    (define MSG-NO-SCRAMBLE "NO SCRAMBLE BANKED.")
+    (define MSG-SCRAMBLE-FAILED "SCRAMBLE FOUND NO MOVE. KEPT.")
+
+    ;; The scramble bank (design note, Klondike twist 2): a twist deal
+    ;; starts with SCRAMBLE-START, a clean run (won before the trace
+    ;; completes) earns one more, never past SCRAMBLE-MAX; the overworld
+    ;; sells them later. Using one costs SCRAMBLE-COST on the trace.
+    (define SCRAMBLE-START 1)
+    (define SCRAMBLE-MAX 3)
 
     (define CARD-MODELS '(tags piles))
 
@@ -89,6 +101,7 @@
       (auto-acc default: 0)          ; ticks toward the next auto-complete step
       (bank default: 0)              ; the Vegas bankroll carried between deals
       (trace default: #f)            ; the ICE, (crash trace) driven by (crash cards trace)
+      (scrambles default: 0)         ; scrambles banked, 0..SCRAMBLE-MAX
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -172,12 +185,15 @@
               trace: (if (and (game-won? g) (deal-trace d))
                          (trace-finish (deal-trace d))
                          (deal-trace d))
+              scrambles: (if (and (game-won? g)
+                                  (deal-trace d)
+                                  (eq? (trace-mode (deal-trace d)) 'twist)
+                                  (eq? (trace-phase (deal-trace d)) 'trace))
+                             (min SCRAMBLE-MAX (+ 1 (deal-scrambles d)))
+                             (deal-scrambles d))
               message: (cond ((game-won? g) MSG-WON)
                              ((or arm? (deal-auto d)) MSG-AUTO)
-                             ((and (null? (legal-moves g))
-                                   (null? (game-stock g))
-                                   (null? (game-waste g)))
-                              MSG-STUCK)
+                             ((game-stuck? g) MSG-STUCK)
                              (else "")))))
 
     (define (deal-severed? d)
@@ -239,9 +255,29 @@
     ;; the clean face (timed Standard) is a tap on the meter or the score
     ;; before the first move.
     (define (deal-new seed draw)
-      (deal (with-game (deal seed: seed trace: (trace-new 'twist))
+      (deal (with-game (deal seed: seed trace: (trace-new 'twist) scrambles: SCRAMBLE-START)
                        (game-with-scoring (game-new seed draw) 'vegas))
             message: MSG-DEALT))
+
+    (define (deal-with-scrambles d n)
+      (deal d scrambles: (max 0 (min SCRAMBLE-MAX n))))
+
+    ;; A scramble: twist mode only, one from the bank, the hidden cards
+    ;; reshuffled until a move exists (refused, and the bank kept, when
+    ;; SCRAMBLE-TRIES find none), SCRAMBLE-COST on the trace.
+    (define (deal-scramble d)
+      (cond ((busy? d) d)
+            ((not (eq? (trace-mode (deal-trace d)) 'twist)) (deal d message: MSG-TOO-LATE))
+            ((<= (deal-scrambles d) 0) (deal d message: MSG-NO-SCRAMBLE))
+            (else
+             (let ((g (game-scramble (deal-game d))))
+               (if (not g)
+                   (deal d message: MSG-SCRAMBLE-FAILED)
+                   (deal (with-game (deal d
+                                          trace: (trace-scramble (deal-trace d))
+                                          scrambles: (- (deal-scrambles d) 1))
+                                    g)
+                         message: MSG-SCRAMBLED))))))
 
     ;; While auto-complete runs, the game is won, or the link is severed,
     ;; the table takes no move: only NEXT, RETRY and the menu.
@@ -255,7 +291,8 @@
         (deal-with-mode (deal fresh
                               model: (deal-model d)
                               labels-shown: (deal-labels-shown d)
-                              bank: (deal-bank d))
+                              bank: (deal-bank d)
+                              scrambles: (max SCRAMBLE-START (deal-scrambles d)))
                         (trace-mode (deal-trace d)))))
 
     ;; Twist (Vegas, the ICE) or clean (timed Standard, no ICE). The two
@@ -313,7 +350,8 @@
         (deal-with-mode (deal fresh
                               model: (deal-model d)
                               labels-shown: (deal-labels-shown d)
-                              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d)))
+                              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d))
+                              scrambles: (max SCRAMBLE-START (deal-scrambles d)))
                         (trace-mode (deal-trace d)))))
 
     ;; Standard <-> Vegas is the clean <-> twist flip.
@@ -371,6 +409,7 @@
               ((and ctrl (pressed? f 'r)) (deal-retry d))
               ((and ctrl (pressed? f 'n)) (deal-next d))
               ((and ctrl (pressed? f 'm)) (deal-toggle-mode d))
+              ((and ctrl (pressed? f 's)) (deal-scramble d))
               (else #f))))
 
     ;; Tags: each letter extends what has been typed; a complete tag taps
@@ -466,6 +505,7 @@
         ((draw) (deal-toggle-draw d))
         ((next) (deal-next d))
         ((score mode) (deal-toggle-mode d))
+        ((scram) (deal-scramble d))
         (else d)))
 
     ;; On a severed table the choices are the board area's thirds: RETRY
