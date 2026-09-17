@@ -1,12 +1,15 @@
 ;;; (crash render) - Drawing the table.
 ;;;
-;;; Takes a session, a geometry and (optionally) the test-tile texture, and
-;;; draws one frame with sigil-graphics primitives: a copper-bar background,
-;;; each tile as a flat face over a darker side face offset per layer, the
-;;; glyph in its suit color from the bitmap font, the selection and the
-;;; keyboard highlight, the coordinate labels when that model is active, and
-;;; the HUD. Nothing here reads input or a platform; the shell decides what
-;;; texture to hand in (native: load-image from assets/; web: from memory).
+;;; Takes a session, a geometry, (optionally) the test-tile texture and the
+;;; frame's effects from (crash fx), and draws one frame with sigil-graphics
+;;; primitives: a copper-bar background, each tile as a flat face over a
+;;; darker side face offset per layer (moved, scaled or flipped as the
+;;; effects say), the glyph in its suit color from the bitmap font, the
+;;; selection and the keyboard highlight, the match ghosts and particles,
+;;; the hint tags, and the HUD with its tappable controls. Nothing here
+;;; reads input, a platform or a clock; the shell decides what texture to
+;;; hand in (native: load-image from assets/; web: from memory) and the
+;;; effects arrive already advanced.
 ;;;
 ;;; Palette: at most 32 colors, all named here, for the Amiga feel and so
 ;;; David can retune the look in one place (design decision 7).
@@ -19,6 +22,8 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash tween)
+          (crash fx)
           (crash font))
 
   (export draw-session draw-frame-ms
@@ -55,6 +60,21 @@
                  (caddr c)
                  1.0))
 
+    (define (color-alpha! c a)
+      (set-color (car c)
+                 (cadr c)
+                 (caddr c)
+                 a))
+
+    ;; c0 at t = 0, c1 at t = 1.
+    (define (mix c0 c1 t)
+      (let loop ((c0 c0) (c1 c1) (acc '()))
+        (if (null? c0)
+            (reverse acc)
+            (loop (cdr c0)
+                  (cdr c1)
+                  (cons (+ (car c0) (* (- (car c1) (car c0)) t)) acc)))))
+
     (define (suit-color face)
       (cond ((< face 9) C-SUIT-0)
             ((< face 18) C-SUIT-1)
@@ -72,13 +92,16 @@
 
     ;; --- background -----------------------------------------------------------
 
-    (define (draw-background g)
+    ;; roll: pixels the copper bars have scrolled (the cleared sequence
+    ;; rolls them; 0 otherwise).
+    (define (draw-background g roll)
       (let ((vw (geometry-vw g))
-            (vh (geometry-vh g)))
+            (vh (geometry-vh g))
+            (shift (modulo (exact (floor roll)) 36)))
         (color! C-BG)
         (draw-filled-rect 0 0 vw vh)
         ;; copper bars: three tones stepping through the board area
-        (let loop ((y 0) (i 0))
+        (let loop ((y (- shift 36)) (i 0))
           (when (< y (- vh (geometry-hud-h g)))
             (color! (case (modulo i 3)
                        ((0) C-BAR-A)
@@ -120,15 +143,15 @@
         (color! C-SIDE)
         (draw-filled-rect (- x side) y side h)))
 
-    (define (draw-face-primitives g b id x y w h selected?)
-      (let ((face (tile-face b id)))
-        ;; the face, with a lighter top-left edge
-        (color! (if selected? C-SELECTED C-FACE))
-        (draw-filled-rect x y w h)
-        (color! (if selected? C-SELECTED C-FACE-EDGE))
-        (draw-filled-rect x y w 1)
-        (draw-filled-rect x y 1 h)
-        (when face (draw-glyph-on g face x y w h selected?))))
+    ;; glow: 0..1, how bright the selected face breathes this frame.
+    (define (draw-face-primitives g face x y w h selected? glow)
+      ;; the face, with a lighter top-left edge
+      (color! (if selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)) C-FACE))
+      (draw-filled-rect x y w h)
+      (color! (if selected? C-SELECTED C-FACE-EDGE))
+      (draw-filled-rect x y w 1)
+      (draw-filled-rect x y 1 h)
+      (when face (draw-glyph-on g face x y w h selected?)))
 
     ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
     ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
@@ -155,9 +178,8 @@
                              (* frame TEST-TILE-W) 0
                              TEST-TILE-W TEST-TILE-H)))
 
-    (define (draw-face-texture g b id tex x y w h selected?)
-      (let ((face (tile-face b id))
-            (frame (tile-frame b id)))
+    (define (draw-face-texture g b id face tex x y w h selected?)
+      (let ((frame (tile-frame b id)))
         (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
         (draw-texture-region tex
                              x y
@@ -170,19 +192,35 @@
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
-    (define (draw-ring g id color)
+    (define (draw-ring g id color alpha)
       (let* ((r (slot-rect g id))
              (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-        (color! color)
+        (color-alpha! color alpha)
         (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
         (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2))))
 
-    (define (draw-tiles s g tex)
+    ;; A tile's rect after the effects: (x y w h) moved by (dx dy) and
+    ;; scaled about its centre by (sx sy).
+    (define (viewed-rect r view)
+      (if (not view)
+          r
+          (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+                 (dx (car view)) (dy (cadr view))
+                 (sx (caddr view)) (sy (cadddr view))
+                 (w2 (* w sx))
+                 (h2 (* h sy)))
+            (list (+ x dx (/ (- w w2) 2.0))
+                  (+ y dy (/ (- h h2) 2.0))
+                  w2
+                  h2))))
+
+    (define (draw-tiles s g tex x)
       (let* ((b (session-board s))
              (lay (board-layout b))
              (selected (board-selected b))
+             (glow (fx-glow x))
              (textured? (and tex (eq? (session-render-mode s) 'texture)))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
@@ -195,26 +233,73 @@
                    (lambda (id)
                      (when (and (tile-present? b id)
                                 (= layer (slot-layer (layout-slot lay id))))
-                       (let* ((r (slot-rect g id))
-                              (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
-                         (proc id x y w h (eqv? selected id)))))
+                       (let* ((view (fx-tile-view x id))
+                              (r (viewed-rect (slot-rect g id) view))
+                              (face (or (and view (list-ref view 4))
+                                        (tile-face b id))))
+                         (proc id
+                               face
+                               (car r) (cadr r) (caddr r) (cadddr r)
+                               (eqv? selected id)))))
                    (geometry-draw-order g)))))
         (let loop ((layer 0))
           (when (< layer (layout-layer-count lay))
             (each-on-layer layer
-                           (lambda (id x y w h selected?)
+                           (lambda (id face x y w h selected?)
                              (if textured?
                                  (draw-sides-texture g b id tex x y w h selected?)
                                  (draw-sides-primitives g x y w h))))
             (each-on-layer layer
-                           (lambda (id x y w h selected?)
+                           (lambda (id face x y w h selected?)
                              (if textured?
-                                 (draw-face-texture g b id tex x y w h selected?)
-                                 (draw-face-primitives g b id x y w h selected?))))
+                                 (draw-face-texture g b id face tex x y w h selected?)
+                                 (draw-face-primitives g face x y w h selected? glow))))
             (loop (+ layer 1))))
-        (when highlight (draw-ring g highlight C-HIGHLIGHT))
-        (let ((hint (session-hint s)))
-          (when (and hint (tile-present? b hint)) (draw-ring g hint C-LABEL-LIT)))))
+        (draw-ghosts g x)
+        (draw-particles g x)
+        (when highlight (draw-ring g highlight C-HIGHLIGHT 1.0))
+        (let ((hint (session-hint s))
+              (partner (session-hint-partner s))
+              (ring-alpha (fx-ring-alpha x)))
+          (when (and hint (tile-present? b hint))
+            (draw-ring g hint C-LABEL-LIT ring-alpha))
+          (when (and partner (tile-present? b partner))
+            (draw-ring g partner C-LABEL-LIT ring-alpha)))))
+
+    ;; The match ghosts: a face rising off the table and fading, in the
+    ;; primitives style whatever the render mode (the burst is the point).
+    (define (draw-ghosts g x)
+      (for-each (lambda (ghost)
+                  (let ((face (car ghost))
+                        (gx (cadr ghost))
+                        (gy (caddr ghost))
+                        (w (cadddr ghost))
+                        (h (list-ref ghost 4))
+                        (a (list-ref ghost 5)))
+                    (color-alpha! C-SIDE a)
+                    (draw-filled-rect (- gx 2) gy (+ w 2) (+ h 2))
+                    (color-alpha! C-SELECTED a)
+                    (draw-filled-rect gx gy w h)
+                    (when face
+                      (color-alpha! (suit-color face) a)
+                      (let* ((scale (glyph-scale g))
+                             (gw (* scale GLYPH-W))
+                             (gh (* scale GLYPH-H)))
+                        (draw-text (string (string-ref FACE-KEYS face))
+                                   (exact (floor (+ gx (/ (- w gw) 2))))
+                                   (exact (floor (+ gy (/ (- h gh) 2))))
+                                   scale)))))
+                (fx-ghosts x)))
+
+    ;; Glyph fragments and rain: small squares in the suit color.
+    (define (draw-particles g x)
+      (for-each (lambda (pt)
+                  (color-alpha! (suit-color (car pt)) (list-ref pt 4))
+                  (draw-filled-rect (cadr pt)
+                                    (caddr pt)
+                                    (cadddr pt)
+                                    (cadddr pt)))
+                (fx-particles x (geometry-vw g) (geometry-vh g))))
 
     ;; --- hint labels (model c) -------------------------------------------------
     ;;
@@ -243,63 +328,101 @@
           (session-labels s))))
 
     ;; --- HUD ------------------------------------------------------------------
+    ;;
+    ;; Row 1: the tile counter, the four controls (rects from (crash
+    ;; geometry), so a tap lands where the button is drawn), the hint count
+    ;; (the trace meter takes this spot in the trace slice) and the seed.
+    ;; Row 2: the keys of the model in use.
 
     (define HINT-KEYS-LINE
-      "TYPE A TAG  SPACE TAGS ON/OFF  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+      "TAGS: TYPE ONE  SPACE HIDE  ENTER DESELECT  TAB CURSOR  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
     (define CURSOR-KEYS-LINE
-      "ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB KEYS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+      "CURSOR: ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB TAGS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
 
-    (define (draw-hud s g)
+    (define (control-label name)
+      (case name
+        ((undo) "UNDO")
+        ((shuf) "SHUF")
+        ((hint) "HINT")
+        ((next) "NEXT")
+        (else "?")))
+
+    (define (draw-controls g)
+      (for-each (lambda (c)
+                  (let* ((name (car c))
+                         (x (cadr c)) (y (caddr c))
+                         (w (cadddr c)) (h (list-ref c 4))
+                         (label (control-label name))
+                         (tw (text-width label 2)))
+                    (color! C-BAR-C)
+                    (draw-filled-rect x y w h)
+                    (color! C-TEXT-DIM)
+                    (draw-filled-rect x y w 1)
+                    (draw-filled-rect x (+ y h -1) w 1)
+                    (draw-filled-rect x y 1 h)
+                    (draw-filled-rect (+ x w -1) y 1 h)
+                    (color! C-TEXT)
+                    (draw-text label
+                               (+ x (exact (floor (/ (- w tw) 2))))
+                               (+ y 3)
+                               2)))
+                (geometry-controls g)))
+
+    ;; The centred message box: the cleared sequence slides it in and
+    ;; fades it up over its first fifth; every other message just sits.
+    (define (draw-message g message top cleared)
+      (let* ((w (text-width message 3))
+             (x (exact (floor (/ (- (geometry-vw g) w) 2))))
+             (p (if cleared (min 1.0 (* cleared 5.0)) 1.0))
+             (k (ease 'out-back p))
+             (y (exact (floor (+ (/ top 2) (* 40 (- 1.0 k)))))))
+        (color-alpha! C-BG p)
+        (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
+        (color-alpha! C-SELECTED p)
+        (draw-text message x (- y 10) 3)))
+
+    (define (draw-hud s g x)
       (let* ((b (session-board s))
              (vw (geometry-vw g))
              (vh (geometry-vh g))
              (top (- vh (geometry-hud-h g)))
              (left (string-append "TILES " (number->string (board-tile-count b))))
-             (right (string-append "SEED " (number->string (session-seed s)))))
+             (right (string-append "SEED " (number->string (session-seed s))))
+             (cleared (fx-cleared x)))
         (color! C-BG)
         (draw-filled-rect 0 top vw (geometry-hud-h g))
         (color! C-TEXT-DIM)
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
-        (draw-text left 8 (+ top 6) 2)
-        (draw-text (string-append "KEYS " (model-name (session-model s)))
-                   (exact (floor (/ (- vw (text-width "KEYS CURSOR" 2)) 2)))
-                   (+ top 6)
-                   2)
-        (draw-text right (- vw 8 (text-width right 2)) (+ top 6) 2)
+        (draw-text left 8 (+ top 7) 2)
+        (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)
+        (draw-controls g)
         (when (> (session-hints s) 0)
           (color! C-LABEL-LIT)
           (let ((hints (string-append "HINTS " (number->string (session-hints s)))))
             (draw-text hints
                        (- vw 8 (text-width right 2) 24 (text-width hints 2))
-                       (+ top 6)
+                       (+ top 7)
                        2)))
-        (when (> (string-length (session-typed s)) 0)
-          (color! C-HIGHLIGHT)
-          (draw-text (string-append "> " (session-typed s))
-                     (+ 8 (text-width "TILES 144" 2) 24)
-                     (+ top 6)
-                     2))
         (color! C-TEXT-DIM)
         (draw-text (if (eq? (session-model s) 'hint)
                        HINT-KEYS-LINE
                        CURSOR-KEYS-LINE)
-                   8 (+ top 24) 1)
+                   8 (+ top 32) 1)
+        (when (> (string-length (session-typed s)) 0)
+          (color! C-HIGHLIGHT)
+          (draw-text (string-append "> " (session-typed s))
+                     (- vw 8 (text-width right 2) 24 (text-width (string-append "> " (session-typed s)) 2))
+                     (+ top 7)
+                     2))
         (let ((message (cond ((board-cleared? b)
                               "STACK CRASHED")
                              ((null? (legal-matches b))
-                              "NO MOVES LEFT - ^S SHUFFLE")
+                              "NO MOVES LEFT - SHUFFLE")
                              (else
                               (session-message s)))))
           (unless (string=? message "")
-            (color! C-SELECTED)
-            (let* ((w (text-width message 3))
-                   (x (exact (floor (/ (- vw w) 2))))
-                   (y (exact (floor (/ top 2)))))
-              (color! C-BG)
-              (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
-              (color! C-SELECTED)
-              (draw-text message x (- y 10) 3))))))
+            (draw-message g message top (and (board-cleared? b) cleared))))))
 
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.
     (define (draw-frame-ms ms)
@@ -309,9 +432,11 @@
 
     ;; --- one frame ------------------------------------------------------------
 
-    (define (draw-session s g tex)
-      (draw-background g)
-      (draw-tiles s g tex)
-      (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
-        (draw-hint-labels s g))
-      (draw-hud s g))))
+    ;; x: the frame's effects from (crash fx), already advanced.
+    (define (draw-session s g tex x)
+      (let ((cleared (fx-cleared x)))
+        (draw-background g (if cleared (* cleared 400.0) 0.0))
+        (draw-tiles s g tex x)
+        (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
+          (draw-hint-labels s g))
+        (draw-hud s g x)))))

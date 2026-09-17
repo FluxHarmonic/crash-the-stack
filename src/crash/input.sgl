@@ -35,6 +35,14 @@
 ;;; ctrl+n deals the next seed, ctrl+t toggles the test-tile renderer,
 ;;; ctrl+h asks for a hint. Commands take ctrl because in hint mode every
 ;;; letter is a tag key. (Escape is the shell's: it quits.)
+;;;
+;;; The same commands sit in the HUD as controls (UNDO SHUF HINT NEXT), the
+;;; rects coming from (crash geometry). A click on one is rewritten into
+;;; the key frame the command already handles, so a tap on a phone and a
+;;; ctrl chord on a desktop are one code path. The HINT control cannot wait
+;;; for a face key (a phone has none), so it gives GNOME's hint instead: a
+;;; legal pair, the selected tile's partner when one is selected. The
+;;; keyboard gets the same by pressing ctrl+h twice.
 
 (define-library (crash input)
   (import (sigil struct)
@@ -49,7 +57,8 @@
           session session? session-new
           session-board session-model session-highlight
           session-render-mode session-seed session-message
-          session-typed session-hint session-hint-armed session-hints session-cursor-shown
+          session-typed session-hint session-hint-partner session-hint-armed
+          session-hints session-cursor-shown
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
           session-step session-pick session-with-model
@@ -80,6 +89,7 @@
       (labels-shown default: #t)          ; space toggles
       (typed default: "")                 ; tag letters typed so far
       (hint default: #f)                  ; priced hint: the ringed slot, or #f
+      (hint-partner default: #f)          ; the pair hint's second slot, or #f
       (hint-armed default: #f)            ; ctrl+h pressed, face key awaited
       (hints default: 0)                  ; priced hints used this board
       (render-mode default: 'primitives)  ; primitives | texture
@@ -219,6 +229,7 @@
                  board: b
                  labels: (compute-hint-labels b)
                  hint: #f
+                 hint-partner: #f
                  typed: ""
                  message: ""
                  cursor-shown: #f)))
@@ -372,8 +383,35 @@
                            (else (car matching)))))
         (session s hint-armed: #f
                       hint: target
+                      hint-partner: #f
                       hints: (+ 1 (session-hints s))
                       message: (if target "" "NO FREE TILE OF THAT FACE"))))
+
+    ;; GNOME's hint: ring a legal pair, the selected tile's partner when
+    ;; one is selected, else the first legal match after the current ring
+    ;; (wrapping, so repeated hints walk the matches). One hint counted.
+    (define (hint-pair s)
+      (let* ((b (session-board s))
+             (sel (board-selected b))
+             (matches (legal-matches b))
+             (mine (if sel
+                       (filter (lambda (m) (or (= (car m) sel) (= (cdr m) sel)))
+                               matches)
+                       '()))
+             (pool (if (null? mine) matches mine))
+             (h (session-hint s))
+             (after (and h (let loop ((ms pool))
+                             (cond ((null? ms) #f)
+                                   ((= (car (car ms)) h) ms)
+                                   (else (loop (cdr ms)))))))
+             (target (cond ((null? pool) #f)
+                           ((and after (pair? (cdr after))) (cadr after))
+                           (else (car pool)))))
+        (session s hint-armed: #f
+                      hint: (and target (car target))
+                      hint-partner: (and target (cdr target))
+                      hints: (+ 1 (session-hints s))
+                      message: (if target "" "NO MOVES LEFT"))))
 
     (define (step-armed-hint s f)
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
@@ -412,6 +450,9 @@
                                model: (session-model s)
                                labels-shown: (session-labels-shown s)
                                render-mode: (session-render-mode s))))
+              ((or (pressed? f 'pair-hint)
+                   (and ctrl (pressed? f 'h) (session-hint-armed s)))
+               (hint-pair s))
               ((and ctrl (pressed? f 'h))
                (session s hint-armed: #t message: "HINT: PRESS A FACE KEY"))
               ((and ctrl (pressed? f 't))
@@ -422,8 +463,27 @@
 
     ;; --- one frame ----------------------------------------------------------
 
-    (define (session-step s f g)
-      (cond ((step-commands s f) => (lambda (s) s))
+    ;; The key frame a HUD control stands for. pair-hint is not a key any
+    ;; keyboard sends; it is the control's own command.
+    (define (control-command name)
+      (case name
+        ((undo) (make-input-frame '(backspace) '() #f))
+        ((shuf) (make-input-frame '(s) '(ctrl) #f))
+        ((hint) (make-input-frame '(pair-hint) '() #f))
+        ((next) (make-input-frame '(n) '(ctrl) #f))
+        (else #f)))
+
+    ;; A click on a control replaces the frame with that control's command
+    ;; (keys pressed in the same frame wait: a tap on a phone comes alone).
+    (define (with-control f g)
+      (let ((click (input-frame-click f)))
+        (or (and click
+                 (control-command (hit-control g (car click) (cdr click))))
+            f)))
+
+    (define (session-step s f0 g)
+      (let ((f (with-control f0 g)))
+        (cond ((step-commands s f) => (lambda (s) s))
             ((session-hint-armed s) (step-armed-hint s f))
             (else
              (let ((s (step-pointer s f g)))
@@ -432,4 +492,4 @@
                    (case (session-model s)
                      ((hint) (step-hint s f))
                      ((cursor) (step-cursor s f))
-                     (else s)))))))))
+                     (else s))))))))))

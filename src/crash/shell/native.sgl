@@ -27,6 +27,7 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash fx)
           (crash render)
           (crash shell))
 
@@ -100,28 +101,31 @@
                           ;; --texture starts in the test-tile renderer
                           (if texture-first?
                               (session s render-mode: 'texture)
-                              s))))
-            (let ((dt (wait-frame)))
-              (when log-keys? (set! *frame-ms* (* 1000.0 dt))))
-            (let* ((f (poll-frame))
-                   (s (session-step s f geom)))
-              (when (and log-keys?
-                         (pair? (input-frame-pressed f)))
-                (display "keys: ")
-                (write (input-frame-pressed f))
-                (display " held: ")
-                (write (input-frame-held f))
-                (newline))
+                              s)))
+                     (x (fx-new)))
+            ;; wait-frame's dt feeds the fixed clock the effects run on
+            (let* ((dt (wait-frame))
+                   (f (poll-frame))
+                   (after (session-step s f geom))
+                   (x (fx-observe (fx-frame x dt) s after geom)))
+              (when log-keys?
+                (set! *frame-ms* (* 1000.0 dt))
+                (when (pair? (input-frame-pressed f))
+                  (display "keys: ")
+                  (write (input-frame-pressed f))
+                  (display " held: ")
+                  (write (input-frame-held f))
+                  (newline)))
 
               (begin-frame)
-              (draw-session s geom tex)
+              (draw-session after geom tex x)
               (when log-keys?
                 (draw-frame-ms *frame-ms*))
               (end-frame)
 
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
-                    (else (loop s))))))
+                    (else (loop after x))))))
         (gfx-shutdown)))
 
     (define (native-main . _args)

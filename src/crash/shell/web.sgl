@@ -20,13 +20,14 @@
 ;;; the way it is.
 ;;;
 ;;; What the browser cannot give the game: ctrl chords (the loader drops any
-;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t), so the page
-;;; carries buttons that send command names, and this shell turns each
-;;; name into the native key or chord for a frame of its own. That is a
-;;; stopgap: the controls belong in the game's own UI, drawn on the canvas
-;;; and tapped there (David, 2026-09-17), which is a render + input change
-;;; for P1, not this shell. Escape does nothing here; there is no window to
-;;; close.
+;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t). The commands
+;;; are on the canvas instead, drawn by (crash render) in the HUD and
+;;; hit-tested by (crash input) from the same rects, so a tap on them takes
+;;; the pointer path like a tap on a tile; the page keeps only its
+;;; fullscreen button (David, 2026-09-17: the controls belong in the game's
+;;; own UI). Tab, Backspace and the tag letters still arrive as keys. The
+;;; test-tile toggle (ctrl+t) has no browser path. Escape does nothing
+;;; here; there is no window to close.
 ;;;
 ;;; Trace lines, printed only when the page was opened with ?trace (the
 ;;; template dispatches ("trace", "on") after boot; verify.mjs relies on
@@ -34,6 +35,7 @@
 ;;;   crash: seed S pair A AX AY B BX BY   the first solution pair and its
 ;;;                                         centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
+;;;   crash: control NAME X Y              the centre of each HUD control
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
 ;;;   crash: undo tiles N                  an undo put tiles back
@@ -52,6 +54,7 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash fx)
           (crash render)
           (crash shell))
 
@@ -61,9 +64,10 @@
     ;; --- state between dispatches ------------------------------------------
     (define *session* #f)
     (define *geom* #f)
+    (define *fx* #f)         ; the effects and their clock, (crash fx)
+    (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
-    (define *commands* '())  ; button presses waiting for a frame each: ((pressed) . (held))
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
     (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
     (define *texture* #f)    ; the decoded test tile, once ready
@@ -91,37 +95,18 @@
             ((= (string-length k) 1) (string->symbol (string-downcase k)))
             (else (string->symbol k))))
 
-    ;; The command buttons on the page. Each name is the key or chord the
-    ;; native shell reads for the same command, as (pressed . held). The name
-    ;; reaches us through the loader's data-key path exactly like a key would
-    ;; (a keydown, then a keyup 120 ms later, which key-up! ignores).
-    (define (command-name->input name)
-      (cond ((string=? name "keys") '((tab) . ()))
-            ((string=? name "undo") '((backspace) . ()))
-            ((string=? name "shuffle") '((s) . (ctrl)))
-            ((string=? name "next") '((n) . (ctrl)))
-            ((string=? name "tile") '((t) . (ctrl)))
-            (else #f)))
-
     (define (key-down! k)
-      (let ((command (command-name->input k)))
-        (if command
-            ;; Queued, not merged: each command gets a frame of its own
-            ;; (see web-tick), so two taps 50 ms apart are two commands and
-            ;; a tap on the board in the same frame is not swallowed.
-            (set! *commands* (append *commands* (list command)))
-            (let ((sym (dom-key->sym k)))
-              ;; A held key repeats keydown in the DOM; only the first counts
-              ;; as pressed, matching sigil-app's edge semantics.
-              (unless (memq sym *keys*)
-                (set! *keys* (cons sym *keys*))
-                (set! *pressed* (cons sym *pressed*)))))))
+      (let ((sym (dom-key->sym k)))
+        ;; A held key repeats keydown in the DOM; only the first counts
+        ;; as pressed, matching sigil-app's edge semantics.
+        (unless (memq sym *keys*)
+          (set! *keys* (cons sym *keys*))
+          (set! *pressed* (cons sym *pressed*)))))
 
     (define (key-up! k)
-      (unless (command-name->input k)
-        (let ((sym (dom-key->sym k)))
-          (set! *keys* (filter (lambda (x) (not (eq? x sym)))
-                               *keys*)))))
+      (let ((sym (dom-key->sym k)))
+        (set! *keys* (filter (lambda (x) (not (eq? x sym)))
+                             *keys*))))
 
     ;; --- pointer -------------------------------------------------------------
 
@@ -205,29 +190,37 @@
               (say "seed" (session-seed s)
                    "pair" a (car ca) (cdr ca)
                    b (car cb) (cdr cb))
-              (say "labels" a (slot-tag s a) b (slot-tag s b))))))
+              (say "labels" a (slot-tag s a) b (slot-tag s b))))
+        (for-each (lambda (c)
+                    (say "control"
+                         (car c)
+                         (+ (cadr c) (half (cadddr c)))
+                         (+ (caddr c) (half (list-ref c 4)))))
+                  (geometry-controls *geom*))))
 
     ;; --- one frame -----------------------------------------------------------
 
-    ;; A queued command is a frame by itself: session-step runs one command
-    ;; and skips the pointer and the keyboard models for that frame, so a
-    ;; key or a tap that arrived alongside a button press would otherwise be
-    ;; lost, and a plain key would read as a ctrl chord. Keys and the tap
-    ;; wait for the next frame instead.
     (define (input-this-frame)
-      (if (pair? *commands*)
-          (let ((command (car *commands*)))
-            (set! *commands* (cdr *commands*))
-            (make-input-frame (car command) (cdr command) #f))
-          (let ((f (make-input-frame *pressed*
-                                     (filter (lambda (k) (memq k MODIFIERS))
-                                             *keys*)
-                                     *click*)))
-            (set! *pressed* '())
-            (set! *click* #f)
-            f)))
+      (let ((f (make-input-frame *pressed*
+                                 (filter (lambda (k) (memq k MODIFIERS))
+                                         *keys*)
+                                 *click*)))
+        (set! *pressed* '())
+        (set! *click* #f)
+        f))
 
-    (define (web-tick)
+    ;; The frame's wall dt in seconds from the rAF timestamp (ms): the
+    ;; fixed clock in (crash fx) turns it into ticks. The first frame, and
+    ;; a frame after a payload that is not a number, count as no time.
+    (define (frame-dt payload)
+      (let* ((ms (string->number payload))
+             (dt (if (and ms *last-ms*)
+                     (/ (- ms *last-ms*) 1000.0)
+                     0.0)))
+        (when ms (set! *last-ms* ms))
+        dt))
+
+    (define (web-tick dt)
       (when *session*
         (gles3-resize-to-display)
         (ensure-texture!)
@@ -237,13 +230,15 @@
           (say-first-pair *session*)
           (set! *announced* #t))
         (let* ((before *session*)
-               (after (session-step before (input-this-frame) *geom*)))
+               (after (session-step before (input-this-frame) *geom*))
+               (x (fx-observe (fx-frame *fx* dt) before after *geom*)))
           (set! *session* after)
+          (set! *fx* x)
           (report-change! before after)
           (when (not (= (session-seed before) (session-seed after)))
             (set! *announced* #f))
           (begin-frame)
-          (draw-session after *geom* *texture*)
+          (draw-session after *geom* *texture* x)
           (end-frame))))
 
     ;; --- entry ---------------------------------------------------------------
@@ -257,7 +252,8 @@
       (set-letterbox-color 0.0 0.0 0.0)
       (let ((lay (turtle-layout)))
         (set! *geom* (make-geometry lay VW VH))
-        (set! *session* (session-new lay 1)))
+        (set! *session* (session-new lay 1))
+        (set! *fx* (fx-new)))
       (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
       ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
@@ -265,7 +261,7 @@
       0)
 
     (define (web-dispatch type payload)
-      (cond ((string=? type "frame") (web-tick) 0)
+      (cond ((string=? type "frame") (web-tick (frame-dt payload)) 0)
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)

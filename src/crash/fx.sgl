@@ -1,0 +1,448 @@
+;;; (crash fx) - What moves on the table, and why.
+;;;
+;;; The rules never animate: a match is two tiles gone between one board
+;;; and the next. This module watches the session before and after each
+;;; step and turns every change it recognizes into an EFFECT with a tween
+;;; on the fixed clock of (crash tween): a select pulse, the match (the
+;;; pair lifts, meets, and decompiles into glyph particles), the mismatch
+;;; shake, the hint blink, the shuffle flip, the cleared-board sequence,
+;;; and a small settle for tiles an undo brings back. (crash render) reads
+;;; the effects back as per-tile offsets, ghosts, particles and ring alpha;
+;;; it never advances anything. (crash input) and the rules know nothing
+;;; of this module, which is what keeps the gates on them unchanged.
+;;;
+;;; fx-frame advances the clock by the frame's wall dt and every effect by
+;;; the ticks that produced; fx-observe compares two sessions and spawns.
+;;; The shells call both once per frame. Everything is immutable and
+;;; copy-constructed; the only randomness (particle scatter, glyph rain)
+;;; comes from the board's own MINSTD generator seeded by the clock tick,
+;;; so the same match at the same tick looks the same on both targets.
+;;;
+;;; The numbers David tunes are the constants at the top: durations in
+;;; sim ticks (60 per second) and sizes in virtual pixels or tile fractions.
+
+(define-library (crash fx)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (crash stack layout)
+          (crash stack rules)
+          (crash stack prng)
+          (crash geometry)
+          (crash input)
+          (crash tween))
+
+  (export fx fx? fx-new fx-clock fx-effects
+          fx-frame fx-observe fx-idle?
+          fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
+          effect effect? effect-kind effect-ids effect-tween effect-data
+          PULSE-TICKS PULSE-SCALE
+          MATCH-TICKS MATCH-LIFT MATCH-SCALE MATCH-PARTICLES
+          SHAKE-TICKS SHAKE-HZ SHAKE-MIN SHAKE-FRACTION
+          BLINK-TICKS BLINKS
+          SHUFFLE-TICKS SHUFFLE-STAGGER
+          CLEARED-TICKS RAIN-DROPS
+          SETTLE-TICKS)
+
+  (begin
+    ;; --- knobs ---------------------------------------------------------------
+
+    (define PULSE-TICKS 12)        ; select pulse: 1 -> PULSE-SCALE -> 1
+    (define PULSE-SCALE 1.08)
+    (define MATCH-TICKS 40)        ; lift and meet for the first MATCH-MEET of it, then burst
+    (define MATCH-MEET 0.4)
+    (define MATCH-LIFT 6)          ; pixels the pair rises while meeting
+    (define MATCH-SCALE 1.15)
+    (define MATCH-PARTICLES 24)    ; glyph fragments per tile
+    (define SHAKE-TICKS 15)        ; GNOME: 250 ms at 6 Hz
+    (define SHAKE-HZ 6.0)
+    (define SHAKE-MIN 3.0)         ; amplitude: max(SHAKE-MIN, SHAKE-FRACTION * tile width)
+    (define SHAKE-FRACTION 0.04)
+    (define BLINK-TICKS 15)        ; one half-period of the hint blink; GNOME: 250 ms
+    (define BLINKS 6)              ; half-periods before the ring holds steady
+    (define SHUFFLE-TICKS 20)      ; one tile's flip
+    (define SHUFFLE-STAGGER 30)    ; ticks between the first and the last flip's start
+    (define CLEARED-TICKS 150)     ; the STACK CRASHED sequence
+    (define RAIN-DROPS 60)
+    (define SETTLE-TICKS 10)       ; tiles an undo brings back scale in
+
+    (define TAU 6.283185307179586)
+
+    ;; --- state ---------------------------------------------------------------
+
+    ;; kind: pulse | match | shake | blink | shuffle | cleared | settle.
+    ;; ids: the slots it concerns. tween: 0..1 over the effect's life.
+    ;; data: kind-specific, documented at each spawn below.
+    (define-struct effect
+      (kind default: 'pulse)
+      (ids default: '())
+      (tween default: #f)
+      (data default: #f))
+
+    (define-struct fx
+      (clock default: #f)
+      (effects default: '()))
+
+    (define (fx-new)
+      (fx clock: (clock-new)))
+
+    (define (fx-idle? x)
+      (null? (fx-effects x)))
+
+    (define (life ticks ease-name)
+      (tween-new 0.0 1.0 ticks ease-name))
+
+    (define (spawn x e)
+      (fx x effects: (cons e (fx-effects x))))
+
+    ;; Drop the effects of a kind (a new pulse replaces the old one; a new
+    ;; hint replaces the old blink).
+    (define (without-kind x kind)
+      (fx x effects: (filter (lambda (e) (not (eq? (effect-kind e) kind)))
+                             (fx-effects x))))
+
+    ;; --- per frame -----------------------------------------------------------
+
+    ;; The clock takes the frame's wall dt; every effect moves by the ticks
+    ;; it drained; finished effects leave, except a blink, which holds its
+    ;; ring steady until the hint is cleared (the observer removes it).
+    (define (fx-frame x dt)
+      (let ((c (clock-advance (fx-clock x) dt)))
+        (fx x
+            clock: c
+            effects: (filter (lambda (e)
+                               (or (not (tween-done? (effect-tween e)))
+                                   (eq? (effect-kind e) 'blink)))
+                             (map (lambda (e)
+                                    (effect e tween: (tween-after-frame (effect-tween e) c)))
+                                  (fx-effects x))))))
+
+    ;; --- observing the session -----------------------------------------------
+
+    (define (gone-tiles b0 b1)
+      (filter (lambda (id)
+                (and (tile-present? b0 id) (not (tile-present? b1 id))))
+              (iota (layout-slot-count (board-layout b0)))))
+
+    (define (returned-tiles b0 b1)
+      (gone-tiles b1 b0))
+
+    ;; The rng for a spawn: the clock's tick count, so the scatter is a
+    ;; function of when the match happened and nothing else.
+    (define (spawn-rng x)
+      (prng-seed (+ 7 (clock-ticks (fx-clock x)))))
+
+    ;; n draws of a float in [0,1) from an rng: (values floats rng) as a pair.
+    (define (draws rng n)
+      (let loop ((k 0) (rng rng) (acc '()))
+        (if (= k n)
+            (cons (reverse acc) rng)
+            (let ((rng (prng-next rng)))
+              (loop (+ k 1)
+                    rng
+                    (cons (/ (prng-index rng 10000) 10000.0) acc))))))
+
+    ;; Particles for one tile: (face x0 y0 vx vy) each, launched from
+    ;; the tile's centre with a random direction, mostly upward.
+    (define (burst-particles face cx cy w rng)
+      (let loop ((k 0) (rng rng) (acc '()))
+        (if (= k MATCH-PARTICLES)
+            (cons acc rng)
+            (let* ((d (draws rng 2))
+                   (r (car d))
+                   (angle (* TAU (car r)))
+                   (speed (+ 0.6 (* 1.2 (cadr r)))))
+              (loop (+ k 1)
+                    (cdr d)
+                    (cons (list face
+                                cx
+                                cy
+                                (* w speed (cos angle))
+                                (- (* w speed (abs (sin angle)))))
+                          acc))))))
+
+    ;; A match: two tiles left the board. data: ((face x y) (face x y) w h
+    ;; particles): the ghosts' faces and rects at removal, and the burst.
+    (define (spawn-match x b0 g a c)
+      (let* ((ra (slot-rect g a))
+             (rc (slot-rect g c))
+             (w (caddr ra))
+             (h (cadddr ra))
+             (rng (spawn-rng x))
+             (pa (burst-particles (tile-face b0 a)
+                                  (+ (car ra) (half w))
+                                  (+ (cadr ra) (half h))
+                                  w
+                                  rng))
+             (pc (burst-particles (tile-face b0 c)
+                                  (+ (car rc) (half w))
+                                  (+ (cadr rc) (half h))
+                                  w
+                                  (cdr pa))))
+        (spawn x (effect kind: 'match
+                         ids: (list a c)
+                         tween: (life MATCH-TICKS 'linear)
+                         data: (list (list (tile-face b0 a) (car ra) (cadr ra))
+                                     (list (tile-face b0 c) (car rc) (cadr rc))
+                                     w
+                                     h
+                                     (append (car pa) (car pc)))))))
+
+    ;; The shuffle: same tiles, new faces, history one longer. data: the
+    ;; faces vector before the shuffle, drawn until each tile's flip passes
+    ;; its midpoint; each tile's flip starts at its reading-order rank
+    ;; spread over SHUFFLE-STAGGER ticks (data also carries the ranks).
+    (define (spawn-shuffle x b0 b1)
+      (let* ((order (filter (lambda (id) (tile-present? b1 id))
+                            (layout-reading-order (board-layout b1))))
+             (n (max 1 (- (length order) 1)))
+             (ranks (let loop ((ids order) (i 0) (acc '()))
+                      (if (null? ids)
+                          acc
+                          (loop (cdr ids)
+                                (+ i 1)
+                                (cons (cons (car ids)
+                                            (exact (floor (/ (* i SHUFFLE-STAGGER) n))))
+                                      acc))))))
+        (spawn x (effect kind: 'shuffle
+                         ids: order
+                         tween: (life (+ SHUFFLE-TICKS SHUFFLE-STAGGER) 'linear)
+                         data: (cons (vector-copy (board-faces b0)) ranks)))))
+
+    ;; The cleared board: glyph rain. data: (face x0 delay speed) per drop,
+    ;; x0 in 0..1 of the viewport width, delay in 0..1 of the life.
+    (define (spawn-cleared x)
+      (let loop ((k 0) (rng (spawn-rng x)) (acc '()))
+        (if (= k RAIN-DROPS)
+            (spawn x (effect kind: 'cleared
+                             tween: (life CLEARED-TICKS 'linear)
+                             data: acc))
+            (let* ((d (draws rng 4))
+                   (r (car d)))
+              (loop (+ k 1)
+                    (cdr d)
+                    (cons (list (exact (floor (* 36 (car r))))
+                                (cadr r)
+                                (* 0.6 (caddr r))
+                                (+ 0.5 (cadddr r)))
+                          acc))))))
+
+    ;; Everything the step changed, as effects. g is the geometry the tiles
+    ;; were drawn with (ghosts keep their rects from it).
+    (define (fx-observe x before after g)
+      (let* ((b0 (session-board before))
+             (b1 (session-board after))
+             (gone (gone-tiles b0 b1))
+             (back (returned-tiles b0 b1))
+             (h0 (length (board-history b0)))
+             (h1 (length (board-history b1)))
+             (sel0 (board-selected b0))
+             (sel1 (board-selected b1))
+             (new-deal? (not (= (session-seed before) (session-seed after)))))
+        (cond
+          ;; a new deal: the table is reset, nothing to animate but the clock
+          (new-deal? (fx x effects: '()))
+          (else
+           (let* ((x (cond ((= (length gone) 2)
+                            (spawn-match (without-kind x 'pulse) b0 g (car gone) (cadr gone)))
+                           ((and (null? gone) (null? back) (> h1 h0)
+                                 (not (equal? (vector->list (board-faces b0))
+                                              (vector->list (board-faces b1)))))
+                            (spawn-shuffle (without-kind x 'pulse) b0 b1))
+                           ((pair? back)
+                            (spawn (without-kind x 'pulse)
+                                   (effect kind: 'settle
+                                           ids: back
+                                           tween: (life SETTLE-TICKS 'out-back))))
+                           (else x)))
+                  ;; selection: a new tile selected pulses; a tile selected while
+                  ;; another was (and did not match, or the pair would be gone)
+                  ;; shakes as GNOME shakes the second tile
+                  (x (cond ((and sel1 (not (eqv? sel0 sel1)))
+                            (let ((x (spawn (without-kind x 'pulse)
+                                            (effect kind: 'pulse
+                                                    ids: (list sel1)
+                                                    tween: (life PULSE-TICKS 'out-quad)))))
+                              (if sel0
+                                  (spawn x (effect kind: 'shake
+                                                   ids: (list sel1)
+                                                   tween: (life SHAKE-TICKS 'linear)
+                                                   data: (max SHAKE-MIN
+                                                              (* SHAKE-FRACTION (geometry-tile-w g)))))
+                                  x)))
+                           ((and sel0 (not sel1)) (without-kind x 'pulse))
+                           (else x)))
+                  ;; the priced hint: a new ring blinks; a cleared ring stops
+                  (x (cond ((and (session-hint after)
+                                 (not (eqv? (session-hint before) (session-hint after))))
+                            (spawn (without-kind x 'blink)
+                                   (effect kind: 'blink
+                                           ids: (list (session-hint after))
+                                           tween: (life (* BLINKS BLINK-TICKS) 'linear))))
+                           ((not (session-hint after)) (without-kind x 'blink))
+                           (else x)))
+                  (x (if (and (board-cleared? b1) (not (board-cleared? b0)))
+                         (spawn-cleared x)
+                         x)))
+             x)))))
+
+    ;; --- reading the effects back --------------------------------------------
+
+    (define (progress e alpha)
+      (tween-progress (effect-tween e) alpha))
+
+    (define (alpha-of x) (clock-alpha (fx-clock x)))
+
+    ;; How a present tile is drawn this frame: (dx dy sx sy face) where face
+    ;; is #f to draw the board's own, or the face to show instead (a shuffle
+    ;; flip before its midpoint). #f when nothing touches the tile.
+    (define (fx-tile-view x id)
+      (let ((alpha (alpha-of x)))
+        (let loop ((es (fx-effects x))
+                   (dx 0.0)
+                   (dy 0.0)
+                   (sx 1.0)
+                   (sy 1.0)
+                   (face #f)
+                   (touched? #f))
+          (if (null? es)
+              (and touched? (list dx dy sx sy face))
+              (let ((e (car es)))
+                (if (not (memv id (effect-ids e)))
+                    (loop (cdr es) dx dy sx sy face touched?)
+                    (case (effect-kind e)
+                      ((pulse)
+                       ;; up to PULSE-SCALE at the midpoint, back to 1
+                       (let* ((p (progress e alpha))
+                              (bump (* (- PULSE-SCALE 1.0) (sin (* 3.14159265 p)))))
+                         (loop (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
+                      ((shake)
+                       (let* ((p (progress e alpha))
+                              (seconds (/ (* p SHAKE-TICKS) TICKS-PER-SECOND))
+                              (offset (* (effect-data e) (sin (* TAU SHAKE-HZ seconds)))))
+                         (loop (cdr es) (+ dx offset) dy sx sy face #t)))
+                      ((shuffle)
+                       (let* ((total (+ SHUFFLE-TICKS SHUFFLE-STAGGER))
+                              (t (* (progress e alpha) total))
+                              (start (cdr (assv id (cdr (effect-data e)))))
+                              (local (/ (- t start) SHUFFLE-TICKS)))
+                         (cond ((< local 0.0)
+                                (loop (cdr es) dx dy sx sy
+                                      (vector-ref (car (effect-data e)) id) #t))
+                               ((>= local 1.0)
+                                (loop (cdr es) dx dy sx sy face touched?))
+                               (else
+                                (loop (cdr es) dx dy
+                                      (* sx (abs (cos (* 3.14159265 local))))
+                                      sy
+                                      (if (< local 0.5)
+                                          (vector-ref (car (effect-data e)) id)
+                                          face)
+                                      #t)))))
+                      ((settle)
+                       (let ((p (progress e alpha)))
+                         (loop (cdr es) dx dy (* sx p) (* sy p) face #t)))
+                      (else (loop (cdr es) dx dy sx sy face touched?)))))))))
+
+    ;; The match ghosts this frame: (face x y w h alpha) each, both tiles
+    ;; rising and drifting toward their midpoint until MATCH-MEET, then gone.
+    (define (fx-ghosts x)
+      (let ((alpha (alpha-of x)))
+        (fold (lambda (acc e)
+                (if (not (eq? (effect-kind e) 'match))
+                    acc
+                    (let* ((p (progress e alpha))
+                           (d (effect-data e))
+                           (w (caddr d))
+                           (h (cadddr d))
+                           (ga (car d))
+                           (gc (cadr d))
+                           (mx (/ (+ (cadr ga) (cadr gc)) 2.0))
+                           (my (/ (+ (caddr ga) (caddr gc)) 2.0))
+                           (q (min 1.0 (/ p MATCH-MEET)))
+                           (k (ease 'out-quad q))
+                           (s (+ 1.0 (* (- MATCH-SCALE 1.0) k)))
+                           (fade (if (< p MATCH-MEET)
+                                     1.0
+                                     (max 0.0 (- 1.0 (/ (- p MATCH-MEET) 0.15)))))
+                           (ghost (lambda (gh)
+                                    (let* ((x0 (cadr gh))
+                                           (y0 (caddr gh))
+                                           (x1 (+ x0 (* 0.5 k (- mx x0))))
+                                           (y1 (- (+ y0 (* 0.5 k (- my y0)))
+                                                  (* MATCH-LIFT k)))
+                                           (gw (* w s))
+                                           (gh2 (* h s)))
+                                      (list (car gh)
+                                            (- x1 (/ (- gw w) 2.0))
+                                            (- y1 (/ (- gh2 h) 2.0))
+                                            gw
+                                            gh2
+                                            fade)))))
+                      (if (<= fade 0.0)
+                          acc
+                          (cons (ghost ga) (cons (ghost gc) acc))))))
+              '()
+              (fx-effects x))))
+
+    ;; Every particle this frame: (face x y size alpha). Match fragments
+    ;; scatter with gravity after the ghosts meet; the cleared board's rain
+    ;; falls from the top edge of the viewport (vw, vh given for it).
+    (define (fx-particles x vw vh)
+      (let ((alpha (alpha-of x)))
+        (fold (lambda (acc e)
+                (case (effect-kind e)
+                  ((match)
+                   (let* ((p (progress e alpha))
+                          (q (/ (- p MATCH-MEET) (- 1.0 MATCH-MEET))))
+                     (if (< q 0.0)
+                         acc
+                         (let ((t (* q 1.2)))       ; particle seconds of flight
+                           (fold (lambda (acc pt)
+                                   (cons (list (car pt)
+                                               (+ (cadr pt) (* (cadddr pt) t))
+                                               (+ (caddr pt)
+                                                  (* (list-ref pt 4) t)
+                                                  (* 60.0 t t))
+                                               2
+                                               (max 0.0 (- 1.0 q)))
+                                         acc))
+                                 acc
+                                 (list-ref (effect-data e) 4))))))
+                  ((cleared)
+                   (let ((p (progress e alpha)))
+                     (fold (lambda (acc drop)
+                             (let* ((delay (caddr drop))
+                                    (q (- p delay)))
+                               (if (< q 0.0)
+                                   acc
+                                   (cons (list (car drop)
+                                               (* vw (cadr drop))
+                                               (* vh q (cadddr drop) 1.6)
+                                               3
+                                               (max 0.0 (- 1.0 (* q 1.2))))
+                                         acc))))
+                           acc
+                           (effect-data e))))
+                  (else acc)))
+              '()
+              (fx-effects x))))
+
+    ;; Alpha of the priced-hint ring: on/off through BLINKS half-periods,
+    ;; then steady. 1.0 when no blink is live.
+    (define (fx-ring-alpha x)
+      (let ((e (find (lambda (e) (eq? (effect-kind e) 'blink)) (fx-effects x))))
+        (if (or (not e) (tween-done? (effect-tween e)))
+            1.0
+            (let ((phase (exact (floor (* (progress e (alpha-of x)) BLINKS)))))
+              (if (even? phase) 1.0 0.15)))))
+
+    ;; Progress of the cleared sequence in 0..1, or #f.
+    (define (fx-cleared x)
+      (let ((e (find (lambda (e) (eq? (effect-kind e) 'cleared)) (fx-effects x))))
+        (and e (progress e (alpha-of x)))))
+
+    ;; A slow breath in 0..1 from the clock, for the selected tile's glow.
+    (define (fx-glow x)
+      (let ((t (+ (clock-ticks (fx-clock x)) (alpha-of x))))
+        (+ 0.5 (* 0.5 (sin (/ (* TAU t) 60.0))))))))

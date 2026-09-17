@@ -18,9 +18,10 @@
 //               frame the game draws, so preserveDrawingBuffer:false is not a problem)
 //   tap-select  a synthetic pointerdown at tile A's center -> "crash: select A"
 //   tap-match   a second one at its pair B     -> "crash: removed A B tiles 142"
-//   keys-match  undo (the page button), then the hint-mode tags of each tile of
-//               the same pair, from the game's "crash: labels" boot line
-//               -> "crash: removed A B tiles 142"
+//   keys-match  undo (a tap on the game's own UNDO control, at the centre the
+//               "crash: control undo X Y" boot line gives), then the hint-mode
+//               tags of each tile of the same pair, from the game's
+//               "crash: labels" boot line -> "crash: removed A B tiles 142"
 //   console     zero error-level console entries and zero exceptions
 //
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
@@ -268,10 +269,11 @@ if (EXPECT_NO_SELECTION) {
 // The game's second boot line gives the first pair's hint tags (one or two
 // letters each, on every uncovered tile). Typing A's tag must select A and
 // typing B's tag must remove the pair. In the normal run the pair is already
-// gone after tap-match, so the arm presses the page's undo button first
-// (its own path), which puts the tiles back and prints "crash: undo tiles
-// 144"; the tags come back with the board. In the positive-control run the
-// board is still full and no undo is needed.
+// gone after tap-match, so the arm taps the game's UNDO control first (the
+// pointer path through (crash input)'s control rects), which puts the tiles
+// back and prints "crash: undo tiles 144"; the tags come back with the
+// board. In the positive-control run the board is still full and no undo is
+// needed (and with forwarding off the control could not be tapped anyway).
 async function key(type, k) {
   await evalJS(`document.dispatchEvent(new KeyboardEvent(${JSON.stringify(type)}, { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
 }
@@ -285,10 +287,14 @@ else {
   const tapped = results.some((r) => r[0] === "tap-match" && r[1] === "PASS");
   if (!EXPECT_NO_SELECTION && !tapped) keysDetail = "SKIP: no pair removed by tap-match, nothing to undo";
   else if (!EXPECT_NO_SELECTION) {
-    mark = consoleLines.length;
-    await evalJS(`document.querySelector('[data-key="undo"]').click()`);
-    const undo = await waitLine(/^crash: undo tiles (\d+)$/, mark, 2000);
-    if (!undo) keysDetail = "undo button produced no \"crash: undo\" line";
+    const ctl = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    if (!ctl) keysDetail = "no \"crash: control undo\" boot line";
+    else {
+      mark = consoleLines.length;
+      await tap(ctl.m[1], ctl.m[2]);
+      const undo = await waitLine(/^crash: undo tiles (\d+)$/, mark, 2000);
+      if (!undo) keysDetail = `UNDO control at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: undo" line`;
+    }
   }
   if (!keysDetail) {
     mark = consoleLines.length;
