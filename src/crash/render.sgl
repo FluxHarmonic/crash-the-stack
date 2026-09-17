@@ -22,13 +22,14 @@
           (crash stack rules)
           (crash geometry)
           (crash input)
+          (crash editor)
           (crash trace)
           (crash stack prng)
           (crash tween)
           (crash fx)
           (crash font))
 
-  (export draw-session draw-frame-ms
+  (export draw-session draw-editor draw-frame-ms
           TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
 
   (begin
@@ -603,6 +604,76 @@
         (draw-text text (- 640 8 (text-width text 2)) 6 2)))
 
     ;; --- one frame ------------------------------------------------------------
+
+    ;; --- the editor -----------------------------------------------------------
+    ;;
+    ;; Blank faces on the canvas geometry, the layers above the cursor's
+    ;; drawn per the editor's dim mode, the cursor as a ring (selected color
+    ;; where a tile can go, highlight where it cannot), and a status line.
+
+    (define (draw-editor e g)
+      (let* ((c (editor-cursor e))
+             (cl (car c))
+             (dim (editor-dim e))
+             (vw (geometry-vw g))
+             (vh (geometry-vh g))
+             (top (- vh (geometry-hud-h g)))
+             (alpha-for (lambda (layer)
+                          (cond ((<= layer cl) 1.0)
+                                ((eq? dim 'full) 1.0)
+                                ((eq? dim 'dim) 0.35)
+                                (else 0.0)))))
+        (draw-background g 0.0)
+        (let loop ((layer 0))
+          (when (< layer CANVAS-LAYERS)
+            (let ((a (alpha-for layer))
+                  (on-layer (filter (lambda (p) (= (car p) layer)) (editor-slots e))))
+              (when (> a 0.0)
+                (for-each (lambda (p)
+                            (let* ((r (cell-rect g layer (cadr p) (caddr p)))
+                                   (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+                                   (side (geometry-side g)))
+                              (color-alpha! C-SIDE-DARK a)
+                              (draw-filled-rect (- x side) (+ y h) (+ w side) side)
+                              (color-alpha! C-SIDE a)
+                              (draw-filled-rect (- x side) y side h)))
+                          on-layer)
+                (for-each (lambda (p)
+                            (let* ((r (cell-rect g layer (cadr p) (caddr p)))
+                                   (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+                              (color-alpha! (if (= layer cl) C-FACE (mix C-FACE C-BAR-C 0.25)) a)
+                              (draw-filled-rect x y w h)
+                              (color-alpha! C-FACE-EDGE a)
+                              (draw-filled-rect x y w 1)
+                              (draw-filled-rect x y 1 h)))
+                          on-layer)))
+            (loop (+ layer 1))))
+        ;; the cursor
+        (let* ((r (cell-rect g cl (cadr c) (caddr c)))
+               (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+               (here? (and (member c (editor-slots e)) #t))
+               (ok? (or here? (placeable? e c))))
+          (color! (if ok? C-SELECTED C-HIGHLIGHT))
+          (draw-filled-rect (- x 1) (- y 1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
+          (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
+          (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2)))
+        ;; the HUD
+        (color! C-BG)
+        (draw-filled-rect 0 top vw (geometry-hud-h g))
+        (color! C-TEXT-DIM)
+        (draw-filled-rect 0 top vw 1)
+        (color! C-TEXT)
+        (draw-text (string-append "EDIT  TILES " (number->string (editor-count e))
+                                  "  LAYER " (number->string cl)
+                                  "  AT " (number->string (cadr c)) "," (number->string (caddr c))
+                                  "  ABOVE " (case dim ((full) "FULL") ((dim) "DIM") (else "HIDDEN")))
+                   8 (+ top 7) 2)
+        (color! C-TEXT-DIM)
+        (draw-text "ARROWS/HJKL MOVE  SHIFT HALF STEP  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM ABOVE  ^S SAVE  ^P PLAY  ESC QUIT"
+                   8 (+ top 32) 1)
+        (unless (string=? (editor-message e) "")
+          (draw-message g (editor-message e) top 1.0 0.0))))
 
     ;; x: the frame's effects from (crash fx), already advanced.
     (define (draw-session s g tex x)

@@ -1,0 +1,135 @@
+;;; Gate leg 3 - the editor's round trip.
+;;;
+;;; Twelve tiles placed across three layers through the editor's own key
+;;; frames (arrows, shift for half steps, u for a layer up, space to
+;;; place), saved as the 2020 (stack LAYER ...) datum, loaded back with
+;;; the game's own loader, structurally equal (as sorted (layer hx hy)
+;;; triples); an odd count and an empty editor are refused; an overlapping
+;;; or floating placement changes nothing; removing a supporting tile
+;;; takes what rests on it.
+
+(import (sigil test)
+        (sigil list)
+        (crash stack layout)
+        (crash input)
+        (crash editor))
+
+(define (frame pressed . rest)
+  (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
+
+(define (press e keys . rest)
+  (editor-step e (make-input-frame keys (if (pair? rest) (car rest) '()) #f)))
+
+;; Drive the cursor to (layer hx hy) from wherever it is and place a tile.
+(define (place e layer hx hy)
+  (let* ((c (editor-cursor e))
+         (e (let loop ((e e) (dl (- layer (car c))))
+              (cond ((> dl 0) (loop (press e '(u)) (- dl 1)))
+                    ((< dl 0) (loop (press e '(d)) (+ dl 1)))
+                    (else e))))
+         (e (let loop ((e e) (dx (- hx (cadr (editor-cursor e)))))
+              (cond ((>= dx 2) (loop (press e '(right)) (- dx 2)))
+                    ((<= dx -2) (loop (press e '(left)) (+ dx 2)))
+                    ((= dx 1) (press e '(l) '(shift)))
+                    ((= dx -1) (press e '(h) '(shift)))
+                    (else e))))
+         (e (let loop ((e e) (dy (- hy (caddr (editor-cursor e)))))
+              (cond ((>= dy 2) (loop (press e '(down)) (- dy 2)))
+                    ((<= dy -2) (loop (press e '(up)) (+ dy 2)))
+                    ((= dy 1) (press e '(j) '(shift)))
+                    ((= dy -1) (press e '(k) '(shift)))
+                    (else e)))))
+    (press e '(space))))
+
+(define (triple< a b)
+  (or (< (car a) (car b))
+      (and (= (car a) (car b))
+           (or (< (cadr a) (cadr b))
+               (and (= (cadr a) (cadr b)) (< (caddr a) (caddr b)))))))
+
+(define (sorted-triples slots) (list-sort triple< slots))
+
+(define (layout-triples lay)
+  (sorted-triples (map (lambda (s) (list (slot-layer s) (slot-hx s) (slot-hy s)))
+                       (vector->list (layout-slots lay)))))
+
+;; Layer 0: a 3x2 block of six (hx 0 2 4, hy 0 2); layer 1: four on top
+;; (hx 1 3, hy 1 and a half step apart); layer 2: two.
+(define PLAN '((0 0 0) (0 2 0) (0 4 0) (0 0 2) (0 2 2) (0 4 2)
+               (1 1 1) (1 3 1) (1 1 3) (1 3 3)
+               (2 2 2) (2 2 0)))
+
+(define (build plan)
+  (let loop ((plan plan) (e (editor-new)))
+    (if (null? plan)
+        e
+        (loop (cdr plan) (apply place e (car plan))))))
+
+(test-group "editor: twelve tiles in three layers round-trip through the file format"
+  (let* ((e (build PLAN))
+         (d (editor-datum e))
+         (lay (and d (sexp->layout d))))
+    (test "every planned tile landed"
+      (assert-equal 12 (editor-count e))
+      (assert-equal (sorted-triples PLAN) (sorted-triples (editor-slots e))))
+    (test "the datum is a stack of three layers"
+      (assert-true (and d #t))
+      (assert-equal 'stack (car d))
+      (assert-equal 3 (length (cdr d)))
+      (assert-equal '(6 4 2) (map length (cdr d))))
+    (test "half steps are written as halves, whole steps as integers"
+      (assert-true (member '(0.5 . 0.5) (cadr (cdr d))))
+      (assert-true (member '(1 . 0) (car (cdr d)))))
+    (test "the game's loader reads it back to the same tiles"
+      (assert-equal 12 (layout-slot-count lay))
+      (assert-equal 3 (layout-layer-count lay))
+      (assert-equal (sorted-triples PLAN) (layout-triples lay)))
+    (test "loading it into the editor gives the same tiles"
+      (assert-equal (sorted-triples PLAN)
+                    (sorted-triples (editor-slots (editor-from-layout lay)))))
+    (test "the layout it makes is playable-shaped: an even count, layers counted"
+      (assert-equal '(6 4 2) (layout-layer-counts lay)))))
+
+(test-group "editor: what is refused"
+  (let* ((e (build PLAN))
+         (odd (place e 0 8 0)))
+    (test "a thirteenth tile makes the count odd and the save is refused"
+      (assert-equal 13 (editor-count odd))
+      (assert-false (editor-datum odd))
+      (assert-false (editor-layout odd)))
+    (test "removing it again saves"
+      (assert-true (and (editor-datum (press odd '(space))) #t)))
+    (test "an empty editor is refused"
+      (assert-false (editor-datum (editor-new))))
+    (test "a tile overlapping one on its layer is refused with a message"
+      (let ((bumped (place e 0 1 0)))
+        (assert-equal 12 (editor-count bumped))
+        (assert-equal "OVERLAPS A TILE ON THIS LAYER" (editor-message bumped))))
+    (test "a floating tile is refused with a message"
+      (let ((floated (place e 3 0 0)))
+        (assert-equal 12 (editor-count floated))
+        (assert-equal "NOTHING UNDER IT" (editor-message floated))))
+    (test "the cursor stays inside the canvas"
+      (let ((far (let loop ((e e) (n 0))
+                   (if (= n 40) e (loop (press e '(left)) (+ n 1))))))
+        (assert-equal CANVAS-MIN-HX (cadr (editor-cursor far)))))
+    (test "removing a supporting tile takes the tiles resting on it"
+      (let* ((tower (build '((0 0 0) (1 0 0) (2 0 0) (0 4 0))))
+             (after (place tower 0 0 0)))     ; the cursor lands on an occupied cell: a removal
+        (assert-equal 4 (editor-count tower))
+        (assert-equal '((0 4 0)) (editor-slots after))
+        (assert-equal "3 TILES REMOVED" (editor-message after))))
+    (test "removing a tile that supports nothing removes only itself"
+      (let* ((e2 (place e 0 2 2))
+             (gone (filter (lambda (p) (not (member p (editor-slots e2)))) PLAN)))
+        ;; every layer-1 tile over (0 2 2) still rests on another layer-0 tile
+        (assert-equal '((0 2 2)) gone)
+        (assert-equal 11 (editor-count e2))))))
+
+(test-group "editor: dimming cycles"
+  (let ((e (editor-new)))
+    (test "tab walks full, dim, hidden, full"
+      (assert-equal 'full (editor-dim e))
+      (assert-equal 'dim (editor-dim (press e '(tab))))
+      (assert-equal 'hidden (editor-dim (press (press e '(tab)) '(tab))))
+      (assert-equal 'full (editor-dim (press (press (press e '(tab)) '(tab)) '(tab)))))))

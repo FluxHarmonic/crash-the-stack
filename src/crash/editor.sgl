@@ -1,0 +1,204 @@
+;;; (crash editor) - Drawing a layout, one tile at a time.
+;;;
+;;; The 2020 editor.sld, rebuilt: a cursor moves over a fixed canvas of
+;;; half-tile cells across five layers, space places a tile there or
+;;; removes the one that is there, u and d change layer, and Tab cycles
+;;; how the layers above the cursor's are drawn (full, dim, hidden) so a
+;;; deep stack can be seen into. A tile can be placed where it would not
+;;; overlap a tile on its own layer and, above layer 0, where at least one
+;;; tile on the layer below sits under its footprint (no floating tiles;
+;;; the 2020 editor did not check this). The result is saved in the 2020
+;;; file format the game loads, (stack LAYER ...) with whole-tile
+;;; coordinates, and a layout with an odd number of tiles, or none, is
+;;; refused because no face assignment can clear it.
+;;;
+;;; Pure: a frame of keys in, an editor out; the native shell owns the
+;;; file and the play-test. (David draws the first original layouts with
+;;; this; the shipped set is P3's.)
+
+(define-library (crash editor)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (crash stack layout)
+          (crash input))
+
+  (export editor editor? editor-new editor-from-layout
+          editor-slots editor-cursor editor-dim editor-message editor-count
+          editor-step editor-place editor-remove editor-move
+          placeable? editor-datum editor-layout
+          CANVAS-MIN-HX CANVAS-MAX-HX CANVAS-MIN-HY CANVAS-MAX-HY CANVAS-LAYERS
+          DIM-MODES)
+
+  (begin
+    ;; The canvas, in half-tile units: wider and taller than the Turtle
+    ;; (hx -13..15, hy -7..7) with room to spare, five layers like it.
+    (define CANVAS-MIN-HX -16)
+    (define CANVAS-MAX-HX 16)
+    (define CANVAS-MIN-HY -9)
+    (define CANVAS-MAX-HY 9)
+    (define CANVAS-LAYERS 5)
+
+    (define DIM-MODES '(full dim hidden))
+
+    ;; slots: (layer hx hy) triples, in placement order. cursor: the same
+    ;; shape. dim: how layers above the cursor's are drawn.
+    (define-struct editor
+      (slots default: '())
+      (cursor default: '(0 0 0))
+      (dim default: 'full)
+      (message default: ""))
+
+    (define (editor-new)
+      (editor))
+
+    (define (editor-from-layout lay)
+      (editor slots: (map (lambda (s) (list (slot-layer s) (slot-hx s) (slot-hy s)))
+                          (vector->list (layout-slots lay)))))
+
+    (define (editor-count e)
+      (length (editor-slots e)))
+
+    (define (pos-layer p) (car p))
+    (define (pos-hx p) (cadr p))
+    (define (pos-hy p) (caddr p))
+
+    (define (at? e p)
+      (and (member p (editor-slots e)) #t))
+
+    ;; Two tiles on one layer overlap when their centres are within two
+    ;; half-units on both axes (a tile is two half-units wide and tall).
+    (define (overlaps-on-layer? e p)
+      (any (lambda (q)
+             (and (= (pos-layer q) (pos-layer p))
+                  (< (abs (- (pos-hx q) (pos-hx p))) 2)
+                  (< (abs (- (pos-hy q) (pos-hy p))) 2)))
+           (editor-slots e)))
+
+    ;; A tile above layer 0 needs a tile under its footprint: one on the
+    ;; layer below within one half-unit on both axes (the rules' covered
+    ;; relation, seen from above).
+    (define (supported? e p)
+      (or (= (pos-layer p) 0)
+          (any (lambda (q)
+                 (and (= (pos-layer q) (- (pos-layer p) 1))
+                      (<= (abs (- (pos-hx q) (pos-hx p))) 1)
+                      (<= (abs (- (pos-hy q) (pos-hy p))) 1)))
+               (editor-slots e))))
+
+    (define (in-canvas? p)
+      (and (>= (pos-layer p) 0) (< (pos-layer p) CANVAS-LAYERS)
+           (>= (pos-hx p) CANVAS-MIN-HX) (<= (pos-hx p) CANVAS-MAX-HX)
+           (>= (pos-hy p) CANVAS-MIN-HY) (<= (pos-hy p) CANVAS-MAX-HY)))
+
+    (define (placeable? e p)
+      (and (in-canvas? p)
+           (not (overlaps-on-layer? e p))
+           (supported? e p)))
+
+    ;; --- edits --------------------------------------------------------------
+
+    (define (editor-place e p)
+      (cond ((at? e p) (editor e message: "A TILE IS THERE"))
+            ((not (placeable? e p))
+             (editor e message: (if (supported? e p)
+                                    "OVERLAPS A TILE ON THIS LAYER"
+                                    "NOTHING UNDER IT")))
+            (else (editor e slots: (append (editor-slots e) (list p)) message: ""))))
+
+    ;; Removing a tile takes the tiles resting on it too (they would float).
+    (define (editor-remove e p)
+      (let loop ((slots (filter (lambda (q) (not (equal? q p))) (editor-slots e)))
+                 (removed 1))
+        (let ((floating (filter (lambda (q)
+                                  (not (supported? (editor slots: slots) q)))
+                                slots)))
+          (if (null? floating)
+              (editor e
+                      slots: slots
+                      message: (if (> removed 1)
+                                   (string-append (number->string removed) " TILES REMOVED")
+                                   ""))
+              (loop (filter (lambda (q) (not (member q floating))) slots)
+                    (+ removed (length floating)))))))
+
+    (define (editor-move e dl dhx dhy)
+      (let* ((c (editor-cursor e))
+             (p (list (max 0 (min (- CANVAS-LAYERS 1) (+ (pos-layer c) dl)))
+                      (max CANVAS-MIN-HX (min CANVAS-MAX-HX (+ (pos-hx c) dhx)))
+                      (max CANVAS-MIN-HY (min CANVAS-MAX-HY (+ (pos-hy c) dhy))))))
+        (editor e cursor: p message: "")))
+
+    (define (next-dim d)
+      (let ((rest (cdr (memq d DIM-MODES))))
+        (if (null? rest) (car DIM-MODES) (car rest))))
+
+    ;; --- one frame -------------------------------------------------------------
+    ;;
+    ;; Arrows or hjkl move one tile (two half-units); with shift held, one
+    ;; half-unit. u and d go a layer up and down. Space places or removes
+    ;; at the cursor. Tab cycles the dimming of the layers above.
+
+    (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+    (define (held? f key) (and (memq key (input-frame-held f)) #t))
+
+    (define (editor-step e f)
+      (let* ((step (if (held? f 'shift) 1 2))
+             (dx (cond ((or (pressed? f 'left) (pressed? f 'h)) (- step))
+                       ((or (pressed? f 'right) (pressed? f 'l)) step)
+                       (else 0)))
+             (dy (cond ((or (pressed? f 'up) (pressed? f 'k)) (- step))
+                       ((or (pressed? f 'down) (pressed? f 'j)) step)
+                       (else 0)))
+             (dl (cond ((pressed? f 'u) 1)
+                       ((pressed? f 'd) -1)
+                       (else 0))))
+        (cond ((or (not (= dx 0)) (not (= dy 0)) (not (= dl 0)))
+               (editor-move e dl dx dy))
+              ((pressed? f 'space)
+               (if (at? e (editor-cursor e))
+                   (editor-remove e (editor-cursor e))
+                   (editor-place e (editor-cursor e))))
+              ((pressed? f 'tab)
+               (editor e dim: (next-dim (editor-dim e))))
+              (else e))))
+
+    ;; --- the file -------------------------------------------------------------------
+
+    ;; A half-unit coordinate in whole tiles: 11 -> 5.5, 10 -> 5.
+    (define (half->coord h)
+      (if (even? h) (quotient h 2) (/ h 2.0)))
+
+    ;; The layout as the 2020 (stack LAYER ...) form, layers bottom-up, or
+    ;; #f when it could never be cleared (no tiles, or an odd count).
+    (define (editor-datum e)
+      (let ((n (editor-count e)))
+        (and (> n 0)
+             (even? n)
+             (cons 'stack
+                   (let layer ((l 0) (acc '()))
+                     (if (= l CANVAS-LAYERS)
+                         (let trim ((layers (reverse acc)))
+                           ;; drop empty layers at the top
+                           (let ((r (reverse layers)))
+                             (if (and (pair? r) (null? (car r)))
+                                 (trim (reverse (cdr r)))
+                                 layers)))
+                         (layer (+ l 1)
+                                (cons (map (lambda (p) (cons (half->coord (pos-hx p))
+                                                             (half->coord (pos-hy p))))
+                                           (filter (lambda (p) (= (pos-layer p) l))
+                                                   (editor-slots e)))
+                                      acc))))))))
+
+    ;; The reason a save is refused, for the HUD.
+    (define (refusal e)
+      (cond ((= (editor-count e) 0) "NOTHING TO SAVE")
+            ((odd? (editor-count e))
+             (string-append "ODD TILE COUNT (" (number->string (editor-count e)) "): ADD OR REMOVE ONE"))
+            (else #f)))
+
+    ;; The layout the tiles make, for a play-test, or #f when unplayable.
+    (define (editor-layout e)
+      (let ((d (editor-datum e)))
+        (and d (sexp->layout d))))))
