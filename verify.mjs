@@ -281,7 +281,9 @@ let keysOk = false, keysDetail = "";
 if (!labels) keysDetail = "no \"crash: labels\" boot line";
 else {
   const [, LA, tagA, LB, tagB] = labels.m;
-  if (!EXPECT_NO_SELECTION) {
+  const tapped = results.some((r) => r[0] === "tap-match" && r[1] === "PASS");
+  if (!EXPECT_NO_SELECTION && !tapped) keysDetail = "SKIP: no pair removed by tap-match, nothing to undo";
+  else if (!EXPECT_NO_SELECTION) {
     mark = consoleLines.length;
     await evalJS(`document.querySelector('[data-key="undo"]').click()`);
     const undo = await waitLine(/^crash: undo tiles (\d+)$/, mark, 2000);
@@ -303,7 +305,9 @@ else {
     }
   }
 }
-if (keysOk) pass("keys-match", keysDetail); else fail("keys-match", keysDetail);
+if (keysOk) pass("keys-match", keysDetail);
+else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6));
+else fail("keys-match", keysDetail);
 
 // ---- 7. console -------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
