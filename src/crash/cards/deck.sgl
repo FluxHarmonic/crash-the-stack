@@ -1,0 +1,106 @@
+;;; (crash cards deck) - Fifty-two cards, and the order they come in.
+;;;
+;;; A card is an integer 0..51: suit = card div 13 in the order S H D C
+;;; (Cybersol's letters), rank = 1 + card mod 13 (ace 1, jack 11, queen 12,
+;;; king 13). Hearts and diamonds are red. A deck is a list of cards, the
+;;; first to be dealt first.
+;;;
+;;; Two ways to get a deck. A deck STRING is Cybersol's two-character
+;;; pairs, suit letter then rank character (0 for ten), read in string
+;;; order; the 2023 fixture is FIXTURE-DECK, and the gate's expected
+;;; layout was derived from it by hand. A SEED gives a Fisher-Yates
+;;; shuffle over the game's own MINSTD stream ((crash stack prng)), so a
+;;; seed names a deal for as long as the game exists, like a Mahjongg
+;;; board's. Nothing here reads a platform.
+
+(define-library (crash cards deck)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack prng))
+
+  (export DECK-SIZE SUITS RANKS FIXTURE-DECK
+          make-card card-suit card-rank card-red? card-color
+          card-string suit-char rank-char
+          fresh-deck deck-string->cards shuffled-deck)
+
+  (begin
+    (define DECK-SIZE 52)
+    (define SUITS '(spades hearts diamonds clubs))
+    (define RANKS 13)
+    (define SUIT-CHARS "SHDC")
+    (define RANK-CHARS "A234567890JQK")
+
+    ;; Cybersol's 2023 deck, the fixture for gate leg 2.
+    (define FIXTURE-DECK
+      "S2H7H6DKH4D3C4S9S3C9CJCKC5DJD0H8C2H0C3DQD2D4CQH2DAS5D6S6S7SQS4D5D9C0H3CAC7D8HKH9HQSKD7H5SJHAS0C6SAC8S8HJ")
+
+    ;; suit 0..3, rank 1..13 -> card.
+    (define (make-card suit rank)
+      (+ (* suit RANKS) (- rank 1)))
+
+    (define (card-suit c) (quotient c RANKS))
+    (define (card-rank c) (+ 1 (modulo c RANKS)))
+
+    (define (card-red? c)
+      (let ((s (card-suit c)))
+        (or (= s 1) (= s 2))))
+
+    (define (card-color c)
+      (if (card-red? c) 'red 'black))
+
+    (define (suit-char c) (string-ref SUIT-CHARS (card-suit c)))
+    (define (rank-char c) (string-ref RANK-CHARS (- (card-rank c) 1)))
+
+    ;; "S2", "H0", "CK": Cybersol's notation, for the trace lines and the gates.
+    (define (card-string c)
+      (string (suit-char c) (rank-char c)))
+
+    (define (char-index chars ch)
+      (let loop ((i 0))
+        (cond ((= i (string-length chars)) #f)
+              ((char=? (string-ref chars i) ch) i)
+              (else (loop (+ i 1))))))
+
+    ;; Every card once, in suit then rank order.
+    (define (fresh-deck)
+      (iota DECK-SIZE))
+
+    ;; The cards a deck string names, in string order, or #f when the
+    ;; string is not 52 well-formed pairs of distinct cards.
+    (define (deck-string->cards text)
+      (and (string? text)
+           (= (string-length text) (* 2 DECK-SIZE))
+           (let loop ((i 0) (acc '()))
+             (if (= i (string-length text))
+                 (let ((cards (reverse acc)))
+                   (and (distinct? cards) cards))
+                 (let ((suit (char-index SUIT-CHARS (string-ref text i)))
+                       (rank (char-index RANK-CHARS (string-ref text (+ i 1)))))
+                   (and suit
+                        rank
+                        (loop (+ i 2) (cons (make-card suit (+ rank 1)) acc))))))))
+
+    (define (distinct? cards)
+      (let ((seen (make-vector DECK-SIZE #f)))
+        (let loop ((cs cards))
+          (cond ((null? cs) #t)
+                ((vector-ref seen (car cs)) #f)
+                (else
+                 (vector-set! seen (car cs) #t)
+                 (loop (cdr cs)))))))
+
+    ;; Fisher-Yates over a fresh deck with the MINSTD stream from seed:
+    ;; for i from 51 down to 1, swap i with a draw in [0, i]. Returns
+    ;; (cons cards rng), the stream's state after the shuffle, so a game can
+    ;; keep drawing from where its deal left off.
+    (define (shuffled-deck seed)
+      (let ((v (list->vector (fresh-deck))))
+        (let loop ((i (- DECK-SIZE 1)) (rng (prng-seed seed)))
+          (if (< i 1)
+              (cons (vector->list v) rng)
+              (let* ((rng (prng-next rng))
+                     (j (prng-index rng (+ i 1)))
+                     (tmp (vector-ref v i)))
+                (vector-set! v i (vector-ref v j))
+                (vector-set! v j tmp)
+                (loop (- i 1) rng))))))))

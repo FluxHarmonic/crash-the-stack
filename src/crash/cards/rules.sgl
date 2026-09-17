@@ -1,0 +1,401 @@
+;;; (crash cards rules) - Klondike, the rules and nothing else.
+;;;
+;;; Windows Solitaire's table: seven tableau piles, four foundations, a
+;;; stock and a waste. A game is a snapshot of all of it plus the
+;;; selection and a history of earlier snapshots for undo, immutable by
+;;; convention like the Mahjongg board in (crash stack rules): every move
+;;; returns a new game, so undo is a pop and a bad move never half-applies.
+;;;
+;;; The rules (Cybersol's valid-pile-move? and valid-foundation-move?, and
+;;; the ones it left on its TODO list):
+;;;   - a card goes on a tableau pile whose top is the opposite color and
+;;;     one rank higher; a king goes on an empty pile; a run of face-up
+;;;     cards moves together when its bottom card may;
+;;;   - a card goes on a foundation whose top is the same suit and one rank
+;;;     lower; an ace goes on an empty foundation; only one card at a time;
+;;;   - the stock deals DRAW cards (one or three) onto the waste; an empty
+;;;     stock takes the waste back, in order, and counts a pass;
+;;;   - the card uncovered on a pile turns face up by itself;
+;;;   - the game is won when the four foundations hold thirteen each.
+;;;
+;;; game-select is the one door the input layer uses: every tap, and later
+;;; every key, names a PLACE and ends here. Places: (pile i depth) with
+;;; depth counted from the top card (0 = the top), (waste), (foundation i),
+;;; (stock). Tap-tap: a first tap selects a face-up card (on a pile, the
+;;; run from that card to the top); a second tap on a pile or foundation
+;;; tries the move; a second tap on the selected card sends it to a
+;;; foundation when one takes it and deselects otherwise (Windows'
+;;; double-click, on a phone); a tap on the stock draws.
+;;;
+;;; No rendering, windowing or platform import may appear here; the gate
+;;; test/test-imports.sgl asserts it.
+
+(define-library (crash cards rules)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack prng)
+          (crash cards deck))
+
+  (export game game?
+          game-tableau game-foundations game-stock game-waste
+          game-draw game-passes game-selected game-history game-moves game-rng
+          game-new game-from-deck
+          PILES FOUNDATIONS DRAW-COUNTS
+          pile-card pile-up? game-pile game-foundation
+          place-card place-selectable? selection-cards
+          valid-pile-move? valid-foundation-move?
+          game-move game-draw! game-undo game-select game-with-draw
+          game-won? game-all-up? game-face-down-count legal-moves
+          game-canonical game-equal?)
+
+  (begin
+    (define PILES 7)
+    (define FOUNDATIONS 4)
+    (define DRAW-COUNTS '(1 3))
+
+    ;; tableau: PILES lists of (card . up?), top card first.
+    ;; foundations: FOUNDATIONS lists of cards, top first.
+    ;; stock, waste: cards, top first (the next card drawn, the last drawn).
+    ;; selected: a place, or #f. history: earlier games, newest first.
+    (define-struct game
+      (tableau default: (vector))
+      (foundations default: (vector))
+      (stock default: '())
+      (waste default: '())
+      (draw default: 1)
+      (passes default: 0)
+      (selected default: #f)
+      (history default: '())
+      (moves default: 0)
+      (rng default: 1))
+
+    ;; --- construction --------------------------------------------------------
+
+    (define (pile-card entry) (car entry))
+    (define (pile-up? entry) (cdr entry))
+
+    ;; Pile i gets i+1 cards, pile by pile in deck order (Cybersol's loop),
+    ;; the last one face up; the rest is the stock, the next card to deal
+    ;; on top.
+    (define (deal-tableau cards)
+      (let ((tableau (make-vector PILES '())))
+        (let loop ((i 0) (cards cards))
+          (if (= i PILES)
+              (cons tableau cards)
+              (let inner ((n (+ i 1)) (cards cards) (pile '()))
+                (if (= n 0)
+                    (begin
+                      (vector-set! tableau i (cons (cons (car (car pile)) #t) (cdr pile)))
+                      (loop (+ i 1) cards))
+                    (inner (- n 1)
+                           (cdr cards)
+                           (cons (cons (car cards) #f) pile))))))))
+
+    (define (game-from-deck cards draw . rest)
+      (let ((dealt (deal-tableau cards)))
+        (game tableau: (car dealt)
+              foundations: (make-vector FOUNDATIONS '())
+              stock: (cdr dealt)
+              draw: (if (memv draw DRAW-COUNTS) draw 1)
+              rng: (if (pair? rest) (car rest) 1))))
+
+    ;; A seeded deal.
+    (define (game-new seed draw)
+      (let ((shuffled (shuffled-deck seed)))
+        (game-from-deck (car shuffled) draw (cdr shuffled))))
+
+    (define (game-with-draw g draw)
+      (if (memv draw DRAW-COUNTS) (game g draw: draw) g))
+
+    ;; --- queries -------------------------------------------------------------
+
+    (define (game-pile g i) (vector-ref (game-tableau g) i))
+    (define (game-foundation g i) (vector-ref (game-foundations g) i))
+
+    (define (place-kind p) (car p))
+
+    ;; The card a place names: a pile's card at its depth, the waste's or a
+    ;; foundation's top; #f for an empty place or the stock.
+    (define (place-card g p)
+      (case (place-kind p)
+        ((pile)
+         (let ((pile (game-pile g (cadr p)))
+               (depth (if (pair? (cddr p)) (caddr p) 0)))
+           (and (< depth (length pile))
+                (pile-card (list-ref pile depth)))))
+        ((waste) (and (pair? (game-waste g)) (car (game-waste g))))
+        ((foundation)
+         (let ((f (game-foundation g (cadr p))))
+           (and (pair? f) (car f))))
+        (else #f)))
+
+    ;; A place the player may pick up: a face-up pile card, the top of the
+    ;; waste, the top of a foundation.
+    (define (place-selectable? g p)
+      (case (place-kind p)
+        ((pile)
+         (let ((pile (game-pile g (cadr p)))
+               (depth (if (pair? (cddr p)) (caddr p) 0)))
+           (and (< depth (length pile))
+                (pile-up? (list-ref pile depth)))))
+        ((waste foundation) (and (place-card g p) #t))
+        (else #f)))
+
+    ;; The cards a selection would move, top first: a pile's run down to
+    ;; the depth, else the one top card.
+    (define (selection-cards g p)
+      (case (place-kind p)
+        ((pile)
+         (let ((depth (if (pair? (cddr p)) (caddr p) 0)))
+           (map pile-card (take (game-pile g (cadr p)) (+ depth 1)))))
+        (else
+         (let ((c (place-card g p)))
+           (if c (list c) '())))))
+
+    ;; --- the two rules -------------------------------------------------------
+
+    ;; card onto the top card of a pile (#f for an empty pile).
+    (define (valid-pile-move? card top)
+      (if (not top)
+          (= (card-rank card) 13)
+          (and (not (eq? (card-color card) (card-color top)))
+               (= (card-rank card) (- (card-rank top) 1)))))
+
+    ;; card onto the top card of a foundation (#f for an empty one).
+    (define (valid-foundation-move? card top)
+      (if (not top)
+          (= (card-rank card) 1)
+          (and (= (card-suit card) (card-suit top))
+               (= (card-rank card) (+ (card-rank top) 1)))))
+
+    ;; --- moves ---------------------------------------------------------------
+
+    (define (snapshot g)
+      (game g history: '()))
+
+    (define (push-history g0 g1)
+      (game g1
+            history: (cons (snapshot g0) (game-history g0))
+            selected: #f
+            moves: (+ 1 (game-moves g0))))
+
+    (define (vector-with v i x)
+      (let ((nv (vector-copy v)))
+        (vector-set! nv i x)
+        nv))
+
+    ;; A pile with its top card face up, whatever it was.
+    (define (flip-top pile)
+      (if (and (pair? pile) (not (pile-up? (car pile))))
+          (cons (cons (pile-card (car pile)) #t) (cdr pile))
+          pile))
+
+    ;; The game with the selection's cards taken off their place (the
+    ;; uncovered pile card turned up), or #f when the place holds nothing.
+    (define (take-from g src)
+      (let ((cards (selection-cards g src)))
+        (and (pair? cards)
+             (case (place-kind src)
+               ((pile)
+                (let* ((i (cadr src))
+                       (pile (game-pile g i)))
+                  (game g tableau: (vector-with (game-tableau g)
+                                                i
+                                                (flip-top (drop-n pile (length cards)))))))
+               ((waste) (game g waste: (cdr (game-waste g))))
+               ((foundation)
+                (let ((i (cadr src)))
+                  (game g foundations: (vector-with (game-foundations g)
+                                                    i
+                                                    (cdr (game-foundation g i))))))
+               (else #f)))))
+
+    ;; cards (top first) placed on a pile or a foundation, legality already
+    ;; checked.
+    (define (put-on g dst cards)
+      (case (place-kind dst)
+        ((pile)
+         (let ((i (cadr dst)))
+           (game g tableau: (vector-with (game-tableau g)
+                                         i
+                                         (append (map (lambda (c) (cons c #t)) cards)
+                                                 (game-pile g i))))))
+        ((foundation)
+         (let ((i (cadr dst)))
+           (game g foundations: (vector-with (game-foundations g)
+                                             i
+                                             (append cards (game-foundation g i))))))
+        (else g)))
+
+    ;; Is moving the run at src onto dst allowed? dst is a pile or a
+    ;; foundation (its depth, if any, is ignored: a tap anywhere on a pile
+    ;; means the pile). Only single cards reach a foundation; a run's
+    ;; bottom card is what must fit a pile.
+    (define (move-legal? g src dst)
+      (let ((cards (selection-cards g src)))
+        (and (pair? cards)
+             (place-selectable? g src)
+             (not (equal? (place-name src) (place-name dst)))
+             (case (place-kind dst)
+               ((pile)
+                (valid-pile-move? (list-ref cards (- (length cards) 1))
+                                  (place-card g (list 'pile (cadr dst) 0))))
+               ((foundation)
+                (and (null? (cdr cards))
+                     (valid-foundation-move? (car cards) (place-card g dst))))
+               (else #f)))))
+
+    ;; A place without its depth: what a destination is.
+    (define (place-name p)
+      (case (place-kind p)
+        ((pile foundation) (list (car p) (cadr p)))
+        (else (list (car p)))))
+
+    ;; The move, or #f when it is not legal.
+    (define (game-move g src dst)
+      (and (move-legal? g src dst)
+           (let ((cards (selection-cards g src)))
+             (push-history g (put-on (take-from g src) dst cards)))))
+
+    ;; Turn DRAW cards from the stock onto the waste, the last drawn on
+    ;; top; an empty stock takes the waste back (a pass); nothing to do
+    ;; with both empty. Named with a bang for the reader's eye only: it
+    ;; returns a new game like every move.
+    (define (game-draw! g)
+      (cond ((pair? (game-stock g))
+             (let loop ((n (game-draw g))
+                        (stock (game-stock g))
+                        (waste (game-waste g)))
+               (if (or (= n 0) (null? stock))
+                   (push-history g (game g stock: stock waste: waste))
+                   (loop (- n 1) (cdr stock) (cons (car stock) waste)))))
+            ((pair? (game-waste g))
+             (push-history g (game g
+                                   stock: (reverse (game-waste g))
+                                   waste: '()
+                                   passes: (+ 1 (game-passes g)))))
+            (else g)))
+
+    ;; Back to the previous snapshot; a game with no history is returned
+    ;; as it is. The move count and passes come back with the snapshot.
+    (define (game-undo g)
+      (let ((h (game-history g)))
+        (if (null? h)
+            g
+            (game (car h) history: (cdr h) selected: #f))))
+
+    ;; The first foundation that takes the card, as a place, or #f.
+    (define (foundation-for g card)
+      (let loop ((i 0))
+        (cond ((= i FOUNDATIONS) #f)
+              ((valid-foundation-move? card (place-card g (list 'foundation i)))
+               (list 'foundation i))
+              (else (loop (+ i 1))))))
+
+    ;; A pile place always carries its depth once it is a selection, so
+    ;; (pile 2) and (pile 2 0) are one tap.
+    (define (with-depth p)
+      (if (and (eq? (place-kind p) 'pile) (null? (cddr p)))
+          (list 'pile (cadr p) 0)
+          p))
+
+    ;; The entry point: a tap at a place. See the header for the tap-tap
+    ;; rule. A tap that changes nothing returns the same game.
+    (define (game-select g p0)
+      (let ((p (with-depth p0))
+            (sel (game-selected g)))
+        (cond ((eq? (place-kind p) 'stock) (game-draw! g))
+              ((not sel)
+               (if (place-selectable? g p) (game g selected: p) g))
+              ((equal? sel p)
+               (let* ((cards (selection-cards g sel))
+                      (dst (and (pair? cards)
+                                (null? (cdr cards))
+                                (foundation-for g (car cards)))))
+                 (or (and dst (game-move g sel dst))
+                     (game g selected: #f))))
+              ((game-move g sel p) => (lambda (moved) moved))
+              ((place-selectable? g p) (game g selected: p))
+              (else (game g selected: #f)))))
+
+    ;; --- the state of play ---------------------------------------------------
+
+    (define (game-won? g)
+      (let loop ((i 0))
+        (cond ((= i FOUNDATIONS) #t)
+              ((= (length (game-foundation g i)) RANKS) (loop (+ i 1)))
+              (else #f))))
+
+    (define (game-face-down-count g)
+      (let loop ((i 0) (n 0))
+        (if (= i PILES)
+            n
+            (loop (+ i 1)
+                  (+ n (length (filter (lambda (e) (not (pile-up? e)))
+                                       (game-pile g i))))))))
+
+    ;; Every tableau card face up: what auto-complete waits for.
+    (define (game-all-up? g)
+      (= 0 (game-face-down-count g)))
+
+    ;; Every move the player could make now, as (src . dst) places, from
+    ;; the piles' face-up runs and the waste's top to a pile or a
+    ;; foundation. Left out: moves from a foundation (never progress), and
+    ;; a king that already heads its pile moving to another empty pile
+    ;; (the same position over again). The stock is not a move here; a
+    ;; caller that asks "is the player stuck" also looks at the stock and
+    ;; the waste.
+    (define (legal-moves g)
+      (let* ((dests (append (map (lambda (i) (list 'pile i)) (iota PILES))
+                            (foundation-dests g)))
+             (sources
+               (append
+                 (apply append
+                        (map (lambda (i)
+                               (let ((pile (game-pile g i)))
+                                 (let loop ((depth 0) (acc '()))
+                                   (if (or (= depth (length pile))
+                                           (not (pile-up? (list-ref pile depth))))
+                                       (reverse acc)
+                                       (loop (+ depth 1)
+                                             (cons (list 'pile i depth) acc))))))
+                             (iota PILES)))
+                 (if (pair? (game-waste g)) (list (list 'waste)) '()))))
+        (apply append
+               (map (lambda (src)
+                      (filter (lambda (m) m)
+                              (map (lambda (dst)
+                                     (and (move-legal? g src dst)
+                                          (not (pointless-king? g src dst))
+                                          (cons src dst)))
+                                   dests)))
+                    sources))))
+
+    ;; The foundations as destinations, with only the first empty one
+    ;; listed: an ace to any empty foundation is one move, not four.
+    (define (foundation-dests g)
+      (let loop ((i 0) (empty-seen? #f) (acc '()))
+        (cond ((= i FOUNDATIONS) (reverse acc))
+              ((null? (game-foundation g i))
+               (loop (+ i 1) #t (if empty-seen? acc (cons (list 'foundation i) acc))))
+              (else (loop (+ i 1) empty-seen? (cons (list 'foundation i) acc))))))
+
+    (define (pointless-king? g src dst)
+      (and (eq? (place-kind src) 'pile)
+           (eq? (place-kind dst) 'pile)
+           (not (place-card g (list 'pile (cadr dst) 0)))
+           (= (+ 1 (caddr src)) (length (game-pile g (cadr src))))))
+
+    ;; --- structural equality -------------------------------------------------
+
+    (define (game-canonical g)
+      (list (vector->list (game-tableau g))
+            (vector->list (game-foundations g))
+            (game-stock g)
+            (game-waste g)
+            (game-draw g)
+            (game-passes g)
+            (game-selected g)))
+
+    (define (game-equal? a b)
+      (equal? (game-canonical a) (game-canonical b)))))

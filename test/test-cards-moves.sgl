@@ -1,0 +1,200 @@
+;;; Gate leg 1 (P2) - the move-validity table.
+;;;
+;;; Every (source card, destination top, kind) case in a hand-written
+;;; table agrees with the rules: pile moves (opposite color, one rank
+;;; lower, kings onto empties, everything that is not that) and
+;;; foundation moves (same suit, one rank higher, aces onto empties). Then
+;;; the same rules through game-move on built positions: a run moves by
+;;; its bottom card, a run never reaches a foundation, a face-down card
+;;; cannot be picked up, the uncovered card turns face up, undo restores
+;;; the position and the move count.
+
+(import (sigil test)
+        (crash cards deck)
+        (crash cards rules))
+
+(define (c text) (car (deck-string->cards-any text)))
+
+;; One card from its two-character name, without the 52-card check.
+(define (deck-string->cards-any text)
+  (let ((suit (case (string-ref text 0) ((#\S) 0) ((#\H) 1) ((#\D) 2) ((#\C) 3)))
+        (rank (case (string-ref text 1)
+                ((#\A) 1) ((#\2) 2) ((#\3) 3) ((#\4) 4) ((#\5) 5) ((#\6) 6)
+                ((#\7) 7) ((#\8) 8) ((#\9) 9) ((#\0) 10) ((#\J) 11) ((#\Q) 12) ((#\K) 13))))
+    (list (make-card suit rank))))
+
+;; (card top expected) for the pile rule; top #f is an empty pile.
+(define PILE-TABLE
+  '(("H7" "S8" #t)      ; red on black, one lower
+    ("S7" "H8" #t)      ; black on red
+    ("D7" "C8" #t)
+    ("C7" "D8" #t)
+    ("H7" "D8" #f)      ; same color
+    ("S7" "C8" #f)
+    ("H7" "S9" #f)      ; two lower
+    ("H7" "S7" #f)      ; same rank
+    ("H8" "S7" #f)      ; one higher
+    ("HA" "S2" #t)      ; ace onto a two
+    ("H2" "SA" #f)      ; nothing goes on an ace
+    ("SK" #f #t)        ; king onto an empty pile
+    ("HK" #f #t)
+    ("SQ" #f #f)        ; only a king onto an empty pile
+    ("HA" #f #f)
+    ("SQ" "HK" #t)
+    ("SQ" "SK" #f)))
+
+;; (card top expected) for the foundation rule; top #f is an empty foundation.
+(define FOUNDATION-TABLE
+  '(("SA" #f #t)
+    ("HA" #f #t)
+    ("S2" #f #f)        ; only an ace starts a foundation
+    ("SK" #f #f)
+    ("S2" "SA" #t)      ; same suit, one higher
+    ("H2" "SA" #f)      ; other suit
+    ("D2" "HA" #f)      ; same color is still another suit
+    ("S3" "SA" #f)      ; two higher
+    ("SA" "SA" #f)
+    ("SA" "S2" #f)      ; lower
+    ("SK" "SQ" #t)
+    ("CK" "CQ" #t)
+    ("C0" "C9" #t)
+    ("CJ" "C0" #t)))
+
+(define (run-table table rule)
+  (for-each (lambda (row)
+              (let ((card (c (car row)))
+                    (top (and (cadr row) (c (cadr row))))
+                    (expected (caddr row)))
+                (test (string-append (car row) " onto " (or (cadr row) "empty")
+                                     (if expected " is legal" " is not legal"))
+                  (assert-equal expected (rule card top)))))
+            table))
+
+(test-group "the pile rule: opposite color, one rank lower, kings onto empties"
+  (run-table PILE-TABLE valid-pile-move?))
+
+(test-group "the foundation rule: same suit, one rank higher, aces onto empties"
+  (run-table FOUNDATION-TABLE valid-foundation-move?))
+
+;; --- through game-move, on a built position -----------------------------
+
+;; A deck that deals: pile 0 = S7 up; pile 1 = D9 down, H6 up; pile 2 =
+;; CK C2 down, S5 up; pile 3 = H4 H3 SA down, HA up; the rest in order.
+;; (Every card once; the first 28 shape the tableau.)
+(define DECK
+  (string-append "S7" "D9H6" "CKC2S5" "H4H3SAHA"
+                 "D2D3D4D5D6" "C3C4C5C6C7C8" "S2S3S4S6S8S9S0"
+                 "H2H5H7H8H9H0HJHQHK" "DAD7D8D0DJDQDK" "CACJCQC9C0" "SJSQSK"))
+
+(define g0 (game-from-deck (deck-string->cards DECK) 1))
+
+(define (pile-cards g i) (map card-string (map pile-card (game-pile g i))))
+(define (pile-ups g i) (map pile-up? (game-pile g i)))
+
+(test-group "the deck deals as the fixture rule says"
+  (test "52 distinct cards"
+    (assert-true (and (deck-string->cards DECK) #t)))
+  (test "pile 3 is H4 H3 SA down, HA up"
+    (assert-equal '("HA" "SA" "H3" "H4") (pile-cards g0 3))
+    (assert-equal '(#t #f #f #f) (pile-ups g0 3)))
+  (test "24 cards in the stock, none in the waste"
+    (assert-equal 24 (length (game-stock g0)))
+    (assert-equal '() (game-waste g0))))
+
+(test-group "moves on the table"
+  (let ((g1 (game-move g0 '(pile 1 0) '(pile 0 0))))
+    (test "H6 goes onto S7 and D9 turns up"
+      (assert-true (and g1 #t))
+      (assert-equal '("H6" "S7") (pile-cards g1 0))
+      (assert-equal '("D9") (pile-cards g1 1))
+      (assert-equal '(#t) (pile-ups g1 1))
+      (assert-equal 1 (game-moves g1)))
+    (test "the run H6 S7 moves by its bottom card: S7 fits neither D6 nor C8"
+      (assert-false (game-move g1 '(pile 0 1) '(pile 4)))
+      (assert-false (game-move g1 '(pile 0 1) '(pile 5))))
+    (test "S5 goes onto H6, the run is S5 H6 S7"
+      (let ((g2 (game-move g1 '(pile 2 0) '(pile 0))))
+        (assert-equal '("S5" "H6" "S7") (pile-cards g2 0))
+        (assert-equal '("C2" "CK") (pile-cards g2 2))
+        (assert-equal '(#t #f) (pile-ups g2 2))))
+    (test "a run never reaches a foundation"
+      (assert-false (game-move g1 '(pile 0 1) '(foundation 0))))
+    (test "a face-down card cannot be picked up"
+      (assert-false (game-move g0 '(pile 3 1) '(pile 0)))
+      (assert-false (place-selectable? g0 '(pile 3 1))))
+    (test "HA goes to an empty foundation, SA turns up and follows"
+      (let* ((g2 (game-move g0 '(pile 3 0) '(foundation 0)))
+             (g3 (game-move g2 '(pile 3 0) '(foundation 1))))
+        (assert-equal '("HA") (map card-string (game-foundation g2 0)))
+        (assert-equal '(#t #f #f) (pile-ups g2 3))
+        (assert-equal '("SA") (map card-string (game-foundation g3 1)))
+        (assert-false (game-move g2 '(pile 3 0) '(foundation 0)))))
+    (test "undo restores the position and the move count"
+      (let ((back (game-undo g1)))
+        (assert-true (game-equal? back g0))
+        (assert-equal 0 (game-moves back))
+        (assert-equal '() (game-history back))))
+    (test "undo on a fresh game is the same game"
+      (assert-true (eq? g0 (game-undo g0))))))
+
+(test-group "tap-tap through game-select"
+  (let* ((s1 (game-select g0 '(pile 1 0)))
+         (s2 (game-select s1 '(pile 0 0))))
+    (test "the first tap selects, the second moves"
+      (assert-equal '(pile 1 0) (game-selected s1))
+      (assert-equal '("H6" "S7") (pile-cards s2 0))
+      (assert-false (game-selected s2)))
+    (test "a second tap on the selected card sends it to a foundation when one takes it"
+      (let* ((s (game-select g0 '(pile 3 0)))
+             (s (game-select s '(pile 3 0))))
+        (assert-equal '("HA") (map card-string (game-foundation s 0)))
+        (assert-false (game-selected s))))
+    (test "a second tap on the selected card deselects when no foundation takes it"
+      (let* ((s (game-select g0 '(pile 0 0)))
+             (s (game-select s '(pile 0 0))))
+        (assert-false (game-selected s))
+        (assert-true (game-equal? s g0))))
+    (test "a tap that is not a legal destination but is a card becomes the selection"
+      (let* ((s (game-select g0 '(pile 0 0)))
+             (s (game-select s '(pile 2 0))))
+        (assert-equal '(pile 2 0) (game-selected s))))
+    (test "a tap on an empty foundation with a seven selected deselects"
+      (let* ((s (game-select g0 '(pile 0 0)))
+             (s (game-select s '(foundation 2))))
+        (assert-false (game-selected s))))
+    (test "a tap on a face-down card with nothing selected changes nothing"
+      (assert-true (eq? g0 (game-select g0 '(pile 3 2)))))
+    (test "a tap on the stock draws and clears the selection"
+      (let* ((s (game-select g0 '(pile 0 0)))
+             (s (game-select s '(stock))))
+        (assert-false (game-selected s))
+        (assert-equal 1 (length (game-waste s)))
+        (assert-equal 23 (length (game-stock s)))))))
+
+(test-group "the legal-move scanner"
+  (test "the fresh position has the moves the table says"
+    (let ((moves (legal-moves g0)))
+      (assert-true (and (member '((pile 1 0) . (pile 0)) moves) #t))     ; H6 onto S7
+      (assert-true (and (member '((pile 2 0) . (pile 1)) moves) #t))     ; S5 onto H6
+      (assert-true (and (member '((pile 2 0) . (pile 4)) moves) #t))     ; S5 onto D6
+      (assert-true (and (member '((pile 4 0) . (pile 0)) moves) #t))     ; D6 onto S7
+      (assert-true (and (member '((pile 3 0) . (foundation 0)) moves) #t)) ; HA up
+      (assert-false (member '((pile 3 0) . (foundation 1)) moves))        ; one empty foundation is every empty foundation
+      (assert-false (member '((pile 0 0) . (pile 1)) moves))              ; S7 onto H6: wrong way
+      (assert-equal 5 (length moves))))
+  (test "a king heading its pile is not offered another empty pile; one with cards under it is"
+    ;; pile 0 H7, pile 1 D8 SK, pile 2 C2 C3 S9, pile 3 D2 D3 D4 CK, pile 6 ends S8.
+    ;; H7 onto S8 empties pile 0; SK onto it; D8 onto S9 empties pile 1.
+    (let* ((cards (deck-string->cards
+                    (string-append "H7" "D8SK" "C2C3S9" "D2D3D4CK"
+                                   "C4C5C6C7C8" "S2S3S4S5S6S0" "H2H3H4H5H6H8S8"
+                                   "SAS7SJSQ" "HAH9H0HJHQHK" "DAD5D6D7D9D0DJDQDK" "CAC9C0CJCQ")))
+           (g (game-from-deck cards 1))
+           (g (game-move g '(pile 0 0) '(pile 6)))
+           (g (game-move g '(pile 1 0) '(pile 0)))
+           (g (game-move g '(pile 1 0) '(pile 2)))
+           (moves (legal-moves g)))
+      (assert-equal '() (game-pile g 1))
+      (assert-equal '("SK") (pile-cards g 0))
+      (assert-false (member '((pile 0 0) . (pile 1)) moves))
+      (assert-true (and (member '((pile 3 0) . (pile 1)) moves) #t)))))

@@ -1,0 +1,170 @@
+;;; Gate legs 2 and 3 (P2) - the fixture deal and the stock.
+;;;
+;;; Leg 2: Cybersol's 2023 deck string deals the recorded tableau (derived
+;;; by hand from the string and the deal rule, pile by pile in string
+;;; order, last card up; the derivation is in the evidence note
+;;; investigations/crash-the-stack-p2), and a scripted line of 30 taps
+;;; through game-select reaches the recorded position.
+;;;
+;;; Leg 3: the stock under draw one and draw three over three passes: the
+;;; waste order, the recycle, the pass count, and that a pass changes no
+;;; card's identity.
+
+(import (sigil test)
+        (crash cards deck)
+        (crash cards rules))
+
+(define (pile-cards g i) (map card-string (map pile-card (game-pile g i))))
+(define (pile-ups g i) (map pile-up? (game-pile g i)))
+(define (cards->strings cards) (map card-string cards))
+
+(define fixture (deck-string->cards FIXTURE-DECK))
+(define g0 (game-from-deck fixture 1))
+
+;; --- leg 2: the deal ---------------------------------------------------------
+
+;; Piles top first, as (cards ups).
+(define EXPECTED-TABLEAU
+  '((("S2") (#t))
+    (("H6" "H7") (#t #f))
+    (("D3" "H4" "DK") (#t #f #f))
+    (("C9" "S3" "S9" "C4") (#t #f #f #f))
+    (("D0" "DJ" "C5" "CK" "CJ") (#t #f #f #f #f))
+    (("D2" "DQ" "C3" "H0" "C2" "H8") (#t #f #f #f #f #f))
+    (("S6" "D6" "S5" "DA" "H2" "CQ" "D4") (#t #f #f #f #f #f #f))))
+
+(define EXPECTED-STOCK
+  '("S7" "SQ" "S4" "D5" "D9" "C0" "H3" "CA" "C7" "D8" "HK" "H9"
+    "HQ" "SK" "D7" "H5" "SJ" "HA" "S0" "C6" "SA" "C8" "S8" "HJ"))
+
+(test-group "leg 2: the 2023 deck string deals the recorded tableau"
+  (test "the string is 52 distinct cards"
+    (assert-equal 52 (length fixture)))
+  (let loop ((i 0))
+    (when (< i PILES)
+      (test (string-append "pile " (number->string i) " holds the recorded cards, only the top face up")
+        (assert-equal (car (list-ref EXPECTED-TABLEAU i)) (pile-cards g0 i))
+        (assert-equal (cadr (list-ref EXPECTED-TABLEAU i)) (pile-ups g0 i)))
+      (loop (+ i 1))))
+  (test "the stock is the remaining 24 in string order, the waste empty, no foundation started"
+    (assert-equal EXPECTED-STOCK (cards->strings (game-stock g0)))
+    (assert-equal '() (game-waste g0))
+    (assert-true (every null? (vector->list (game-foundations g0)))))
+  (test "the same string deals the same game twice"
+    (assert-true (game-equal? g0 (game-from-deck (deck-string->cards FIXTURE-DECK) 1)))))
+
+;; --- leg 2: the scripted line --------------------------------------------------
+;;
+;; Thirty taps, draw one, each a place. The position after them was
+;; recorded by playing the line by hand against the layout above, one
+;; step at a time (the trace is in the evidence note); the comments say
+;; what each tap does under the tap-tap rule.
+
+(define LINE
+  '((pile 0 0) (pile 2)                 ; S2 onto D3               pile 0 empty
+    (stock)                             ; S7 to the waste
+    (stock)                             ; SQ
+    (stock)                             ; S4
+    (stock)                             ; D5
+    (waste) (pile 1)                    ; D5 onto H6: same color, refused; H6 is a card, so it
+                                        ; becomes the selection instead
+    (pile 1 0) (pile 1 0)               ; H6 again: no foundation takes it, deselect; then select it
+    (stock)                             ; D9
+    (stock)                             ; C0
+    (stock)                             ; H3
+    (stock)                             ; CA
+    (waste) (waste)                     ; CA to a foundation (0)
+    (waste) (pile 5)                    ; H3 onto D2: same color, refused; D2 selected
+    (pile 5 0) (foundation 3)           ; D2 again: deselect; an empty foundation is nothing to select
+    (stock)                             ; C7
+    (stock)                             ; D8
+    (stock)                             ; HK
+    (waste) (pile 0)                    ; HK onto the empty pile 0
+    (waste) (pile 6)                    ; D8 onto S6: wrong rank, refused; S6 selected
+    (pile 6 0)                          ; S6 again: deselect
+    (pile 2 0) (pile 5)))               ; S2 (top of pile 2) onto D2: wrong rank, refused; D2 selected
+
+(define (play g line)
+  (fold (lambda (g p) (game-select g p)) g line))
+
+(define g30 (play g0 LINE))
+
+(test-group "leg 2: the scripted 30-tap line reaches the recorded position"
+  (test "thirty taps"
+    (assert-equal 30 (length LINE)))
+  (test "pile 0 holds HK alone, face up"
+    (assert-equal '("HK") (pile-cards g30 0))
+    (assert-equal '(#t) (pile-ups g30 0)))
+  (test "pile 2 is S2 D3 over H4 DK"
+    (assert-equal '("S2" "D3" "H4" "DK") (pile-cards g30 2))
+    (assert-equal '(#t #t #f #f) (pile-ups g30 2)))
+  (test "foundation 0 holds CA"
+    (assert-equal '("CA") (cards->strings (game-foundation g30 0))))
+  (test "the waste is D8 C7 H3 C0 D9 D5 S4 SQ S7 (top first) and the stock the 13 after HK"
+    (assert-equal '("D8" "C7" "H3" "C0" "D9" "D5" "S4" "SQ" "S7") (cards->strings (game-waste g30)))
+    (assert-equal '("H9" "HQ" "SK" "D7" "H5" "SJ" "HA" "S0" "C6" "SA" "C8" "S8" "HJ")
+                  (cards->strings (game-stock g30))))
+  (test "the last tap left D2 selected"
+    (assert-equal '(pile 5 0) (game-selected g30)))
+  (test "the move count: 1 + 4 draws + 4 draws + 1 + 3 draws + 1 = 14"
+    (assert-equal 14 (game-moves g30)))
+  (test "undoing every move returns to the deal"
+    (let loop ((g g30) (n 0))
+      (if (null? (game-history g))
+          (begin
+            (assert-equal 14 n)
+            (assert-true (game-equal? (game g selected: #f) g0)))
+          (loop (game-undo g) (+ n 1))))))
+
+;; --- leg 3: the stock ------------------------------------------------------------
+
+(define (draws g n)
+  (if (= n 0) g (draws (game-draw! g) (- n 1))))
+
+(test-group "leg 3: the stock under draw one, three passes"
+  (let* ((g1 (game-draw! g0)))
+    (test "one draw moves the top of the stock to the top of the waste"
+      (assert-equal '("S7") (cards->strings (game-waste g1)))
+      (assert-equal "SQ" (card-string (car (game-stock g1)))))
+    (let ((g24 (draws g0 24)))
+      (test "24 draws empty the stock; the waste is the stock reversed"
+        (assert-equal '() (game-stock g24))
+        (assert-equal (reverse EXPECTED-STOCK) (cards->strings (game-waste g24)))
+        (assert-equal 0 (game-passes g24)))
+      (let ((g25 (game-draw! g24)))
+        (test "the 25th draw turns the waste back into the stock, in order: one pass"
+          (assert-equal EXPECTED-STOCK (cards->strings (game-stock g25)))
+          (assert-equal '() (game-waste g25))
+          (assert-equal 1 (game-passes g25)))
+        (test "three passes later the cards are the same and the count says three"
+          (let ((g75 (draws g25 50)))
+            (assert-equal EXPECTED-STOCK (cards->strings (game-stock g75)))
+            (assert-equal 3 (game-passes g75))))))))
+
+(test-group "leg 3: the stock under draw three, three passes"
+  (let* ((g3 (game-with-draw g0 3))
+         (g1 (game-draw! g3)))
+    (test "one draw moves three cards, the third drawn on top"
+      (assert-equal '("S4" "SQ" "S7") (cards->strings (game-waste g1)))
+      (assert-equal "D5" (card-string (car (game-stock g1)))))
+    (let ((g8 (draws g3 8)))
+      (test "eight draws empty the 24-card stock"
+        (assert-equal '() (game-stock g8))
+        (assert-equal (reverse EXPECTED-STOCK) (cards->strings (game-waste g8))))
+      (let ((g9 (game-draw! g8)))
+        (test "the ninth turns the waste back: one pass, the same order"
+          (assert-equal EXPECTED-STOCK (cards->strings (game-stock g9)))
+          (assert-equal 1 (game-passes g9)))
+        (test "a short stock deals what is left"
+          (let* ((g (game-with-draw (draws g9 7) 3))     ; 21 drawn, 3 left
+                 (g (game-draw! (game-with-draw g 1)))   ; draw one: 2 left
+                 (g (game-draw! (game-with-draw g 3))))  ; draw three with 2 left
+            (assert-equal '() (game-stock g))
+            (assert-equal 24 (length (game-waste g)))))
+        (test "three passes: the count says three, the cards are the same"
+          (let ((g27 (draws g9 18)))
+            (assert-equal 3 (game-passes g27))
+            (assert-equal EXPECTED-STOCK (cards->strings (game-stock g27)))))))
+    (test "a draw with an empty stock and an empty waste changes nothing"
+      (let ((empty (game g0 stock: '() waste: '())))
+        (assert-true (eq? empty (game-draw! empty)))))))
