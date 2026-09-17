@@ -91,7 +91,11 @@ let exiting = false;
 function shutdown(code) {
   if (exiting) return; exiting = true;
   server.close();
-  chrome.on("exit", () => { fs.rmSync(udd, { recursive: true, force: true }); process.exit(code); });
+  // Chrome can still be flushing its profile when "exit" fires (ENOTEMPTY
+  // on the rmdir, seen 2026-09-17); the directory is scratch, so a failed
+  // removal must not turn a green arm's exit code red (verify.mjs guards
+  // the same way).
+  chrome.on("exit", () => { try { fs.rmSync(udd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (e) { console.log(`note: profile dir left behind: ${udd} (${e.code})`); } process.exit(code); });
   chrome.kill("SIGTERM");
   setTimeout(() => { chrome.kill("SIGKILL"); }, 3000).unref();
 }
