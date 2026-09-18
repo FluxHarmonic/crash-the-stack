@@ -95,8 +95,13 @@
              (window->virtual (mouse-x)
                               (mouse-y)))))
 
-    (define (load-test-tile)
-      (let ((img (load-image TEST-TILE-PATH)))
+    ;; The textures the looks name, loaded on demand the first time a look
+    ;; asks for one and kept by path: ((path . texture-or-#f) ...). A file
+    ;; that is not there is said once and the flat tile stands in.
+    (define *textures* '())
+
+    (define (load-texture-file path)
+      (let ((img (load-image path)))
         (if img
             ;; load-image, load-texture, image-free!: a helper for this belongs in
             ;; sigil-graphics (finding 11 in the evidence note).
@@ -104,8 +109,19 @@
               (image-free! img)
               tex)
             (begin
-              (display "test tile not found: ") (display TEST-TILE-PATH) (newline)
+              (display "texture not found: ") (display path) (newline)
               #f))))
+
+    ;; The texture for a session's look, or #f for a flat look.
+    (define (texture-for s)
+      (let ((path (look-texture (look-ref (session-look s)))))
+        (and path
+             (let ((entry (assoc path *textures*)))
+               (if entry
+                   (cdr entry)
+                   (let ((tex (load-texture-file path)))
+                     (set! *textures* (cons (cons path tex) *textures*))
+                     tex))))))
 
     (define (arg-value args flag default)
       (cond ((null? args) default)
@@ -235,7 +251,6 @@
         (let* ((lay (turtle-layout))
                (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
-               (tex (load-test-tile))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
           (let loop ((a (if cards?
@@ -266,7 +281,7 @@
               (case (stage-screen a)
                 ((menu) (draw-menu (stage-menu a) VW VH #f))
                 ((stack)
-                 (draw-session (stage-session a) geom tex (stage-fx a))
+                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a))
                  (when log-keys?
                    (draw-frame-ms *frame-ms*)))
                 (else (draw-deal (stage-deal a) card-geom (stage-card-fx a))))

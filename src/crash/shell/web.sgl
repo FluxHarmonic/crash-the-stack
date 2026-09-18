@@ -23,7 +23,8 @@
 ;;; the pointer path like a tap on a tile; the page keeps only its
 ;;; fullscreen button (David, 2026-09-17: the controls belong in the game's
 ;;; own UI). Tab, Backspace and the tag letters still arrive as keys. The
-;;; test-tile toggle (ctrl+t) has no browser path. Escape does nothing
+;;; look switch (ctrl+t) has a tap on the TILES counter and the menu's LOOK
+;;; entry as its browser paths (P3). Escape does nothing
 ;;; here; there is no window to close.
 ;;;
 ;;; Trace lines, printed only when the page was opened with ?trace (the
@@ -53,8 +54,8 @@
 ;;;   crash: restored tiles N trace V phase P ice K locked A B ...   a saved
 ;;;                                         board came back at boot (verify.mjs's
 ;;;                                         reload sub-arm)
-;;;   crash: tile missing after N fetches   the test tile never landed; the
-;;;                                         flat renderer stands in
+;;;   crash: texture missing PATH after N fetches   a look's texture never
+;;;                                         landed; the flat tile stands in
 ;;;
 ;;;   crash: cards seed S moves N draw D    the card table booted (with ?cards)
 ;;;   crash: cards stock X Y                the stock's center
@@ -128,10 +129,11 @@
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
-    (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = not asked yet
-    (define *tile-tries* 0)  ; fetches started for it, TILE-TRIES at most
-    (define *tile-wait* 0.0) ; seconds the current fetch has been pending
-    (define *texture* #f)    ; the decoded test tile, once ready
+    (define *textures* '())  ; loaded look textures by path, tex or #f once given up
+    (define *tex-path* #f)   ; the path being fetched, or #f
+    (define *tex-fetch* 0)   ; gles3 image handle of that fetch
+    (define *tex-tries* 0)   ; fetches started for it, TEXTURE-TRIES at most
+    (define *tex-wait* 0.0)  ; seconds the current fetch has been pending
     (define *trace* #f)      ; print the trace lines above
     (define *restored* #f)   ; the boot restored a saved board
     (define *fresh* #f)      ; ?fresh: ignore the saved board
@@ -202,48 +204,71 @@
                                             x
                                             y)))))))
 
-    ;; --- the test tile, fetched by JS, decoded here once it lands ---------
+    ;; --- textures, fetched by JS, decoded here once they land -------------
 
-    ;; The tile is optional (the primitives renderer is the fallback), so
-    ;; it is fetched on demand, from the first stack frame that wants the
-    ;; texture render mode, rather than from web-main: a fetch pending
-    ;; while the page's service worker activates over the boot's first
-    ;; frames failed under load ("Failed to fetch", measured 2026-09-18 in
-    ;; headless Chrome, 7 of 24 arm runs; the retry a second later always
-    ;; landed). A fetch that has not landed after TILE-RETRY-AFTER seconds
-    ;; is asked for again, TILE-TRIES times in all; then the tile is given
-    ;; up with one trace line and the mode stays flat. (Today the texture
-    ;; mode's only toggle is ctrl+t, which has no browser path, so no web
-    ;; session asks for the tile; the fetch waits for the day one does.)
-    (define TILE-RETRY-AFTER 1.0)
-    (define TILE-TRIES 2)
+    ;; A look's texture is optional (the primitives tile is the fallback),
+    ;; so it is fetched on demand, from the first stack frame that wants
+    ;; it, rather than from web-main: a fetch pending while the page's
+    ;; service worker activates over the boot's first frames failed under
+    ;; load ("Failed to fetch", measured 2026-09-18 in headless Chrome, 7 of
+    ;; 24 arm runs; the retry a second later always landed). One fetch is in
+    ;; flight at a time (the look in force); one that has not landed after
+    ;; TEXTURE-RETRY-AFTER seconds is asked for again, TEXTURE-TRIES times
+    ;; in all, then that path is given up with one trace line and the flat
+    ;; tile stands in. Loaded textures are kept by path: ((path . tex) ...),
+    ;; tex #f for a path that was given up.
+    ;;   crash: texture missing PATH after N fetches
+    (define TEXTURE-RETRY-AFTER 1.0)
+    (define TEXTURE-TRIES 2)
 
-    (define (fetch-tile!)
-      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
-      (set! *tile-tries* (+ *tile-tries* 1))
-      (set! *tile-wait* 0.0))
+    (define (fetch-texture! path)
+      (set! *tex-path* path)
+      (set! *tex-fetch* (gles3-fetch-image path))
+      (set! *tex-tries* (+ *tex-tries* 1))
+      (set! *tex-wait* 0.0))
+
+    (define (texture-loaded! path tex)
+      (set! *textures* (cons (cons path tex) *textures*))
+      (set! *tex-path* #f)
+      (set! *tex-fetch* 0)
+      (set! *tex-tries* 0))
+
+    ;; The texture for the session's look: loaded, or #f (flat, pending, or
+    ;; given up).
+    (define (texture-for s)
+      (let* ((path (look-texture (look-ref (session-look s))))
+             (entry (and path (assoc path *textures*))))
+        (and entry (cdr entry))))
 
     (define (ensure-texture! dt)
-      (cond (*texture* #f)
-            ((> *tile-tries* TILE-TRIES) #f)
-            ((and (= *tile-fetch* 0)
-                  (not (eq? (look-tile (look-ref (session-look *session*))) 'test-tile)))
-             #f)
-            ((= *tile-fetch* 0) (fetch-tile!))
-            ((gles3-image-ready? *tile-fetch*)
-             (let ((img (load-image-from-memory (gles3-image-ptr *tile-fetch*)
-                                                (gles3-image-size *tile-fetch*))))
-               (when img
-                 (set! *texture* (load-texture img))
-                 (image-free! img))))
+      (let ((want (look-texture (look-ref (session-look *session*)))))
+        (cond ((not want) #f)
+              ((assoc want *textures*) #f)
+              ((and *tex-path* (not (string=? *tex-path* want)))
+               ;; the look moved on mid-fetch: let that fetch land or lapse
+               ;; on its own clock, then this one is asked for
+               (ensure-fetch! dt))
+              ((not *tex-path*) (fetch-texture! want))
+              (else (ensure-fetch! dt)))))
+
+    ;; The fetch in flight: decode it when it lands, retry or give it up.
+    (define (ensure-fetch! dt)
+      (cond ((gles3-image-ready? *tex-fetch*)
+             (let ((img (load-image-from-memory (gles3-image-ptr *tex-fetch*)
+                                                (gles3-image-size *tex-fetch*))))
+               (if img
+                   (let ((tex (load-texture img)))
+                     (image-free! img)
+                     (texture-loaded! *tex-path* tex))
+                   (texture-loaded! *tex-path* #f))))
             (else
-             (set! *tile-wait* (+ *tile-wait* dt))
-             (when (> *tile-wait* TILE-RETRY-AFTER)
-               (if (< *tile-tries* TILE-TRIES)
-                   (fetch-tile!)
+             (set! *tex-wait* (+ *tex-wait* dt))
+             (when (> *tex-wait* TEXTURE-RETRY-AFTER)
+               (if (< *tex-tries* TEXTURE-TRIES)
+                   (fetch-texture! *tex-path*)
                    (begin
-                     (say "tile" "missing" "after" *tile-tries* "fetches")
-                     (set! *tile-tries* (+ *tile-tries* 1))))))))
+                     (say "texture" "missing" *tex-path* "after" *tex-tries* "fetches")
+                     (texture-loaded! *tex-path* #f)))))))
 
     ;; --- trace lines ---------------------------------------------------------
 
@@ -530,7 +555,7 @@
         (when (not (= (session-seed before) (session-seed after)))
           (set! *announced* #f))
         (begin-frame)
-        (draw-session after *geom* *texture* x)
+        (draw-session after *geom* (texture-for after) x)
         (end-frame)
         (ensure-texture! dt)))
 

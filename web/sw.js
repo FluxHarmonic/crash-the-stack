@@ -31,6 +31,8 @@ var SHELL = [
   "assets/sigil-wasm-gles3.js",
   "assets/sigil-browser.js",
   "assets/test-tile.png",
+  "assets/tiles/block.png",
+  "assets/tiles/block-worn.png",
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
   "assets/icon-512.png"

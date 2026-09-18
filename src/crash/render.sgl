@@ -7,9 +7,9 @@
 ;;; effects say), the glyph in its suit color from the bitmap font, the
 ;;; selection and the keyboard highlight, the match ghosts and particles,
 ;;; the hint tags, and the HUD with its tappable controls. Nothing here
-;;; reads input, a platform or a clock; the shell decides what texture to
-;;; hand in (native: load-image from assets/; web: from memory) and the
-;;; effects arrive already advanced.
+;;; reads input, a platform or a clock; the shell hands in the texture the
+;;; look names, if it has loaded it (native: load-image from assets/; web:
+;;; from memory), and the effects arrive already advanced.
 ;;;
 ;;; Palette: the colors come from (crash palette), at most 32, so David
 ;;; can retune the look in one place (design decision 7).
@@ -34,8 +34,7 @@
           (crash menu))
 
   (export draw-session draw-editor draw-frame-ms draw-menu
-          draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
-          TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
+          draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in)
 
   (begin
     ;; The bible's section 3: four suits of eight (MEM, PWR, TX, DSK) and
@@ -47,15 +46,6 @@
         ((2) C-SUIT-2)
         ((3) C-SUIT-3)
         (else C-DAEMON)))
-
-    ;; --- test tile texture layout -------------------------------------------
-    ;; assets/test-tile.png is a strip of TEST-TILE-FRAMES frames, each
-    ;; TEST-TILE-W x TEST-TILE-H: frame 0 the blank block (side face included
-    ;; in the art), frames 1.. the hand-drawn glyph faces for faces 0, 1, 2.
-
-    (define TEST-TILE-W 32)
-    (define TEST-TILE-H 44)
-    (define TEST-TILE-FRAMES 4)
 
     ;; --- background -----------------------------------------------------------
 
@@ -148,42 +138,43 @@
         (draw-filled-rect x (+ y 3) w 2)
         (draw-filled-rect x (+ y h -5) w 2)))
 
-    ;; Test-tile mode: the drawn block scaled to the tile, with the drawn
-    ;; face for faces 0..2 and the bitmap glyph for the rest, so the two
-    ;; directions sit side by side on one board. The strip's frame carries
-    ;; the side art in its left and bottom cells (TEST-TILE-SIDE of them), so
-    ;; the side pass draws the whole frame and the face pass redraws only the
-    ;; face region over it.
+    ;; A textured look: the look's strip (frame 0 the blank block, side
+    ;; face included in the art; frames 1.. drawn faces for faces 0.., as
+    ;; P0's test tile carries three) scaled to the tile, the glyph sheet
+    ;; drawn on a blank frame. The frame carries the side art in its left
+    ;; and bottom cells (look-side of them), so the side pass draws the
+    ;; whole frame and the face pass redraws only the face region over it.
 
-    (define TEST-TILE-SIDE 4)
-
-    (define (tile-frame b id)
+    (define (tile-frame look b id)
       (let ((face (tile-face b id)))
-        (if (and face (< face (- TEST-TILE-FRAMES 1)))
+        (if (and face (< face (- (look-frames look) 1)))
             (+ face 1)
             0)))
 
-    (define (draw-sides-texture g b id tex x y w h selected?)
+    (define (draw-sides-texture g look b id tex x y w h selected?)
       (let ((side (geometry-side g))
-            (frame (tile-frame b id)))
+            (frame (tile-frame look b id)))
         (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
         (draw-texture-region tex
                              (- x side) y
                              (+ w side) (+ h side)
-                             (* frame TEST-TILE-W) 0
-                             TEST-TILE-W TEST-TILE-H)))
+                             (* frame (look-frame-w look)) 0
+                             (look-frame-w look) (look-frame-h look))))
 
-    (define (draw-face-texture g sheet b id face tex x y w h selected?)
-      (let ((frame (tile-frame b id)))
+    (define (draw-face-texture g look b id face tex x y w h selected?)
+      (let ((frame (tile-frame look b id))
+            (fw (look-frame-w look))
+            (fh (look-frame-h look))
+            (inset (look-side look)))
         (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
         (draw-texture-region tex
                              x y
                              w h
-                             (+ (* frame TEST-TILE-W) TEST-TILE-SIDE) 0
-                             (- TEST-TILE-W TEST-TILE-SIDE)
-                             (- TEST-TILE-H TEST-TILE-SIDE))
+                             (+ (* frame fw) inset) 0
+                             (- fw inset)
+                             (- fh inset))
         (when (and face (= frame 0))
-          (draw-glyph-on g sheet face x y w h selected?))))
+          (draw-glyph-on g (look-glyphs look) face x y w h selected?))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -225,7 +216,7 @@
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
              (sheet (look-glyphs look))
-             (textured? (and tex (eq? (look-tile look) 'test-tile)))
+             (textured? (and tex (look-texture look) #t))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
                              (session-highlight s)
@@ -251,12 +242,12 @@
             (each-on-layer layer
                            (lambda (id face x y w h selected?)
                              (if textured?
-                                 (draw-sides-texture g b id tex x y w h selected?)
+                                 (draw-sides-texture g look b id tex x y w h selected?)
                                  (draw-sides-primitives g x y w h))))
             (each-on-layer layer
                            (lambda (id face x y w h selected?)
                              (if textured?
-                                 (draw-face-texture g sheet b id face tex x y w h selected?)
+                                 (draw-face-texture g look b id face tex x y w h selected?)
                                  (draw-face-primitives g sheet face x y w h selected?
                                                        (lock-state b id now)
                                                        (not (blocked-right? b id))
@@ -498,9 +489,23 @@
     (define (draw-toast g text top p)
       (draw-toast-in (geometry-vw g) text top p))
 
-    ;; The same toast on any table (the card table's, P2).
+    ;; An ICE line is one the ICE speaks ("ICE LOCKED A PAIR."); the
+    ;; bible's section 1 gives it C-ICE, every other line C-TEXT, and
+    ;; nothing else exists (Gibson's C-GIBSON waits for D17's lines).
+    (define (ice-line? text)
+      (and (>= (string-length text) 4)
+           (string=? (substring text 0 4) "ICE ")))
+
+    ;; The same toast on any table (the card table's, P2). An ICE toast
+    ;; lands with ICE-FLASH-TICKS of C-ICE around the board's edge (bible
+    ;; section 5), so the counter-hack is unmistakable from across the room.
+    (define ICE-FLASH-TICKS 6)
+
     (define (draw-toast-in vw text top p)
-      (let* ((w (+ 16 (text-width text 2)))
+      (let* ((ice? (ice-line? text))
+             (ink (if ice? C-ICE C-TEXT))
+             (edge (if ice? C-ICE C-TEXT-DIM))
+             (w (+ 16 (text-width text 2)))
              (h 24)
              (slide (cond ((< p TOAST-SLIDE) (- 1.0 (ease 'out-quad (/ p TOAST-SLIDE))))
                           ((> p (- 1.0 TOAST-SLIDE))
@@ -512,14 +517,20 @@
              (flash (if (and (>= p TOAST-SLIDE) (< p (* 2.5 TOAST-SLIDE)))
                         (if (even? (exact (floor (* p 60)))) 1.0 0.0)
                         0.0)))
-        (color! (mix C-BG C-SELECTED (* 0.5 flash)))
+        (when (and ice? (>= p TOAST-SLIDE) (< p (+ TOAST-SLIDE (/ ICE-FLASH-TICKS TOAST-TICKS))))
+          (color! C-ICE)
+          (draw-filled-rect 0 0 vw 3)
+          (draw-filled-rect 0 (- top 3) vw 3)
+          (draw-filled-rect 0 0 3 top)
+          (draw-filled-rect (- vw 3) 0 3 top))
+        (color! (mix C-BG ink (* 0.5 flash)))
         (draw-filled-rect x y w h)
-        (color! C-SELECTED)
+        (color! edge)
         (draw-filled-rect x y w 1)
         (draw-filled-rect x (+ y h -1) w 1)
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
-        (color! (mix C-SELECTED C-TEXT flash))
+        (color! (mix ink C-FACE-EDGE flash))
         (draw-text text (+ x 8) (+ y 5) 2)))
 
     (define (draw-hud s g x)
@@ -535,7 +546,7 @@
              (cleared (fx-cleared x)))
         (color! C-BG)
         (draw-filled-rect 0 top vw (geometry-hud-h g))
-        (color! C-TEXT-DIM)
+        (color! C-BAR-C)
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
         (draw-text left 8 (+ top 7) 2)
@@ -543,9 +554,17 @@
         ;; counter it would sit under the UNDO box)
         (color! C-TEXT-DIM)
         (draw-text look-label 8 (+ top 23) 1)
-        (if (memq (session-update s) '(waiting prompt))
-            (draw-update-mark g)
-            (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2))
+        ;; the right slot: the update mark when one waits, the ICE countdown
+        ;; under the ICE (bible section 5: the interval beside the meter; at
+        ;; scale 2 "ICE 0:30" is what fits after the meter), else the seed
+        (cond ((memq (session-update s) '(waiting prompt))
+               (draw-update-mark g))
+              ((eq? (trace-phase (session-trace s)) 'counter)
+               (let ((ice (string-append "ICE " (trace-ice-string (session-trace s)))))
+                 (color! C-ICE)
+                 (draw-text ice (- vw 8 (text-width ice 2)) (+ top 7) 2)))
+              (else
+               (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)))
         (draw-controls g)
         (draw-meter g (session-trace s))
         ;; row 2, centered (David, 2026-09-17)
@@ -553,7 +572,11 @@
                (text (or line
                          (if (eq? (session-model s) 'hint) HINT-KEYS-LINE CURSOR-KEYS-LINE)))
                (x (max 8 (exact (floor (/ (- vw (text-width text 1)) 2))))))
-          (color! (if line C-HIGHLIGHT C-TEXT-DIM))
+          ;; the phase line in the phase's color (bible section 1: the ICE
+          ;; speaks in C-ICE; a severed link is C-TRACE-HOT)
+          (color! (cond ((not line) C-TEXT-DIM)
+                        ((trace-severed? (session-trace s)) C-TRACE-HOT)
+                        (else C-ICE)))
           (draw-text text x (+ top 32) 1))
         (when (> (string-length (session-typed s)) 0)
           (color! C-HIGHLIGHT)
@@ -602,7 +625,9 @@
                    (y (prng-index r1 top))
                    (h (+ 2 (prng-index r2 6)))
                    (dx (- (prng-index r3 40) 20)))
-              (color-alpha! (if (even? k) C-TRACE-HOT C-SELECTED) a)
+              ;; bible section 5: band displacement in C-STATIC-A, with the
+              ;; hot color David saw in P1 every third band
+              (color-alpha! (if (= 0 (modulo k 3)) C-TRACE-HOT C-STATIC-A) a)
               (draw-filled-rect dx y vw h)
               (loop (+ k 1) r3))))))
 

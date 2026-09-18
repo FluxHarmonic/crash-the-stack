@@ -4,7 +4,7 @@
 # that uses a color outside the family's allowance (the bible's
 # color-count gate: red on a gradient that slipped through).
 #
-#   scripts/art/shape RAW.png OUT.png WxH ROLE,ROLE,... [MAX] [--clean PCT]
+#   scripts/art/shape RAW.png OUT.png WxH ROLE,ROLE,... [MAX] [--clean PCT] [--ground ROLE]
 #
 # ROLE,... are palette roles from assets/palette.sgl (the family's
 # allowance); MAX (default: the number of distinct roles) caps the colors
@@ -15,15 +15,20 @@
 # produce a few such pixels on a clean picture too: --clean PCT lets the
 # shaper re-snap those to the family when they are under PCT percent of
 # the pixels, and says how many it moved (put that in the manifest row);
-# without it the gate refuses, and a PCT past 5 is refused too. Alpha is dropped: a reference is opaque on
+# without it the gate refuses, and a PCT past 5 is refused too. A raw
+# with an alpha channel is flattened onto --ground (C-BG unless said
+# otherwise; a tile whose face came back transparent wants C-FACE) before
+# anything else, since what is under alpha 0 is noise; then alpha is
+# dropped: a reference is opaque on
 # the ground color, and the ground is a palette color like any other.
 set -eu
 cd "$(dirname "$0")/../.." || exit 1
 raw="${1:?raw.png}"; out="${2:?out.png}"; size="${3:?WxH}"; roles="${4:?roles}"; shift 4
-max=""; clean=""
+max=""; clean=""; ground="C-BG"
 while [ $# -gt 0 ]; do
   case "$1" in
     --clean) clean="${2:?pct}"; shift 2 ;;
+    --ground) ground="${2:?role}"; shift 2 ;;
     *) max="$1"; shift ;;
   esac
 done
@@ -44,7 +49,9 @@ allowed="$(colors_of "$tmp/family.png")"
 printf '%s\n' "$allowed" > "$tmp/allowed.txt"
 n_allowed="$(wc -l < "$tmp/allowed.txt")"
 [ -n "$max" ] || max="$n_allowed"
-convert "$raw" -background "$(hex_of C-BG)" -alpha remove -alpha off -filter point -resize "${size}!" -dither None -remap "$tmp/palette.png" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$tmp/out.png"
+ground_hex="$(hex_of "$ground")"
+[ -n "$ground_hex" ] || { echo "shape: unknown --ground role $ground"; exit 1; }
+convert "$raw" -background "$ground_hex" -alpha remove -alpha off -filter point -resize "${size}!" -dither None -remap "$tmp/palette.png" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$tmp/out.png"
 used="$(colors_of "$tmp/out.png")"
 bad="$(printf '%s\n' "$used" | grep -vxF -f "$tmp/allowed.txt" || true)"
 moved=0
