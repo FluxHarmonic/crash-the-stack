@@ -44,6 +44,7 @@
           game-new game-from-deck game-with-scoring
           game-corrupted? game-corrupt-waste game-encrypt game-unlock-expired game-churn
           encryptable-places
+          game-obfuscated game-obfuscate game-unobfuscate-all obfuscatable-cards card-obfuscated?
           game-stuck? game-scramble progress-moves SCRAMBLE-TRIES
           PILES FOUNDATIONS DRAW-COUNTS SCORINGS
           SCORE-TO-FOUNDATION SCORE-WASTE-TO-TABLEAU SCORE-TURN-OVER
@@ -103,6 +104,7 @@
       (scoring default: 'standard)    ; standard | vegas
       (score default: 0)
       (corrupt default: #f)           ; (card . draws-left) while the ICE holds the waste's top
+      (obfuscated default: '())       ; cards whose faces draw obfuscated (P3, the ICE's fourth member)
       (rng default: 1))
 
     ;; --- construction --------------------------------------------------------
@@ -344,12 +346,36 @@
         (game g score: (if (eq? (game-scoring g) 'vegas) total (max 0 total)))))
 
     ;; The move, or #f when it is not legal.
+    ;; A move also clears the obfuscation of every card it moves: the
+    ;; read is paid (P3).
     (define (game-move g src dst)
       (and (move-legal? g src dst)
-           (let ((cards (selection-cards g src)))
+           (let* ((cards (selection-cards g src))
+                  (moved (add-score (put-on (take-from g src) dst cards)
+                                    (move-points g src dst cards))))
              (push-history g
-                           (add-score (put-on (take-from g src) dst cards)
-                                      (move-points g src dst cards))))))
+                           (game moved
+                                 obfuscated: (filter (lambda (c) (not (memv c cards)))
+                                                     (game-obfuscated moved)))))))
+
+    ;; --- the obfuscation (P3: the ICE's OBFUSCATED member, SCRAMBLED on the stack) ---
+
+    ;; Every face-up tableau card whose face is not already obfuscated.
+    (define (obfuscatable-cards g)
+      (apply append
+             (map (lambda (i)
+                    (filter (lambda (c) (not (memv c (game-obfuscated g))))
+                            (map pile-card (filter pile-up? (game-pile g i)))))
+                  (iota PILES))))
+
+    (define (card-obfuscated? g c)
+      (and (memv c (game-obfuscated g)) #t))
+
+    (define (game-obfuscate g cards)
+      (game g obfuscated: (append cards (game-obfuscated g))))
+
+    (define (game-unobfuscate-all g)
+      (if (null? (game-obfuscated g)) g (game g obfuscated: '())))
 
     ;; May the waste be turned back into the stock? Always. Windows' Vegas
     ;; allows one pass under draw one and three under draw three; here

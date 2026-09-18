@@ -41,7 +41,8 @@
           CARDS-ICE-SET cards-ice-applicable fire-cards-ice
           trace-pass trace-undo trace-scramble trace-probe
           timed-score
-          MSG-ENCRYPTED MSG-CORRUPTED MSG-CHURNED MSG-CORRUPT-REFUSED)
+          MSG-ENCRYPTED MSG-CORRUPTED MSG-CHURNED MSG-CORRUPT-REFUSED
+          MSG-OBFUSCATED OBFUSCATE-COUNT)
 
   (begin
     ;; --- the numbers David tunes (seconds) -------------------------------------
@@ -65,6 +66,12 @@
     (define MSG-ENCRYPTED "ICE ENCRYPTED A PACKET.")
     (define MSG-CORRUPTED "ICE CORRUPTED THE BUFFER.")
     (define MSG-CHURNED "ICE CHURNED THE FEED.")
+    ;; The fourth member (P3): SCRAMBLE is DEFRAG's player verb, so the
+    ;; ICE's face glitch is OBFUSCATED here (ruled 2026-09-18; David may
+    ;; rename from play).
+    (define OBFUSCATE-COUNT 4)
+    (define MSG-OBFUSCATED
+      (string-append "ICE OBFUSCATED " (number->string OBFUSCATE-COUNT) " PACKETS."))
     (define MSG-CORRUPT-REFUSED "CORRUPTED. PULL PAST IT.")
 
     ;; --- the player's costs -----------------------------------------------------
@@ -106,6 +113,23 @@
       (let ((r (game-churn g rng)))
         (game (car r) rng: (cdr r))))
 
+    ;; Obfuscate: OBFUSCATE-COUNT face-up tableau packets, drawn from the
+    ;; candidates by the game's stream, draw glitched until moved or until
+    ;; the next counter-hack (fire-cards-ice clears every mark first).
+    (define (obfuscate-applicable? g)
+      (>= (length (obfuscatable-cards g)) OBFUSCATE-COUNT))
+
+    (define (obfuscate-apply g rng now)
+      (let loop ((left (obfuscatable-cards g))
+                 (rng rng)
+                 (k OBFUSCATE-COUNT)
+                 (picked '()))
+        (if (= k 0)
+            (game (game-obfuscate g picked) rng: rng)
+            (let* ((rng (prng-next rng))
+                   (c (list-ref left (prng-index rng (length left)))))
+              (loop (filter (lambda (x) (not (= x c))) left) rng (- k 1) (cons c picked))))))
+
     (define CARDS-ICE-SET
       (list (ice-member name: 'encrypt
                         applicable?: encrypt-applicable?
@@ -115,7 +139,10 @@
                         apply: corrupt-apply)
             (ice-member name: 'churn
                         applicable?: churn-applicable?
-                        apply: churn-apply)))
+                        apply: churn-apply)
+            (ice-member name: 'obfuscate
+                        applicable?: obfuscate-applicable?
+                        apply: obfuscate-apply)))
 
     (define (cards-ice-applicable g)
       (filter (lambda (m) ((ice-member-applicable? m) g)) CARDS-ICE-SET))
@@ -123,8 +150,10 @@
     ;; One counter-hack on the card table, the shape trace-advance* wants:
     ;; a uniform pick over the applicable members with the game's random
     ;; stream, the history cut at the event; none applicable -> (cons g #f).
-    (define (fire-cards-ice g now)
-      (let ((members (cards-ice-applicable g)))
+    (define (fire-cards-ice g0 now)
+      ;; the last counter-hack's obfuscation lapses with this one
+      (let* ((g (game-unobfuscate-all g0))
+             (members (cards-ice-applicable g)))
         (if (null? members)
             (cons g #f)
             (let* ((rng (prng-next (game-rng g)))

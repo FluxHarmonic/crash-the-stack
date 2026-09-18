@@ -23,7 +23,8 @@
         (crash cards geometry)
         (crash cards input)
         (crash cards trace)
-        (crash cards save))
+        (crash cards save)
+        (crash stack prng))
 
 (define geom (make-card-geometry 640 400))
 
@@ -93,8 +94,10 @@
       (assert-equal 0 (trace-ice-count (deal-trace d1)))
       (assert-equal 1 (trace-ice-count (deal-trace d2)))
       ;; at the deal nothing is encryptable and the waste is empty: churn
-      (assert-equal 'churn (trace-last-ice (deal-trace d2)))
-      (assert-equal MSG-CHURNED (deal-message d2))
+      ;; or (P3) obfuscate, the two members that apply to a fresh deal
+      (assert-true (and (memq (trace-last-ice (deal-trace d2)) '(churn obfuscate)) #t))
+      (assert-equal (if (eq? (trace-last-ice (deal-trace d2)) 'churn) MSG-CHURNED MSG-OBFUSCATED)
+                    (deal-message d2))
       (assert-equal '() (game-history (deal-game d2)))))
   (test "under the ICE a pass eats PASS-SEVER-COST off the countdown"
     (let* ((d (deal-advance (deal-toggle-draw (fixture-deal)) (* 60 TRACE-AT)))
@@ -230,17 +233,60 @@
       (let* ((g1 (fold (lambda (g _) (game-draw! g)) g (iota 3)))     ; encryptable, a waste, 24 cards: all three apply
              (a (fire-cards-ice g1 0))
              (b (fire-cards-ice g1 0)))
-        (assert-equal 3 (length (cards-ice-applicable g1)))
+        (assert-equal 4 (length (cards-ice-applicable g1)))
         (assert-equal (cdr a) (cdr b))
         (assert-true (game-equal? (car a) (car b)))
         (assert-equal '() (game-history (car a)))
-        (assert-true (memq (cdr a) '(encrypt corrupt churn)))))
+        (assert-true (memq (cdr a) '(encrypt corrupt churn obfuscate)))))
     (test "none applicable: the interval passes"
       (let* ((bare (game g stock: '() waste: '() tableau: (make-vector PILES '())))
              (r (fire-cards-ice bare 0)))
         (assert-equal '() (cards-ice-applicable bare))
         (assert-false (cdr r))
         (assert-true (eq? bare (car r)))))))
+
+(test-group "the fourth member: obfuscate (P3; SCRAMBLED on the stack, the DEFRAG verb is the player's)"
+  (let* ((d (fixture-deal))
+         (g (deal-game d))
+         (m (car (filter (lambda (m) (eq? (ice-member-name m) 'obfuscate)) CARDS-ICE-SET)))
+         (hit ((ice-member-apply m) g (prng-next (game-rng g)) 0))
+         (marked (game-obfuscated hit)))
+    (test "the wording is the ruling's"
+      (assert-equal "ICE OBFUSCATED 4 PACKETS." MSG-OBFUSCATED))
+    (test "applicable at the deal (seven face-up packets), marks OBFUSCATE-COUNT face-up tableau cards"
+      (assert-true ((ice-member-applicable? m) g))
+      (assert-equal OBFUSCATE-COUNT (length marked))
+      (assert-true (every (lambda (c) (memv c (obfuscatable-cards g))) marked))
+      (assert-true (every (lambda (c) (card-obfuscated? hit c)) marked)))
+    (test "an obfuscation changes no legality"
+      (assert-equal (legal-moves g) (legal-moves hit)))
+    (test "moving an obfuscated packet clears its mark; the others keep theirs"
+      (let* ((moves (legal-moves hit))
+             ;; a move is (src . dst); a pile source is (pile i depth)
+             (from-marked (filter (lambda (mv)
+                                    (let ((src (car mv)))
+                                      (and (eq? (car src) 'pile)
+                                           (memv (pile-card (car (game-pile hit (cadr src)))) marked))))
+                                  moves)))
+        (assert-true (pair? from-marked))
+        (when (pair? from-marked)
+            (let* ((mv (car from-marked))
+                   (c (pile-card (car (game-pile hit (cadr (car mv))))))
+                   (after (game-move hit (car mv) (cdr mv))))
+              (assert-true (and after #t))
+              (assert-false (card-obfuscated? after c))
+              (assert-equal (- OBFUSCATE-COUNT 1) (length (game-obfuscated after)))))))
+    (test "the next counter-hack clears the marks it did not remake"
+      (let* ((fired (fire-cards-ice hit 0))
+             (after (car fired)))
+        (if (eq? (cdr fired) 'obfuscate)
+            (assert-equal OBFUSCATE-COUNT (length (game-obfuscated after)))
+            (assert-equal '() (game-obfuscated after)))))
+    (test "the marks survive a save"
+      (let* ((saved (deal-restore 1 hit #t (trace-new 'twist)))
+             (back (datum->deal (deal->datum saved))))
+        (assert-true (and back #t))
+        (assert-equal (list-sort < marked) (list-sort < (game-obfuscated (deal-game back))))))))
 
 (test-group "the timed Standard score"
   (let ((g (game-with-scoring (game-from-deck (deck-string->cards FIXTURE-DECK) 1) 'standard)))

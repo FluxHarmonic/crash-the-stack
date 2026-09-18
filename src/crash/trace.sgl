@@ -10,9 +10,11 @@
 ;;; stream from the applicable members of a set: lock a pair (a STRONG
 ;;; lock cannot be selected at all; it turns WEAK after LOCK-DECAY or when
 ;;; it blocks the last legal match, and a weak lock breaks on one tap;
-;;; never placed where it would be weak on arrival: D15), or remap the
+;;; never placed where it would be weak on arrival: D15), remap the
 ;;; remaining tiles (every lock dropped, then the solvable generator, so
-;;; the board stays winnable). Hints and shuffles now eat into the countdown. When
+;;; the board stays winnable), or scramble SCRAMBLE-COUNT free faces (P3:
+;;; they draw glitched until selected or until the next counter-hack, so
+;;; a match takes longer to read). Hints and shuffles now eat into the countdown. When
 ;;; it reaches zero the connection is SEVERED: the board is lost, no move
 ;;; or undo is accepted, and the player gets the same seed again or a new
 ;;; board. Clearing the board wins in any phase; the score is GNOME's
@@ -26,9 +28,9 @@
 ;;; Time comes in sim ticks from the fixed clock of (crash tween), one at
 ;;; a time inside trace-advance, so a chunk of ticks fires exactly the
 ;;; counter-hacks its seconds cover. The counter-hack set is a list of
-;;; members (name, applicable?, apply); P3's face scramble is one more
-;;; entry and its art. This module is in the rules family: no platform,
-;;; no drawing. The numbers David tunes are the block at the top.
+;;; members (name, applicable?, apply): lock, remap and (P3) scramble.
+;;; This module is in the rules family: no platform, no drawing. The
+;;; numbers David tunes are the block at the top.
 
 (define-library (crash trace)
   (import (sigil struct)
@@ -54,7 +56,8 @@
           ICE-FIRST ICE-INTERVAL SEVER-AT HINT-SEVER-COST SHUFFLE-SEVER-COST
           LOCK-DECAY SCRAMBLE-COUNT MODES PHASES
           MSG-JACKED-IN MSG-TRACED MSG-LOCKED-PAIR MSG-LOCKED MSG-LOCK-WEAK MSG-LOCK-BROKEN
-          MSG-REMAPPED MSG-NOTHING MSG-SEVERED MSG-TOO-LATE MSG-NO-MENU
+          MSG-REMAPPED MSG-SCRAMBLED MSG-NOTHING MSG-SEVERED MSG-TOO-LATE MSG-NO-MENU
+          scramble-candidates
           TAG-CLEAN-RUN TAG-UNDER-ICE)
 
   (begin
@@ -80,6 +83,8 @@
     (define MSG-LOCK-WEAK "LOCK WEAK. TAP TO BREAK.")
     (define MSG-LOCK-BROKEN "LOCK BROKEN.")
     (define MSG-REMAPPED "ICE REMAPPED THE STACK.")
+    (define MSG-SCRAMBLED
+      (string-append "ICE SCRAMBLED " (number->string SCRAMBLE-COUNT) " FACES."))
     (define MSG-NOTHING "ICE PROBED. NOTHING TO HIT.")
     (define MSG-SEVERED "LINK SEVERED.")
     (define MSG-TOO-LATE "TOO LATE TO SWITCH.")
@@ -270,13 +275,46 @@
              (dealt (reshuffle broken)))
         (and (not (eq? dealt broken)) dealt)))
 
+    ;; Scramble: SCRAMBLE-COUNT playable, unlocked, unscrambled tiles,
+    ;; chosen by the board's random stream, draw glitched until selected
+    ;; or until the next counter-hack (fire-ice clears every mark first).
+    ;; Applicable when that many candidates exist (design note, twist 1).
+    (define (scramble-candidates b)
+      (filter (lambda (id)
+                (and (not (tile-locked? b id)) (not (tile-scrambled? b id))))
+              (playable-slots b)))
+
+    (define (scramble-applicable? b)
+      (>= (length (scramble-candidates b)) SCRAMBLE-COUNT))
+
+    ;; SCRAMBLE-COUNT of the candidates, each drawn from the remainder.
+    (define (scramble-apply b now)
+      (let loop ((left (scramble-candidates b))
+                 (rng (board-rng b))
+                 (k SCRAMBLE-COUNT)
+                 (picked '()))
+        (if (= k 0)
+            (let ((nx (board-scramble b picked)))
+              (set-board-rng! nx rng)
+              nx)
+            (let* ((rng (prng-next rng))
+                   (i (prng-index rng (length left)))
+                   (id (list-ref left i)))
+              (loop (filter (lambda (x) (not (= x id))) left)
+                    rng
+                    (- k 1)
+                    (cons id picked))))))
+
     (define ICE-SET
       (list (ice-member name: 'lock
                         applicable?: lock-applicable?
                         apply: lock-apply)
             (ice-member name: 'remap
                         applicable?: remap-applicable?
-                        apply: remap-apply)))
+                        apply: remap-apply)
+            (ice-member name: 'scramble
+                        applicable?: scramble-applicable?
+                        apply: scramble-apply)))
 
     (define (ice-applicable b)
       (filter (lambda (m) ((ice-member-applicable? m) b)) ICE-SET))
@@ -288,8 +326,10 @@
     ;; player could undo would have no teeth (ruled 2026-09-17); the
     ;; player's own moves after it are undoable as usual. Returns
     ;; (cons board name-or-#f).
-    (define (fire-ice b now)
-      (let ((members (ice-applicable b)))
+    (define (fire-ice b0 now)
+      ;; the last counter-hack's scramble marks lapse with this one
+      (let* ((b (if (null? (board-scrambled-slots b0)) b0 (board-unscramble-all b0)))
+             (members (ice-applicable b)))
         (if (null? members)
             (cons b #f)
             (let* ((rng (prng-next (board-rng b)))

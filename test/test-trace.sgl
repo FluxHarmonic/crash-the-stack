@@ -157,7 +157,7 @@
       (assert-true (board-equal? (session-board traced) (session-board before-first))))
     (test "the first counter-hack fires at ICE-FIRST and is a member of the set"
       (assert-equal 1 (trace-ice-count (tr-of first)))
-      (assert-true (and (memq (trace-last-ice (tr-of first)) '(lock remap)) #t))
+      (assert-true (and (memq (trace-last-ice (tr-of first)) '(lock remap scramble)) #t))
       (assert-false (board-equal? (session-board traced) (session-board first)))
       (assert-equal (* TPS ICE-INTERVAL) (trace-ice-timer (tr-of first))))
     (test "the second fires one ICE-INTERVAL later, not before"
@@ -306,6 +306,57 @@
         (assert-false (string=? MSG-LOCK-WEAK (session-message before)))
         (assert-equal MSG-LOCK-WEAK (session-message at))
         (assert-true (lock-weak? (session-board at) a (trace-ticks (session-trace at))))))))
+
+(test-group "trace: (i)..(l) the scramble (P3, D13's third member, D15's wording)"
+  ;; the member itself, on a fresh Turtle, at tick 0
+  (let* ((b (generate lay SEED))
+         (m (car (filter (lambda (m) (eq? (ice-member-name m) 'scramble)) ICE-SET)))
+         (hit ((ice-member-apply m) (board-copy b) 0))
+         (marked (board-scrambled-slots hit)))
+    (test "(i) applicable with SCRAMBLE-COUNT free tiles, marks exactly that many, all playable and unlocked"
+      (assert-true ((ice-member-applicable? m) b))
+      (assert-equal SCRAMBLE-COUNT (length marked))
+      (assert-true (every (lambda (id) (and (playable? hit id) (not (tile-locked? hit id)))) marked)))
+    (test "(i) the wording is D15's"
+      (assert-equal "ICE SCRAMBLED 6 FACES." MSG-SCRAMBLED))
+    (test "(i) a scramble changes no legality"
+      (assert-equal (legal-matches b) (legal-matches hit)))
+    (test "(j) selecting a scrambled tile clears its mark and selects it"
+      (let* ((id (car marked))
+             (after (board-select hit id)))
+        (assert-equal id (board-selected after))
+        (assert-false (tile-scrambled? after id))
+        (assert-equal (- SCRAMBLE-COUNT 1) (length (board-scrambled-slots after)))))
+    (test "(i) not applicable with fewer than SCRAMBLE-COUNT candidates"
+      (let ((tiny (board-new (tower-3-layout) (vector 0 1 1 2 2 0))))
+        (assert-false ((ice-member-applicable? m) tiny)))))
+  ;; through the phase machine: the marks lapse at the next counter-hack
+  (let* ((traced (last-of (run (session-new lay SEED) TRACE-SCRIPT)))
+         (find-scramble (lambda (s)
+                          (let loop ((s s) (k 0))
+                            (cond ((> k 12) #f)
+                                  ((eq? (trace-last-ice (tr-of s)) 'scramble) s)
+                                  (else (loop (session-advance s (* TPS ICE-INTERVAL)) (+ k 1)))))))
+         (scrambled (find-scramble (session-advance traced (* TPS ICE-FIRST)))))
+    (test "(i) the scramble fires within a dozen counter-hacks on this seed"
+      (assert-true (and scrambled #t)))
+    (when scrambled
+      (test "(i) the session says ICE SCRAMBLED 6 FACES. and marks six"
+        (assert-equal MSG-SCRAMBLED (session-message scrambled))
+        (assert-equal SCRAMBLE-COUNT (length (board-scrambled-slots (session-board scrambled)))))
+      (test "(k) the next counter-hack clears the marks it did not remake"
+        (let* ((next (session-advance scrambled (* TPS ICE-INTERVAL)))
+               (b (session-board next)))
+          (assert-equal (+ 1 (trace-ice-count (tr-of scrambled))) (trace-ice-count (tr-of next)))
+          (if (eq? (trace-last-ice (tr-of next)) 'scramble)
+              (assert-equal SCRAMBLE-COUNT (length (board-scrambled-slots b)))
+              (assert-equal '() (board-scrambled-slots b)))))
+      (test "(l) the scramble cut the undo history"
+        (assert-equal '() (board-history (session-board scrambled))))
+      (test "(j) a pick through the session clears one mark"
+        (let* ((id (car (board-scrambled-slots (session-board scrambled))))
+               (picked (session-pick scrambled id)))
+          (assert-false (tile-scrambled? (session-board picked) id)))))))
 
 (test-group "trace: (d) a forced shuffle keeps the tile count and stays winnable"
   (let* ((s (under-ice (one-match-board 3) 1))

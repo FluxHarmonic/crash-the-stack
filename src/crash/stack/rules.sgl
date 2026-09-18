@@ -23,12 +23,16 @@
 ;;; ordinary pairs, so a cross-daemon match is a bonus and solvability is
 ;;; unchanged.
 ;;;
-;;; The one twist the rules know about (P1, the trace meter): a pair of
-;;; tiles can be LOCKED. A locked tile cannot be selected here at all;
+;;; The twists the rules know about: a pair of tiles can be LOCKED (P1,
+;;; the trace meter). A locked tile cannot be selected here at all;
 ;;; whether a lock is strong or weak (weak: one select breaks it) is time
 ;;; and board state that (crash trace) derives, and (crash input) calls
 ;;; board-unlock-pair when a weak lock is tapped. A lock records its
-;;; partner and the tick it landed, and undo restores it.
+;;; partner and the tick it landed, and undo restores it. And a tile can
+;;; be SCRAMBLED (P3, the ICE's third counter-hack, D13/D15): its face
+;;; draws glitched so a match takes longer to read. A scramble changes no
+;;; legality; selecting the tile clears its mark (the read is paid), and
+;;; the trace clears every mark at the next counter-hack.
 ;;;
 ;;; No rendering, windowing or platform import may appear here; the gate
 ;;; test/test-imports.sgl asserts it.
@@ -49,6 +53,7 @@
           DAEMON-FIRST daemon-face?
           board-select board-remove-pair board-undo
           board-lock-pair board-unlock-pair board-break-locks
+          tile-scrambled? board-scrambled-slots board-scramble board-unscramble-all
           board-canonical board-equal?
           snapshot
           ;; Field setters, for the generator working on its own private copy.
@@ -63,6 +68,7 @@
       (present default: (vector) mutable: #t)   ; slot -> #t while the tile is on the board
       (occ default: (vector) mutable: #t)       ; cell -> slot or #f; see layout-cell-index
       (locked default: (vector) mutable: #t)    ; slot -> (partner . tick) while locked, else #f
+      (scrambled default: (vector) mutable: #t) ; slot -> #t while its face draws scrambled
       (selected default: #f mutable: #t)        ; slot or #f
       (history default: '() mutable: #t)        ; earlier snapshots, newest first
       (solution default: '() mutable: #t)       ; ((a . b) ...) in removal order from the
@@ -97,7 +103,8 @@
                faces: (vector-copy faces)
                present: (vector-copy present)
                occ: (build-occ lay present)
-               locked: (make-vector (layout-slot-count lay) #f))))
+               locked: (make-vector (layout-slot-count lay) #f)
+               scrambled: (make-vector (layout-slot-count lay) #f))))
 
     ;; A copy that shares nothing mutable with the original: the three vectors
     ;; are copied, everything else is the copy-construction form (board b ...).
@@ -106,7 +113,8 @@
              faces: (vector-copy (board-faces b))
              present: (vector-copy (board-present b))
              occ: (vector-copy (board-occ b))
-             locked: (vector-copy (board-locked b))))
+             locked: (vector-copy (board-locked b))
+             scrambled: (vector-copy (board-scrambled b))))
 
     ;; A copy with no history of its own, for the history stack.
     (define (snapshot b)
@@ -139,6 +147,19 @@
             acc
             (loop (- id 1)
                   (if (and (tile-present? b id) (tile-locked? b id))
+                      (cons id acc)
+                      acc)))))
+
+    (define (tile-scrambled? b id)
+      (vector-ref (board-scrambled b) id))
+
+    ;; Ascending slot ids of every scrambled tile still on the board.
+    (define (board-scrambled-slots b)
+      (let loop ((id (- (layout-slot-count (board-layout b)) 1)) (acc '()))
+        (if (< id 0)
+            acc
+            (loop (- id 1)
+                  (if (and (tile-present? b id) (tile-scrambled? b id))
                       (cons id acc)
                       acc)))))
 
@@ -270,6 +291,27 @@
         (vector-fill! (board-locked nx) #f)
         nx))
 
+    ;; Scramble these tiles (the ICE's counter-hack), no history entry: a
+    ;; counter-hack is never undone.
+    (define (board-scramble b ids)
+      (let ((nx (board-copy b)))
+        (for-each (lambda (id) (vector-set! (board-scrambled nx) id #t)) ids)
+        nx))
+
+    ;; Every scramble off, no history entry (the next counter-hack).
+    (define (board-unscramble-all b)
+      (let ((nx (board-copy b)))
+        (vector-fill! (board-scrambled nx) #f)
+        nx))
+
+    ;; The read paid: a selected tile's scramble clears with the selection.
+    (define (unscrambled b id)
+      (if (tile-scrambled? b id)
+          (let ((nx (board-copy b)))
+            (vector-set! (board-scrambled nx) id #f)
+            nx)
+          b))
+
     (define (with-selected b id)
       (board (board-copy b) selected: id))
 
@@ -282,9 +324,9 @@
       (let ((sel (board-selected b)))
         (cond ((not (playable? b id)) b)
               ((tile-locked? b id) b)
-              ((not sel) (with-selected b id))
+              ((not sel) (with-selected (unscrambled b id) id))
               ((= sel id) (with-selected b #f))
-              ((not (faces-match? b sel id)) (with-selected b id))
+              ((not (faces-match? b sel id)) (with-selected (unscrambled b id) id))
               (else (board-remove-pair b sel id)))))
 
     ;; Back to the previous snapshot; selection cleared. A board with no
@@ -309,6 +351,7 @@
             (vector->list (board-faces b))
             (vector->list (board-occ b))
             (vector->list (board-locked b))
+            (vector->list (board-scrambled b))
             (board-selected b)))
 
     (define (board-equal? a b)

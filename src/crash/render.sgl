@@ -122,19 +122,36 @@
             (draw-rows rows x y scale GLYPH-W)
             (draw-text (string (string-ref FACE-KEYS face)) x y scale))))
 
+    ;; A scrambled face (the ICE's third counter-hack, P3): the glyph's
+    ;; rows shear sideways by a cell or two, a different way every few
+    ;; ticks from the board's own stream, and one row drops out, so the
+    ;; face is readable with effort; a C-ICE hairline says whose work it is.
+    (define SCRAMBLE-PERIOD 4)
+
+    (define (draw-face-glyph-scrambled sheet face x y scale ticks id)
+      (let ((rows (or (and (not (eq? sheet 'keys)) (sheet-glyph sheet face))
+                      (glyph-rows-of (string-ref FACE-KEYS face)))))
+        (when rows
+          (draw-rows-sheared rows x y scale GLYPH-W
+                             (+ 31 (* 7 id) (* 101 (quotient ticks SCRAMBLE-PERIOD)))))))
+
     ;; The glyph is drawn only while the (possibly flipping) face is wide
-    ;; enough to hold it; a tile edge-on shows no glyph.
-    (define (draw-glyph-on g look face x y w h dark?)
+    ;; enough to hold it; a tile edge-on shows no glyph. scramble: #f, or
+    ;; (ticks . id) for a scrambled face.
+    (define (draw-glyph-on g look face x y w h dark? scramble)
       (let* ((scale (glyph-scale g))
              (gw (* scale GLYPH-W))
-             (gh (* scale GLYPH-H)))
+             (gh (* scale GLYPH-H))
+             (gx (+ x (exact (floor (/ (- w gw) 2)))))
+             (gy (+ y (exact (floor (/ (- h gh) 2))))))
         (when (>= w (+ gw 2))
           (color! (if dark? C-BG (suit-color look face)))
-          (draw-face-glyph (look-glyphs look)
-                           face
-                           (+ x (exact (floor (/ (- w gw) 2))))
-                           (+ y (exact (floor (/ (- h gh) 2))))
-                           scale))))
+          (if scramble
+              (begin
+                (draw-face-glyph-scrambled (look-glyphs look) face gx gy scale (car scramble) (cdr scramble))
+                (color! C-ICE)
+                (draw-filled-rect x (+ gy (* scale 3)) w 1))
+              (draw-face-glyph (look-glyphs look) face gx gy scale)))))
 
     ;; A tile is drawn in two passes per layer: first its side faces (left and
     ;; bottom, one layer offset deep), then its face. With half-row offsets a
@@ -160,7 +177,7 @@
     ;; nothing) and gets a dark line to read as an edge (David, 2026-09-17:
     ;; a tile's right boundary was hard to see against the tiles under it;
     ;; two faces side by side on one layer stay seamless).
-    (define (draw-face-primitives g look face x y w h selected? lock right-open? glow)
+    (define (draw-face-primitives g look face x y w h selected? lock right-open? glow scramble)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
@@ -173,7 +190,7 @@
       (when right-open?
         (color! (if selected? C-SELECTED C-SIDE))
         (draw-filled-rect (+ x w -1) y 1 h))
-      (when face (draw-glyph-on g look face x y w h selected?))
+      (when face (draw-glyph-on g look face x y w h selected? scramble))
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
@@ -202,7 +219,7 @@
                              (* frame (look-frame-w look)) 0
                              (look-frame-w look) (look-frame-h look))))
 
-    (define (draw-face-texture g look b id face tex x y w h selected?)
+    (define (draw-face-texture g look b id face tex x y w h selected? scramble)
       (let ((frame (tile-frame look b id))
             (fw (look-frame-w look))
             (fh (look-frame-h look))
@@ -215,7 +232,7 @@
                              (- fw inset)
                              (- fh inset))
         (when (and face (= frame 0))
-          (draw-glyph-on g look face x y w h selected?))))
+          (draw-glyph-on g look face x y w h selected? scramble))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -254,6 +271,7 @@
              (lay (board-layout b))
              (selected (board-selected b))
              (now (trace-ticks (session-trace s)))
+             (ticks (fx-ticks x))
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
              (textured? (and tex (look-texture look) #t))
@@ -286,12 +304,14 @@
                                  (draw-sides-primitives g x y w h))))
             (each-on-layer layer
                            (lambda (id face x y w h selected?)
-                             (if textured?
-                                 (draw-face-texture g look b id face tex x y w h selected?)
-                                 (draw-face-primitives g look face x y w h selected?
-                                                       (lock-state b id now)
-                                                       (not (blocked-right? b id))
-                                                       glow))))
+                             (let ((scramble (and (tile-scrambled? b id) (cons ticks id))))
+                               (if textured?
+                                   (draw-face-texture g look b id face tex x y w h selected? scramble)
+                                   (draw-face-primitives g look face x y w h selected?
+                                                         (lock-state b id now)
+                                                         (not (blocked-right? b id))
+                                                         glow
+                                                         scramble)))))
             (loop (+ layer 1))))
         (draw-ghosts g look x)
         (draw-particles g look x)

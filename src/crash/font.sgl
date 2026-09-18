@@ -9,10 +9,11 @@
 ;;; Cinder's text.sgl is the precedent. Unknown characters draw as a blank.
 
 (define-library (crash font)
-  (import (sigil graphics))
+  (import (sigil graphics)
+          (crash stack prng))
 
   (export GLYPH-W GLYPH-H
-          draw-text text-width draw-rows
+          draw-text text-width draw-rows draw-rows-sheared glyph-rows-of
           draw-suit
           MINI-W MINI-H draw-text-mini text-width-mini)
 
@@ -75,6 +76,11 @@
       (let ((entry (assv (char-downcase c) GLYPHS)))
         (and entry (cdr entry))))
 
+    ;; A character's rows, for drawing them one at a time (the scrambled
+    ;; face, P3), or #f.
+    (define (glyph-rows-of c)
+      (glyph-rows c))
+
     ;; Draw one glyph with its top-left at (x, y), cells scale px square. Each
     ;; row is drawn as its runs of lit cells, one rect per run, not one per
     ;; cell: sokol_gp has a 65536-vertex budget per frame (six per rect) and a
@@ -104,6 +110,22 @@
                                              (* (- col run-start) scale) scale))
                          (cells (+ col 1) #f)))))
               (loop (cdr rows) (+ r 1)))))))
+
+    ;; The rows sheared: each row slides a cell or two sideways and one
+    ;; in seven drops out, drawn from seed (the caller folds the tick and
+    ;; the tile or card in, so it flickers a different way every few
+    ;; ticks). The ICE's scrambled and obfuscated faces (P3).
+    (define (draw-rows-sheared rows x y scale width seed)
+      (let loop ((rs rows)
+                 (r 0)
+                 (rng (prng-seed seed)))
+        (unless (null? rs)
+          (let* ((rng (prng-next rng))
+                 (dx (- (prng-index rng 5) 2))
+                 (drop? (= 0 (prng-index (prng-next rng) 7))))
+            (unless drop?
+              (draw-rows (list (car rs)) (+ x (* dx scale)) (+ y (* r scale)) scale width))
+            (loop (cdr rs) (+ r 1) rng)))))
 
     ;; Draw text left-aligned at (x, y) in the current color; one cell of
     ;; space between glyphs.

@@ -49,9 +49,13 @@
     ;; A strip of three portraits, DAEMON SYSOP ROOT, a white tint mask on
     ;; transparent (the class color multiplies it), loaded by the shell.
     (define PORTRAITS-PATH "assets/packets/portraits.png")
-    ;; The portrait texture this frame, or #f (set by draw-deal; the face
-    ;; drawers are reached through the tableau, the movers and the cascade).
+    ;; The portrait texture this frame, or #f, and the cards the ICE has
+    ;; obfuscated with the frame's tick (set by draw-deal; the face drawers
+    ;; are reached through the tableau, the movers and the cascade).
     (define *portraits* #f)
+    (define *obfuscated* '())
+    (define *ticks* 0)
+    (define OBFUSCATE-PERIOD 4)
 
     ;; Cybersol's FacePatterns: pips per column, columns left to right, for
     ;; ranks 2..10; a column of 1 sits at the middle, or at a third when it
@@ -251,9 +255,26 @@
         (draw-filled-rect x y w 1)
         (draw-filled-rect x y 1 h)
         (color! (suit-color c))
-        (draw-text rank (+ x 4) (+ y 2) GLYPH-SCALE)
-        (draw-rows (class-mark (card-suit c)) mark-x (+ y 2) 1 MARK-W)
-        (draw-text-mini (subsystem-tag c) mark-x (+ y 12) 1)
+        (if (memv c *obfuscated*)
+            ;; obfuscated (P3): the index band sheared and flickering, a
+            ;; C-ICE hairline through it; the body is drawn as usual, so
+            ;; the packet still reads as a packet, only its identity slowly
+            (let ((seed (+ 53 (* 7 c) (* 101 (quotient *ticks* OBFUSCATE-PERIOD)))))
+              (let loop ((chars (string->list rank))
+                         (cx (+ x 4))
+                         (k 0))
+                (unless (null? chars)
+                  (let ((rows (glyph-rows-of (car chars))))
+                    (when rows (draw-rows-sheared rows cx (+ y 2) GLYPH-SCALE GLYPH-W (+ seed k))))
+                  (loop (cdr chars) (+ cx (* GLYPH-SCALE (+ GLYPH-W 1))) (+ k 1))))
+              (draw-rows-sheared (class-mark (card-suit c)) mark-x (+ y 2) 1 MARK-W (+ seed 9))
+              (color! C-ICE)
+              (draw-filled-rect x (+ y 8) w 1)
+              (color! (suit-color c)))
+            (begin
+              (draw-text rank (+ x 4) (+ y 2) GLYPH-SCALE)
+              (draw-rows (class-mark (card-suit c)) mark-x (+ y 2) 1 MARK-W)
+              (draw-text-mini (subsystem-tag c) mark-x (+ y 12) 1)))
         ;; the body, when the face is tall enough to hold one
         (when (>= body-h 24)
           (let ((cx (+ x (half w)))
@@ -682,6 +703,8 @@
     (define (draw-deal d g x tex bg)
       (let ((game (deal-game d)))
         (set! *portraits* tex)
+        (set! *obfuscated* (game-obfuscated game))
+        (set! *ticks* (card-fx-ticks x))
         (draw-background g bg)
         (draw-top-row g game x)
         (draw-tableau g game x (if (deal-trace d) (trace-ticks (deal-trace d)) 0))
