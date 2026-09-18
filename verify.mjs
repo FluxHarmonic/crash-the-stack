@@ -123,26 +123,36 @@ await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 // ---- no leaked chrome ----------------------------------------------------------
 // A headless chrome from an earlier run (its user-data-dir under
 // /tmp/crash-verify-*) once outlived the arm by hours with its GPU process
-// at several cores (David, 2026-09-18). Refuse to start while one is
-// alive, and kill this run's chrome as a whole process group on EVERY
+// at several cores (David, 2026-09-18). Refuse to start while a leaked
+// one is alive, and kill this run's chrome as a whole process group on EVERY
 // way out: normal, a failed assertion, the whole-run timeout, SIGINT,
 // SIGTERM (what `timeout` sends), SIGHUP, an uncaught exception.
-function liveVerifyChromes() {
-  const out = [];
+// A LEAKED chrome is one whose arm is gone (reparented to init) or
+// older than any arm run (STALE_S); another arm running right now on
+// its own ports beside this one is not a leak and is only noted.
+const STALE_S = 600;
+function leakedVerifyChromes() {
+  const out = [], running = [];
+  const hz = 100, uptime = parseFloat(fs.readFileSync("/proc/uptime", "utf8"));
   for (const pid of fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
-    let cmd = "";
-    try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" "); } catch { continue; }
+    let cmd = "", stat = "";
+    try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" "); stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8"); } catch { continue; }
     const m = cmd.match(/--user-data-dir=(\/tmp\/crash-verify-[^ ]+)/);
-    if (m && /chrome/.test(cmd) && !/--type=/.test(cmd)) out.push({ pid: Number(pid), dir: m[1] });
+    if (!m || !/chrome/.test(cmd) || /--type=/.test(cmd)) continue;
+    const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+    const ppid = Number(fields[1]), ageS = uptime - Number(fields[19]) / hz;
+    const entry = { pid: Number(pid), dir: m[1], ppid, ageS: Math.round(ageS) };
+    if (ppid === 1 || ageS > STALE_S) out.push(entry); else running.push(entry);
   }
-  return out;
+  return { leaked: out, running };
 }
 {
-  const live = liveVerifyChromes();
-  if (live.length) {
-    console.log(`SETUP-FAILED: a chrome from an earlier run is still alive: ${live.map((c) => `pid ${c.pid} (${c.dir})`).join(", ")}; kill it (kill -- -<pid> takes its helpers too) and rerun`);
+  const { leaked, running } = leakedVerifyChromes();
+  if (leaked.length) {
+    console.log(`SETUP-FAILED: a chrome from an earlier run is still alive: ${leaked.map((c) => `pid ${c.pid} (${c.dir}, ${c.ageS} s, parent ${c.ppid})`).join(", ")}; kill it (kill -- -<pid> takes its helpers too) and rerun`);
     process.exit(2);
   }
+  if (running.length) console.log(`note: another arm's chrome is running beside this one: ${running.map((c) => `pid ${c.pid} (${c.dir})`).join(", ")}`);
 }
 
 const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
