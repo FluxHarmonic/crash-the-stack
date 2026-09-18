@@ -131,10 +131,17 @@ const boot = await waitLine(/^crash: (seed|cards seed|menu) /, 0, 30000);
 if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(-10))); shutdown(2); }
 await sleep(600);
 
+let lineFrom = 0;
 for (const action of actions) {
   const [kind, rest] = [action.slice(0, action.indexOf(":")), action.slice(action.indexOf(":") + 1)];
   if (kind === "wait") await sleep(parseInt(rest, 10));
-  else if (kind === "line") { const l = await waitLine(new RegExp(rest), 0, 150000); if (!l) { console.log(`SETUP-FAILED: no line matching ${rest}`); shutdown(2); } console.log(`line: ${l.m[0]}`); }
+  else if (kind === "line") {
+    // from the last matched line on, so a repeated line (a second shuffle) waits for a new one
+    const l = await waitLine(new RegExp(rest), lineFrom, 150000);
+    if (!l) { console.log(`SETUP-FAILED: no line matching ${rest}`); shutdown(2); await new Promise(() => {}); }
+    lineFrom = l.index + 1;
+    console.log(`line: ${l.m[0]}`);
+  }
   else if (kind === "tap") {
     const ctl = await waitLine(new RegExp(`^crash: control ${rest} (-?[\\d.]+) (-?[\\d.]+)$`), 0, 3000);
     if (!ctl) { console.log(`SETUP-FAILED: no control ${rest}`); shutdown(2); }
