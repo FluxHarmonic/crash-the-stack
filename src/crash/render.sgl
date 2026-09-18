@@ -30,6 +30,7 @@
           (crash font)
           (crash palette)
           (crash look)
+          (crash glyphs)
           (crash menu))
 
   (export draw-session draw-editor draw-frame-ms draw-menu
@@ -37,11 +38,15 @@
           TEST-TILE-W TEST-TILE-H TEST-TILE-FRAMES)
 
   (begin
+    ;; The bible's section 3: four suits of eight (MEM, PWR, TX, DSK) and
+    ;; the four daemons in C-DAEMON.
     (define (suit-color face)
-      (cond ((< face 9) C-SUIT-0)
-            ((< face 18) C-SUIT-1)
-            ((< face 27) C-SUIT-2)
-            (else C-SUIT-3)))
+      (case (face-suit face)
+        ((0) C-SUIT-0)
+        ((1) C-SUIT-1)
+        ((2) C-SUIT-2)
+        ((3) C-SUIT-3)
+        (else C-DAEMON)))
 
     ;; --- test tile texture layout -------------------------------------------
     ;; assets/test-tile.png is a strip of TEST-TILE-FRAMES frames, each
@@ -77,19 +82,28 @@
     (define (glyph-scale g)
       (max 1 (exact (floor (/ (- (geometry-tile-w g) 6) GLYPH-W)))))
 
+    ;; A face's glyph with its top-left at (x, y): the look's sheet (P3), or
+    ;; the face-key letter when the look says keys (or names a sheet that
+    ;; is not in the tree). In the current color.
+    (define (draw-face-glyph sheet face x y scale)
+      (let ((rows (and (not (eq? sheet 'keys)) (sheet-glyph sheet face))))
+        (if rows
+            (draw-rows rows x y scale GLYPH-W)
+            (draw-text (string (string-ref FACE-KEYS face)) x y scale))))
+
     ;; The glyph is drawn only while the (possibly flipping) face is wide
     ;; enough to hold it; a tile edge-on shows no glyph.
-    (define (draw-glyph-on g face x y w h dark?)
+    (define (draw-glyph-on g sheet face x y w h dark?)
       (let* ((scale (glyph-scale g))
              (gw (* scale GLYPH-W))
-             (gh (* scale GLYPH-H))
-             (text (string (string-ref FACE-KEYS face))))
+             (gh (* scale GLYPH-H)))
         (when (>= w (+ gw 2))
           (color! (if dark? C-BG (suit-color face)))
-          (draw-text text
-                     (+ x (exact (floor (/ (- w gw) 2))))
-                     (+ y (exact (floor (/ (- h gh) 2))))
-                     scale))))
+          (draw-face-glyph sheet
+                           face
+                           (+ x (exact (floor (/ (- w gw) 2))))
+                           (+ y (exact (floor (/ (- h gh) 2))))
+                           scale))))
 
     ;; A tile is drawn in two passes per layer: first its side faces (left and
     ;; bottom, one layer offset deep), then its face. With half-row offsets a
@@ -115,7 +129,7 @@
     ;; nothing) and gets a dark line to read as an edge (David, 2026-09-17:
     ;; a tile's right boundary was hard to see against the tiles under it;
     ;; two faces side by side on one layer stay seamless).
-    (define (draw-face-primitives g face x y w h selected? lock right-open? glow)
+    (define (draw-face-primitives g sheet face x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
@@ -128,7 +142,7 @@
       (when right-open?
         (color! (if selected? C-SELECTED C-SIDE))
         (draw-filled-rect (+ x w -1) y 1 h))
-      (when face (draw-glyph-on g face x y w h selected?))
+      (when face (draw-glyph-on g sheet face x y w h selected?))
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
@@ -159,7 +173,7 @@
                              (* frame TEST-TILE-W) 0
                              TEST-TILE-W TEST-TILE-H)))
 
-    (define (draw-face-texture g b id face tex x y w h selected?)
+    (define (draw-face-texture g sheet b id face tex x y w h selected?)
       (let ((frame (tile-frame b id)))
         (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
         (draw-texture-region tex
@@ -169,7 +183,7 @@
                              (- TEST-TILE-W TEST-TILE-SIDE)
                              (- TEST-TILE-H TEST-TILE-SIDE))
         (when (and face (= frame 0))
-          (draw-glyph-on g face x y w h selected?))))
+          (draw-glyph-on g sheet face x y w h selected?))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -209,7 +223,9 @@
              (selected (board-selected b))
              (now (trace-ticks (session-trace s)))
              (glow (fx-glow x))
-             (textured? (and tex (eq? (look-tile (look-ref (session-look s))) 'test-tile)))
+             (look (look-ref (session-look s)))
+             (sheet (look-glyphs look))
+             (textured? (and tex (eq? (look-tile look) 'test-tile)))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
                              (session-highlight s)
@@ -240,13 +256,13 @@
             (each-on-layer layer
                            (lambda (id face x y w h selected?)
                              (if textured?
-                                 (draw-face-texture g b id face tex x y w h selected?)
-                                 (draw-face-primitives g face x y w h selected?
+                                 (draw-face-texture g sheet b id face tex x y w h selected?)
+                                 (draw-face-primitives g sheet face x y w h selected?
                                                        (lock-state b id now)
                                                        (not (blocked-right? b id))
                                                        glow))))
             (loop (+ layer 1))))
-        (draw-ghosts g x)
+        (draw-ghosts g sheet x)
         (draw-particles g x)
         (when highlight (draw-ring g highlight C-HIGHLIGHT 1.0))
         (let ((hint (session-hint s))
@@ -259,7 +275,7 @@
 
     ;; The match ghosts: a face rising off the table and fading, in the
     ;; primitives style whatever the render mode (the burst is the point).
-    (define (draw-ghosts g x)
+    (define (draw-ghosts g sheet x)
       (for-each (lambda (ghost)
                   (let ((face (car ghost))
                         (gx (cadr ghost))
@@ -276,10 +292,11 @@
                       (let* ((scale (glyph-scale g))
                              (gw (* scale GLYPH-W))
                              (gh (* scale GLYPH-H)))
-                        (draw-text (string (string-ref FACE-KEYS face))
-                                   (exact (floor (+ gx (/ (- w gw) 2))))
-                                   (exact (floor (+ gy (/ (- h gh) 2))))
-                                   scale)))))
+                        (draw-face-glyph sheet
+                                         face
+                                         (exact (floor (+ gx (/ (- w gw) 2))))
+                                         (exact (floor (+ gy (/ (- h gh) 2))))
+                                         scale)))))
                 (fx-ghosts x)))
 
     ;; Glyph fragments and rain: small squares in the suit color.
@@ -522,8 +539,10 @@
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
         (draw-text left 8 (+ top 7) 2)
+        ;; under the counter, in the gap between the two rows (after the
+        ;; counter it would sit under the UNDO box)
         (color! C-TEXT-DIM)
-        (draw-text look-label (+ 8 (text-width left 2) 6) (+ top 12) 1)
+        (draw-text look-label 8 (+ top 23) 1)
         (if (memq (session-update s) '(waiting prompt))
             (draw-update-mark g)
             (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2))

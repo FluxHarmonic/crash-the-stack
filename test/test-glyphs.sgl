@@ -1,0 +1,104 @@
+;;; Gate (P3) - every glyph sheet obeys the bible's readability rule.
+;;;
+;;; Section 2 of the style bible, measured not felt: every glyph lives in
+;;; the 5x7 cell, and no two glyphs in one suit differ by fewer than 3
+;;; cells (the daemons are a suit for this purpose). Plus: 36 glyphs per
+;;; sheet, seven rows of five, no glyph blank (a full block is MEM's
+;;; first glyph, so full is allowed), and every sheet a look names is in
+;;; the registry.
+;;; A sabotage: copy one glyph over another in a sheet's text, rebuild the
+;;; sheet, and the suit's distance assertion names the pair.
+
+(import (sigil test)
+        (sigil list)
+        (crash glyphs)
+        (crash look))
+
+;; Cells that differ between two glyphs (lists of seven 5-char strings).
+(define (distance a b)
+  (let loop ((ra a) (rb b) (n 0))
+    (if (null? ra)
+        n
+        (loop (cdr ra)
+              (cdr rb)
+              (+ n (let cells ((i 0) (k 0))
+                     (if (= i 5)
+                         k
+                         (cells (+ i 1)
+                                (if (char=? (string-ref (car ra) i) (string-ref (car rb) i))
+                                    k
+                                    (+ k 1))))))))))
+
+(define (lit-cells rows)
+  (fold (lambda (n row)
+          (+ n (length (filter (lambda (c) (char=? c #\#)) (string->list row)))))
+        0
+        rows))
+
+(define (well-formed? rows)
+  (and (list? rows)
+       (= (length rows) 7)
+       (every (lambda (r)
+                (and (string? r)
+                     (= (string-length r) 5)
+                     (every (lambda (c) (or (char=? c #\#) (char=? c #\.)))
+                            (string->list r))))
+              rows)))
+
+(define MIN-DISTANCE 3)
+
+(define (suit-faces suit)
+  (let loop ((f (- FACE-COUNT 1)) (acc '()))
+    (if (< f 0)
+        acc
+        (loop (- f 1) (if (= (face-suit f) suit) (cons f acc) acc)))))
+
+(define (check-sheet name)
+  (let ((sheet (sheet-ref name)))
+    (test (string-append "sheet " (symbol->string name) " has 36 glyphs")
+      (assert-true (and (vector? sheet) (= (vector-length sheet) FACE-COUNT))))
+    (let loop ((f 0))
+      (when (< f FACE-COUNT)
+        (let ((rows (vector-ref sheet f))
+              (label (string-append (symbol->string name) " " (number->string f)
+                                    " " (or (sheet-name name f) "?"))))
+          (test (string-append label ": seven rows of five cells")
+            (assert-true (well-formed? rows)))
+          (test (string-append label ": not blank")
+            (assert-true (> (lit-cells rows) 0))))
+        (loop (+ f 1))))
+    ;; the distance rule, per suit, every pair once
+    (let suits ((suit 0))
+      (when (<= suit 4)
+        (let ((faces (suit-faces suit)))
+          (let outer ((fs faces))
+            (unless (null? fs)
+              (for-each (lambda (g)
+                          (let ((d (distance (vector-ref sheet (car fs)) (vector-ref sheet g))))
+                            (test (string-append (symbol->string name) " suit " (number->string suit)
+                                                 ": " (or (sheet-name name (car fs)) "?")
+                                                 " vs " (or (sheet-name name g) "?")
+                                                 " differ by " (number->string d) " cells (min "
+                                                 (number->string MIN-DISTANCE) ")")
+                              (assert-true (>= d MIN-DISTANCE)))))
+                        (cdr fs))
+              (outer (cdr fs)))))
+        (suits (+ suit 1))))))
+
+(test-group "glyphs: the registry and the looks"
+  (test "the registry has at least one sheet"
+    (assert-true (pair? SHEETS)))
+  (test "mem-full is face 0, the first daemon is face 32"
+    (assert-equal 0 (face-suit 0))
+    (assert-equal 3 (face-suit 31))
+    (assert-equal 4 (face-suit 32))
+    (assert-true (daemon-face? 35))
+    (assert-false (daemon-face? 31)))
+  (for-each (lambda (l)
+              (test (string-append "look " (symbol->string (look-name l)) " names a sheet in the tree, or keys")
+                (assert-true (or (eq? (look-glyphs l) 'keys)
+                                 (and (sheet-ref (look-glyphs l)) #t)))))
+            LOOKS))
+
+(test-group "glyphs: the readability rule, every sheet"
+  (for-each (lambda (entry) (check-sheet (car entry))) SHEETS))

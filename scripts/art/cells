@@ -1,0 +1,90 @@
+#!/bin/sh
+# Shape a generated glyph strip into 5x7 cells: the glyph-sheet text
+# format scripts/art/glyphs reads, one "= NAME" block per glyph.
+#
+#   scripts/art/cells RAW.png ROLE NAME,NAME,... >> assets/src/glyphs/SHEET.txt
+#
+# ROLE is the strip's one ink color (a palette role; the ground is
+# whatever the generator drew, snapped away). The strip is snapped to
+# {ROLE, C-BG} against the whole palette (like shape), then read: columns
+# with any ink, split at gaps, give one glyph per run; each run's bounding
+# columns and the strip's rows (shared, so a half block stays half) are
+# resampled onto the 5x7 grid, a cell lit when ink covers at least 40%
+# of it. The number of runs must equal the number of names, or
+# this refuses and prints what it found: a generator that drew seven
+# glyphs for eight names, or merged two, is a finding, not a sheet.
+set -eu
+cd "$(dirname "$0")/../.." || exit 1
+raw="${1:?raw.png}"; role="${2:?role}"; names="${3:?names}"
+[ -f "$raw" ] || { echo "cells: no $raw" >&2; exit 1; }
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+scripts/art/palette "$tmp/pal.png" > /dev/null
+ink="$(awk -v role="$role" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl)"
+[ -n "$ink" ] || { echo "cells: unknown role $role" >&2; exit 1; }
+# snap to the palette, then everything that is not the ink is ground
+convert "$raw" -alpha off -dither None -remap "$tmp/pal.png" -compress none ppm:- > "$tmp/strip.ppm"
+awk -v ink="$ink" -v names="$names" -v fill="0.40" '
+  function hex2(h, i) { return (index("0123456789ABCDEF", substr(h, i, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, i + 1, 1)) - 1 }
+  BEGIN { ir = hex2(ink, 2); ig = hex2(ink, 4); ib = hex2(ink, 6); n = split(names, nm, ",") }
+  NR == 1 { next }                     # P3
+  NR == 2 { W = $1; H = $2; next }
+  NR == 3 { next }                     # maxval
+  { for (i = 1; i <= NF; i++) vals[nv++] = $i }
+  END {
+    # ink mask, column and row projections
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+      k = (y * W + x) * 3
+      if (vals[k] == ir && vals[k + 1] == ig && vals[k + 2] == ib) { m[x, y] = 1; colx[x]++ }
+    }
+    # runs of inked columns, split at gaps wider than GAP columns
+    GAP = int(W / 200) + 2; runs = 0; inrun = 0; gap = 0
+    for (x = 0; x < W; x++) {
+      if (colx[x] > 0) { if (!inrun) { runs++; rx0[runs] = x; inrun = 1 } rx1[runs] = x; gap = 0 }
+      else if (inrun) { gap++; if (gap > GAP) inrun = 0 }
+    }
+    # a glyph drawn in two parts (brackets, a dotted block) is two runs
+    # with a gap narrower than the gaps between glyphs: while there are
+    # more runs than names, join the two runs across the narrowest gap
+    while (runs > n) {
+      best = 0; bestgap = W
+      for (r = 1; r < runs; r++) { g = rx0[r + 1] - rx1[r]; if (g < bestgap) { bestgap = g; best = r } }
+      rx1[best] = rx1[best + 1]
+      for (r = best + 1; r < runs; r++) { rx0[r] = rx0[r + 1]; rx1[r] = rx1[r + 1] }
+      runs--; joined++
+    }
+    if (runs != n) {
+      printf "cells: REFUSED %s: found %d glyph runs for %d names (", ink, runs, n > "/dev/stderr"
+      for (r = 1; r <= runs; r++) printf "%s%d..%d", (r > 1 ? " " : ""), rx0[r], rx1[r] > "/dev/stderr"
+      print ")" > "/dev/stderr"; exit 1
+    }
+    # a run much wider than the rest is two glyphs the join above should not have made
+    for (r = 1; r <= runs; r++) w[r] = rx1[r] - rx0[r] + 1
+    asort(w, sw); med = sw[int((runs + 1) / 2)]
+    for (r = 1; r <= runs; r++) if (w[r] > 1.7 * med) {
+      printf "cells: REFUSED %s: run %d (%d..%d) is %d wide against a median of %d: two glyphs joined\n", ink, r, rx0[r], rx1[r], w[r], med > "/dev/stderr"; exit 1
+    }
+    if (joined) printf "# cells: joined %d narrow gaps\n", joined
+    # the row extent is the strip'"'"'s, shared by every glyph, so a half block
+    # stays half and a low glyph stays low; the column extent is each run'"'"'s
+    y0 = -1; y1 = -1
+    for (y = 0; y < H; y++) { hit = 0; for (x = 0; x < W; x++) if (m[x, y]) { hit = 1; break }
+      if (hit) { if (y0 < 0) y0 = y; y1 = y } }
+    for (r = 1; r <= runs; r++) {
+      bw = rx1[r] - rx0[r] + 1; bh = y1 - y0 + 1
+      print "= " nm[r]
+      for (cy = 0; cy < 7; cy++) {
+        line = ""
+        for (cx = 0; cx < 5; cx++) {
+          # the cell'"'"'s pixel box, inclusive-exclusive
+          px0 = rx0[r] + int(cx * bw / 5); px1 = rx0[r] + int((cx + 1) * bw / 5)
+          py0 = y0 + int(cy * bh / 7); py1 = y0 + int((cy + 1) * bh / 7)
+          if (px1 <= px0) px1 = px0 + 1; if (py1 <= py0) py1 = py0 + 1
+          tot = 0; lit = 0
+          for (y = py0; y < py1; y++) for (x = px0; x < px1; x++) { tot++; if (m[x, y]) lit++ }
+          line = line ((lit / tot >= fill) ? "#" : ".")
+        }
+        print line
+      }
+    }
+  }' "$tmp/strip.ppm"
