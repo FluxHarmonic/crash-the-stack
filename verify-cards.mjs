@@ -293,11 +293,15 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         await tap(entries2.look[0], entries2.look[1]);
         const stepped = await waitLine(/^crash: look ([a-z-]+)$/, m0, 3000);
         await sleep(300);
+        const m1 = consoleLines.length;
+        await tap(entries2.look[0], entries2.look[1]);
+        const again = await waitLine(/^crash: look ([a-z-]+)$/, m1, 3000);
+        await sleep(300);
         const left = consoleLines.slice(m0).some((l) => /^crash: (cards seed|seed) /.test(l));
         if (!stepped) lookDetail = "a tap on LOOK produced no \"crash: look\" line";
-        else if (stepped.m[1] === "flat") lookDetail = "LOOK stayed on flat";
+        else if (!again) lookDetail = "a second tap on LOOK produced no \"crash: look\" line";
+        else if (stepped.m[1] === again.m[1]) lookDetail = `two taps on LOOK both said ${stepped.m[1]}`;
         else if (left) lookDetail = "LOOK left the menu (a table booted)";
-        else { await tap(entries2.look[0], entries2.look[1]); await sleep(300); }
       }
       m0 = consoleLines.length;
       if (lookDetail) fail("menu", lookDetail);

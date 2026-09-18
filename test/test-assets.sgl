@@ -3,14 +3,14 @@
 ;;; Leg 1, population-derived in both directions: every file under
 ;;; assets/ has a row in assets/MANIFEST and every row names a file.
 ;;; Both sets come from the tree, never from a list in this file. The
-;;; population is CLASSIFIED, not filtered: every path under assets/
-;;; lands in exactly one bucket (shipped, refs, src, bookkeeping, other),
-;;; the counts are printed, and only the shipped bucket is held against
-;;; the manifest; anything in `other` is a red, because a file the
-;;; classifier does not know is a file nobody accounted for. The positive
-;;; control is a scratch copy of the tree with a stray file (run by hand
-;;; in the evidence note, and by this file's own probe below against a
-;;; temporary directory).
+;;; population is CLASSIFIED, not filtered: every entry under assets/
+;;; (files, symlinks and anything else the walk reports) lands in exactly
+;;; one bucket (shipped, refs, src, bookkeeping, symlink, other), the
+;;; counts are printed, only the shipped bucket is held against the
+;;; manifest, and the symlink and other buckets must be empty: a linked
+;;; asset or an odd entry is a file nobody accounted for. The positive
+;;; control is a scratch copy of the tree with a stray file and a ghost
+;;; row, run by this file against a temporary directory.
 ;;;
 ;;; Leg 2: every "assets/..." string literal in src/**/*.sgl names a file
 ;;; that exists, so a texture or sample load cannot point at nothing on
@@ -34,15 +34,25 @@
   (and (>= (string-length s) (string-length prefix))
        (string=? (substring s 0 (string-length prefix)) prefix)))
 
-(define (classify path)
-  (cond ((member path BOOKKEEPING) 'bookkeeping)
-        ((starts-with? path "assets/refs/") 'refs)
-        ((starts-with? path "assets/src/") 'src)
-        ((starts-with? path "assets/") 'shipped)
-        (else 'other)))
+;; Every entry under root with its type from the walk: (path . type).
+(define (tree-entries root)
+  (let ((acc '()))
+    (directory-walk root
+      (lambda (p type)
+        (unless (eq? type 'directory) (set! acc (cons (cons p type) acc)))
+        #t))
+    (reverse acc)))
 
-(define (bucket paths kind)
-  (filter (lambda (p) (eq? (classify p) kind)) paths))
+(define (classify entry)
+  (let ((path (car entry)) (type (cdr entry)))
+    (cond ((not (eq? type 'file)) (if (eq? type 'symlink) 'symlink 'other))
+          ((member path BOOKKEEPING) 'bookkeeping)
+          ((starts-with? path "assets/refs/") 'refs)
+          ((starts-with? path "assets/src/") 'src)
+          (else 'shipped))))
+
+(define (bucket entries kind)
+  (map car (filter (lambda (e) (eq? (classify e) kind)) entries)))
 
 ;; The manifest's rows: (path . columns) for every non-comment line.
 (define (manifest-rows path)
@@ -61,7 +71,7 @@
   (newline))
 
 (define (check-tree root manifest)
-  (let* ((all (find-files root))
+  (let* ((all (tree-entries root))
          (shipped (bucket all 'shipped))
          (rows (manifest-rows manifest))
          (row-paths (map car rows))
@@ -73,13 +83,27 @@
     (report "refs" (bucket all 'refs))
     (report "src" (bucket all 'src))
     (report "bookkeeping" (bucket all 'bookkeeping))
+    (report "symlink" (bucket all 'symlink))
     (report "other" (bucket all 'other))
     (report "rows" row-paths)
     (report "unmanifested" unmanifested)
     (report "missing" missing)
-    (list all shipped rows unmanifested missing (bucket all 'other))))
+    (list all shipped rows unmanifested missing (bucket all 'other) (bucket all 'symlink))))
 
-(define LICENCES '("CC-BY-4.0" "reserved"))
+(define LICENSES '("CC-BY-4.0" "reserved"))
+
+(define (digits? s from to)
+  (let loop ((i from))
+    (or (= i to)
+        (and (char-numeric? (string-ref s i)) (loop (+ i 1))))))
+
+(define (date? s)
+  (and (= (string-length s) 10)
+       (digits? s 0 4)
+       (char=? (string-ref s 4) #\-)
+       (digits? s 5 7)
+       (char=? (string-ref s 7) #\-)
+       (digits? s 8 10)))
 (define ORIGINS '("hand-made" "generated-and-shaped" "generated-raw"))
 (define SHAPERS '("hand" "pipeline" "David"))
 
@@ -90,11 +114,14 @@
          (rows (caddr r))
          (unmanifested (cadddr r))
          (missing (list-ref r 4))
-         (other (list-ref r 5)))
+         (other (list-ref r 5))
+         (links (list-ref r 6)))
     (test "the tree has files"
       (assert-true (pair? all)))
-    (test "every path is classified (none in other)"
+    (test "every entry is classified (none in other)"
       (assert-equal '() other))
+    (test "no asset is a symlink"
+      (assert-equal '() links))
     (test "every shipped file has a manifest row"
       (assert-equal '() unmanifested))
     (test "every manifest row names a file"
@@ -106,42 +133,33 @@
                   (test (string-append (car cols) ": eight columns")
                     (assert-equal 8 (length cols)))
                   (when (= (length cols) 8)
-                    (test (string-append (car cols) ": licence")
-                      (assert-true (and (member (cadr cols) LICENCES) #t)))
+                    (test (string-append (car cols) ": license")
+                      (assert-true (and (member (cadr cols) LICENSES) #t)))
                     (test (string-append (car cols) ": origin")
                       (assert-true (and (member (caddr cols) ORIGINS) #t)))
+                    ;; a generated asset names its prompt and model; a
+                    ;; hand-made one has neither: the provenance claim the
+                    ;; manifest exists to carry
+                    (test (string-append (car cols) ": origin " (caddr cols) " agrees with prompt-id and model")
+                      (let ((prompt (list-ref cols 3)) (model (list-ref cols 4)))
+                        (assert-true (if (starts-with? (caddr cols) "generated")
+                                         (and (not (string=? prompt "-")) (not (string=? model "-")))
+                                         (and (string=? prompt "-") (string=? model "-"))))))
                     (test (string-append (car cols) ": shaped-by")
                       (assert-true (and (member (list-ref cols 6) SHAPERS) #t)))
-                    (test (string-append (car cols) ": date")
-                      (assert-equal 10 (string-length (list-ref cols 5)))))))
+                    (test (string-append (car cols) ": date is YYYY-MM-DD")
+                      (assert-true (date? (list-ref cols 5)))))))
               rows)))
 
-;; The positive control, run here as well: a temporary tree with the
-;; real manifest and one stray file must report the stray by name, and a
-;; manifest row with no file must be reported too.
-(test-group "assets: the gate can say no (positive control)"
-  (call-with-temp-directory
-    (lambda (dir)
-      (let ((root (string-append dir "/assets")))
-        (make-directory root)
-        (for-each (lambda (p)
-                    (let ((rel (substring p (+ 1 (string-length ASSETS)) (string-length p))))
-                      (ensure-directory (string-append root "/" (path-dirname rel)))
-                      (copy-file p (string-append root "/" rel))))
-                  (find-files ASSETS))
-        (write-file-string (string-append root "/stray.png") "not a png")
-        (write-file-string (string-append root "/MANIFEST")
-                           (string-append (read-file-string MANIFEST)
-                                          "ghost.png | CC-BY-4.0 | hand-made | - | - | 2026-09-18 | hand | a row with no file\n"))
-        (with-current-directory dir
-          (lambda ()
-            (let* ((r (check-tree "assets" "assets/MANIFEST"))
-                   (unmanifested (cadddr r))
-                   (missing (list-ref r 4)))
-              (test "a stray file is reported by name"
-                (assert-equal '("assets/stray.png") unmanifested))
-              (test "a row without a file is reported by name"
-                (assert-equal '("assets/ghost.png") missing)))))))))
+;; Delete every file and then every directory under root, deepest first.
+(define (remove-tree root)
+  (let ((entries (let ((acc '()))
+                   (directory-walk root
+                     (lambda (p type) (set! acc (cons (cons p type) acc)) #t))
+                   acc)))
+    (for-each (lambda (e) (unless (eq? (cdr e) 'directory) (delete-file (car e)))) entries)
+    (for-each (lambda (e) (when (eq? (cdr e) 'directory) (delete-directory (car e)))) entries)
+    (delete-directory root)))
 
 ;; --- leg 2: every asset path in the source resolves ----------------------
 
@@ -179,3 +197,37 @@
                 (test (string-append (car ref) " -> " (cdr ref) " exists")
                   (assert-true (file-exists? (cdr ref)))))
               refs)))
+
+;; The positive control, run here as well: a temporary tree with the
+;; real manifest and one stray file must report the stray by name, and a
+;; manifest row with no file must be reported too.
+(test-group "assets: the gate can say no (positive control)"
+  (call-with-temp-directory
+    (lambda (dir)
+      (let ((root (string-append dir "/assets")))
+        (make-directory root)
+        (for-each (lambda (p)
+                    (let ((rel (substring p (+ 1 (string-length ASSETS)) (string-length p))))
+                      (ensure-directory (string-append root "/" (path-dirname rel)))
+                      (copy-file p (string-append root "/" rel))))
+                  (find-files ASSETS))
+        (write-file-string (string-append root "/stray.png") "not a png")
+        (write-file-string (string-append root "/MANIFEST")
+                           (string-append (read-file-string MANIFEST)
+                                          "ghost.png | CC-BY-4.0 | hand-made | - | - | 2026-09-18 | hand | a row with no file\n"))
+        (make-symlink "test-tile.png" (string-append root "/linked.png"))
+        (with-current-directory dir
+          (lambda ()
+            (let* ((r (check-tree "assets" "assets/MANIFEST"))
+                   (unmanifested (cadddr r))
+                   (missing (list-ref r 4))
+                   (links (list-ref r 6)))
+              (test "a stray file is reported by name"
+                (assert-equal '("assets/stray.png") unmanifested))
+              (test "a row without a file is reported by name"
+                (assert-equal '("assets/ghost.png") missing))
+              (test "a symlinked asset is reported by name"
+                (assert-equal '("assets/linked.png") links)))))
+        ;; the copy is ours to remove: call-with-temp-directory's own
+        ;; delete-directory is not recursive and leaves it behind
+        (remove-tree root)))))

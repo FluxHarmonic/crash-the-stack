@@ -24,9 +24,9 @@
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
 //   look        a tap on the TILES counter (the game's "crash: control look X Y"
-//               line) steps the look: "crash: look test-tile", and a second tap
-//               steps it around: "crash: look flat" (P3, ruling D26's sheet
-//               switch on the phone)
+//               line) steps the look away from the boot's ("crash: look NAME"
+//               in the boot lines), and a second tap steps it again (P3,
+//               ruling D26's sheet switch on the phone)
 //   assets      every resource the page loaded (performance entries: the
 //               wasm, the bridges, assets/) answered 200, and the test tile the
 //               look sub-arm asked for is among them (P3 gate leg 2, the web
@@ -413,18 +413,21 @@ else fail("keys-match", keysDetail);
   else if (!ctl) fail("look", "no \"crash: control look\" boot line");
   else {
     let detail = "";
+    const boot = await waitLine(/^crash: look ([a-z-]+)$/, 0, 2000);
+    const at = boot ? boot.m[1] : null;
     mark = consoleLines.length;
     await tap(ctl.m[1], ctl.m[2]);
     const first = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
-    if (!first) detail = `a tap on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
-    else if (first.m[1] === "flat") detail = `the first tap stayed on flat`;
+    if (!at) detail = "no \"crash: look\" boot line";
+    else if (!first) detail = `a tap on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
+    else if (first.m[1] === at) detail = `the first tap stayed on ${at}`;
     else {
       mark = consoleLines.length;
       await tap(ctl.m[1], ctl.m[2]);
       const second = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
       if (!second) detail = "no second \"crash: look\" line";
       else if (second.m[1] === first.m[1]) detail = `the second tap stayed on ${first.m[1]}`;
-      else pass("look", `flat -> ${first.m[1]} -> ${second.m[1]}`);
+      else pass("look", `${at} -> ${first.m[1]} -> ${second.m[1]}`);
     }
     if (detail) fail("look", detail);
   }
@@ -440,11 +443,12 @@ else fail("keys-match", keysDetail);
     const bad = list.filter(([, st]) => st !== 200);
     const assets = list.filter(([n]) => n.startsWith("assets/") || n.endsWith(".wasm"));
     const tile = list.some(([n, st]) => n === "assets/test-tile.png" && st === 200);
+    const lookRan = results.some((r) => r[0] === "look" && r[1] === "PASS");
     if (list.length === 0) fail("assets", "no resource entries at all");
     else if (bad.length) fail("assets", `${bad.length} of ${list.length} resources not 200: ${JSON.stringify(bad.slice(0, 5))}`);
     else if (assets.length === 0) fail("assets", `${list.length} resources, none under assets/ or the wasm`);
-    else if (!tile) fail("assets", "the look sub-arm asked for the test tile but assets/test-tile.png was never fetched with 200");
-    else pass("assets", `${list.length} resources all 200, ${assets.length} assets/wasm, test tile fetched on demand`);
+    else if (lookRan && !tile) fail("assets", "the look sub-arm asked for the test tile but assets/test-tile.png was never fetched with 200");
+    else pass("assets", `${list.length} resources all 200, ${assets.length} assets/wasm${lookRan ? ", test tile fetched on demand" : ""}`);
   } catch (err) {
     fail("assets", `CDP: ${err.message}`);
   }

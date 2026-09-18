@@ -45,9 +45,13 @@
     ;; its own key so it outlives a deal and reaches both tables.
     (define LOOK-KEY "look")
 
-    (define (stored-look)
+    ;; The stored look, or #f when nothing is stored yet.
+    (define (stored-look*)
       (let ((d (store-read-datum LOOK-KEY)))
-        (if (look-name? d) d DEFAULT-LOOK)))
+        (and (look-name? d) d)))
+
+    (define (stored-look)
+      (or (stored-look*) DEFAULT-LOOK))
 
     (define (set-stored-look! name)
       (store-write-datum! LOOK-KEY name))
@@ -62,12 +66,17 @@
     ;; (cons session restored?): the saved session if there is one and
     ;; fresh? is #f, else a new deal of seed; the best result comes along
     ;; either way.
+    ;; The look comes from its own key; a save from before the key existed
+    ;; (P0..P2: the settings' render mode) seeds the key instead of being
+    ;; overridden by the default, so a player who had the texture on keeps it.
     (define (boot-session lay seed fresh?)
-      (let ((saved (and (not fresh?)
-                        (datum->session (store-read-datum BOARD-KEY))))
-            (best (datum->best (store-read-datum BEST-KEY))))
-        (cons (session-with-look (session-with-best (or saved (session-new lay (or seed 1))) best)
-                                 (stored-look))
+      (let* ((saved (and (not fresh?)
+                         (datum->session (store-read-datum BOARD-KEY))))
+             (best (datum->best (store-read-datum BEST-KEY)))
+             (s (session-with-best (or saved (session-new lay (or seed 1))) best))
+             (stored (stored-look*)))
+        (unless stored (set-stored-look! (session-look s)))
+        (cons (if stored (session-with-look s stored) s)
               (and saved #t))))
 
     ;; After a frame: save the session when the step warrants it, and when

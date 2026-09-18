@@ -15,7 +15,7 @@
 # produce a few such pixels on a clean picture too: --clean PCT lets the
 # shaper re-snap those to the family when they are under PCT percent of
 # the pixels, and says how many it moved (put that in the manifest row);
-# without it the gate refuses. Alpha is dropped: a reference is opaque on
+# without it the gate refuses, and a PCT past 5 is refused too. Alpha is dropped: a reference is opaque on
 # the ground color, and the ground is a palette color like any other.
 set -eu
 cd "$(dirname "$0")/../.." || exit 1
@@ -28,17 +28,24 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -f "$raw" ] || { echo "shape: no $raw"; exit 1; }
+# --clean is for edge noise; a tolerance past CLEAN-MAX would let a real
+# gradient through and turn the gate off, so it is refused, not honored.
+CLEAN_MAX=5
+if [ -n "$clean" ] && [ "$(awk -v c="$clean" -v m="$CLEAN_MAX" 'BEGIN { print (c + 0 > m || c + 0 < 0) ? 1 : 0 }')" = 1 ]; then
+  echo "shape: --clean $clean is past $CLEAN_MAX percent; that is a gradient, not noise"; exit 1
+fi
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 scripts/art/palette "$tmp/family.png" "$roles" > "$tmp/palette.log"
 scripts/art/palette "$tmp/palette.png" >> "$tmp/palette.log"
 colors_of() { convert "$1" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u; }
 allowed="$(colors_of "$tmp/family.png")"
-n_allowed="$(printf '%s\n' "$allowed" | wc -l)"
+printf '%s\n' "$allowed" > "$tmp/allowed.txt"
+n_allowed="$(wc -l < "$tmp/allowed.txt")"
 [ -n "$max" ] || max="$n_allowed"
-convert "$raw" -alpha off -filter point -resize "${size}!" -dither None -remap "$tmp/palette.png" -type TrueColor "PNG24:$tmp/out.png"
+convert "$raw" -alpha off -filter point -resize "${size}!" -dither None -remap "$tmp/palette.png" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$tmp/out.png"
 used="$(colors_of "$tmp/out.png")"
-bad="$(printf '%s\n' "$used" | grep -vxF -f <(printf '%s\n' "$allowed") || true)"
+bad="$(printf '%s\n' "$used" | grep -vxF -f "$tmp/allowed.txt" || true)"
 moved=0
 if [ -n "$bad" ]; then
   total="$(identify -format '%[fx:w*h]' "$tmp/out.png")"
@@ -53,7 +60,7 @@ if [ -n "$bad" ]; then
     [ -n "$clean" ] && echo "shape: --clean $clean would not cover it" || echo "shape: pass --clean PCT to re-snap them if this is edge noise, not a gradient"
     exit 1
   fi
-  convert "$tmp/out.png" -dither None -remap "$tmp/family.png" -type TrueColor "PNG24:$tmp/clean.png"
+  convert "$tmp/out.png" -dither None -remap "$tmp/family.png" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$tmp/clean.png"
   mv "$tmp/clean.png" "$tmp/out.png"
   moved="$offs"
   used="$(colors_of "$tmp/out.png")"
