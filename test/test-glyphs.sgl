@@ -11,6 +11,8 @@
 
 (import (sigil test)
         (sigil list)
+        (sigil string)
+        (sigil fs)
         (crash glyphs)
         (crash look))
 
@@ -102,3 +104,41 @@
 
 (test-group "glyphs: the readability rule, every sheet"
   (for-each (lambda (entry) (check-sheet (car entry))) SHEETS))
+
+;; The data module is generated from the text; a stale module would draw
+;; a sheet nobody edited. Parse the text here (a "= NAME" line opens a
+;; glyph, the next seven 5-cell lines are its rows, "#..." otherwise a
+;; comment) and hold the registered sheet to it, glyph by glyph.
+(define (parse-sheet-text path)
+  (let loop ((lines (string-split (read-file-string path) "\n"))
+             (names '())
+             (glyphs '())
+             (rows '()))
+    (cond ((null? lines)
+           (let ((glyphs (if (pair? rows) (cons (reverse rows) glyphs) glyphs)))
+             (cons (list->vector (reverse names)) (list->vector (reverse glyphs)))))
+          ((and (= (string-length (car lines)) 5)
+                (every (lambda (c) (or (char=? c #\#) (char=? c #\.))) (string->list (car lines))))
+           (loop (cdr lines) names glyphs (cons (car lines) rows)))
+          ((and (> (string-length (car lines)) 2) (string=? (substring (car lines) 0 2) "= "))
+           (loop (cdr lines)
+                 (cons (substring (car lines) 2 (string-length (car lines))) names)
+                 (if (pair? rows) (cons (reverse rows) glyphs) glyphs)
+                 '()))
+          (else (loop (cdr lines) names glyphs rows)))))
+
+(test-group "glyphs: every registered sheet is its text"
+  (for-each (lambda (entry)
+              (let* ((name (car entry))
+                     (path (string-append "assets/src/glyphs/" (symbol->string name) ".txt"))
+                     (parsed (and (file-exists? path) (parse-sheet-text path))))
+                (test (string-append "sheet " (symbol->string name) " has its text in assets/src/glyphs")
+                  (assert-true (and parsed #t)))
+                (when parsed
+                  (test (string-append "sheet " (symbol->string name) ": the module's glyphs are the text's")
+                    (assert-equal (vector->list (cdr parsed)) (vector->list (cdr entry))))
+                  (test (string-append "sheet " (symbol->string name) ": the module's names are the text's")
+                    (assert-equal (vector->list (car parsed))
+                                  (let loop ((f 0) (acc '()))
+                                    (if (= f FACE-COUNT) (reverse acc) (loop (+ f 1) (cons (sheet-name name f) acc)))))))))
+            SHEETS))
