@@ -11,7 +11,8 @@
 // exits 2, and says which sub-arms did not run.
 //
 //   imports     the wasm's import modules are exactly wasi + gl + sigil_wasm_gles3
-//               + sigil_browser (localStorage), no env, no emscripten
+//               + sigil_browser (localStorage) + sigil_wasm_audio (P3), no env,
+//               no emscripten
 //   boot        the game prints its boot line (seed, first solution pair, centers)
 //   render      the board region of the WebGL canvas is drawn: many non-background
 //               pixels in at least six color bins: the copper bars alone give two
@@ -41,6 +42,11 @@
 //   reload      the page is reloaded (fresh navigation, same origin) and the
 //               game boots from localStorage: "crash: restored tiles 142 ...
 //               phase counter ice 1 locked ..." (gate leg 4, web)
+//   audio       after the reload the page is cross-origin isolated (sw.js's
+//               COOP/COEP), the game's context is open and resumed by a tap,
+//               a fresh pair is matched, and an AnalyserNode tap on the
+//               destination reads a positive RMS from an AudioWorkletNode
+//               (P3 gate leg 3, the web half)
 //   update      ruling D14: with the game running under a controlling service
 //               worker, the arm serves a sw.js with a new version and asks for
 //               an update check; the new worker must reach WAITING without any
@@ -91,7 +97,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "look", "assets", "traced", "reload", "update", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "look", "assets", "traced", "reload", "audio", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -105,7 +111,7 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
   const byModule = {};
   for (const imp of WebAssembly.Module.imports(mod)) (byModule[imp.module] = byModule[imp.module] || []).push(imp.name);
   const modules = Object.keys(byModule).sort();
-  const expected = ["gl", "sigil_browser", "sigil_wasm_gles3", "wasi_snapshot_preview1"];
+  const expected = ["gl", "sigil_browser", "sigil_wasm_audio", "sigil_wasm_gles3", "wasi_snapshot_preview1"];
   const listing = modules.map((m) => `${m}(${byModule[m].length})`).join(" ");
   if (JSON.stringify(modules) === JSON.stringify(expected)) pass("imports", listing);
   else fail("imports", `expected modules ${expected.join(",")} got ${listing}`);
@@ -168,6 +174,9 @@ const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
+  // the audio sub-arm: a synthetic tap is not a user gesture, so the
+  // context must be allowed to run without one
+  "--autoplay-policy=no-user-gesture-required",
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`,
   PHONE ? "--window-size=390,844" : "--window-size=1000,760", "about:blank",
@@ -234,6 +243,29 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
+// The audio tap (P3 gate leg 3, the web half): before any page script,
+// every AudioNode.connect to a context's destination also feeds an
+// AnalyserNode, and the connecting node's kind is remembered, so the arm
+// can read the output's level and which path the bridge took
+// (AudioWorkletNode under cross-origin isolation, ScriptProcessorNode
+// otherwise) without touching the bridge.
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `(function () {
+  var tap = { nodes: [], analysers: [] };
+  window.__crashAudioTap = tap;
+  var connect = AudioNode.prototype.connect;
+  AudioNode.prototype.connect = function (dest) {
+    try {
+      if (dest && dest.context && dest === dest.context.destination) {
+        var an = dest.context.createAnalyser();
+        an.fftSize = 2048;
+        connect.call(this, an);
+        tap.analysers.push(an);
+        tap.nodes.push(this.constructor.name);
+      }
+    } catch (e) { tap.error = String(e); }
+    return connect.apply(this, arguments);
+  };
+})();` });
 // Never run at devicePixelRatio 1: the page's CSS-to-buffer factor is then 1 and
 // its inverse is also 1, so a wrong factor (sabotage S5) is invisible. Measured
 // 2026-09-16: the arm stayed green under S5 until this override existed.
@@ -523,6 +555,59 @@ let iceLock = null;
       else if (iceLock && got !== want) fail("reload", `expected locked ${want}, got ${restored.m[0]}`);
       else pass("reload", restored.m[0]);
     }
+  }
+}
+
+// ---- 8b. audio: the match cue reaches the output (gate leg 3, web) ---------
+// After the reload the page is controlled by the service worker, which adds
+// COOP/COEP, so this navigation is cross-origin isolated and the bridge takes
+// its AudioWorklet path; the arm asserts both, taps a fresh pair (a match
+// cue), and reads the analyser's RMS over the next 400 ms.
+{
+  const reloadOk = results.some((r) => r[0] === "reload" && r[1] === "PASS");
+  if (EXPECT_NO_SELECTION) skip("audio", "no taps with forwarding off");
+  else if (!reloadOk) skip("audio", "the reload sub-arm did not run");
+  else {
+    let detail = "";
+    const isolated = await evalJS("crossOriginIsolated === true");
+    const open = await waitLine(/^crash: audio (open|closed)$/, 0, 2000);
+    if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
+    else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
+    else {
+      // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
+      mark = consoleLines.length;
+      const next = await waitLine(/^crash: control next (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+      if (!next) detail = "no \"crash: control next\" line";
+      else {
+        await tap(next.m[1], next.m[2]);
+        const pair = await waitLine(/^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/, mark, 5000);
+        const resumed = consoleLines.some((l) => l === "crash: audio resumed");
+        if (!pair) detail = "no boot line after NEXT";
+        else if (!resumed) detail = "the context was never resumed from a tap";
+        else {
+          // level before the match (the ambient may already play): then the match
+          const before = await evalJS(`(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`);
+          mark = consoleLines.length;
+          await tap(pair.m[4], pair.m[5]);
+          await sleep(120);
+          await tap(pair.m[7], pair.m[8]);
+          const removed = await waitLine(/^crash: removed /, mark, 3000);
+          let peak = 0;
+          for (let i = 0; i < 8; i++) {
+            const r = await evalJS(`(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`);
+            peak = Math.max(peak, r);
+            await sleep(50);
+          }
+          const kinds = JSON.parse(await evalJS("JSON.stringify(window.__crashAudioTap.nodes)"));
+          if (!removed) detail = "the pair did not match after NEXT";
+          else if (before < 0) detail = "no AudioNode ever connected to a destination (the tap saw nothing)";
+          else if (!(peak > 0)) detail = `RMS stayed 0 after the match (nodes ${kinds.join(",")})`;
+          else if (!kinds.includes("AudioWorkletNode")) detail = `RMS ${peak.toFixed(4)} but the bridge used ${kinds.join(",")}, not the AudioWorkletNode path`;
+          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
+        }
+      }
+    }
+    if (detail) fail("audio", detail);
   }
 }
 
