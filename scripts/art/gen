@@ -1,0 +1,59 @@
+#!/bin/sh
+# Generate reference images for one family with Codex imagegen, one
+# codex exec per prompt file, serialized (each takes about a minute).
+#
+#   scripts/art/gen FAMILY            every assets/refs/FAMILY/prompt-*.txt
+#   scripts/art/gen FAMILY K [K...]   only prompt-K.txt
+#
+# Ruling D26: the generator makes REFERENCES; the pipeline (shape, atlas)
+# makes the pixels. Raw outputs land beside their prompt as
+# assets/refs/FAMILY/raw-K-DATE.png with a raw-K-DATE.log (the model line
+# from codex's banner, the date, the prompt file's sha256): provenance
+# evidence, never shipped, never referenced by the game. A prompt file
+# holds only the picture's description; this script appends the line
+# that names the imagegen skill and the save path, so every prompt takes
+# the same door. The bible's constraint line ("flat pixel art, hard
+# edges, ...") belongs in the prompt file itself.
+#
+# codex exec reads stdin when it is not a terminal and blocks until it
+# closes (measured 2026-09-18: 600 s and no image), hence < /dev/null.
+set -eu
+cd "$(dirname "$0")/../.." || exit 1
+family="${1:?family}"; shift
+dir="assets/refs/$family"
+[ -d "$dir" ] || { echo "gen: no $dir"; exit 1; }
+if [ $# -eq 0 ]; then
+  set -- $(ls "$dir" | sed -n 's/^prompt-\(.*\)\.txt$/\1/p')
+fi
+[ $# -gt 0 ] || { echo "gen: no prompt files in $dir"; exit 1; }
+date="$(date +%Y-%m-%d)"
+for k in "$@"; do
+  prompt="$dir/prompt-$k.txt"
+  [ -f "$prompt" ] || { echo "gen: no $prompt"; exit 1; }
+  out="raw-$k-$date.png"
+  n=0
+  while [ -e "$dir/$out" ]; do n=$((n + 1)); out="raw-$k-$date-$n.png"; done
+  log="$dir/${out%.png}.log"
+  text="$(cat "$prompt")
+Use the imagegen skill's built-in image_gen tool to generate exactly this one image, then copy the generated PNG into this directory as $out. Do nothing else and create no other file."
+  echo "gen: $prompt -> $dir/$out"
+  start=$(date +%s)
+  # The sandbox is codex's default (writes inside -C only), which is the
+  # point: the image can land nowhere but beside its prompt.
+  if ! timeout 900 codex exec --skip-git-repo-check -C "$dir" "$text" < /dev/null > "$log.tmp" 2>&1; then
+    echo "gen: codex exec failed for $prompt (see $log.tmp)"; exit 1
+  fi
+  [ -f "$dir/$out" ] || { echo "gen: codex exited 0 but $dir/$out is missing (see $log.tmp)"; exit 1; }
+  {
+    echo "prompt: $prompt"
+    echo "prompt-sha256: $(sha256sum "$prompt" | cut -d' ' -f1)"
+    echo "date: $date"
+    echo "seconds: $(( $(date +%s) - start ))"
+    grep -m1 '^model:' "$log.tmp" || echo "model: unknown"
+    echo "image: $out $(identify -format '%wx%h %k colors' "$dir/$out")"
+    echo "--- codex transcript ---"
+    cat "$log.tmp"
+  } > "$log"
+  rm -f "$log.tmp"
+  echo "gen: $(grep '^image:' "$log") in $(grep '^seconds:' "$log" | cut -d' ' -f2) s"
+done

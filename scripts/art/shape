@@ -1,0 +1,67 @@
+#!/bin/sh
+# Shape a generated reference into a shipped asset: nearest-neighbor
+# downscale to the target size, snap to the palette, and refuse anything
+# that uses a color outside the family's allowance (the bible's
+# color-count gate: red on a gradient that slipped through).
+#
+#   scripts/art/shape RAW.png OUT.png WxH ROLE,ROLE,... [MAX] [--clean PCT]
+#
+# ROLE,... are palette roles from assets/palette.sgl (the family's
+# allowance); MAX (default: the number of distinct roles) caps the colors
+# the output may use. The raw is snapped against the WHOLE palette and
+# then held to the family, so a gradient or a stray tint snaps to palette
+# colors outside the family and reddens; snapping to the family alone
+# would hide it. A generator's anti-aliased edges and background noise
+# produce a few such pixels on a clean picture too: --clean PCT lets the
+# shaper re-snap those to the family when they are under PCT percent of
+# the pixels, and says how many it moved (put that in the manifest row);
+# without it the gate refuses. Alpha is dropped: a reference is opaque on
+# the ground color, and the ground is a palette color like any other.
+set -eu
+cd "$(dirname "$0")/../.." || exit 1
+raw="${1:?raw.png}"; out="${2:?out.png}"; size="${3:?WxH}"; roles="${4:?roles}"; shift 4
+max=""; clean=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --clean) clean="${2:?pct}"; shift 2 ;;
+    *) max="$1"; shift ;;
+  esac
+done
+[ -f "$raw" ] || { echo "shape: no $raw"; exit 1; }
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+scripts/art/palette "$tmp/family.png" "$roles" > "$tmp/palette.log"
+scripts/art/palette "$tmp/palette.png" >> "$tmp/palette.log"
+colors_of() { convert "$1" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u; }
+allowed="$(colors_of "$tmp/family.png")"
+n_allowed="$(printf '%s\n' "$allowed" | wc -l)"
+[ -n "$max" ] || max="$n_allowed"
+convert "$raw" -alpha off -filter point -resize "${size}!" -dither None -remap "$tmp/palette.png" -type TrueColor "PNG24:$tmp/out.png"
+used="$(colors_of "$tmp/out.png")"
+bad="$(printf '%s\n' "$used" | grep -vxF -f <(printf '%s\n' "$allowed") || true)"
+moved=0
+if [ -n "$bad" ]; then
+  total="$(identify -format '%[fx:w*h]' "$tmp/out.png")"
+  # pixels per color from the histogram: "  N: (r,g,b) #RRGGBB srgb(...)"
+  offs="$(convert "$tmp/out.png" -format %c histogram:info:- | awk -v bad="$(echo $bad)" '
+    BEGIN { n = split(bad, b, " "); for (i = 1; i <= n; i++) isbad[b[i]] = 1 }
+    { for (i = 1; i <= NF; i++) if ($i ~ /^#[0-9A-F]{6}$/ && ($i in isbad)) { c = $1; sub(/:$/, "", c); s += c } }
+    END { print s + 0 }')"
+  pct="$(awk -v o="$offs" -v t="$total" 'BEGIN { printf "%.2f", 100 * o / t }')"
+  if [ -z "$clean" ] || [ "$(awk -v p="$pct" -v c="$clean" 'BEGIN { print (p > c) ? 1 : 0 }')" = 1 ]; then
+    echo "shape: REFUSED $raw: $offs of $total pixels ($pct%) in colors outside the family: $(echo $bad)"
+    [ -n "$clean" ] && echo "shape: --clean $clean would not cover it" || echo "shape: pass --clean PCT to re-snap them if this is edge noise, not a gradient"
+    exit 1
+  fi
+  convert "$tmp/out.png" -dither None -remap "$tmp/family.png" -type TrueColor "PNG24:$tmp/clean.png"
+  mv "$tmp/clean.png" "$tmp/out.png"
+  moved="$offs"
+  used="$(colors_of "$tmp/out.png")"
+fi
+n_used="$(printf '%s\n' "$used" | wc -l)"
+if [ "$n_used" -gt "$max" ]; then
+  echo "shape: REFUSED $raw: $n_used colors, allowance $max"; exit 1
+fi
+mkdir -p "$(dirname "$out")"
+cp "$tmp/out.png" "$out"
+echo "shape: $out $(identify -format '%wx%h' "$out") colors $n_used of $max allowed ($(echo $used)); cleaned $moved pixels"
