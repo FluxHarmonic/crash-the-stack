@@ -23,6 +23,14 @@
 //               "crash: control undo X Y" boot line gives), then the hint-mode
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
+//   look        a tap on the TILES counter (the game's "crash: control look X Y"
+//               line) steps the look: "crash: look test-tile", and a second tap
+//               steps it around: "crash: look flat" (P3, ruling D26's sheet
+//               switch on the phone)
+//   assets      every resource the page loaded (performance entries: the
+//               wasm, the bridges, assets/) answered 200, and the test tile the
+//               look sub-arm asked for is among them (P3 gate leg 2, the web
+//               half: a referenced asset resolves on the served build)
 //   traced      SHUFFLES taps on the SHUF control fill the trace (60 each,
 //               TRACE-AT 180 -> 3) -> "crash: shuffle" that many times, then
 //               "crash: trace ... counter 0" on the next tick,
@@ -82,7 +90,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "traced", "reload", "update", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "look", "assets", "traced", "reload", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -397,6 +405,50 @@ else {
 if (keysOk) pass("keys-match", keysDetail);
 else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6));
 else fail("keys-match", keysDetail);
+
+// ---- 6b. look: the TILES counter steps the look (P3) ----------------------
+{
+  const ctl = await waitLine(/^crash: control look (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  if (EXPECT_NO_SELECTION) skip("look", "controls are not tappable with forwarding off");
+  else if (!ctl) fail("look", "no \"crash: control look\" boot line");
+  else {
+    let detail = "";
+    mark = consoleLines.length;
+    await tap(ctl.m[1], ctl.m[2]);
+    const first = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
+    if (!first) detail = `a tap on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
+    else if (first.m[1] === "flat") detail = `the first tap stayed on flat`;
+    else {
+      mark = consoleLines.length;
+      await tap(ctl.m[1], ctl.m[2]);
+      const second = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
+      if (!second) detail = "no second \"crash: look\" line";
+      else if (second.m[1] === first.m[1]) detail = `the second tap stayed on ${first.m[1]}`;
+      else pass("look", `flat -> ${first.m[1]} -> ${second.m[1]}`);
+    }
+    if (detail) fail("look", detail);
+  }
+}
+
+// ---- 6c. assets: everything the page fetched answered (P3 leg 2, web) -----
+{
+  try {
+    const entries = await evalJS(`JSON.stringify(performance.getEntriesByType("resource").map((e) => [e.name.replace(location.origin + "/", ""), e.responseStatus]))`);
+    const list = JSON.parse(entries);
+    // every entry is same-origin (the page loads nothing else), so a status
+    // other than 200 is a failure, 0 included (blocked, or never answered)
+    const bad = list.filter(([, st]) => st !== 200);
+    const assets = list.filter(([n]) => n.startsWith("assets/") || n.endsWith(".wasm"));
+    const tile = list.some(([n, st]) => n === "assets/test-tile.png" && st === 200);
+    if (list.length === 0) fail("assets", "no resource entries at all");
+    else if (bad.length) fail("assets", `${bad.length} of ${list.length} resources not 200: ${JSON.stringify(bad.slice(0, 5))}`);
+    else if (assets.length === 0) fail("assets", `${list.length} resources, none under assets/ or the wasm`);
+    else if (!tile) fail("assets", "the look sub-arm asked for the test tile but assets/test-tile.png was never fetched with 200");
+    else pass("assets", `${list.length} resources all 200, ${assets.length} assets/wasm, test tile fetched on demand`);
+  } catch (err) {
+    fail("assets", `CDP: ${err.message}`);
+  }
+}
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
 // Each shuffle costs SHUFFLE_COST on the trace, so SHUFFLES taps take the

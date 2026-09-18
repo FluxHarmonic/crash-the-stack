@@ -9,8 +9,9 @@
 // ?cards so the web shell boots the Klondike table, and these sub-arms:
 //
 //   menu        the page without ?cards or ?stack opens on the menu:
-//               "crash: menu stack X Y cards X Y" (no CONTINUE on a fresh
-//               origin); a tap at CARDS' center -> "crash: menu chose cards"
+//               "crash: menu stack X Y cards X Y look X Y" (no CONTINUE on a
+//               fresh origin); a tap on LOOK -> "crash: look NAME" with the
+//               menu kept (P3); a tap at CARDS' center -> "crash: menu chose cards"
 //               and the card table's boot line
 //   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
 //               move's centers, "crash: cards first SX SY DX DY"
@@ -284,7 +285,23 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       for (let i = 0; i + 2 < parts2.length; i += 3) entries2[parts2[i]] = [parts2[i + 1], parts2[i + 2]];
       await sleep(800);
       m0 = consoleLines.length;
-      if (!entries2.cards) fail("menu", "no CARDS entry on the second menu");
+      // the LOOK entry (P3, the sheet switch) steps the look and keeps the
+      // menu up: "crash: look NAME" with no table boot line
+      let lookDetail = "";
+      if (!entries2.look) lookDetail = "no LOOK entry on the menu";
+      else {
+        await tap(entries2.look[0], entries2.look[1]);
+        const stepped = await waitLine(/^crash: look ([a-z-]+)$/, m0, 3000);
+        await sleep(300);
+        const left = consoleLines.slice(m0).some((l) => /^crash: (cards seed|seed) /.test(l));
+        if (!stepped) lookDetail = "a tap on LOOK produced no \"crash: look\" line";
+        else if (stepped.m[1] === "flat") lookDetail = "LOOK stayed on flat";
+        else if (left) lookDetail = "LOOK left the menu (a table booted)";
+        else { await tap(entries2.look[0], entries2.look[1]); await sleep(300); }
+      }
+      m0 = consoleLines.length;
+      if (lookDetail) fail("menu", lookDetail);
+      else if (!entries2.cards) fail("menu", "no CARDS entry on the second menu");
       else {
         await tap(entries2.cards[0], entries2.cards[1]);
         const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
@@ -292,7 +309,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
         else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
         else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
-        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); tap on CARDS -> ${chose.m[0]}, table booted`);
+        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); LOOK tapped twice (stepped, menu kept); tap on CARDS -> ${chose.m[0]}, table booted`);
       }
     }
   }

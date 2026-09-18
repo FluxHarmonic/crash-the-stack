@@ -19,10 +19,12 @@
           (crash cards input)
           (crash cards save)
           (crash cards seeds)
+          (crash look)
           (crash menu))
 
   (export VW VH TEST-TILE-PATH MODIFIERS
-          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
+          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY LOOK-KEY
+          stored-look set-stored-look! step-look!
           boot-session save-after-frame!
           boot-deal save-deal-after-frame!
           active-game set-active-game! saved-game?
@@ -39,6 +41,23 @@
     (define CARDS-KEY "cards")
     ;; The game last chosen from the menu: stack | cards.
     (define ACTIVE-KEY "active")
+    ;; The look in force (P3, the sheet switch), a name from (crash look);
+    ;; its own key so it outlives a deal and reaches both tables.
+    (define LOOK-KEY "look")
+
+    (define (stored-look)
+      (let ((d (store-read-datum LOOK-KEY)))
+        (if (look-name? d) d DEFAULT-LOOK)))
+
+    (define (set-stored-look! name)
+      (store-write-datum! LOOK-KEY name))
+
+    ;; The next look, stored; the shells call this for the menu's LOOK
+    ;; entry and hand the name to the table in memory, if any.
+    (define (step-look!)
+      (let ((next (look-after (stored-look))))
+        (set-stored-look! next)
+        next))
 
     ;; (cons session restored?): the saved session if there is one and
     ;; fresh? is #f, else a new deal of seed; the best result comes along
@@ -47,7 +66,8 @@
       (let ((saved (and (not fresh?)
                         (datum->session (store-read-datum BOARD-KEY))))
             (best (datum->best (store-read-datum BEST-KEY))))
-        (cons (session-with-best (or saved (session-new lay (or seed 1))) best)
+        (cons (session-with-look (session-with-best (or saved (session-new lay (or seed 1))) best)
+                                 (stored-look))
               (and saved #t))))
 
     ;; After a frame: save the session when the step warrants it, and when
@@ -66,6 +86,9 @@
                         after)))
         (when (save-due? before after)
           (store-write-datum! BOARD-KEY (session->datum after)))
+        ;; ctrl+t or the TILES tap stepped the look: it is the game's, not the board's
+        (unless (eq? (session-look before) (session-look after))
+          (set-stored-look! (session-look after)))
         after))
 
     ;; (cons deal restored?): the saved deal if there is one and fresh? is
@@ -103,10 +126,11 @@
     ;; STACK, DEFRAG, UPDATE when the page says one is waiting.
     (define (launch-menu update-waiting? held?)
       (let ((continue? (or held? (saved-game? (active-game)))))
-        (menu-new (append (if continue? '(continue) '())
-                          '(stack cards)
-                          (if update-waiting? '(update) '()))
-                  (if continue? 'continue 'stack))))
+        (menu-with-look (menu-new (append (if continue? '(continue) '())
+                                          '(stack cards look)
+                                          (if update-waiting? '(update) '()))
+                                  (if continue? 'continue 'stack))
+                        (stored-look))))
 
     ;; Does this frame ask for the menu: a tap on a MENU control (its
     ;; name from either table's hit-test, passed in), or ctrl+e?
