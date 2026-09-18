@@ -292,7 +292,29 @@ fs.writeFileSync(OUT, header.concat(results.map((r) => `seed ${r.seed} moves ${r
 console.log(`--- seeds ${FROM}..${TO}: won ${tally.won} lost ${tally.lost} unknown ${tally.unknown} (${((100 * tally.won) / (TO - FROM + 1)).toFixed(1)}% won) in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 if (PROBE > 0) console.log(`--- encrypt probe: ${kills.tried} locks on ${kills.seedsProbed} winnable deals at mid-line: ${kills.lost} killed (${kills.tried ? ((100 * kills.lost) / kills.tried).toFixed(1) : 0}%), ${kills.unknown} unknown; ${kills.seedsKilled} deals killable by one lock (${kills.seedsProbed ? ((100 * kills.seedsKilled) / kills.seedsProbed).toFixed(1) : 0}%)`);
 console.log(`--- wrote ${results.length} lines to ${OUT}`);
+// --emit also rewrites (crash cards lines): the lines themselves, three
+// printable characters per move (see that module), one string per seed,
+// in the same order as WINNABLE-SEEDS.
+function encodeLine(text) {
+  let out = "";
+  for (const tok of text.split(" ")) {
+    const [src, dst] = tok.split(">");
+    if (src[0] === "w") out += "p" + String.fromCharCode(48 + parseInt(src.slice(1), 10));
+    else { const [i, d] = src.slice(1).split("."); out += String.fromCharCode(97 + parseInt(i, 10)) + String.fromCharCode(48 + parseInt(d, 10)); }
+    out += dst[0] === "t" ? String.fromCharCode(48 + parseInt(dst.slice(1), 10)) : String.fromCharCode(70 + parseInt(dst.slice(1), 10));
+  }
+  return out;
+}
 if (EMIT) {
+  const linesPath = path.join(path.dirname(EMIT), "lines.sgl");
+  if (fs.existsSync(linesPath)) {
+    const src = fs.readFileSync(linesPath, "utf8");
+    const m = src.match(/\(define LINES\n\s+#\([^]*?\)\)\n/);
+    if (!m) { console.log(`--- ${linesPath}: no LINES vector found`); process.exit(1); }
+    const rows = results.map((r) => "        " + JSON.stringify(encodeLine(r.text)));
+    fs.writeFileSync(linesPath, src.replace(m[0], `(define LINES\n      #(\n${rows.join("\n")}))\n`));
+    console.log(`--- ${linesPath}: LINES now ${results.length} lines`);
+  }
   const src = fs.readFileSync(EMIT, "utf8");
   const m = src.match(/\(define WINNABLE-SEEDS\n\s+#\([^)]*\)\)/);
   if (!m) { console.log(`--- ${EMIT}: no WINNABLE-SEEDS vector found`); process.exit(1); }

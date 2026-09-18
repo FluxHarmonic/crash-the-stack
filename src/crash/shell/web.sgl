@@ -61,6 +61,8 @@
 ;;;   crash: cards first SX SY DX DY        the first legal move's source and
 ;;;                                         destination centers, or "first none"
 ;;;   crash: cards tags TS TD               the same move's source and destination tags
+;;;   crash: cards probe hint SRC DST        PROBE showed a move (its places' kinds)
+;;;   crash: cards probe none                PROBE found no line (or lost the thread)
 ;;;   crash: cards restored moves N          ... from a saved deal
 ;;;   crash: cards select PLACE              a card was selected
 ;;;   crash: cards deselect
@@ -134,6 +136,10 @@
     (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
+    (define *frames* 0)      ; frames seen before the boot: the page's parameters land on a
+                             ; task after setInstance, which can come after the first frame
+    (define BOOT-AFTER-FRAMES 60)  ; a boot without "params done" waits this long for it (~1 s)
+    (define *params-done* #f)
     (define *screen* 'menu)  ; menu | stack | cards
     (define *menu* #f)       ; the first screen, (crash menu)
     (define *update* #f)     ; the page says a new version is waiting
@@ -324,7 +330,11 @@
              (m1 (game-moves g1))
              (h0 (length (game-history g0)))
              (h1 (length (game-history g1))))
-        (cond ((eq? g0 g1) #f)
+        (cond ((and (deal-hint after) (not (deal-hint before)))
+               (say "cards" "probe" "hint" (car (car (deal-hint after))) (car (cadr (deal-hint after)))))
+              ((and (deal-probe-running? before) (not (deal-probe-running? after)) (not (deal-hint after)))
+               (say "cards" "probe" "none"))
+              ((eq? g0 g1) #f)
               ((not (= (deal-seed before) (deal-seed after)))
                (set! *announced* #f)
                (set! *restored* #f))
@@ -421,6 +431,19 @@
         (when ms (set! *last-ms* ms))
         dt))
 
+    ;; A running PROBE gets PROBE-FRAME-MS of this frame, one position at
+    ;; a time, so a hard position never stalls the table (the solver runs
+    ;; at a few ms per position in this build; see the evidence note).
+    (define PROBE-FRAME-MS 6)
+
+    (define (probe-work d)
+      (let ((t0 (current-milliseconds)))
+        (let loop ((d d))
+          (if (and (deal-probe-running? d)
+                   (< (- (current-milliseconds) t0) PROBE-FRAME-MS))
+              (loop (deal-probe-step d))
+              d))))
+
     (define (cards-tick f dt)
       (when (and *trace* (not *announced*))
         (say-deal *deal*)
@@ -429,8 +452,9 @@
              (x (card-fx-frame *card-fx* dt *card-geom*))
              (after (save-deal-after-frame!
                       before
-                      (deal-advance (deal-step before f *card-geom*)
-                                    (clock-steps (card-fx-clock x)))))
+                      (probe-work
+                        (deal-advance (deal-step before f *card-geom*)
+                                      (clock-steps (card-fx-clock x))))))
              (x (card-fx-observe x before after *card-geom*)))
         (set! *deal* after)
         (set! *card-fx* x)
@@ -507,7 +531,16 @@
             (tick-screen (make-input-frame '() '() #f) dt))))
 
     (define (web-tick dt)
-      (unless *booted* (boot!))
+      (unless *booted*
+        (set! *frames* (+ *frames* 1))
+        ;; The boot waits for the page's "params done" (a second of frames
+        ;; at most): booting the default table first and the parameter's
+        ;; table a frame later announced the wrong deal to the arms
+        ;; (2026-09-18, once the default deal stopped being seed 1).
+        (when (or *params-done* (>= *frames* BOOT-AFTER-FRAMES)) (boot!)))
+      (when *booted* (tick-booted dt)))
+
+    (define (tick-booted dt)
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt))
 
@@ -585,7 +618,7 @@
     ;; and takes the choice, (crash input) step-update) and the menu (its
     ;; UPDATE entry). Reported for the arm.
     (define (update! state)
-      (set! *update* (memq state '(waiting prompt)))
+      (set! *update* (and (memq state '(waiting prompt)) state))
       (when *session*
         (set! *session* (session-with-update *session* state))
         (say "update" state))
@@ -621,7 +654,10 @@
       (store-remove! UPDATE-KEY)
       (cond (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
-            (else (open-menu!))))
+            (else (open-menu!)))
+      ;; the page's update word can land before the boot now that the
+      ;; boot waits for the parameters: the table takes it here
+      (when *update* (update! *update*)))
 
     ;; A page parameter landed: take it, and if the table is already up,
     ;; boot again with it.
@@ -649,6 +685,7 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
+            ((string=? type "params") (when (string=? payload "done") (set! *params-done* #t)) 0)
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
             ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))

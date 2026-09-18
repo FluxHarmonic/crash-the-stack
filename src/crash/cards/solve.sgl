@@ -1,0 +1,327 @@
+;;; (crash cards solve) - A line from here: the PROBE tool's solver.
+;;;
+;;; The card table's hint (David, 2026-09-18: a PROBE control "that shows
+;;; the next move of a known winning line from the CURRENT position"; if
+;;; none, say so). The same search as scripts/solve-seeds.mjs, in the
+;;; rules family so it runs in the wasm and native builds: full
+;;; knowledge of the face-down cards, best-first over positions (face-down
+;;; cards weigh most, then cards not yet on a foundation), each position
+;;; seen once, under the table's rules as (crash cards rules) has them.
+;;;
+;;; Under PULL 1 with unlimited turns every card in the feed and the
+;;; buffer can be brought to the top with pulls alone, so the search keeps
+;;; them as one POOL and plays any pool card directly; a pool move in the
+;;; line means "pull until that card tops the buffer, then play it".
+;;; Under PULL 3 that is not so, and the tool refuses ((crash cards
+;;; input)). A locked packet counts as a face-down card (it turns up when
+;;; uncovered; that its lock also expires with time is ignored: the
+;;; verdict is conservative). Moves never made: from a foundation back to
+;;; the table (rare in a line; leaving them out only ever costs a WON).
+;;; Moves made without looking further: a card to a foundation that can
+;;; never be needed on the table again (both foundations of the other
+;;; color hold the rank below it). A run is split off a face-up card only
+;;; when the card it exposes can go up at once (any other split can wait).
+;;;
+;;; The search is resumable: solve-start makes a search, solve-step
+;;; expands up to n positions, and the shell spreads the work over frames
+;;; so a hard position never stalls one. NODE-BUDGET positions without a
+;;; verdict is UNKNOWN. The verdict's line is (src . dst) pairs in the
+;;; rules' place notation, a pool card as (pool card).
+
+(define-library (crash cards solve)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash cards deck)
+          (crash cards rules))
+
+  (export NODE-BUDGET
+          solve solve-start solve-step solve-done? solve-verdict search-nodes
+          verdict verdict? verdict-status verdict-line verdict-nodes
+          pool-game position-key fast-move)
+
+  (begin
+    ;; Positions a search may visit before giving up (UNKNOWN).
+    (define NODE-BUDGET 4000)
+
+    (define-struct verdict
+      (status default: 'unknown)     ; won | lost | unknown
+      (line default: '())            ; the moves, first first: (src . dst)
+      (nodes default: 0))            ; positions expanded
+
+    ;; --- the pool -----------------------------------------------------------------
+
+    ;; The game with its feed and buffer as one pool in the waste, stock
+    ;; empty, history cut: the shape the search works on.
+    (define (pool-game g)
+      (game g
+            stock: '()
+            waste: (append (game-waste g) (game-stock g))
+            history: '()
+            selected: #f
+            corrupt: #f))
+
+    (define (pool g) (game-waste g))
+
+    (define (remove-one c cards)
+      (cond ((null? cards) '())
+            ((eqv? (car cards) c) (cdr cards))
+            (else (cons (car cards) (remove-one c (cdr cards))))))
+
+    ;; --- the position key -----------------------------------------------------------
+
+    ;; The rank each suit's foundation holds, 0 when empty, in suit order.
+    (define (foundation-ranks g)
+      (let ((ranks (make-vector 4 0)))
+        (let loop ((i 0))
+          (when (< i FOUNDATIONS)
+            (let ((f (game-foundation g i)))
+              (when (pair? f)
+                (vector-set! ranks (card-suit (car f)) (card-rank (car f)))))
+            (loop (+ i 1))))
+        ranks))
+
+    ;; One character per pile entry (card and face folded together, from
+    ;; code 40 up), a separator between piles, the four foundation ranks
+    ;; in front. A locked packet keys as face down.
+    (define (entry-char e)
+      (integer->char (+ 40 (* 2 (pile-card e)) (if (pile-up? e) 1 0))))
+
+    (define KEY-SEPARATOR (integer->char 36))
+
+    (define (position-key g)
+      (let ((ranks (foundation-ranks g)))
+        (list->string
+          (append (map (lambda (i) (integer->char (+ 40 (vector-ref ranks i)))) (iota 4))
+                  (apply append
+                         (map (lambda (i)
+                                (cons KEY-SEPARATOR (map entry-char (game-pile g i))))
+                              (iota PILES)))))))
+
+    ;; --- moves -----------------------------------------------------------------------
+
+    ;; Is a card of this rank and color never needed on the table again
+    ;; once on its foundation: both foundations of the other color hold
+    ;; at least the rank below it (an ace or a two always).
+    (define (safe-to-foundation? ranks c)
+      (let ((r (card-rank c))
+            (others (if (card-red? c) '(0 3) '(1 2))))
+        (or (<= r 2)
+            (every (lambda (s) (>= (vector-ref ranks s) (- r 1))) others))))
+
+    (define (foundation-move? m) (eq? (car (cdr m)) 'foundation))
+
+    ;; Does the move uncover a face-down card: its source is the bottom of
+    ;; its run and a card lies under it.
+    (define (uncovers? g m)
+      (let ((src (car m)))
+        (and (eq? (car src) 'pile)
+             (let* ((pile (game-pile g (cadr src)))
+                    (depth (caddr src)))
+               (and (= (+ depth 1) (run-length pile))
+                    (< (+ depth 1) (length pile)))))))
+
+    ;; The foundation place a card goes to: its suit's, or the first empty.
+    (define (foundation-for g c)
+      (let loop ((i 0) (empty #f))
+        (cond ((= i FOUNDATIONS) empty)
+              ((let ((f (game-foundation g i)))
+                 (and (pair? f) (= (card-suit (car f)) (card-suit c))))
+               (list 'foundation i))
+              ((and (not empty) (null? (game-foundation g i)))
+               (loop (+ i 1) (list 'foundation i)))
+              (else (loop (+ i 1) empty)))))
+
+    ;; The pool's moves, found from the destinations (each wants at most
+    ;; four named cards).
+    (define (pool-moves g ranks)
+      (let* ((cards (pool g))
+             (in-pool? (lambda (c) (memv c cards)))
+             (wanted-by (lambda (top)
+                          (if top
+                              (let ((r (- (card-rank top) 1)))
+                                (if (< r 1)
+                                    '()
+                                    (map (lambda (s) (make-card s r))
+                                         (if (card-red? top) '(0 3) '(1 2)))))
+                              (map (lambda (s) (make-card s 13)) '(0 1 2 3))))))
+        (append
+          (let loop ((s 0) (acc '()))
+            (if (= s 4)
+                (reverse acc)
+                (let ((r (+ 1 (vector-ref ranks s))))
+                  (loop (+ s 1)
+                        (if (and (<= r 13) (in-pool? (make-card s r)))
+                            (cons (cons (list 'pool (make-card s r)) (foundation-for g (make-card s r))) acc)
+                            acc)))))
+          (apply append
+                 (map (lambda (i)
+                        (let ((top (place-card g (list 'pile i 0))))
+                          (map (lambda (c) (cons (list 'pool c) (list 'pile i)))
+                               (filter in-pool? (wanted-by top)))))
+                      (iota PILES))))))
+
+    ;; The table's moves: the rules' own, sources on the piles only, less
+    ;; the run splits that go nowhere.
+    (define (table-moves g ranks)
+      (filter (lambda (m)
+                (let ((src (car m)))
+                  (and (eq? (car src) 'pile)
+                       (let* ((pile (game-pile g (cadr src)))
+                              (depth (caddr src))
+                              (under (and (< (+ depth 1) (length pile))
+                                          (list-ref pile (+ depth 1)))))
+                         (or (not under)
+                             (not (pile-up? under))
+                             (foundation-move? m)
+                             (= (card-rank (pile-card under))
+                                (+ 1 (vector-ref ranks (card-suit (pile-card under))))))))))
+              (legal-moves g)))
+
+    ;; The card a move plays (its run's bottom).
+    (define (moved-card g m)
+      (let ((src (car m)))
+        (if (eq? (car src) 'pool)
+            (cadr src)
+            (place-card g src))))
+
+    ;; Every move from here, best first: a safe foundation move alone when
+    ;; one exists; else foundation moves, uncovering moves, pool moves,
+    ;; the rest.
+    (define (moves g)
+      (let* ((ranks (foundation-ranks g))
+             (all (append (table-moves g ranks) (pool-moves g ranks)))
+             (safe (find (lambda (m) (and (foundation-move? m) (safe-to-foundation? ranks (moved-card g m))))
+                         all)))
+        (if safe
+            (list safe)
+            (let ((score (lambda (m)
+                           (cond ((foundation-move? m) 0)
+                                 ((uncovers? g m) 1)
+                                 ((eq? (car (car m)) 'pool) 2)
+                                 (else 3)))))
+              (list-sort (lambda (a b) (< (score a) (score b))) all)))))
+
+    ;; The game after a move, the search's way: the piles rewritten
+    ;; directly, no legality check, no score, no history (the moves come
+    ;; from the rules' own generator).
+    (define (vector-with v i x)
+      (let ((nv (vector-copy v)))
+        (vector-set! nv i x)
+        nv))
+
+    (define (flip-top pile)
+      (if (and (pair? pile) (not (pile-up? (car pile))))
+          (cons (cons (pile-card (car pile)) #t) (cdr pile))
+          pile))
+
+    (define (fast-move g m)
+      (let* ((src (car m))
+             (dst (cdr m))
+             (from-pool? (eq? (car src) 'pool))
+             (cards (if from-pool?
+                        (list (cadr src))
+                        (map pile-card (take (game-pile g (cadr src)) (+ 1 (caddr src))))))
+             (g (if from-pool?
+                    (game g waste: (remove-one (cadr src) (pool g)))
+                    (let ((i (cadr src)))
+                      (game g tableau: (vector-with (game-tableau g)
+                                                    i
+                                                    (flip-top (drop-n (game-pile g i) (length cards)))))))))
+        (if (eq? (car dst) 'pile)
+            (let ((i (cadr dst)))
+              (game g tableau: (vector-with (game-tableau g)
+                                            i
+                                            (append (map (lambda (c) (cons c #t)) cards)
+                                                    (game-pile g i)))))
+            (let ((i (cadr dst)))
+              (game g foundations: (vector-with (game-foundations g)
+                                                i
+                                                (append cards (game-foundation g i))))))))
+
+    ;; --- the search --------------------------------------------------------------------
+
+    ;; How far from a win: face-down cards weigh most, then cards not yet
+    ;; on a foundation.
+    (define (distance g)
+      (+ (* 8 (game-face-down-count g))
+         (- DECK-SIZE
+            (let loop ((i 0) (n 0))
+              (if (= i FOUNDATIONS)
+                  n
+                  (loop (+ i 1) (+ n (length (game-foundation g i)))))))))
+
+    (define DISTANCE-MAX (+ (* 8 21) DECK-SIZE))
+
+    ;; A search in progress: a bucket per distance, each a list of
+    ;; (game . line-so-far-reversed), the newest first so that among
+    ;; equals the deepest line continues; the positions seen; the count;
+    ;; the verdict once there is one.
+    (define-struct search
+      (buckets default: #f)
+      (seen default: #f)
+      (nodes default: 0)
+      (budget default: NODE-BUDGET)  ; positions before UNKNOWN
+      (verdict default: #f))
+
+    (define (frontier-push! buckets d entry)
+      (vector-set! buckets d (cons entry (vector-ref buckets d))))
+
+    (define (frontier-pop! buckets)
+      (let loop ((d 0))
+        (cond ((> d DISTANCE-MAX) #f)
+              ((pair? (vector-ref buckets d))
+               (let ((entry (car (vector-ref buckets d))))
+                 (vector-set! buckets d (cdr (vector-ref buckets d)))
+                 entry))
+              (else (loop (+ d 1))))))
+
+    ;; A search from g0; an optional budget of positions (NODE-BUDGET).
+    (define (solve-start g0 . rest)
+      (let ((buckets (make-vector (+ DISTANCE-MAX 1) '()))
+            (g (pool-game g0)))
+        (frontier-push! buckets (distance g) (cons g '()))
+        (search buckets: buckets
+                seen: (dict-set (dict) (position-key g) #t)
+                nodes: 0
+                budget: (if (pair? rest) (car rest) NODE-BUDGET))))
+
+    (define (solve-done? st) (and (search-verdict st) #t))
+    (define (solve-verdict st) (search-verdict st))
+
+    ;; Up to n more positions expanded; the search with its verdict when
+    ;; one was reached (a search with a verdict is returned as it is).
+    (define (solve-step st n)
+      (if (search-verdict st)
+          st
+          (let ((buckets (search-buckets st)))
+            (let loop ((seen (search-seen st)) (nodes (search-nodes st)) (left n))
+              (cond ((= left 0)
+                     (search st seen: seen nodes: nodes))
+                    ((>= nodes (search-budget st))
+                     (search st seen: seen nodes: nodes verdict: (verdict status: 'unknown nodes: nodes)))
+                    (else
+                     (let ((best (frontier-pop! buckets)))
+                       (cond ((not best)
+                              (search st seen: seen nodes: nodes verdict: (verdict status: 'lost nodes: nodes)))
+                             ((game-won? (car best))
+                              (search st seen: seen nodes: nodes
+                                      verdict: (verdict status: 'won line: (reverse (cdr best)) nodes: nodes)))
+                             (else
+                              (let ((g (car best))
+                                    (line (cdr best)))
+                                (let expand ((ms (moves g)) (seen seen))
+                                  (if (null? ms)
+                                      (loop seen (+ nodes 1) (- left 1))
+                                      (let* ((m (car ms))
+                                             (g1 (fast-move g m))
+                                             (key (position-key g1)))
+                                        (if (dict-ref seen key #f)
+                                            (expand (cdr ms) seen)
+                                            (begin
+                                              (frontier-push! buckets (distance g1) (cons g1 (cons m line)))
+                                              (expand (cdr ms) (dict-set seen key #t)))))))))))))))))
+
+    ;; The whole search at once: the verdict.
+    (define (solve g0)
+      (solve-verdict (solve-step (solve-start g0) NODE-BUDGET)))))

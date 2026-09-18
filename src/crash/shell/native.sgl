@@ -7,6 +7,7 @@
 ;;; only this file, and (crash main) picks between the two.
 ;;;
 ;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
+;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
 ;;;
@@ -51,6 +52,9 @@
           (crash cards input)
           (crash cards render)
           (crash cards fx)
+          (crash cards rules)
+          (crash cards seeds)
+          (crash cards solve)
           (crash menu)
           (crash shell))
 
@@ -208,8 +212,9 @@
              (x (card-fx-frame (stage-card-fx a) dt geom))
              (after (save-deal-after-frame!
                       d
-                      (deal-advance (deal-step d f geom)
-                                    (clock-steps (card-fx-clock x)))))
+                      (probe-work
+                        (deal-advance (deal-step d f geom)
+                                      (clock-steps (card-fx-clock x))))))
              (x (card-fx-observe x d after geom)))
         (stage a deal: after card-fx: x)))
 
@@ -338,6 +343,44 @@
       (draw-editor e canvas)
       (end-frame))
 
+    ;; A running PROBE gets PROBE-FRAME-MS of each frame, one position at
+    ;; a time (the web shell does the same).
+    (define PROBE-FRAME-MS 6)
+
+    (define (probe-work d)
+      (let ((t0 (current-milliseconds)))
+        (let loop ((d d))
+          (if (and (deal-probe-running? d)
+                   (< (- (current-milliseconds) t0) PROBE-FRAME-MS))
+              (loop (deal-probe-step d))
+              d))))
+
+    ;; --bench-probe N: the PROBE solver's speed in this build, the
+    ;; number that sets how many positions a frame may expand ((crash
+    ;; cards input) PROBE-NODES-PER-TICK): each of the first n winnable
+    ;; seeds solved from the deal, ms and positions printed, then the
+    ;; per-position cost.
+    (define (bench-probe! n)
+      (let loop ((i 0) (ms-total 0) (nodes-total 0))
+        (if (>= i (min n (vector-length WINNABLE-SEEDS)))
+            (begin
+              (display (string-append "bench-probe: " (number->string i) " deals, "
+                                      (number->string ms-total) " ms, "
+                                      (number->string nodes-total) " positions, "
+                                      (number->string (if (> nodes-total 0) (/ (* 1000 ms-total) nodes-total) 0))
+                                      " us/position"))
+              (newline))
+            (let* ((seed (vector-ref WINNABLE-SEEDS i))
+                   (t0 (current-milliseconds))
+                   (v (solve (game-new seed 1)))
+                   (ms (- (current-milliseconds) t0)))
+              (display (string-append "  seed " (number->string seed) " " (symbol->string (verdict-status v))
+                                      " moves " (number->string (length (verdict-line v)))
+                                      " nodes " (number->string (verdict-nodes v))
+                                      " ms " (number->string ms)))
+              (newline)
+              (loop (+ i 1) (+ ms-total ms) (+ nodes-total (verdict-nodes v)))))))
+
     (define (native-main . _args)
       (let* ((args (cdr (command-line)))
              (seed-arg (string->number (arg-value args "--seed" "")))
@@ -355,7 +398,11 @@
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
              (cards? (and (member "--cards" args) #t))
-             (edit-path (arg-value args "--edit" #f)))
+             (edit-path (arg-value args "--edit" #f))
+             (bench-arg (arg-value args "--bench-probe" #f)))
+        (when bench-arg
+          (bench-probe! (or (string->number bench-arg) 20))
+          (exit 0))
         (run-game (if edit-path "Crash The Stack - Editor" "Crash The Stack")
                   WINDOW-W
                   WINDOW-H

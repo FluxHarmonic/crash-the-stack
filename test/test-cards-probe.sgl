@@ -1,0 +1,150 @@
+;;; PROBE, the card table's hint (P2b, David 2026-09-18): the next move
+;;; of a winning line from the current position, or the word that there
+;;; is none. The gate: a winnable position PROBEs to a move that keeps
+;;; it winnable (the solver's own verdict on the position after the
+;;; move); a position with exactly one winning move PROBEs to that move
+;;; and not the legal one that loses; a dead position PROBEs to the
+;;; refusal; the price is the stack's hint price on the trace; a hint
+;;; expires with the clock or with the next change of the table.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash input)
+        (crash trace)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input)
+        (crash cards trace)
+        (crash cards seeds)
+        (crash cards solve))
+
+(define geom (make-card-geometry 640 400))
+
+(define (fresh-deal seed)
+  (deal-restore seed (game-new seed 1) #t (trace-new 'twist)))
+
+;; A probe run to its end: the deal with its hint or its message.
+(define (probed d)
+  (let loop ((d (deal-probe d)) (n 0))
+    (if (and (deal-probe-running? d) (< n 100000))
+        (loop (deal-probe-step d) (+ n 1))
+        d)))
+
+;; The hinted move made on the real table: a card named on the stock is
+;; pulled until it tops the waste first.
+(define (make-hinted g h)
+  (let ((src (car h)) (dst (cadr h)))
+    (case (car src)
+      ((stock)
+       (let loop ((g g) (n 0))
+         (cond ((and (pair? (game-waste g)) (= (car (game-waste g)) (cadr src)))
+                (game-move g '(waste) dst))
+               ((> n 120) #f)
+               (else (loop (game-draw! g) (+ n 1))))))
+      (else (game-move g src dst)))))
+
+(test-group "PROBE on a winnable deal"
+  (let* ((d (fresh-deal (first-seed)))
+         (p (probed d))
+         (h (deal-hint p)))
+    (test "the position is on its own line: the hint comes at once, no search"
+      (assert-false (deal-probe-running? (deal-probe d)))
+      (assert-true (and h #t)))
+    (test "the hint costs HINT-COST on the trace"
+      (assert-equal HINT-COST (trace-value (deal-trace p))))
+    (test "the hinted move is legal and the position after it is still winnable"
+      (let ((g (make-hinted (deal-game d) h)))
+        (assert-true (and g #t))
+        (assert-equal 'won (verdict-status (solve g)))))
+    (test "the message names the move"
+      (assert-true (> (string-length (deal-message p)) 7))
+      (assert-equal "PROBE: " (substring (deal-message p) 0 7)))))
+
+(test-group "PROBE off the line: the solver from here"
+  ;; The line's first move is a pool card to a foundation. A card pulled
+  ;; and played onto a stack instead (one that keeps the deal winnable)
+  ;; is a position no prefix of the line reaches; the solver must find a
+  ;; line from there.
+  (let* ((d (fresh-deal (first-seed)))
+         (off (let loop ((g (deal-game d)) (n 0))
+                (if (> n 60)
+                    #f
+                    (let* ((m (find (lambda (m) (and (eq? (car (car m)) 'waste) (eq? (car (cdr m)) 'pile)))
+                                    (legal-moves g)))
+                           (g1 (and m (game-move g (car m) (cdr m)))))
+                      (if (and g1 (eq? (verdict-status (solve g1)) 'won))
+                          g1
+                          (loop (game-draw! g) (+ n 1)))))))
+         (d1 (and off (deal-restore (first-seed) off #t (deal-trace d))))
+         (p (and d1 (probed d1))))
+    (test "a winnable position off the line gets a hint that keeps it winnable"
+      (assert-true (and d1 #t))
+      (let ((h (deal-hint p)))
+        (assert-true (and h #t))
+        (let ((g (make-hinted (deal-game d1) h)))
+          (assert-true (and g #t))
+          (assert-equal 'won (verdict-status (solve g))))))))
+
+(test-group "PROBE picks the winning move, not the legal one that loses"
+  ;; spades to the ten on their foundation, hearts to the queen, D and C
+  ;; complete; Q♠ face up over J♠ and K♠ face down; K♥ alone on pile 1;
+  ;; nothing in the pool. Two legal moves: K♥ up to its foundation (then
+  ;; Q♠ has no red king to go to: lost), or Q♠ onto K♥ (J♠ turns up and
+  ;; goes up, K♠ turns up, then Q♠, K♠ and K♥ go up: won).
+  (let* ((f (lambda (suit n) (reverse (map (lambda (r) (make-card suit (+ r 1))) (iota n)))))
+         (g (game tableau: (vector (list (cons (make-card 0 12) #t)
+                                         (cons (make-card 0 11) #f)
+                                         (cons (make-card 0 13) #f))
+                                   (list (cons (make-card 1 13) #t))
+                                   '() '() '() '() '())
+                  foundations: (vector (f 0 10) (f 1 12) (f 2 13) (f 3 13))
+                  stock: '()
+                  waste: '()))
+         (d (deal-restore 999 g #t (trace-new 'twist)))
+         (p (probed d))
+         (h (deal-hint p)))
+    (test "both moves are legal"
+      (assert-true (and (game-move g '(pile 0 0) '(pile 1)) #t))
+      (assert-true (and (game-move g '(pile 1 0) '(foundation 1)) #t)))
+    (test "the hint is Q♠ onto K♥"
+      (assert-true (and h #t))
+      (assert-equal '(pile 0 0) (car h))
+      (assert-equal '(pile 1) (cadr h)))
+    (test "the other move loses"
+      (assert-equal 'lost (verdict-status (solve (game-move g '(pile 1 0) '(foundation 1))))))))
+
+(test-group "PROBE on a dead position and under PULL 3"
+  (let* ((f (lambda (suit n) (reverse (map (lambda (r) (make-card suit (+ r 1))) (iota n)))))
+         (dead (game tableau: (vector (list (cons (make-card 0 12) #t)
+                                            (cons (make-card 0 11) #f)
+                                            (cons (make-card 0 13) #f))
+                                      '() '() '() '() '() '())
+                     foundations: (vector (f 0 10) (f 1 13) (f 2 13) (f 3 13))
+                     stock: '()
+                     waste: '()))
+         (d (deal-restore 998 dead #t (trace-new 'twist)))
+         (p (probed d)))
+    (test "no line from here: the refusal, no hint, the price still paid"
+      (assert-false (deal-hint p))
+      (assert-equal MSG-NO-LINE (deal-message p))
+      (assert-equal HINT-COST (trace-value (deal-trace p))))
+    (test "under PULL 3 the probe refuses and charges nothing"
+      (let* ((d3 (deal-toggle-draw (fresh-deal (first-seed))))
+             (p3 (deal-probe d3)))
+        (assert-equal 3 (game-draw (deal-game d3)))
+        (assert-equal MSG-PROBE-PULL-3 (deal-message p3))
+        (assert-false (deal-probe-running? p3))
+        (assert-equal 0 (trace-value (deal-trace p3)))))))
+
+(test-group "a hint's life"
+  (let* ((d (fresh-deal (first-seed)))
+         (p (probed d)))
+    (test "it stays HINT-TICKS on the clock, then goes"
+      (assert-true (and (deal-hint (deal-advance p (- HINT-TICKS 1))) #t))
+      (assert-false (deal-hint (deal-advance p HINT-TICKS))))
+    (test "a change of the table clears it"
+      (let ((moved (deal-step p (make-input-frame '() '() (place-center geom (deal-game p) '(stock))) geom)))
+        (assert-true (> (length (game-waste (deal-game moved))) 0))
+        (assert-false (deal-hint moved))))))
