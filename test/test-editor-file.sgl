@@ -1,0 +1,36 @@
+;;; The layout editor's file half, in (crash shell native): --edit PATH on
+;;; an existing file loads that layout; on a missing file it starts empty.
+;;;
+;;; Found by the 0.22.2 cleanup's reviewer (2026-09-18): load-editor read
+;;; the file with with-input-from-file, which in the stdlib does not
+;;; rebind the current input port, so `--edit existing.sgl` read stdin,
+;;; got EOF, and died at init with "sexp->layout: expected (stack layer
+;;; ...)" on the dev and release builds alike. The test writes a layout
+;;; the way ctrl+s does and loads it back through the same procedure the
+;;; shell calls.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil io)
+        (crash stack layout)
+        (crash editor)
+        (crash shell native))
+
+(define root (make-temp-directory))
+(define path (string-append root "/edited.sgl"))
+(define FORM '(stack (trace-at 170) (sever-at 240) ((0 . 0) (4 . 0)) ((0 . 0) (4 . 0))))
+
+(write-file-string path (with-output-to-string (lambda () (write FORM) (newline))))
+
+(test-group "the editor loads the layout file it is pointed at"
+  (let ((e (load-editor path)))
+    (test "four slots come back, layers included"
+      (assert-equal 4 (editor-count e))
+      (assert-equal '(2 2) (layout-layer-counts (editor-layout e))))
+    (test "the header's thresholds ride along"
+      (assert-equal 170 (editor-trace-at e))
+      (assert-equal 240 (editor-sever-at e)))
+    (test "a missing file starts an empty editor"
+      (assert-equal 0 (editor-count (load-editor (string-append root "/absent.sgl")))))))
+
+(run-tests)
