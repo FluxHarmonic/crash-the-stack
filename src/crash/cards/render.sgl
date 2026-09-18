@@ -1,15 +1,20 @@
 ;;; (crash cards render) - Drawing the card table (DEFRAG, ruling D16).
 ;;;
-;;; Takes a deal and a card geometry and draws one frame with
-;;; sigil-graphics primitives, in the P0 tile shape: each card a flat face
-;;; over a darker side strip, the rank and suit as bitmap glyphs in the
-;;; card's corner (what a fanned column shows) with the suit again large
-;;; in the middle, face-down cards as a dark back, empty places as
-;;; outlines, and the HUD with its tappable controls (rects from (crash
-;;; cards geometry), so a tap lands where the button is drawn). Nothing
-;;; here reads input, a platform or a clock; there is no animation yet
-;;; (the cascade and the card motion come with (crash fx) in a later
-;;; slice). Colors come from (crash palette).
+;;; Takes a deal, a card geometry, the frame's effects and (optionally)
+;;; the court-portrait texture, and draws one frame with sigil-graphics
+;;; primitives to the bible's section 4 (P3): each packet a flat face over
+;;; a darker side strip; an 18 px index band with the rank glyph and the
+;;; class mark in the class color and the subsystem tag under the mark
+;;; (what a fanned column shows); ranks 2..10 as pips of the class mark in
+;;; the classic arrangements (Cybersol's FacePatterns), the BOOT as one
+;;; large mark, the courts as a 40x48 portrait from the texture tinted in
+;;; the class color (or the large mark when the texture is not there),
+;;; each with its name; face-down packets as a back of hex noise with a
+;;; cold frame, never a hot color; empty places as outlines; and the HUD
+;;; with its tappable controls (rects from (crash cards geometry), so a
+;;; tap lands where the button is drawn). Nothing here reads input, a
+;;; platform or a clock; the shell hands in the texture it has loaded.
+;;; Colors come from (crash palette).
 
 (define-library (crash cards render)
   (import (sigil struct)
@@ -26,15 +31,33 @@
           (crash cards trace)
           (crash render)
           (crash font)
+          (crash glyphs)
           (crash palette))
 
-  (export draw-deal)
+  (export draw-deal PORTRAITS-PATH PORTRAIT-W PORTRAIT-H)
 
   (begin
     (define SIDE LAYER-OFFSET)
     (define (half n) (quotient n 2))
     (define GLYPH-SCALE 2)
-    (define BIG-SUIT-SCALE 6)
+    ;; The bible's section 4: the index band a fanned packet shows, the
+    ;; class mark in it, the pip grid under it, the court portrait block.
+    (define BAND-H 18)
+    (define PIP-SCALE 1)
+    (define PORTRAIT-W 40)
+    (define PORTRAIT-H 48)
+    ;; A strip of three portraits, DAEMON SYSOP ROOT, white on transparent,
+    ;; tinted in the class color when drawn; loaded by the shell.
+    (define PORTRAITS-PATH "assets/packets/portraits.png")
+    ;; The portrait texture this frame, or #f (set by draw-deal; the face
+    ;; drawers are reached through the tableau, the movers and the cascade).
+    (define *portraits* #f)
+
+    ;; Cybersol's FacePatterns: pips per column, columns left to right, for
+    ;; ranks 2..10; a column of 1 sits at the middle, or at a third when it
+    ;; is the middle column between two threes (the seven).
+    (define PIP-PATTERNS
+      '#((2) (3) (2 2) (2 1 2) (3 3) (3 1 3) (4 4) (4 1 4) (4 2 4)))
 
     ;; The four subsystems (ruling D16): hot PWR and TX for hearts and
     ;; diamonds, cold MEM and DSK for spades and clubs. One color per
@@ -108,35 +131,98 @@
         (color! C-SIDE)
         (draw-filled-rect (- x SIDE) y SIDE h)))
 
+    ;; The back (bible section 4): hex-noise rows in C-STATIC-B on C-BG
+    ;; inside a C-COLD frame, and no hot color, so a face-down packet never
+    ;; looks playable. The noise comes from the table's own random stream
+    ;; seeded by the packet's place on the screen, so it holds still.
+    (define HEX-CHARS "0123456789abcdef")
+
     (define (draw-back r)
       (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
         (draw-sides r)
-        (color! C-SIDE-DARK)
+        (color! C-BG)
         (draw-filled-rect x y w h)
-        (color! C-SIDE)
+        (color! C-COLD)
         (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
         (draw-filled-rect x y 1 h)
-        (color! C-BAR-C)
-        (draw-filled-rect (+ x 6) (+ y 6) (- w 12) (- h 12))
-        ;; a lattice of dots
-        (color! C-SIDE-DARK)
-        (let loop ((py (+ y 10)))
-          (when (< py (+ y h -8))
-            (let inner ((px (+ x 10)))
-              (when (< px (+ x w -8))
-                (draw-filled-rect px py 2 2)
-                (inner (+ px 8))))
-            (loop (+ py 8))))))
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (color! C-STATIC-B)
+        (let rows ((py (+ y 6)) (rng (prng-seed (+ 101 (* 7 x) (* 13 y)))))
+          (when (< py (+ y h -10))
+            (let chars ((px (+ x 6)) (rng rng))
+              (if (< px (+ x w -8))
+                  (let ((rng (prng-next rng)))
+                    (draw-text-mini (string (string-ref HEX-CHARS (prng-index rng 16))) px py 1)
+                    (chars (+ px 8) rng))
+                  (rows (+ py 10) rng)))))))
 
-    ;; A face-up card: the tile's face with the rank and suit top-left
-    ;; (the strip a fanned column shows) and the suit large in the middle.
+    ;; --- the face: the index band, the pips, the courts ------------------------
+
+    (define (rank-text c)
+      (if (= (card-rank c) 10) "10" (string (rank-char c))))
+
+    ;; Pips of the class mark in the classic arrangement, in the body
+    ;; under the band. Columns at a quarter, a half and three quarters of
+    ;; the body's width; a column of n at the n-th odd fraction of the
+    ;; body's height, the lone middle pip of a seven at a third.
+    (define (draw-pips c x y w h)
+      (let* ((pattern (vector-ref PIP-PATTERNS (- (card-rank c) 2)))
+             (columns (length pattern))
+             (mw (* PIP-SCALE MARK-W))
+             (mh (* PIP-SCALE MARK-H))
+             (col-x (lambda (i)
+                      (let ((frac (case columns
+                                    ((1) 0.5)
+                                    ((2) (if (= i 0) 0.25 0.75))
+                                    (else (* 0.25 (+ i 1))))))
+                        (+ x (exact (round (- (* w frac) (/ mw 2))))))))
+             (row-y (lambda (frac) (+ y (exact (round (- (* h frac) (/ mh 2))))))))
+        (let loop ((ps pattern) (i 0))
+          (unless (null? ps)
+            (let ((n (car ps)) (cx (col-x i)))
+              (cond ((= n 1)
+                     (draw-rows (class-mark (card-suit c))
+                                cx
+                                (row-y (if (and (= columns 3) (= i 1) (= (car pattern) 3)) (/ 1.0 3) 0.5))
+                                PIP-SCALE
+                                MARK-W))
+                    (else
+                     (let pips ((k 0))
+                       (when (< k n)
+                         (draw-rows (class-mark (card-suit c))
+                                    cx
+                                    (row-y (/ (+ 1 (* 2 k)) (* 2.0 n)))
+                                    PIP-SCALE
+                                    MARK-W)
+                         (pips (+ k 1)))))))
+            (loop (cdr ps) (+ i 1))))))
+
+    ;; The court's portrait from the strip (DAEMON SYSOP ROOT = frames
+    ;; 0 1 2), white on transparent, tinted in the class color; the large
+    ;; class mark stands in while the texture is not there.
+    (define (draw-court c cx cy)
+      (let ((frame (- (card-rank c) 11)))
+        (if *portraits*
+            (draw-texture-region *portraits*
+                                 (- cx (half PORTRAIT-W)) (- cy (half PORTRAIT-H))
+                                 PORTRAIT-W PORTRAIT-H
+                                 (* frame PORTRAIT-W) 0
+                                 PORTRAIT-W PORTRAIT-H)
+            (draw-rows (class-mark (card-suit c)) (- cx 12) (- cy 12) 3 MARK-W))))
+
+    ;; A face-up packet (bible section 4): the index band a fanned column
+    ;; shows (the rank glyph at scale 2 and the 8x8 class mark beside it,
+    ;; the subsystem tag under the mark in the 3x5 set, all in the class
+    ;; color), then the body: pips for 2..10, one large mark for the BOOT,
+    ;; the portrait for a court, with the court's name under it.
     (define (draw-face r c selected?)
       (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-             (rank (if (= (card-rank c) 10) "10" (string (rank-char c))))
+             (rank (rank-text c))
              (rw (text-width rank GLYPH-SCALE))
-             (gw (* GLYPH-SCALE GLYPH-W))
-             (bw (* BIG-SUIT-SCALE GLYPH-W))
-             (bh (* BIG-SUIT-SCALE GLYPH-H)))
+             (mark-x (+ x 4 rw 4))
+             (body-y (+ y BAND-H 2))
+             (body-h (- h BAND-H 6)))
         (draw-sides r)
         (color! (if selected? (mix C-SELECTED C-FACE-EDGE 0.3) C-FACE))
         (draw-filled-rect x y w h)
@@ -144,24 +230,26 @@
         (draw-filled-rect x y w 1)
         (draw-filled-rect x y 1 h)
         (color! (suit-color c))
-        (draw-text rank (+ x 4) (+ y 3) GLYPH-SCALE)
-        ;; the subsystem tag where a card's suit symbol would sit (the icons
-        ;; are P3's), and the suit mark small beside it for the classic eye
-        (draw-text (subsystem-tag c) (+ x 4 rw 4) (+ y 3) 1)
-        (draw-suit (card-suit c) (+ x 4 rw 4) (+ y 11) 1)
-        ;; the big suit mark, when the face is tall enough to hold it under
-        ;; the corner, with the court's name under it
-        (when (>= h (+ 3 (* GLYPH-SCALE GLYPH-H) bh 6))
-          (draw-suit (card-suit c)
-                     (+ x (half (- w bw)))
-                     (+ y (half (- h bh)))
-                     BIG-SUIT-SCALE)
-          (let ((word (rank-word c)))
-            (when word
-              (draw-text word
-                         (+ x (half (- w (text-width word 1))))
-                         (+ y (half (- h bh)) bh 4)
-                         1))))
+        (draw-text rank (+ x 4) (+ y 2) GLYPH-SCALE)
+        (draw-rows (class-mark (card-suit c)) mark-x (+ y 2) 1 MARK-W)
+        (draw-text-mini (subsystem-tag c) mark-x (+ y 12) 1)
+        ;; the body, when the face is tall enough to hold one
+        (when (>= body-h 24)
+          (let ((cx (+ x (half w)))
+                (cy (+ body-y (half body-h))))
+            (cond ((= (card-rank c) 1)
+                   (draw-rows (class-mark (card-suit c)) (- cx 12) (- cy 16) 3 MARK-W))
+                  ((>= (card-rank c) 11)
+                   (draw-court c cx (- cy 6)))
+                  (else
+                   (draw-pips c (+ x 4) body-y (- w 8) body-h)))
+            (let ((word (rank-word c)))
+              (when word
+                (color! (suit-color c))
+                (draw-text word
+                           (- cx (half (text-width word 1)))
+                           (+ body-y body-h -6)
+                           1)))))
         (when selected?
           (draw-outline (list (- x 1) (- y 1) (+ w 2) (+ h 2)) C-SELECTED))))
 
@@ -568,8 +656,10 @@
     ;; --- one frame ------------------------------------------------------------------
 
     ;; x: the frame's effects from (crash cards fx), already advanced.
-    (define (draw-deal d g x)
+    ;; tex: the portrait strip the shell has loaded, or #f.
+    (define (draw-deal d g x tex)
       (let ((game (deal-game d)))
+        (set! *portraits* tex)
         (draw-background g)
         (draw-top-row g game x)
         (draw-tableau g game x (if (deal-trace d) (trace-ticks (deal-trace d)) 0))

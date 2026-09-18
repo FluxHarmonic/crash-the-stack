@@ -1,15 +1,23 @@
 #!/bin/sh
 # Pack frames into one strip and write its coordinate table.
 #
-#   scripts/art/atlas OUT.png TABLE.txt NAME=FRAME.png [NAME=FRAME.png ...]
+#   scripts/art/atlas OUT.png TABLE.txt [--key ROLE] NAME=FRAME.png [NAME=FRAME.png ...]
 #
 # Frames go left to right, each at its own size, top-aligned; the table
 # has one line per frame: NAME X Y W H. The game reads the table's
 # numbers as constants (a data module or a literal), the manifest gets one
-# row for the PNG and one for the table.
+# row for the PNG and one for the table. --key ROLE makes that palette
+# color transparent in the strip (a white-on-C-BG portrait becomes white
+# on nothing, so the game can tint it in the class color).
 set -eu
 cd "$(dirname "$0")/../.." || exit 1
 out="${1:?out.png}"; table="${2:?table.txt}"; shift 2
+key=""
+if [ "${1:-}" = "--key" ]; then
+  role="${2:?role}"; shift 2
+  key="$(awk -v role="$role" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl)"
+  [ -n "$key" ] || { echo "atlas: unknown --key role $role"; exit 1; }
+fi
 [ $# -gt 0 ] || { echo "atlas: no frames"; exit 1; }
 x=0
 frames=""
@@ -23,6 +31,6 @@ for spec in "$@"; do
   x=$((x + w))
 done
 # shellcheck disable=SC2086
-convert $frames -background none -gravity NorthWest +append +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG32:$out"
+convert $frames -background none -gravity NorthWest +append +repage ${key:+-transparent "$key"} +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG32:$out"
 mv "$table.tmp" "$table"
 echo "atlas: $out $(identify -format '%wx%h' "$out"), $(wc -l < "$table") frames in $table"

@@ -218,8 +218,15 @@
     ;; tile stands in. Loaded textures are kept by path: ((path . tex) ...),
     ;; tex #f for a path that was given up.
     ;;   crash: texture missing PATH after N fetches
+    ;; No fetch starts in the boot's first TEXTURE-BOOT-DELAY seconds: that
+    ;; is the window in which the page's service worker activates, and a
+    ;; fetch pending across it fails under load (the finding above; the
+    ;; card table wants its portraits from its first frame, so the
+    ;; on-demand rule alone no longer keeps fetches out of the window).
     (define TEXTURE-RETRY-AFTER 1.0)
     (define TEXTURE-TRIES 2)
+    (define TEXTURE-BOOT-DELAY 2.0)
+    (define *since-boot* 0.0)
 
     (define (fetch-texture! path)
       (set! *tex-path* path)
@@ -233,23 +240,27 @@
       (set! *tex-fetch* 0)
       (set! *tex-tries* 0))
 
-    ;; The texture for the session's look: loaded, or #f (flat, pending, or
-    ;; given up).
-    (define (texture-for s)
-      (let* ((path (look-texture (look-ref (session-look s))))
-             (entry (and path (assoc path *textures*))))
+    ;; The texture at a path: loaded, or #f (no path, pending, or given up).
+    (define (texture-for-path path)
+      (let ((entry (and path (assoc path *textures*))))
         (and entry (cdr entry))))
 
-    (define (ensure-texture! dt)
-      (let ((want (look-texture (look-ref (session-look *session*)))))
-        (cond ((not want) #f)
-              ((assoc want *textures*) #f)
-              ((and *tex-path* (not (string=? *tex-path* want)))
-               ;; the look moved on mid-fetch: let that fetch land or lapse
-               ;; on its own clock, then this one is asked for
-               (ensure-fetch! dt))
-              ((not *tex-path*) (fetch-texture! want))
-              (else (ensure-fetch! dt)))))
+    ;; The texture for the session's look, or #f for a flat look.
+    (define (texture-for s)
+      (texture-for-path (look-texture (look-ref (session-look s)))))
+
+    ;; Ask for the texture at want (a path or #f) unless it is loaded or
+    ;; in flight; called once a frame by the screen that draws it.
+    (define (ensure-texture! dt want)
+      (cond ((not want) #f)
+            ((assoc want *textures*) #f)
+            ((< *since-boot* TEXTURE-BOOT-DELAY) #f)
+            ((and *tex-path* (not (string=? *tex-path* want)))
+             ;; the look moved on mid-fetch: let that fetch land or lapse
+             ;; on its own clock, then this one is asked for
+             (ensure-fetch! dt))
+            ((not *tex-path*) (fetch-texture! want))
+            (else (ensure-fetch! dt))))
 
     ;; The fetch in flight: decode it when it lands, retry or give it up.
     (define (ensure-fetch! dt)
@@ -518,8 +529,9 @@
         (report-deal-change! before after)
         (report-deal-trace! before after)
         (begin-frame)
-        (draw-deal after *card-geom* x)
-        (end-frame)))
+        (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH))
+        (end-frame)
+        (ensure-texture! dt PORTRAITS-PATH)))
 
     (define (stack-tick f dt)
       ;; The boot lines wait for trace to be switched on, and repeat after
@@ -557,7 +569,7 @@
         (begin-frame)
         (draw-session after *geom* (texture-for after) x)
         (end-frame)
-        (ensure-texture! dt)))
+        (ensure-texture! dt (look-texture (look-ref (session-look after))))))
 
     ;; The menu's boot line: each shown entry with its center.
     (define (say-menu m)
@@ -592,6 +604,7 @@
 
     (define (web-tick dt)
       (unless *booted* (boot!))
+      (set! *since-boot* (+ *since-boot* dt))
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt))
 
