@@ -35,8 +35,9 @@
 //               TRACE-AT 180 -> 3) -> "crash: shuffle" that many times, then
 //               "crash: trace ... counter 0" on the next tick,
 //               and within ICE-FIRST + 5 s the first counter-hack:
-//               "crash: trace ... counter 1" with "crash: lock A B" or a sixth
-//               "crash: shuffle" (gate leg 2 on the product)
+//               "crash: trace ... counter 1" with "crash: lock A B", a
+//               "crash: remap" or (P3) "crash: scramble" naming six faces
+//               (gate leg 2 on the product)
 //   reload      the page is reloaded (fresh navigation, same origin) and the
 //               game boots from localStorage: "crash: restored tiles 142 ...
 //               phase counter ice 1 locked ..." (gate leg 4, web)
@@ -487,9 +488,12 @@ let iceLock = null;
         else {
           const lock = consoleLines.slice(mark, ice.index + 3).map((l) => l.match(/^crash: lock (\d+) (\d+)$/)).find(Boolean);
           const remaps = consoleLines.slice(mark, ice.index + 3).filter((l) => l === "crash: remap").length;
+          const scramble = consoleLines.slice(mark, ice.index + 3).map((l) => l.match(/^crash: scramble((?: \d+)+)$/)).find(Boolean);
           if (lock) { iceLock = [lock[1], lock[2]]; pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 locked ${lock[1]} ${lock[2]}`); }
           else if (remaps) pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 remapped the stack`);
-          else detail = `ICE 1 fired (${ice.m[0]}) but neither a lock nor a remap line followed`;
+          else if (scramble && scramble[1].trim().split(" ").length === 6) pass("traced", `traced after ${SHUFFLES} shuffles; ICE 1 scrambled${scramble[1]}`);
+          else if (scramble) detail = `ICE 1 scrambled ${scramble[1].trim().split(" ").length} faces, not 6`;
+          else detail = `ICE 1 fired (${ice.m[0]}) but no lock, remap or scramble line followed`;
         }
       }
     }
@@ -611,6 +615,9 @@ let iceLock = null;
 // console.error, so they count here too (2026-09-17: a per-frame "=:
 // expected number" left this sub-arm reading "0 errors").
 const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
+// the three lines before the first error are the context a reader needs
+const firstErrorAt = consoleLines.findIndex((l) => /^Error: /.test(l));
+if (firstErrorAt > 0) console.log(`  before the first error: ${JSON.stringify(consoleLines.slice(Math.max(0, firstErrorAt - 3), firstErrorAt))}`);
 if (consoleErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
 else fail("console", `${consoleErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(consoleErrors.concat(runtimeErrors).slice(0, 5))}`);
 
