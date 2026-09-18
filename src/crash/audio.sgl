@@ -8,9 +8,12 @@
 ;;; into a bank, the ambient loop arrives as s16 mono PCM at its own rate
 ;;; (the motif render, shipped under assets/audio/), and each frame the
 ;;; mixer fills the sink's free room with the ambient resampled by linear
-;;; interpolation plus every voice still playing, stereo, and pushes it.
-;;; The sink's buffer (AMBIENT-LEAD frames) is the only latency; a cue
-;;; lands within it.
+;;; interpolation plus every voice still playing, stereo, and pushes it
+;;; up to TARGET-DEPTH frames ahead of the output: that depth is the
+;;; latency a cue lands within (64 ms at 48 kHz, plus the device's own),
+;;; and the sink's ring (BUFFER-FRAMES) is the headroom for a frame that
+;;; runs long, not the latency. A pump that always filled the ring put
+;;; every cue 170..190 ms after its tap (the slices 5-7 review).
 ;;;
 ;;; The context opens at boot on both targets and must be RESUMED from a
 ;;; user gesture on the web (the autoplay policy): the shell calls
@@ -27,14 +30,16 @@
   (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-voices audio-ambient-frames
+          audio-state
           mix-into
-          AMBIENT-GAIN CUE-GAIN PUSH-MAX)
+          AMBIENT-GAIN CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
 
   (begin
     (define AMBIENT-GAIN 0.55)
     (define CUE-GAIN 1.0)
     (define PUSH-MAX 4096)         ; frames per pump at most (85 ms at 48 kHz)
-    (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the latency ceiling
+    (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the stall headroom
+    (define TARGET-DEPTH 3072)     ; frames kept ahead of the output: the cue latency (64 ms at 48 kHz)
 
     ;; --- state ---------------------------------------------------------------
     (define *ctx* #f)
@@ -49,6 +54,11 @@
     (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
 
     (define (audio-open?) (and *stream* #t))
+    ;; The context's state: running | suspended | closed, or #f without one.
+    (define (audio-state)
+      (and *ctx*
+           (guard (e (#t #f))
+             (audio-context-state *ctx*))))
     (define (audio-stream) *stream*)
     (define (audio-rate) *rate*)
     (define (audio-muted?) *muted*)
@@ -126,12 +136,15 @@
                             ((>= (+ 1 (cdr (car vs))) (cue-frames (car (car vs)))) (advance (cdr vs) acc))
                             (else (advance (cdr vs) (cons (cons (car (car vs)) (+ 1 (cdr (car vs)))) acc))))))))))
 
-    ;; Once a frame: fill what the sink has room for, PUSH-MAX at most.
-    ;; Answers the frames pushed (0 when there is no stream).
+    ;; Once a frame: top the sink up to TARGET-DEPTH frames ahead of the
+    ;; output, PUSH-MAX at most. Answers the frames pushed (0 when there is
+    ;; no stream, or the depth is already there).
     (define (audio-pump!)
       (if (not *stream*)
           0
-          (let ((n (min PUSH-MAX (audio-stream-room *stream*))))
+          (let ((n (min PUSH-MAX
+                        (audio-stream-room *stream*)
+                        (- TARGET-DEPTH (audio-stream-depth *stream*)))))
             (if (<= n 0)
                 0
                 (let* ((ambient (and (not *muted*) *ambient*))

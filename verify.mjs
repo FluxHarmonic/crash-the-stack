@@ -97,6 +97,11 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
+// the ambient loop must reach the output (its RMS peaks near 0.1 at gain
+// 0.55), and with it off the match cue must rise the RMS by this much (its
+// first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
+const AUDIO_AMBIENT = 0.02;
+const AUDIO_RISE = 0.04;
 const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "look", "assets", "traced", "reload", "audio", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
@@ -570,9 +575,16 @@ let iceLock = null;
   else {
     let detail = "";
     const isolated = await evalJS("crossOriginIsolated === true");
-    const open = await waitLine(/^crash: audio (open|closed)$/, 0, 2000);
+    // the last boot's audio line (the arm has booted the page more than once)
+    let openAt = -1;
+    for (let i = consoleLines.length - 1; i >= 0; i--) if (/^crash: audio (open|closed)$/.test(consoleLines[i])) { openAt = i; break; }
+    const open = openAt >= 0 ? { m: consoleLines[openAt].match(/^crash: audio (open|closed)$/) } : null;
+    // the ambient loop lands a few seconds after the boot (the page fetches
+    // it late, on purpose) and must be playing under the cue
+    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 10000) : null;
     if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
     else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
+    else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 10 s of the boot)";
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
@@ -585,8 +597,21 @@ let iceLock = null;
         if (!pair) detail = "no boot line after NEXT";
         else if (!resumed) detail = "the context was never resumed from a tap";
         else {
-          // level before the match (the ambient may already play): then the match
-          const before = await evalJS(`(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`);
+          // the ambient's level, its peak over 400 ms: it must be audible; then
+          // the ambient is dropped so the cue is measured by itself (over the
+          // ambient a muted cue hid inside the music's own swings)
+          const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+          let ambientPeak = -1;
+          for (let i = 0; i < 8; i++) {
+            const r = await evalJS(rms);
+            if (r < 0) { ambientPeak = r; break; }
+            ambientPeak = Math.max(ambientPeak, r);
+            await sleep(50);
+          }
+          await evalJS("window.__crashUpdates.app.dispatch('ambient', 'off')");
+          await sleep(400);
+          let before = 0;
+          for (let i = 0; i < 4; i++) { before = Math.max(before, await evalJS(rms)); await sleep(50); }
           mark = consoleLines.length;
           await tap(pair.m[4], pair.m[5]);
           await sleep(120);
@@ -594,16 +619,17 @@ let iceLock = null;
           const removed = await waitLine(/^crash: removed /, mark, 3000);
           let peak = 0;
           for (let i = 0; i < 8; i++) {
-            const r = await evalJS(`(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`);
+            const r = await evalJS(rms);
             peak = Math.max(peak, r);
             await sleep(50);
           }
           const kinds = JSON.parse(await evalJS("JSON.stringify(window.__crashAudioTap.nodes)"));
           if (!removed) detail = "the pair did not match after NEXT";
-          else if (before < 0) detail = "no AudioNode ever connected to a destination (the tap saw nothing)";
-          else if (!(peak > 0)) detail = `RMS stayed 0 after the match (nodes ${kinds.join(",")})`;
+          else if (ambientPeak < 0) detail = "no AudioNode ever connected to a destination (the tap saw nothing)";
+          else if (!(ambientPeak > AUDIO_AMBIENT)) detail = `the ambient landed but its RMS peaked at ${ambientPeak.toFixed(4)}: not playing`;
+          else if (!(peak > before + AUDIO_RISE)) detail = `RMS peaked ${peak.toFixed(4)} after the match against ${before.toFixed(4)} with the ambient off: no cue (nodes ${kinds.join(",")})`;
           else if (!kinds.includes("AudioWorkletNode")) detail = `RMS ${peak.toFixed(4)} but the bridge used ${kinds.join(",")}, not the AudioWorkletNode path`;
-          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
+          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; ambient ${ambient.m[1]} frames at RMS ${ambientPeak.toFixed(4)}; with it off, RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
         }
       }
     }

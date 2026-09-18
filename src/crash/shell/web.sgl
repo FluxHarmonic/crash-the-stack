@@ -158,8 +158,8 @@
     (define *bg-mode* 'life) ; ?bg=reaction: the living background's other rule
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
-    (define *ambient-chunks* '()) ; base64 chunks of the ambient PCM the page sent, newest first
-    (define *resumed* #f)    ; the context was resumed from a tap
+    (define *ambient-chunks* '()) ; the ambient PCM's decoded chunks, newest first
+    (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
     (define *ms-n* 0)
@@ -198,6 +198,7 @@
             (else (string->symbol k))))
 
     (define (key-down! k)
+      (gesture! k)
       (let ((sym (dom-key->sym k)))
         ;; A held key repeats keydown in the DOM; only the first counts
         ;; as pressed, matching sigil-app's edge semantics.
@@ -217,8 +218,10 @@
     ;; as ("audio-chunk", base64) dispatches, then ("audio-done", count).
     ;; Decoded here into one s16le bytevector and handed to the mixer.
     ;;   crash: audio open|closed             the context and sink at boot
-    ;;   crash: audio resumed                 the first tap resumed the context
+    ;;   crash: audio resumed                 a gesture resumed the context (said once)
     ;;   crash: ambient FRAMES                the loop landed (frames at AMBIENT-RATE)
+    ;; ("ambient", "off") drops the loop again: the browser arm's way to
+    ;; hear a cue by itself.
     (define B64 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 
     ;; code point -> value, a 128-entry table built once (1.1 MB of PCM is
@@ -235,35 +238,57 @@
       (let ((k (char->integer c)))
         (and (< k 128) (vector-ref B64-TABLE k))))
 
-    ;; base64 text -> bytevector (padding tolerated; other characters skipped).
+    ;; base64 text -> bytevector, exact to the padding. Indexed, not
+    ;; listed: a chunk is 22 thousand characters and the page sends
+    ;; seventy of them, one a frame; a string->list per chunk was the
+    ;; garbage that made the decode a one-second stall (the review).
     (define (b64-decode text)
-      (let* ((chars (filter b64-value (string->list text)))
-             (n (length chars))
-             (out (make-bytevector (quotient (* n 3) 4) 0)))
-        (let loop ((cs chars) (acc 0) (bits 0) (k 0))
-          (cond ((null? cs) out)
-                (else
-                 (let ((acc (+ (* acc 64) (b64-value (car cs))))
-                       (bits (+ bits 6)))
-                   (if (>= bits 8)
-                       (let* ((bits (- bits 8))
-                              (byte (quotient acc (expt 2 bits))))
-                         (when (< k (bytevector-length out))
-                           (bytevector-u8-set! out k byte))
-                         (loop (cdr cs) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
-                       (loop (cdr cs) acc bits k))))))))
+      (let* ((n (string-length text))
+             (pads (cond ((and (>= n 2) (char=? (string-ref text (- n 1)) #\=) (char=? (string-ref text (- n 2)) #\=)) 2)
+                         ((and (>= n 1) (char=? (string-ref text (- n 1)) #\=)) 1)
+                         (else 0)))
+             (out (make-bytevector (quotient (* (- n pads) 3) 4) 0)))
+        (let loop ((i 0) (acc 0) (bits 0) (k 0))
+          (if (= i n)
+              out
+              (let ((v (b64-value (string-ref text i))))
+                (if (not v)
+                    (loop (+ i 1) acc bits k)
+                    (let ((acc (+ (* acc 64) v))
+                          (bits (+ bits 6)))
+                      (if (>= bits 8)
+                          (let* ((bits (- bits 8))
+                                 (byte (quotient acc (expt 2 bits))))
+                            (when (< k (bytevector-length out))
+                              (bytevector-u8-set! out k byte))
+                            (loop (+ i 1) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
+                          (loop (+ i 1) acc bits k)))))))))
 
+    ;; One chunk a frame, decoded as it lands, so the cost is spread over
+    ;; the seconds the page takes to send them.
     (define (audio-chunk! payload)
-      (set! *ambient-chunks* (cons payload *ambient-chunks*))
+      (set! *ambient-chunks* (cons (b64-decode payload) *ambient-chunks*))
       0)
 
     (define (audio-done! payload)
-      (let* ((chunks (reverse *ambient-chunks*))
-             (bytes (apply bytevector-append (map b64-decode chunks))))
+      (let ((bytes (apply bytevector-append (reverse *ambient-chunks*))))
         (set! *ambient-chunks* '())
         (audio-set-ambient! bytes AMBIENT-RATE)
         (say "ambient" (quotient (bytevector-length bytes) 2))
         0))
+
+    ;; A user gesture (a pointer down, a key, the page's pointerup and
+    ;; touchend and click): resume the context whenever it is not running.
+    ;; Once is not enough: touch activation comes with pointerup, not
+    ;; pointerdown; iOS suspends the context on lock and tab switch; a
+    ;; keyboard-only player never taps (the slices 5-7 review).
+    (define (gesture! payload)
+      (when (and *audio-ready* (not (eq? (audio-state) 'running)))
+        (audio-resume!))
+      (when (and *audio-ready* (not *resumed*) (eq? (audio-state) 'running))
+        (set! *resumed* #t)
+        (say "audio" "resumed"))
+      0)
 
     ;; --- pointer -------------------------------------------------------------
 
@@ -272,11 +297,7 @@
     ;; uses) and a modifier bitmask the game does not read (the web's
     ;; commands are on the canvas, not on chords).
     (define (pointer-down! payload)
-      ;; the first tap is the user gesture the autoplay policy wants
-      (when (and *audio-ready* (not *resumed*))
-        (audio-resume!)
-        (set! *resumed* #t)
-        (say "audio" "resumed"))
+      (gesture! payload)
       (let ((parts (string-split payload ",")))
         (when (= (length parts) 3)
           (let ((x (string->number (car parts)))
@@ -861,5 +882,8 @@
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (if (string=? payload "reaction") 'reaction 'life)))))
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
+            ((string=? type "gesture") (gesture! payload))
+            ;; the ambient off (the browser arm mutes it to hear a cue alone)
+            ((string=? type "ambient") (when (string=? payload "off") (audio-set-ambient! #f AMBIENT-RATE)) 0)
             ((string=? type "audio-done") (audio-done! payload))
             (else 0)))))

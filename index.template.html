@@ -114,26 +114,39 @@
     // then ("audio-done", n). Fetched after the boot's first seconds,
     // outside the service worker's activation window (the same reason the
     // game's own texture fetches wait), and never fatal: no ambient means
-    // sound effects alone.
+    // sound effects alone. One 16 KB chunk per animation frame: the game
+    // decodes each as it lands, so the decode is spread over about a
+    // second instead of stalling one frame for that long.
     function fetchAmbient(app) {
       setTimeout(function () {
         fetch("assets/audio/ambient.pcm", { cache: "force-cache" }).then(function (r) {
           if (!r.ok) throw new Error("ambient " + r.status);
           return r.arrayBuffer();
         }).then(function (buf) {
-          var bytes = new Uint8Array(buf), CHUNK = 48 * 1024, n = 0;
-          for (var i = 0; i < bytes.length; i += CHUNK) {
+          var bytes = new Uint8Array(buf), CHUNK = 16 * 1024, i = 0, n = 0;
+          (function next() {
+            if (i >= bytes.length) { app.dispatch("audio-done", String(n)); return; }
             var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
             for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
             app.dispatch("audio-chunk", btoa(s));
-            n++;
-          }
-          app.dispatch("audio-done", String(n));
+            i += CHUNK; n++;
+            requestAnimationFrame(next);
+          })();
         }).catch(function (err) {
           console.log("crash: ambient failed " + err.message);
         });
       }, 2500);
     }
+
+    // Every user gesture reaches the game as ("gesture", name), so it can
+    // resume its audio context whenever the browser has suspended it: a
+    // touch counts as activation at pointerup, not pointerdown; iOS
+    // suspends on lock; a keyboard-only player never taps.
+    ["pointerup", "touchend", "click", "keydown"].forEach(function (name) {
+      document.addEventListener(name, function () {
+        if (updates.app) updates.app.dispatch("gesture", name);
+      }, true);
+    });
     globalThis.__crashUpdates = updates;
 
     var canvas = document.getElementById("stage");
