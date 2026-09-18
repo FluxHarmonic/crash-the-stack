@@ -33,6 +33,7 @@ var SHELL = [
   "assets/test-tile.png",
   "assets/tiles/block.png",
   "assets/tiles/block-worn.png",
+  "assets/packets/portraits.png",
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
   "assets/icon-512.png"

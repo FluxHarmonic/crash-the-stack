@@ -46,8 +46,8 @@
     (define PIP-SCALE 1)
     (define PORTRAIT-W 40)
     (define PORTRAIT-H 48)
-    ;; A strip of three portraits, DAEMON SYSOP ROOT, white on transparent,
-    ;; tinted in the class color when drawn; loaded by the shell.
+    ;; A strip of three portraits, DAEMON SYSOP ROOT, a white tint mask on
+    ;; transparent (the class color multiplies it), loaded by the shell.
     (define PORTRAITS-PATH "assets/packets/portraits.png")
     ;; The portrait texture this frame, or #f (set by draw-deal; the face
     ;; drawers are reached through the tableau, the movers and the cascade).
@@ -137,10 +137,23 @@
     ;; inside a C-COLD frame, and no hot color, so a face-down packet never
     ;; looks playable. The noise comes from the table's own random stream
     ;; seeded by the packet's place on the screen, so it holds still.
-    (define HEX-CHARS "0123456789abcdef")
+    ;; The sixteen hex digits as one-character strings, made once: the
+    ;; back draws a few hundred of them a frame.
+    (define HEX-STRINGS
+      (list->vector (map string (string->list "0123456789abcdef"))))
+    ;; The noise is sparse on purpose: sokol_gp draws nothing at all once a
+    ;; frame passes 65,536 vertices (six per rectangle), and a dealt table
+    ;; has 22 backs; four digits on six rows is about 150 rectangles a back
+    ;; (the slice-4 review measured the dense form at 400, 97% of the
+    ;; budget with the HUD, and an ICE toast over it).
+    (define BACK-COLUMNS 4)
+    (define BACK-ROW-STEP 12)
 
     (define (draw-back r)
-      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+      (let ((x (car r))
+            (y (cadr r))
+            (w (caddr r))
+            (h (cadddr r)))
         (draw-sides r)
         (color! C-BG)
         (draw-filled-rect x y w h)
@@ -150,14 +163,19 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! C-STATIC-B)
-        (let rows ((py (+ y 6)) (rng (prng-seed (+ 101 (* 7 x) (* 13 y)))))
-          (when (< py (+ y h -10))
-            (let chars ((px (+ x 6)) (rng rng))
-              (if (< px (+ x w -8))
+        (let rows ((py (+ y 8))
+                   (rng (prng-seed (+ 101 (* 7 x) (* 13 y)))))
+          (when (< py (+ y h -8))
+            (let chars ((k 0)
+                        (rng rng))
+              (if (< k BACK-COLUMNS)
                   (let ((rng (prng-next rng)))
-                    (draw-text-mini (string (string-ref HEX-CHARS (prng-index rng 16))) px py 1)
-                    (chars (+ px 8) rng))
-                  (rows (+ py 10) rng)))))))
+                    (draw-text-mini (vector-ref HEX-STRINGS (prng-index rng 16))
+                                    (+ x 10 (* k 14))
+                                    py
+                                    1)
+                    (chars (+ k 1) rng))
+                  (rows (+ py BACK-ROW-STEP) rng)))))))
 
     ;; --- the face: the index band, the pips, the courts ------------------------
 
@@ -182,7 +200,8 @@
              (row-y (lambda (frac) (+ y (exact (round (- (* h frac) (/ mh 2))))))))
         (let loop ((ps pattern) (i 0))
           (unless (null? ps)
-            (let ((n (car ps)) (cx (col-x i)))
+            (let ((n (car ps))
+                  (cx (col-x i)))
               (cond ((= n 1)
                      (draw-rows (class-mark (card-suit c))
                                 cx
@@ -201,8 +220,8 @@
             (loop (cdr ps) (+ i 1))))))
 
     ;; The court's portrait from the strip (DAEMON SYSOP ROOT = frames
-    ;; 0 1 2), white on transparent, tinted in the class color; the large
-    ;; class mark stands in while the texture is not there.
+    ;; 0 1 2), a white mask tinted in the class color; the large class
+    ;; mark stands in while the texture is not there.
     (define (draw-court c cx cy)
       (let ((frame (- (card-rank c) 11)))
         (if *portraits*

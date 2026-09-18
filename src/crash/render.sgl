@@ -40,14 +40,23 @@
 
   (begin
     ;; The bible's section 3: four suits of eight (MEM, PWR, TX, DSK) and
-    ;; the four daemons in C-DAEMON.
-    (define (suit-color face)
+    ;; the four daemons in the look's daemon color (C-DAEMON by default;
+    ;; C-GIBSON, Gibson's watchers, is the candidate David asked to see).
+    (define (suit-color look face)
       (case (face-suit face)
         ((0) C-SUIT-0)
         ((1) C-SUIT-1)
         ((2) C-SUIT-2)
         ((3) C-SUIT-3)
-        (else C-DAEMON)))
+        (else (if (eq? (look-daemon look) 'violet) C-GIBSON C-DAEMON))))
+
+    ;; The tile face in the look's color: the built C-FACE, or one of the
+    ;; two darker candidates (both keep the C-FACE-EDGE rim and the side).
+    (define (face-color look)
+      (case (look-face look)
+        ((navy) C-WIRE-DARK)
+        ((charcoal) C-STATIC-B)
+        (else C-FACE)))
 
     ;; --- background -----------------------------------------------------------
 
@@ -102,13 +111,13 @@
 
     ;; The glyph is drawn only while the (possibly flipping) face is wide
     ;; enough to hold it; a tile edge-on shows no glyph.
-    (define (draw-glyph-on g sheet face x y w h dark?)
+    (define (draw-glyph-on g look face x y w h dark?)
       (let* ((scale (glyph-scale g))
              (gw (* scale GLYPH-W))
              (gh (* scale GLYPH-H)))
         (when (>= w (+ gw 2))
-          (color! (if dark? C-BG (suit-color face)))
-          (draw-face-glyph sheet
+          (color! (if dark? C-BG (suit-color look face)))
+          (draw-face-glyph (look-glyphs look)
                            face
                            (+ x (exact (floor (/ (- w gw) 2))))
                            (+ y (exact (floor (/ (- h gh) 2))))
@@ -138,12 +147,12 @@
     ;; nothing) and gets a dark line to read as an edge (David, 2026-09-17:
     ;; a tile's right boundary was hard to see against the tiles under it;
     ;; two faces side by side on one layer stay seamless).
-    (define (draw-face-primitives g sheet face x y w h selected? lock right-open? glow)
+    (define (draw-face-primitives g look face x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
                     ((eq? lock 'weak) C-LOCK-WEAK)
-                    (else C-FACE)))
+                    (else (face-color look))))
       (draw-filled-rect x y w h)
       (color! (if selected? C-SELECTED C-FACE-EDGE))
       (draw-filled-rect x y w 1)
@@ -151,7 +160,7 @@
       (when right-open?
         (color! (if selected? C-SELECTED C-SIDE))
         (draw-filled-rect (+ x w -1) y 1 h))
-      (when face (draw-glyph-on g sheet face x y w h selected?))
+      (when face (draw-glyph-on g look face x y w h selected?))
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
@@ -193,7 +202,7 @@
                              (- fw inset)
                              (- fh inset))
         (when (and face (= frame 0))
-          (draw-glyph-on g (look-glyphs look) face x y w h selected?))))
+          (draw-glyph-on g look face x y w h selected?))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -234,7 +243,6 @@
              (now (trace-ticks (session-trace s)))
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
-             (sheet (look-glyphs look))
              (textured? (and tex (look-texture look) #t))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
@@ -267,13 +275,13 @@
                            (lambda (id face x y w h selected?)
                              (if textured?
                                  (draw-face-texture g look b id face tex x y w h selected?)
-                                 (draw-face-primitives g sheet face x y w h selected?
+                                 (draw-face-primitives g look face x y w h selected?
                                                        (lock-state b id now)
                                                        (not (blocked-right? b id))
                                                        glow))))
             (loop (+ layer 1))))
-        (draw-ghosts g sheet x)
-        (draw-particles g x)
+        (draw-ghosts g look x)
+        (draw-particles g look x)
         (when highlight (draw-ring g highlight C-HIGHLIGHT 1.0))
         (let ((hint (session-hint s))
               (partner (session-hint-partner s))
@@ -285,7 +293,7 @@
 
     ;; The match ghosts: a face rising off the table and fading, in the
     ;; primitives style whatever the render mode (the burst is the point).
-    (define (draw-ghosts g sheet x)
+    (define (draw-ghosts g look x)
       (for-each (lambda (ghost)
                   (let ((face (car ghost))
                         (gx (cadr ghost))
@@ -298,11 +306,11 @@
                     (color-alpha! C-SELECTED a)
                     (draw-filled-rect gx gy w h)
                     (when face
-                      (color-alpha! (suit-color face) a)
+                      (color-alpha! (suit-color look face) a)
                       (let* ((scale (glyph-scale g))
                              (gw (* scale GLYPH-W))
                              (gh (* scale GLYPH-H)))
-                        (draw-face-glyph sheet
+                        (draw-face-glyph (look-glyphs look)
                                          face
                                          (exact (floor (+ gx (/ (- w gw) 2))))
                                          (exact (floor (+ gy (/ (- h gh) 2))))
@@ -310,9 +318,9 @@
                 (fx-ghosts x)))
 
     ;; Glyph fragments and rain: small squares in the suit color.
-    (define (draw-particles g x)
+    (define (draw-particles g look x)
       (for-each (lambda (pt)
-                  (color-alpha! (suit-color (car pt)) (list-ref pt 4))
+                  (color-alpha! (suit-color look (car pt)) (list-ref pt 4))
                   (draw-filled-rect (cadr pt)
                                     (caddr pt)
                                     (cadddr pt)
@@ -508,17 +516,21 @@
     (define (draw-toast g text top p)
       (draw-toast-in (geometry-vw g) text top p))
 
-    ;; An ICE line is one the ICE speaks ("ICE LOCKED A PAIR."); the
-    ;; bible's section 1 gives it C-ICE, every other line C-TEXT, and
-    ;; nothing else exists (Gibson's C-GIBSON waits for D17's lines).
+    ;; An ICE line is one the ICE speaks ("ICE LOCKED A PAIR.", and the
+    ;; lock lines, which are its work too); the bible's section 1 gives it
+    ;; C-ICE, every other line C-TEXT, and nothing else exists (Gibson's
+    ;; C-GIBSON waits for D17's lines).
     (define (ice-line? text)
-      (and (>= (string-length text) 4)
-           (string=? (substring text 0 4) "ICE ")))
+      (or (and (>= (string-length text) 4)
+               (string=? (substring text 0 4) "ICE "))
+          (and (member text (list MSG-LOCKED MSG-LOCK-WEAK MSG-LOCK-BROKEN)) #t)))
 
     ;; The same toast on any table (the card table's, P2). An ICE toast
-    ;; lands with ICE-FLASH-TICKS of C-ICE around the board's edge (bible
-    ;; section 5), so the counter-hack is unmistakable from across the room.
-    (define ICE-FLASH-TICKS 6)
+    ;; lands with about six ticks of C-ICE around the board's edge (bible
+    ;; section 5), so the counter-hack is unmistakable from across the
+    ;; room: ICE-FLASH of the toast's life, six ticks of the stack's 160
+    ;; and five of the card table's 130.
+    (define ICE-FLASH 0.0375)
 
     (define (draw-toast-in vw text top p)
       (let* ((ice? (ice-line? text))
@@ -536,7 +548,7 @@
              (flash (if (and (>= p TOAST-SLIDE) (< p (* 2.5 TOAST-SLIDE)))
                         (if (even? (exact (floor (* p 60)))) 1.0 0.0)
                         0.0)))
-        (when (and ice? (>= p TOAST-SLIDE) (< p (+ TOAST-SLIDE (/ ICE-FLASH-TICKS TOAST-TICKS))))
+        (when (and ice? (>= p TOAST-SLIDE) (< p (+ TOAST-SLIDE ICE-FLASH)))
           (color! C-ICE)
           (draw-filled-rect 0 0 vw 3)
           (draw-filled-rect 0 (- top 3) vw 3)
