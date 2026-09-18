@@ -52,6 +52,8 @@
 ;;;   crash: restored tiles N trace V phase P ice K locked A B ...   a saved
 ;;;                                         board came back at boot (verify.mjs's
 ;;;                                         reload sub-arm)
+;;;   crash: tile missing after N fetches   the test tile never landed; the
+;;;                                         flat renderer stands in
 ;;;
 ;;;   crash: cards seed S moves N draw D    the card table booted (with ?cards)
 ;;;   crash: cards stock X Y                the stock's center
@@ -124,7 +126,9 @@
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
-    (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = none
+    (define *tile-fetch* 0)  ; gles3 image handle for the test tile, 0 = not asked yet
+    (define *tile-tries* 0)  ; fetches started for it, TILE-TRIES at most
+    (define *tile-wait* 0.0) ; seconds the current fetch has been pending
     (define *texture* #f)    ; the decoded test tile, once ready
     (define *trace* #f)      ; print the trace lines above
     (define *restored* #f)   ; the boot restored a saved board
@@ -198,15 +202,46 @@
 
     ;; --- the test tile, fetched by JS, decoded here once it lands ---------
 
-    (define (ensure-texture!)
-      (when (and (not *texture*)
-                 (> *tile-fetch* 0)
-                 (gles3-image-ready? *tile-fetch*))
-        (let ((img (load-image-from-memory (gles3-image-ptr *tile-fetch*)
-                                           (gles3-image-size *tile-fetch*))))
-          (when img
-            (set! *texture* (load-texture img))
-            (image-free! img)))))
+    ;; The tile is optional (the primitives renderer is the fallback), so
+    ;; it is fetched on demand, from the first stack frame that wants the
+    ;; texture render mode, rather than from web-main: a fetch pending
+    ;; while the page's service worker activates over the boot's first
+    ;; frames failed under load ("Failed to fetch", measured 2026-09-18 in
+    ;; headless Chrome, 7 of 24 arm runs; the retry a second later always
+    ;; landed). A fetch that has not landed after TILE-RETRY-AFTER seconds
+    ;; is asked for again, TILE-TRIES times in all; then the tile is given
+    ;; up with one trace line and the mode stays flat. (Today the texture
+    ;; mode's only toggle is ctrl+t, which has no browser path, so no web
+    ;; session asks for the tile; the fetch waits for the day one does.)
+    (define TILE-RETRY-AFTER 1.0)
+    (define TILE-TRIES 2)
+
+    (define (fetch-tile!)
+      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
+      (set! *tile-tries* (+ *tile-tries* 1))
+      (set! *tile-wait* 0.0))
+
+    (define (ensure-texture! dt)
+      (cond (*texture* #f)
+            ((> *tile-tries* TILE-TRIES) #f)
+            ((and (= *tile-fetch* 0)
+                  (not (eq? (session-render-mode *session*) 'texture)))
+             #f)
+            ((= *tile-fetch* 0) (fetch-tile!))
+            ((gles3-image-ready? *tile-fetch*)
+             (let ((img (load-image-from-memory (gles3-image-ptr *tile-fetch*)
+                                                (gles3-image-size *tile-fetch*))))
+               (when img
+                 (set! *texture* (load-texture img))
+                 (image-free! img))))
+            (else
+             (set! *tile-wait* (+ *tile-wait* dt))
+             (when (> *tile-wait* TILE-RETRY-AFTER)
+               (if (< *tile-tries* TILE-TRIES)
+                   (fetch-tile!)
+                   (begin
+                     (say "tile" "missing" "after" *tile-tries* "fetches")
+                     (set! *tile-tries* (+ *tile-tries* 1))))))))
 
     ;; --- trace lines ---------------------------------------------------------
 
@@ -460,7 +495,6 @@
         (end-frame)))
 
     (define (stack-tick f dt)
-      (ensure-texture!)
       ;; The boot lines wait for trace to be switched on, and repeat after
       ;; a new deal.
       (when (and *trace* (not *announced*))
@@ -492,7 +526,8 @@
           (set! *announced* #f))
         (begin-frame)
         (draw-session after *geom* *texture* x)
-        (end-frame)))
+        (end-frame)
+        (ensure-texture! dt)))
 
     ;; The menu's boot line: each shown entry with its center.
     (define (say-menu m)
@@ -651,7 +686,6 @@
       (gfx-setup)
       (set-viewport VW VH)
       (set-letterbox-color 0.0 0.0 0.0)
-      (set! *tile-fetch* (gles3-fetch-image TEST-TILE-PATH))
       ;; The callback name is only used by the bytecode eval path; native
       ;; builds get a ("frame", ms) dispatch instead, which lands in web-dispatch.
       (gles3-start-loop "crash-web-tick")
