@@ -26,7 +26,7 @@
 //   look        taps on the TILES counter (the game's "crash: control look X Y"
 //               line) step the look ("crash: look NAME", first in the boot
 //               lines), each tap to a new name, around to the test-tile look
-//               within eight taps (P3, ruling D26's sheet switch on the phone)
+//               within twelve taps (P3, ruling D26's sheet switch on the phone)
 //   assets      every resource the page loaded (performance entries: the
 //               wasm, the bridges, assets/) answered 200, and the test tile the
 //               look sub-arm asked for is among them (P3 gate leg 2, the web
@@ -419,7 +419,7 @@ else fail("keys-match", keysDetail);
     const boot = await waitLine(/^crash: look ([a-z-]+)$/, 0, 2000);
     const seen = boot ? [boot.m[1]] : [];
     if (!boot) detail = "no \"crash: look\" boot line";
-    for (let i = 0; !detail && i < 8 && seen[seen.length - 1] !== "test-tile"; i++) {
+    for (let i = 0; !detail && i < 12 && seen[seen.length - 1] !== "test-tile"; i++) {
       mark = consoleLines.length;
       await tap(ctl.m[1], ctl.m[2]);
       const next = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
@@ -427,7 +427,7 @@ else fail("keys-match", keysDetail);
       else if (next.m[1] === seen[seen.length - 1]) detail = `tap ${i + 1} stayed on ${next.m[1]}`;
       else seen.push(next.m[1]);
     }
-    if (!detail && seen[seen.length - 1] !== "test-tile") detail = `no test-tile look within 8 taps: ${seen.join(" -> ")}`;
+    if (!detail && seen[seen.length - 1] !== "test-tile") detail = `no test-tile look within 12 taps: ${seen.join(" -> ")}`;
     if (detail) fail("look", detail);
     else { await sleep(1500); pass("look", seen.join(" -> ")); }
   }

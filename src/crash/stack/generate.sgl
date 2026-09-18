@@ -11,10 +11,16 @@
 ;;; under any face assignment and generate answers #f rather than emitting
 ;;; an unsolvable board; GNOME assigns faces anyway in that case, we refuse.
 ;;;
-;;; Faces: with n slots there are n/2 pairs and pair i gets face i mod 36,
-;;; shuffled, so the Turtle's 72 pairs are 36 faces four tiles each. reshuffle
-;;; runs the same search over the tiles still on a board with the faces they
-;;; still carry (every face count is even, because pairs leave together).
+;;; Faces: with n slots there are n/2 pairs and pair i gets the i-th face
+;;; of FACE-ORDER (mod its length), shuffled. FACE-ORDER is the Turtle's 72
+;;; pairs: every suit face twice (64 pairs, four tiles each), every daemon
+;;; once (4 pairs: eight daemon tiles on the board, GNOME's flowers and
+;;; seasons count; ruled by David 2026-09-18 from play, down from sixteen),
+;;; and the four remaining pairs to the first glyph of each suit, which
+;;; therefore shows six tiles. reshuffle runs the same search over the
+;;; tiles still on a board with the faces they still carry (every face
+;;; count is even, because pairs leave together; the daemons count as one
+;;; face there, any two of them matching).
 ;;;
 ;;; The random stream is the board's own MINSTD state (crash stack prng);
 ;;; one seed, one board, on every machine and every Sigil.
@@ -25,11 +31,20 @@
           (crash stack rules)
           (crash stack prng))
 
-  (export generate generate/stats reshuffle FACE-COUNT
+  (export generate generate/stats reshuffle FACE-COUNT FACE-ORDER
           replay-solution)
 
   (begin
     (define FACE-COUNT 36)
+
+    ;; The face of pair i on a 72-pair board (see the header); a bigger
+    ;; layout wraps around, a smaller one takes a prefix.
+    (define FACE-ORDER
+      (let loop ((i 0) (acc '()))
+        (cond ((< i 64) (loop (+ i 1) (cons (modulo i 32) acc)))
+              ((< i 68) (loop (+ i 1) (cons (+ 32 (- i 64)) acc)))
+              ((< i 72) (loop (+ i 1) (cons (* 8 (- i 68)) acc)))
+              (else (list->vector (reverse acc))))))
 
     ;; Fisher-Yates over a vector, consuming the prng. Returns the new state.
     (define (shuffle! vec rng)
@@ -111,12 +126,12 @@
               (cons work backtracks))
             (cons #f backtracks))))
 
-    ;; Pair i of n gets face (i mod 36); shuffled by the prng.
+    ;; Pair i of n gets FACE-ORDER's i-th face (mod 72); shuffled by the prng.
     (define (dealt-faces pair-count rng)
       (let ((v (make-vector pair-count 0)))
         (let loop ((i 0))
           (when (< i pair-count)
-            (vector-set! v i (modulo i FACE-COUNT))
+            (vector-set! v i (vector-ref FACE-ORDER (modulo i (vector-length FACE-ORDER))))
             (loop (+ i 1))))
         (let ((rng (shuffle! v rng)))
           (cons (vector->list v) rng))))
