@@ -17,13 +17,16 @@ set -eu
 cd "$(dirname "$0")/../.." || exit 1
 raw="${1:?raw.png}"; role="${2:?role}"; names="${3:?names}"
 [ -f "$raw" ] || { echo "cells: no $raw" >&2; exit 1; }
+hex_of() { awk -v role="$1" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 scripts/art/palette "$tmp/pal.png" > /dev/null
 ink="$(awk -v role="$role" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl)"
 [ -n "$ink" ] || { echo "cells: unknown role $role" >&2; exit 1; }
 # snap to the palette, then everything that is not the ink is ground
-convert "$raw" -alpha off -dither None -remap "$tmp/pal.png" -compress none ppm:- > "$tmp/strip.ppm"
+# a generator may answer with transparency; what is under alpha 0 is noise,
+# so the raw is flattened onto the ground color, never alpha-stripped
+convert "$raw" -background "$(hex_of C-BG)" -alpha remove -alpha off -dither None -remap "$tmp/pal.png" -compress none ppm:- > "$tmp/strip.ppm"
 awk -v ink="$ink" -v names="$names" -v fill="0.40" '
   function hex2(h, i) { return (index("0123456789ABCDEF", substr(h, i, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, i + 1, 1)) - 1 }
   BEGIN { ir = hex2(ink, 2); ig = hex2(ink, 4); ib = hex2(ink, 6); n = split(names, nm, ",") }

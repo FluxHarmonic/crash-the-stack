@@ -11,7 +11,7 @@
 ;;;   scripts/dev sigil build --config web               browser (manifest has binaryen)
 ;;;   scripts/serve-web                                  host build/web on wg0
 
-(import (sigil process) (sigil string) (sigil time) (sigil math))
+(import (sigil process) (sigil string) (sigil time) (sigil math) (sigil fs))
 
 (define sigil-repo "codeberg:sigil/sigil")
 (define app-repo "codeberg:sigil/sigil-app")
@@ -29,6 +29,19 @@
     (if (string=? dirty "")
         sha
         (string-append sha "-dirty-" (number->string (exact (floor (current-second))))))))
+
+;; The last step: assets/refs/ (raw generator outputs and prompts, P3) is
+;; provenance evidence the manifest does not cover and the page never
+;; fetches; it is not shipped, so it leaves the build's assets/ again.
+;; Last, because link-assets' copy is a registered action that runs after
+;; the step list, not in it (measured 2026-09-18: a drop placed right after
+;; link-assets ran before the copy).
+(define (drop-refs ctx)
+  (let ((refs (path-join (config-output-dir (context-config ctx)) "assets/refs")))
+    (when (directory-exists? refs)
+      (process-run "rm" "-rf" refs)
+      (display "  dropped ") (display refs) (newline))
+    ctx))
 
 ;; After link-web-application on a wasm target: copy web/sw.js into the
 ;; build with its version stamped, and stamp the page's __VERSION__ too.
@@ -119,12 +132,14 @@
       steps: (list
         (compile-sigil-modules sources: "src/**/*.sgl")
         (copy-package-docs)
-        ;; the whole assets/ tree -> build/web/assets/ (licence, manifest
+        ;; the whole assets/ tree -> build/web/assets/ (license, manifest
         ;; and the tile sources included), so the web page fetches the test
-        ;; tile from assets/test-tile.png next to the wasm.
+        ;; tile from assets/test-tile.png next to the wasm; then the
+        ;; generator references come back out: provenance, not shipped.
         (link-assets)
         ;; link-web-application generates the sigil_wasm_app_register that
         ;; calls sigil-graphics' native-init (sigil 0.22.2), so the sokol C
         ;; is linked in and the wasm imports `gl`.
         (link-web-application name: "crash-the-stack" html-mount-id: "status")
-        stamp-web-version))))
+        stamp-web-version
+        drop-refs))))

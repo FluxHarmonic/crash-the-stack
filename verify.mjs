@@ -23,10 +23,10 @@
 //               "crash: control undo X Y" boot line gives), then the hint-mode
 //               tags of each tile of the same pair, from the game's
 //               "crash: labels" boot line -> "crash: removed A B tiles 142"
-//   look        a tap on the TILES counter (the game's "crash: control look X Y"
-//               line) steps the look away from the boot's ("crash: look NAME"
-//               in the boot lines), and a second tap steps it again (P3,
-//               ruling D26's sheet switch on the phone)
+//   look        taps on the TILES counter (the game's "crash: control look X Y"
+//               line) step the look ("crash: look NAME", first in the boot
+//               lines), each tap to a new name, around to the test-tile look
+//               within eight taps (P3, ruling D26's sheet switch on the phone)
 //   assets      every resource the page loaded (performance entries: the
 //               wasm, the bridges, assets/) answered 200, and the test tile the
 //               look sub-arm asked for is among them (P3 gate leg 2, the web
@@ -412,24 +412,24 @@ else fail("keys-match", keysDetail);
   if (EXPECT_NO_SELECTION) skip("look", "controls are not tappable with forwarding off");
   else if (!ctl) fail("look", "no \"crash: control look\" boot line");
   else {
+    // tap around the list until the test-tile look comes up (it asks for
+    // the tile, which the assets sub-arm then expects to see fetched);
+    // every tap must change the look, and the list must be short
     let detail = "";
     const boot = await waitLine(/^crash: look ([a-z-]+)$/, 0, 2000);
-    const at = boot ? boot.m[1] : null;
-    mark = consoleLines.length;
-    await tap(ctl.m[1], ctl.m[2]);
-    const first = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
-    if (!at) detail = "no \"crash: look\" boot line";
-    else if (!first) detail = `a tap on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
-    else if (first.m[1] === at) detail = `the first tap stayed on ${at}`;
-    else {
+    const seen = boot ? [boot.m[1]] : [];
+    if (!boot) detail = "no \"crash: look\" boot line";
+    for (let i = 0; !detail && i < 8 && seen[seen.length - 1] !== "test-tile"; i++) {
       mark = consoleLines.length;
       await tap(ctl.m[1], ctl.m[2]);
-      const second = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
-      if (!second) detail = "no second \"crash: look\" line";
-      else if (second.m[1] === first.m[1]) detail = `the second tap stayed on ${first.m[1]}`;
-      else pass("look", `${at} -> ${first.m[1]} -> ${second.m[1]}`);
+      const next = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
+      if (!next) detail = `tap ${i + 1} on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
+      else if (next.m[1] === seen[seen.length - 1]) detail = `tap ${i + 1} stayed on ${next.m[1]}`;
+      else seen.push(next.m[1]);
     }
+    if (!detail && seen[seen.length - 1] !== "test-tile") detail = `no test-tile look within 8 taps: ${seen.join(" -> ")}`;
     if (detail) fail("look", detail);
+    else { await sleep(1500); pass("look", seen.join(" -> ")); }
   }
 }
 
