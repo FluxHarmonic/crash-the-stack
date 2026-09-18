@@ -1,0 +1,287 @@
+;;; (crash bg) - The living background: patches of color that drift,
+;;; merge and split behind the board.
+;;;
+;;; David, 2026-09-17: "pixellated color patches move around, merging and
+;;; splitting, almost like a lava lamp effect", with a genetic-algorithm
+;;; flavor (the phase plan's P3 row). A small population of round patches
+;;; lives on a coarse grid of CELL px squares over the board area; each
+;;; carries a few genes: drift (a direction), a hue from the palette's
+;;; three bar tones, a split threshold (the radius it splits at) and a
+;;; greed (how fast it grows). Every sim tick each patch drifts and grows;
+;;; two patches that touch swap one gene (the merge: the reason the
+;;; population looks like one family after a while); a patch past its
+;;; threshold splits in two, a patch under the minimum radius dies, and
+;;; the population is kept between a floor and a cap, so it evolves
+;;; visibly over a session and never needs to be "right". The phase
+;;; machine sets the agitation: calm in TRACE, restless under the ICE, a
+;;; burst when a counter-hack fires, a collapse once severed.
+;;;
+;;; Everything is a pure function of the seed: the patches' own MINSTD
+;;; state ((crash stack prng)) is the only randomness, threaded through
+;;; every step, and the arithmetic is the same on both targets (the
+;;; determinism leg holds two runs of one seed to the same trajectory).
+;;; Drawing is (crash render)'s: bg-runs answers the rectangles to fill,
+;;; one per patch row, already quantized to the cell grid. Rules family:
+;;; no platform, no drawing.
+
+(define-library (crash bg)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (crash stack prng))
+
+  (export bg bg? bg-new bg-tick bg-patches bg-rng bg-ticks bg-swaps bg-agitation bg-burst
+          bg-with-phase bg-with-burst bg-step bg-runs bg-canonical
+          patch patch? patch-cx patch-cy patch-r patch-hue patch-dx patch-dy
+          patch-threshold patch-greed
+          CELL GRID-W GRID-H
+          POP-START POP-FLOOR POP-CAP GREED-EVEN
+          R-MIN R-START R-MAX
+          AGITATION-TRACE AGITATION-ICE AGITATION-BURST AGITATION-SEVERED
+          BURST-TICKS HUES)
+
+  (begin
+    ;; --- the numbers David tunes -----------------------------------------------
+
+    (define CELL 8)              ; px per cell; the grid is the board area / CELL
+    (define GRID-W 80)           ; cells across at 640 wide
+    (define GRID-H 44)           ; cells down over the 352 px board area
+    (define POP-START 12)
+    (define POP-FLOOR 4)         ; below this a patch is born
+    (define POP-CAP 24)          ; at this no patch splits
+    (define R-MIN 1.5)           ; cells; smaller dies
+    (define R-START 4.0)
+    (define R-MAX 12.0)
+    (define HUES 3)              ; the three copper-bar tones, C-BAR-A/B/C
+    (define DRIFT 0.06)          ; cells per tick at agitation 1
+    (define GROWTH 0.004)        ; cells per tick per unit of greed above GREED-EVEN
+    (define GREED-EVEN 0.35)     ; a patch greedier than this grows; a meeker one shrinks and dies
+    (define AGITATION-TRACE 1.0)
+    (define AGITATION-ICE 2.5)
+    (define AGITATION-BURST 6.0)
+    (define AGITATION-SEVERED 0.0)
+    (define BURST-TICKS 30)
+    (define SHRINK 0.05)         ; cells per tick once severed
+    (define SWAP-RATE 12)        ; a touching pair swaps a gene about once per this many ticks
+
+    ;; --- the population ------------------------------------------------------
+
+    (define-struct patch
+      (cx default: 0.0)
+      (cy default: 0.0)
+      (r default: R-START)
+      (dx default: 0.0)          ; drift, cells per tick at agitation 1
+      (dy default: 0.0)
+      (hue default: 0)           ; 0..HUES-1
+      (threshold default: 8.0)   ; splits past this radius
+      (greed default: 0.5))      ; 0..1
+
+    (define-struct bg
+      (patches default: '())
+      (rng default: 1)
+      (ticks default: 0)
+      (swaps default: 0)         ; gene swaps so far (the merge, counted for the gate)
+      (agitation default: AGITATION-TRACE)
+      (burst default: 0)         ; ticks of burst left
+      (severed default: #f))
+
+    ;; A unit float in [0, 1) from a fresh draw; returns (cons value rng).
+    (define (draw-unit rng)
+      (let ((rng (prng-next rng)))
+        (cons (/ (prng-index rng 1000000) 1000000.0) rng)))
+
+    (define (random-patch rng)
+      (let* ((u1 (draw-unit rng))
+             (u2 (draw-unit (cdr u1)))
+             (u3 (draw-unit (cdr u2)))
+             (u4 (draw-unit (cdr u3)))
+             (u5 (draw-unit (cdr u4)))
+             (u6 (draw-unit (cdr u5)))
+             (u7 (draw-unit (cdr u6))))
+        (cons (patch cx: (* (car u1) GRID-W)
+                     cy: (* (car u2) GRID-H)
+                     r: R-START
+                     dx: (* DRIFT (- (* 2.0 (car u3)) 1.0))
+                     dy: (* DRIFT (- (* 2.0 (car u4)) 1.0))
+                     hue: (exact (floor (* (car u5) HUES)))
+                     threshold: (+ 6.0 (* 5.0 (car u6)))
+                     greed: (car u7))
+              (cdr u7))))
+
+    (define (bg-new seed)
+      (let loop ((n POP-START) (rng (prng-seed seed)) (acc '()))
+        (if (= n 0)
+            (bg patches: acc rng: rng)
+            (let ((p (random-patch rng)))
+              (loop (- n 1) (cdr p) (cons (car p) acc))))))
+
+    ;; --- the phase machine's inputs -----------------------------------------------
+
+    ;; phase: trace | counter | severed | cleared (the trace's).
+    (define (bg-with-phase b phase)
+      (case phase
+        ((counter) (bg b agitation: AGITATION-ICE severed: #f))
+        ((severed) (bg b agitation: AGITATION-SEVERED severed: #t))
+        (else (bg b agitation: AGITATION-TRACE severed: #f))))
+
+    ;; A counter-hack fired: BURST-TICKS of violence.
+    (define (bg-with-burst b)
+      (bg b burst: BURST-TICKS))
+
+    ;; --- one tick ------------------------------------------------------------------
+
+    (define (clamp v lo hi) (max lo (min hi v)))
+
+    ;; Drift and bounce, grow (or shrink, severed).
+    (define (move p agit severed?)
+      (let* ((cx (+ (patch-cx p) (* agit (patch-dx p))))
+             (cy (+ (patch-cy p) (* agit (patch-dy p))))
+             (dx (if (or (< cx 0.0) (> cx GRID-W)) (- (patch-dx p)) (patch-dx p)))
+             (dy (if (or (< cy 0.0) (> cy GRID-H)) (- (patch-dy p)) (patch-dy p)))
+             (r (if severed?
+                    (- (patch-r p) SHRINK)
+                    (min R-MAX (+ (patch-r p) (* GROWTH (- (patch-greed p) GREED-EVEN)))))))
+        (patch p
+               cx: (clamp cx 0.0 (* 1.0 GRID-W))
+               cy: (clamp cy 0.0 (* 1.0 GRID-H))
+               dx: dx
+               dy: dy
+               r: r)))
+
+    (define (touching? a b)
+      (let ((ddx (- (patch-cx a) (patch-cx b)))
+            (ddy (- (patch-cy a) (patch-cy b)))
+            (rr (+ (patch-r a) (patch-r b))))
+        (<= (+ (* ddx ddx) (* ddy ddy)) (* rr rr))))
+
+    ;; The merge: a touching pair swaps one gene, chosen by the stream,
+    ;; about once per SWAP-RATE ticks per pair. Returns (list a b rng swapped?).
+    (define (swap-genes a b rng)
+      (let* ((rng (prng-next rng))
+             (roll (prng-index rng SWAP-RATE)))
+        (if (not (= roll 0))
+            (list a b rng #f)
+            (let* ((rng (prng-next rng))
+                   (gene (prng-index rng 3)))
+              (case gene
+                ((0) (list (patch a hue: (patch-hue b)) (patch b hue: (patch-hue a)) rng #t))
+                ((1) (list (patch a greed: (patch-greed b)) (patch b greed: (patch-greed a)) rng #t))
+                (else (list (patch a dx: (patch-dx b) dy: (patch-dy b))
+                            (patch b dx: (patch-dx a) dy: (patch-dy a))
+                            rng
+                            #t)))))))
+
+    ;; Every touching pair, once, in list order. Returns (cons patches rng),
+    ;; with swaps counted into the third value.
+    (define (merge-pass patches rng)
+      (let outer ((ps patches) (done '()) (rng rng) (swaps 0))
+        (if (null? ps)
+            (list (reverse done) rng swaps)
+            (let inner ((a (car ps)) (rest (cdr ps)) (rest-done '()) (rng rng) (swaps swaps))
+              (if (null? rest)
+                  (outer (reverse rest-done) (cons a done) rng swaps)
+                  (let ((b (car rest)))
+                    (if (touching? a b)
+                        (let ((r (swap-genes a b rng)))
+                          (inner (car r)
+                                 (cdr rest)
+                                 (cons (cadr r) rest-done)
+                                 (caddr r)
+                                 (if (cadddr r) (+ swaps 1) swaps)))
+                        (inner a (cdr rest) (cons b rest-done) rng swaps))))))))
+
+    ;; A patch past its threshold splits into two of half the radius,
+    ;; pushed apart along its drift, the child's genes nudged by the stream.
+    (define (split p rng)
+      (let* ((u (draw-unit rng))
+             (r (/ (patch-r p) 1.6))
+             (push (+ r 0.5))
+             (nx (- (* 2.0 (car u)) 1.0))
+             (a (patch p r: r cx: (+ (patch-cx p) (* push nx)) cy: (- (patch-cy p) (* push 0.5))))
+             (b (patch p
+                       r: r
+                       cx: (- (patch-cx p) (* push nx))
+                       cy: (+ (patch-cy p) (* push 0.5))
+                       dx: (- (patch-dx p))
+                       dy: (- (patch-dy p))
+                       greed: (clamp (+ (patch-greed p) (- (car u) 0.5)) 0.0 1.0))))
+        (list a b (cdr u))))
+
+    ;; Splits (while under the cap) and deaths. Returns (cons patches rng).
+    (define (life-pass patches rng)
+      (let loop ((ps patches) (acc '()) (rng rng) (count (length patches)))
+        (cond ((null? ps) (cons (reverse acc) rng))
+              ((< (patch-r (car ps)) R-MIN)
+               (loop (cdr ps) acc rng (- count 1)))
+              ((and (> (patch-r (car ps)) (patch-threshold (car ps))) (< count POP-CAP))
+               (let ((s (split (car ps) rng)))
+                 (loop (cdr ps) (cons (cadr s) (cons (car s) acc)) (caddr s) (+ count 1))))
+              (else (loop (cdr ps) (cons (car ps) acc) rng count)))))
+
+    ;; Births up to the floor.
+    (define (floor-pass patches rng)
+      (let loop ((ps patches) (rng rng))
+        (if (>= (length ps) POP-FLOOR)
+            (cons ps rng)
+            (let ((p (random-patch rng)))
+              (loop (cons (car p) ps) (cdr p))))))
+
+    (define (bg-step b)
+      (let* ((agit (if (> (bg-burst b) 0) AGITATION-BURST (bg-agitation b)))
+             (moved (map (lambda (p) (move p agit (bg-severed b))) (bg-patches b)))
+             (merged (merge-pass moved (bg-rng b)))
+             (lived (life-pass (car merged) (cadr merged)))
+             (born (if (bg-severed b)
+                       lived
+                       (floor-pass (car lived) (cdr lived)))))
+        (bg b
+            patches: (car born)
+            rng: (cdr born)
+            ticks: (+ 1 (bg-ticks b))
+            swaps: (+ (bg-swaps b) (caddr merged))
+            burst: (max 0 (- (bg-burst b) 1)))))
+
+    (define (bg-tick b n)
+      (if (<= n 0) b (bg-tick (bg-step b) (- n 1))))
+
+    ;; --- reading it back ------------------------------------------------------------
+
+    ;; The rectangles to fill this frame, (hue x y w h) in px, one per
+    ;; patch row on the cell grid, patches in list order (later over earlier).
+    (define (bg-runs b)
+      (let loop ((ps (bg-patches b)) (acc '()))
+        (if (null? ps)
+            (reverse acc)
+            (let* ((p (car ps))
+                   (r (patch-r p))
+                   (cy (patch-cy p))
+                   (cx (patch-cx p))
+                   (row0 (max 0 (exact (floor (- cy r)))))
+                   (row1 (min (- GRID-H 1) (exact (floor (+ cy r))))))
+              (loop (cdr ps)
+                    (let rows ((row row0) (acc acc))
+                      (if (> row row1)
+                          acc
+                          (let* ((dy (- (+ row 0.5) cy))
+                                 (half (sqrt (max 0.0 (- (* r r) (* dy dy)))))
+                                 (x0 (max 0 (exact (floor (- cx half)))))
+                                 (x1 (min GRID-W (exact (ceiling (+ cx half))))))
+                            (rows (+ row 1)
+                                  (if (> x1 x0)
+                                      (cons (list (patch-hue p)
+                                                  (* CELL x0)
+                                                  (* CELL row)
+                                                  (* CELL (- x1 x0))
+                                                  CELL)
+                                            acc)
+                                      acc))))))))))
+
+    ;; A plain datum of the population, for the determinism leg.
+    (define (bg-canonical b)
+      (list (bg-ticks b)
+            (bg-rng b)
+            (bg-swaps b)
+            (map (lambda (p)
+                   (list (patch-cx p) (patch-cy p) (patch-r p) (patch-dx p) (patch-dy p)
+                         (patch-hue p) (patch-threshold p) (patch-greed p)))
+                 (bg-patches b))))))

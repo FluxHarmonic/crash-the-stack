@@ -31,9 +31,11 @@
           (crash palette)
           (crash look)
           (crash glyphs)
+          (crash bg)
           (crash menu))
 
   (export draw-session draw-editor draw-frame-ms draw-menu
+          draw-bg-in
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in)
 
   (begin
@@ -50,8 +52,8 @@
     ;; --- background -----------------------------------------------------------
 
     ;; roll: pixels the copper bars have scrolled (the cleared sequence
-    ;; rolls them; 0 otherwise).
-    (define (draw-background g roll)
+    ;; rolls them; 0 otherwise). bg: the living background ((crash bg)) or #f.
+    (define (draw-background g roll bg)
       (let ((vw (geometry-vw g))
             (vh (geometry-vh g))
             (shift (modulo (exact (floor roll)) 36)))
@@ -65,7 +67,24 @@
                        ((1) C-BAR-B)
                        (else C-BAR-C)))
             (draw-filled-rect 0 y vw 6)
-            (loop (+ y 12) (+ i 1))))))
+            (loop (+ y 12) (+ i 1))))
+        (when bg (draw-bg-in bg (- vh (geometry-hud-h g))))))
+
+    ;; The living background's patches over the bars, in the bar tones,
+    ;; one rectangle per patch row on the cell grid, clipped to the board
+    ;; area (the same field on the card table).
+    (define (draw-bg-in bg top)
+      (for-each (lambda (run)
+                  (when (< (caddr run) top)
+                    (color! (case (car run)
+                              ((0) C-BAR-A)
+                              ((1) C-BAR-B)
+                              (else C-BAR-C)))
+                    (draw-filled-rect (cadr run)
+                                      (caddr run)
+                                      (cadddr run)
+                                      (min (list-ref run 4) (- top (caddr run))))))
+                (bg-runs bg)))
 
     ;; --- tiles ----------------------------------------------------------------
 
@@ -750,7 +769,7 @@
                                 ((eq? dim 'full) 1.0)
                                 ((eq? dim 'dim) 0.35)
                                 (else 0.0)))))
-        (draw-background g 0.0)
+        (draw-background g 0.0 #f)
         (let loop ((layer 0))
           (when (< layer CANVAS-LAYERS)
             (let ((a (alpha-for layer))
@@ -804,11 +823,12 @@
         (unless (string=? (editor-message e) "")
           (draw-message g (editor-message e) top 1.0 0.0))))
 
-    ;; x: the frame's effects from (crash fx), already advanced.
-    (define (draw-session s g tex x)
+    ;; x: the frame's effects from (crash fx), already advanced; bg: the
+    ;; living background, already stepped, or #f.
+    (define (draw-session s g tex x bg)
       (let ((cleared (fx-cleared x))
             (glitch (fx-glitch x)))
-        (draw-background g (if cleared (* cleared 400.0) 0.0))
+        (draw-background g (if cleared (* cleared 400.0) 0.0) bg)
         (draw-tiles s g tex x)
         (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
           (draw-hint-labels s g))

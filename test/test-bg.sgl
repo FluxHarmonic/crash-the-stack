@@ -1,0 +1,120 @@
+;;; Gate (P3) leg 5 - the living background.
+;;;
+;;; Determinism from a seed: two runs of one seed over 600 ticks are the
+;;; same trajectory, datum for datum, and different seeds differ. A
+;;; bounded population: for seeds 1..20 over 3600 ticks (a minute of sim
+;;; time) the count never leaves [POP-FLOOR, POP-CAP], the floor included
+;;; (a dead subject would satisfy every cap). The merge is live: over the
+;;; same runs, genes were swapped (sabotage S4 breaks the swap, and this
+;;; and the recorded trajectory both go red). The phase inputs take
+;;; effect: the ICE agitates, a burst is louder still, severed shrinks
+;;; every patch and adds none. bg-runs answers rectangles on the cell
+;;; grid inside the board area.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash bg))
+
+(define TICKS 3600)
+(define SEEDS 20)
+
+;; The recorded canonical datum of seed 7 after 600 ticks: a change in
+;; the rules, the constants or the stream moves it (update on purpose).
+(define RECORDED-SEED 7)
+(define RECORDED-TICKS 600)
+
+(define (population-range b ticks)
+  (let loop ((b b) (k 0) (lo (length (bg-patches b))) (hi (length (bg-patches b))))
+    (if (= k ticks)
+        (list lo hi (bg-swaps b))
+        (let* ((b (bg-step b))
+               (n (length (bg-patches b))))
+          (loop b (+ k 1) (min lo n) (max hi n))))))
+
+(test-group "bg: determinism from a seed"
+  (test "two runs of one seed are one trajectory"
+    (assert-equal (bg-canonical (bg-tick (bg-new RECORDED-SEED) RECORDED-TICKS))
+                  (bg-canonical (bg-tick (bg-new RECORDED-SEED) RECORDED-TICKS))))
+  (test "a different seed is a different trajectory"
+    (assert-false (equal? (bg-canonical (bg-tick (bg-new 1) 120))
+                          (bg-canonical (bg-tick (bg-new 2) 120)))))
+  (test "the population starts at POP-START"
+    (assert-equal POP-START (length (bg-patches (bg-new 1))))))
+
+(test-group "bg: a bounded population, and the merge is live"
+  (let loop ((seed 1))
+    (when (<= seed SEEDS)
+      (let* ((r (population-range (bg-new seed) TICKS))
+             (lo (car r))
+             (hi (cadr r))
+             (swaps (caddr r)))
+        (test (string-append "seed " (number->string seed) ": population within ["
+                             (number->string POP-FLOOR) ", " (number->string POP-CAP)
+                             "] over " (number->string TICKS) " ticks (saw "
+                             (number->string lo) ".." (number->string hi) ")")
+          (assert-true (and (>= lo POP-FLOOR) (<= hi POP-CAP))))
+        (test (string-append "seed " (number->string seed) ": genes were swapped (saw "
+                             (number->string swaps) ")")
+          (assert-true (> swaps 0))))
+      (loop (+ seed 1)))))
+
+(define (total-radius b)
+  (fold + 0.0 (map patch-r (bg-patches b))))
+
+(define (mean-speed b)
+  (/ (fold + 0.0 (map (lambda (p) (+ (abs (patch-dx p)) (abs (patch-dy p)))) (bg-patches b)))
+     (max 1 (length (bg-patches b)))))
+
+(test-group "bg: the phase inputs"
+  (test "the ICE agitates: the same population moves further under counter than under trace"
+    (let* ((b (bg-tick (bg-new 3) 60))
+           (calm (bg-step (bg-with-phase b 'trace)))
+           (ice (bg-step (bg-with-phase b 'counter)))
+           (moved (lambda (before after)
+                    (fold + 0.0 (map (lambda (p q) (+ (abs (- (patch-cx p) (patch-cx q)))
+                                                      (abs (- (patch-cy p) (patch-cy q)))))
+                                     (bg-patches before)
+                                     (bg-patches after))))))
+      (assert-true (> (moved b ice) (moved b calm)))))
+  (test "a burst is louder than the ICE, and passes"
+    (let* ((b (bg-with-phase (bg-tick (bg-new 3) 60) 'counter))
+           (burst (bg-with-burst b)))
+      (assert-equal BURST-TICKS (bg-burst burst))
+      (assert-equal 0 (bg-burst (bg-tick burst BURST-TICKS)))
+      (assert-true (> (mean-speed-of-step burst) (mean-speed-of-step b)))))
+  (test "severed: every patch shrinks, none is born, the count only falls"
+    (let* ((b (bg-with-phase (bg-tick (bg-new 5) 300) 'severed))
+           (after (bg-tick b 120)))
+      (assert-true (< (total-radius after) (total-radius b)))
+      (assert-true (<= (length (bg-patches after)) (length (bg-patches b)))))))
+
+;; The speed a step imparts: the mean displacement of the patches over one step.
+(define (mean-speed-of-step b)
+  (let ((after (bg-step b)))
+    (/ (fold + 0.0 (map (lambda (p q) (+ (abs (- (patch-cx p) (patch-cx q)))
+                                         (abs (- (patch-cy p) (patch-cy q)))))
+                        (bg-patches b)
+                        (bg-patches after)))
+       (max 1 (length (bg-patches b))))))
+
+(test-group "bg: the runs"
+  (let* ((b (bg-tick (bg-new 11) 200))
+         (runs (bg-runs b)))
+    (test "there are runs"
+      (assert-true (pair? runs)))
+    (test "every run is a cell-aligned rectangle inside the board area, with a hue"
+      (assert-true (every (lambda (r)
+                            (and (= 5 (length r))
+                                 (>= (car r) 0) (< (car r) HUES)
+                                 (= 0 (modulo (cadr r) CELL))
+                                 (= 0 (modulo (caddr r) CELL))
+                                 (= 0 (modulo (cadddr r) CELL))
+                                 (= CELL (list-ref r 4))
+                                 (>= (cadr r) 0)
+                                 (<= (+ (cadr r) (cadddr r)) (* CELL GRID-W))
+                                 (>= (caddr r) 0)
+                                 (< (caddr r) (* CELL GRID-H))))
+                          runs)))
+    (test "the runs are few enough for a frame (under 600 rectangles)"
+      (assert-true (< (length runs) 600)))))

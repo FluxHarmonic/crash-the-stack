@@ -57,6 +57,7 @@
           (crash cards solve)
           (crash menu)
           (crash look)
+          (crash bg)
           (crash shell))
 
   (export native-main load-editor)
@@ -151,7 +152,8 @@
       (session default: #f)       ; the stack, once opened
       (fx default: #f)
       (deal default: #f)          ; the card table, once opened
-      (card-fx default: #f))
+      (card-fx default: #f)
+      (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
     ;; the saved one; STACK deals a NEW board: the next seed after the
@@ -234,7 +236,10 @@
             (display " held: ")
             (write (input-frame-held f))
             (newline)))
-        (stage a session: after fx: x)))
+        (stage a
+               session: after
+               fx: x
+               bg: (bg-advance (stage-bg a) (clock-steps (fx-clock x)) (session-trace s) (session-trace after)))))
 
     (define (step-cards a f dt geom)
       (let* ((d (stage-deal a))
@@ -245,7 +250,10 @@
                         (deal-advance (deal-step d f geom)
                                       (clock-steps (card-fx-clock x))))))
              (x (card-fx-observe x d after geom)))
-        (stage a deal: after card-fx: x)))
+        (stage a
+               deal: after
+               card-fx: x
+               bg: (bg-advance (stage-bg a) (clock-steps (card-fx-clock x)) (deal-trace d) (deal-trace after)))))
 
     (define (stage-loop seed texture-first? model log-keys? fresh? cards?)
       (lambda ()
@@ -257,9 +265,10 @@
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
-          (let loop ((a (if cards?
-                            (open-cards (open-menu (stage)) seed fresh? #t)
-                            (open-menu (stage)))))
+          (let loop ((a (let ((fresh (stage bg: (bg-new 1))))
+                          (if cards?
+                              (open-cards (open-menu fresh) seed fresh? #t)
+                              (open-menu fresh)))))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))
                    (f (poll-frame))
@@ -285,10 +294,10 @@
               (case (stage-screen a)
                 ((menu) (draw-menu (stage-menu a) VW VH #f))
                 ((stack)
-                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a))
+                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-bg a))
                  (when log-keys?
                    (draw-frame-ms *frame-ms*)))
-                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH))))
+                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-bg a))))
               (end-frame)
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
@@ -351,7 +360,7 @@
                         (after (session-advance (session-step s f g) (clock-steps (fx-clock x))))
                         (x (fx-observe x s after g)))
                    (begin-frame)
-                   (draw-session after g #f x)
+                   (draw-session after g #f x #f)
                    (end-frame)
                    (cond ((key-pressed? 'escape) (request-quit))
                          ((quit-requested?) #t)
