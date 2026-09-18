@@ -1,0 +1,36 @@
+#!/bin/sh
+# The palette as an image, for ImageMagick's -remap in scripts/art/shape.
+#
+#   scripts/art/palette                     -> assets/palette.png (every color, one pixel each)
+#   scripts/art/palette OUT.png ROLE,ROLE   -> a family subset for one shape run
+#
+# Reads assets/palette.sgl (the style bible's section 1 as a datum) with
+# awk: every (ROLE "#RRGGBB" ...) line, distinct hex kept in order. Roles
+# are matched by name; an unknown role is a refusal, not a silent skip.
+set -eu
+cd "$(dirname "$0")/../.." || exit 1
+OUT="${1:-assets/palette.png}"
+ROLES="${2:-}"
+SRC=assets/palette.sgl
+hexes="$(awk -v want="$ROLES" '
+  BEGIN { n = split(want, w, ","); for (i = 1; i <= n; i++) if (w[i] != "") wanted[w[i]] = 1 }
+  /^ *\(?\(C-[A-Z0-9-]+ +"#[0-9A-Fa-f]{6}"/ {
+    line = $0; sub(/^ *\(?\(/, "", line)
+    role = line; sub(/ .*/, "", role)
+    hex = line; sub(/^[^"]*"/, "", hex); sub(/".*/, "", hex)
+    if (want == "" || (role in wanted)) { seen[role] = 1; if (!(hex in have)) { have[hex] = 1; out = out hex " " } }
+  }
+  END {
+    for (r in wanted) if (!(r in seen)) { print "palette: unknown role " r > "/dev/stderr"; exit 1 }
+    print out
+  }' "$SRC")"
+[ -n "$hexes" ] || { echo "palette: no colors read from $SRC"; exit 1; }
+count=0
+args=""
+for h in $hexes; do
+  args="$args xc:$h"
+  count=$((count + 1))
+done
+# shellcheck disable=SC2086
+convert -size 1x1 $args +append -type TrueColor "PNG24:$OUT"
+echo "palette: $count colors -> $OUT"

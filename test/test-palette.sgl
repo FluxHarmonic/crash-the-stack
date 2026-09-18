@@ -1,0 +1,76 @@
+;;; Gate (P3) - the palette has one source.
+;;;
+;;; assets/palette.sgl is the style bible's section 1 as a datum (hex, the
+;;; truth for the art pipeline); (crash palette) carries the same colors
+;;; as (r g b) triples (the truth for the renderers). This holds them
+;;; together: every role in the datum is in PALETTE with the same hex
+;;; (round half up, times 255), every role in PALETTE is in the datum,
+;;; and the slot count stays within the Amiga 32 (distinct hex plus the
+;;; in-hand placeholders). A sabotage: change one triple's second decimal
+;;; and the role's assertion names it.
+
+(import (sigil test)
+        (sigil io)
+        (sigil math)
+        (sigil string)
+        (crash palette))
+
+(define DATUM-PATH "assets/palette.sgl")
+(define SLOTS 32)
+
+(define datum (call-with-input-file DATUM-PATH read))
+
+(define (channel->hex v)
+  (let* ((n (exact (floor (+ (* v 255) 0.5))))
+         (s (string-upcase (number->string n 16))))
+    (if (< n 16) (string-append "0" s) s)))
+
+(define (color->hex c)
+  (string-append "#"
+                 (channel->hex (car c))
+                 (channel->hex (cadr c))
+                 (channel->hex (caddr c))))
+
+;; The datum's roles with a hex; the in-hand slots have #f.
+(define colored (filter (lambda (e) (string? (cadr e))) datum))
+(define in-hand (filter (lambda (e) (not (string? (cadr e)))) datum))
+
+(test-group "palette: the datum"
+  (test "the datum is a list of (ROLE hex-or-#f note) entries"
+    (assert-true (and (pair? datum)
+                      (every (lambda (e)
+                               (and (= (length e) 3)
+                                    (symbol? (car e))
+                                    (string? (caddr e))))
+                             datum))))
+  (test "every hex is #RRGGBB, upper case"
+    (assert-true (every (lambda (e)
+                          (let ((h (cadr e)))
+                            (and (= (string-length h) 7)
+                                 (char=? (string-ref h 0) #\#)
+                                 (string=? h (string-upcase h)))))
+                        colored)))
+  (test "distinct colors plus the in-hand slots fit the 32"
+    (let ((distinct (let loop ((es colored) (acc '()))
+                      (cond ((null? es) acc)
+                            ((member (cadr (car es)) acc) (loop (cdr es) acc))
+                            (else (loop (cdr es) (cons (cadr (car es)) acc)))))))
+      (assert-true (<= (+ (length distinct) (length in-hand)) SLOTS))))
+  (test "three slots are in hand"
+    (assert-equal 3 (length in-hand))))
+
+(test-group "palette: (crash palette) agrees with the datum"
+  (for-each (lambda (e)
+              (let* ((role (car e))
+                     (hex (cadr e))
+                     (built (assq role PALETTE)))
+                (test (string-append (symbol->string role) " is in (crash palette)")
+                  (assert-true (and built #t)))
+                (when built
+                  (test (string-append (symbol->string role) " is " hex)
+                    (assert-equal hex (color->hex (cdr built)))))))
+            colored)
+  (for-each (lambda (p)
+              (test (string-append (symbol->string (car p)) " is in the datum")
+                (assert-true (and (assq (car p) datum) #t))))
+            PALETTE))
