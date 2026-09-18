@@ -42,124 +42,71 @@
   </main>
 
   <script>
-  // Pointer forwarding: a tap on the board reaches the game as a
-  // ("pointerdown", "bx,by") dispatch in canvas-buffer pixels, the same
-  // coordinate entry point the native mouse uses ((crash input) hit-tests
-  // it after (crash geometry) undoes the letterbox). The generic loader
-  // forwards keys, clicks-by-id and swipes, but not pointer coordinates,
-  // and it keeps its wasm instance private; so this page catches the
-  // instance where the bridge loader publishes it to every bridge
-  // (SigilWasmBridges.setInstance) and calls the same typed dispatch ABI
-  // the loader uses. Promotion of this into the loader is a finding for
-  // the row, not something this page can do.
+  // The page's part of the boot. The generic loader (sigil-web-app.js,
+  // sigil 0.22.2) publishes SigilWebApp: a dispatch made before the
+  // runtime starts is queued and delivered right after sigil_wasm_start,
+  // so the page's parameters reach the game after its entry ran and
+  // before its first frame, in one place, once. The loader also forwards
+  // a pointerdown on the canvas as ("pointerdown", "x,y,mods") in
+  // canvas-buffer pixels, the same coordinate entry point the native
+  // mouse uses ((crash input) hit-tests it after (crash geometry) undoes
+  // the letterbox); this page no longer carries that shim.
   //
   // POINTER_FORWARDING is the browser arm's positive control: with it
-  // false, the same synthetic pointerdown must produce no selection.
+  // false the page claims the canvas's pointerdown (preventDefault, the
+  // loader's documented stand-down) and the same synthetic pointerdown
+  // must produce no selection.
   (function () {
     "use strict";
     var POINTER_FORWARDING = true;
 
-    var instance = null;
-    var bridges = null;
-    Object.defineProperty(globalThis, "SigilWasmBridges", {
-      configurable: true,
-      enumerable: true,
-      get: function () { return bridges; },
-      set: function (real) {
-        bridges = Object.freeze(Object.assign({}, real, {
-          setInstance: function (manifest, inst) {
-            instance = inst;
-            // The page's parameters, all on a later task: setInstance runs
-            // before the loader initializes the VM, and a dispatch made here
-            // is dropped ("VM not initialized"; measured 2026-09-17, the
-            // touch flag went that way). The game boots on its first frame
-            // and boots again if a parameter lands after that.
-            //   trace: the console lines verify.mjs reads.
-            //   fresh: ignore the saved board or deal.
-            //   cards / stack: straight to that table, past the menu (the
-            //          arms' doors); seed=N: the seed a fresh deal or
-            //          board starts from.
-            //   touch: a touch screen starts every launch with the hint tags
-            //          hidden (David, 2026-09-17; Space shows them). Phones
-            //          and tablets match (their primary pointer is coarse);
-            //          a laptop with a trackpad does not, even one whose
-            //          browser reports no hover (2026-09-18: David's laptop
-            //          lost the card tags at every launch; hover: none
-            //          alone no longer counts). With ?trace the page says
-            //          what it saw: "crash: page pointer coarse|fine hover
-            //          none|hover".
-            // The game holds its boot until "params done" (or a second of
-            // frames without it); a frame can come before this task, and
-            // a boot on the default table followed by one on the
-            // parameter's announced the wrong deal (2026-09-18). The first
-            // dispatch is retried until the VM takes it.
-            var params = new URLSearchParams(location.search);
-            function sendParams() {
-              if (!dispatch("params", "begin")) { setTimeout(sendParams, 10); return; }
-              var coarse = matchMedia("(pointer: coarse)").matches;
-              var noHover = matchMedia("(hover: none)").matches;
-              if (params.has("trace")) {
-                dispatch("trace", "on");
-                console.log("crash: page pointer " + (coarse ? "coarse" : "fine") + " hover " + (noHover ? "none" : "hover"));
-              }
-              if (params.has("fresh")) dispatch("fresh", "on");
-              if (params.has("cards")) dispatch("cards", "on");
-              if (params.has("stack")) dispatch("stack", "on");
-              if (params.has("seed")) dispatch("seed", params.get("seed"));
-              if (coarse) dispatch("touch", "on");
-              dispatch("params", "done");
-              updates.ready();
-            }
-            setTimeout(sendParams, 0);
-            return real.setInstance(manifest, inst);
-          }
-        }));
-      }
-    });
-
-    var encoder = new TextEncoder();
-    // The game's answer (an integer), or -1 when it cannot be asked.
-    function dispatchRc(type, payload) {
-      var ex = instance && instance.exports;
-      if (!ex || typeof ex.sigil_wasm_dispatch_event !== "function") return -1;
-      function put(s) {
-        var bytes = encoder.encode(s + "\0");
-        var ptr = ex.malloc(bytes.length);
-        new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes);
-        return ptr;
-      }
-      var t = put(type), p = put(payload);
-      var rc = ex.sigil_wasm_dispatch_event(t, p);
-      ex.free(p); ex.free(t);
-      return rc;
+    // The loader's app object: already there when this script runs after
+    // the loader tag, else handed over by the ready event the loader
+    // fires for scripts that ran before it.
+    function withApp(fn) {
+      if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
+      document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
     }
-    function dispatch(type, payload) { return dispatchRc(type, payload) === 0; }
-    var updates = { ready: function () {} };
-    globalThis.__crashDispatch = { dispatch: dispatch, dispatchRc: dispatchRc, updates: updates };
+
+    // The page's parameters:
+    //   trace: the console lines verify.mjs reads.
+    //   fresh: ignore the saved board or deal.
+    //   cards / stack: straight to that table, past the menu (the
+    //          arms' doors); seed=N: the seed a fresh deal or
+    //          board starts from.
+    //   touch: a touch screen starts every launch with the hint tags
+    //          hidden (David, 2026-09-17; Space shows them). Phones
+    //          and tablets match (their primary pointer is coarse);
+    //          a laptop with a trackpad does not, even one whose
+    //          browser reports no hover (2026-09-18: David's laptop
+    //          lost the card tags at every launch; hover: none
+    //          alone no longer counts). With ?trace the page says
+    //          what it saw: "crash: page pointer coarse|fine hover
+    //          none|hover".
+    var updates = { app: null, ready: function () {} };
+    withApp(function (app) {
+      var params = new URLSearchParams(location.search);
+      var coarse = matchMedia("(pointer: coarse)").matches;
+      var noHover = matchMedia("(hover: none)").matches;
+      if (params.has("trace")) {
+        app.dispatch("trace", "on");
+        console.log("crash: page pointer " + (coarse ? "coarse" : "fine") + " hover " + (noHover ? "none" : "hover"));
+      }
+      if (params.has("fresh")) app.dispatch("fresh", "on");
+      if (params.has("cards")) app.dispatch("cards", "on");
+      if (params.has("stack")) app.dispatch("stack", "on");
+      if (params.has("seed")) app.dispatch("seed", params.get("seed"));
+      if (coarse) app.dispatch("touch", "on");
+      updates.app = app;
+      updates.ready(app);
+    });
+    globalThis.__crashUpdates = updates;
 
     var canvas = document.getElementById("stage");
 
-    // Event point (CSS pixels) -> canvas buffer pixels. The buffer is
-    // CSS size x devicePixelRatio after the app shell's resize, so this
-    // one factor carries the phone's pixel density. The letterbox inverse
-    // is not here: it is (crash geometry)'s frame->virtual, shared with
-    // the native shell.
-    function bufferPoint(e) {
-      var r = canvas.getBoundingClientRect();
-      var sx = canvas.width / r.width;
-      var sy = canvas.height / r.height;
-      return {
-        x: Math.round((e.clientX - r.left) * sx),
-        y: Math.round((e.clientY - r.top) * sy)
-      };
+    if (!POINTER_FORWARDING) {
+      canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); });
     }
-
-    canvas.addEventListener("pointerdown", function (e) {
-      if (!POINTER_FORWARDING) return;
-      var p = bufferPoint(e);
-      dispatch("pointerdown", p.x + "," + p.y);
-      e.preventDefault();
-    });
 
     // The loader maps a swipe anywhere on the document to an arrow key. On
     // the board a swipe would then both select (at pointerdown) and move
@@ -222,7 +169,7 @@
   // the browser arm.
   (function () {
     "use strict";
-    var bridge = globalThis.__crashDispatch;
+    var app = null;
     var status = { version: "__VERSION__", state: "none", told: null, reg: null };
     window.crashUpdate = status;
     if (!("serviceWorker" in navigator)) { status.state = "unsupported"; return; }
@@ -246,20 +193,22 @@
     var gameReady = false;
     var applied = false;
     var polling = null;
-    // Tell the game once it is up: the launch prompt inside the first
-    // seconds, the mark after that; then watch for its APPLY, which the
-    // game leaves in localStorage under "update" (the dispatch ABI's return
-    // value does not carry a handler's answer).
+    // Tell the game once the loader is up: the launch prompt inside the
+    // first seconds, the mark after that; then poll it for the player's
+    // APPLY, which it answers through the dispatch's return value (1 once
+    // chosen).
     function chosen() {
-      try { return localStorage.getItem("update") === "apply"; } catch (e) { return false; }
+      return app.dispatch("update", "chosen?") === 1;
     }
     function tell() {
       if (status.state !== "waiting" || !gameReady || status.told) return;
       status.told = Date.now() < launchUntil ? "prompt" : "waiting";
-      bridge.dispatch("update", status.told);
+      app.dispatch("update", status.told);
       polling = setInterval(function () { if (chosen()) apply(); }, 500);
     }
-    bridge.updates.ready = function () { gameReady = true; tell(); };
+    var updates = globalThis.__crashUpdates;
+    updates.ready = function (a) { app = a; gameReady = true; tell(); };
+    if (updates.app) updates.ready(updates.app);
     function waiting(reg) {
       status.reg = reg;
       status.state = "waiting";
@@ -284,7 +233,6 @@
       if (!status.reg || !status.reg.waiting || applied) return;
       applied = true;
       if (polling) clearInterval(polling);
-      try { localStorage.removeItem("update"); } catch (e) {}
       status.state = "applying";
       status.reg.waiting.postMessage({ type: "SKIP_WAITING" });
     }

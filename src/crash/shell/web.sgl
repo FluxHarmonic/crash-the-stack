@@ -2,8 +2,8 @@
 ;;;
 ;;; The same game as (crash shell native), driven the way a browser drives
 ;;; things: the generic loader (sigil-web-app.js, from sigil-wasm-runtime)
-;;; forwards DOM keydown/keyup by key name, the page template forwards
-;;; pointerdown as canvas-buffer pixels, and the gles3 app shell dispatches
+;;; forwards DOM keydown/keyup by key name and a pointerdown on the canvas
+;;; as canvas-buffer pixels, and the gles3 app shell dispatches
 ;;; ("frame", ms) once per requestAnimationFrame. Every one of those arrives
 ;;; here through (crash main)'s sigil-web-dispatch-event, and each frame this
 ;;; shell folds what arrived into one input-frame, steps the session, and
@@ -14,10 +14,7 @@
 ;;; frame at a time; there is nothing to suspend. (sigil coroutines) itself
 ;;; does work under native-codegen wasm as of sigil 0.22.1: measured
 ;;; 2026-09-17, the stdlib's doubler example returned 10 and 42 from the web
-;;; build; Cinder's July finding that reset/shift trapped there is stale. A
-;;; top-level define inside cond-expand still is not registered (measured the
-;;; same day: "call: not a procedure"), which is why (crash main) is shaped
-;;; the way it is.
+;;; build; Cinder's July finding that reset/shift trapped there is stale.
 ;;;
 ;;; What the browser cannot give the game: ctrl chords (the loader drops any
 ;;; keydown with ctrlKey, and Chrome reserves ctrl+n / ctrl+t). The commands
@@ -30,8 +27,8 @@
 ;;; here; there is no window to close.
 ;;;
 ;;; Trace lines, printed only when the page was opened with ?trace (the
-;;; template dispatches ("trace", "on") after boot; verify.mjs relies on
-;;; them, a player never sees them):
+;;; page dispatches ("trace", "on") as soon as the loader is up; verify.mjs
+;;; relies on them, a player never sees them):
 ;;;   crash: seed S tiles N pair A AX AY B BX BY   the first solution pair
 ;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
@@ -85,9 +82,9 @@
 ;;; from N (with ?fresh, or when nothing is saved). The MENU control in
 ;;; either HUD, ctrl+e, or a severed stack's JACK OUT come back to the
 ;;; menu; the table stays in memory meanwhile. The menu's UPDATE entry
-;;; applies a waiting version the way the in-game prompt does (P1's
-;;; mechanism: "apply" in the localStorage key update, which the page
-;;; polls).
+;;; applies a waiting version the way the in-game prompt does: the page
+;;; polls ("update", "chosen?") and the dispatch answers 1 once APPLY was
+;;; taken.
 ;;;   crash: menu ID X Y ...                the menu's entries and their centers
 ;;;   crash: menu chose ID
 
@@ -105,7 +102,6 @@
           (crash input)
           (crash trace)
           (crash save)
-          (crash store)
           (crash tween)
           (crash fx)
           (crash render)
@@ -136,13 +132,10 @@
     (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
-    (define *frames* 0)      ; frames seen before the boot: the page's parameters land on a
-                             ; task after setInstance, which can come after the first frame
-    (define BOOT-AFTER-FRAMES 60)  ; a boot without "params done" waits this long for it (~1 s)
-    (define *params-done* #f)
     (define *screen* 'menu)  ; menu | stack | cards
     (define *menu* #f)       ; the first screen, (crash menu)
-    (define *update* #f)     ; the page says a new version is waiting
+    (define *update* #f)     ; waiting | prompt | #f: the page's word on a new version
+    (define *update-chosen* #f) ; the player took APPLY; the page's poll reads it
     (define *cards* #f)      ; ?cards: straight to the card table
     (define *stack* #f)      ; ?stack: straight to the stack
     (define *seed* #f)       ; ?seed=N: the raw seed a fresh deal or board starts from; none given: the tables' own first ones
@@ -186,11 +179,13 @@
 
     ;; --- pointer -------------------------------------------------------------
 
-    ;; "bx,by" in canvas-buffer pixels (the template's job is the CSS to
-    ;; buffer scale; the letterbox inverse is the same one native uses).
+    ;; "x,y,mods" from the loader: canvas-buffer pixels (the loader applies
+    ;; the CSS to buffer scale; the letterbox inverse is the same one native
+    ;; uses) and a modifier bitmask the game does not read (the web's
+    ;; commands are on the canvas, not on chords).
     (define (pointer-down! payload)
       (let ((parts (string-split payload ",")))
-        (when (= (length parts) 2)
+        (when (= (length parts) 3)
           (let ((x (string->number (car parts)))
                 (y (string->number (cadr parts))))
             (when (and x y)
@@ -531,16 +526,7 @@
             (tick-screen (make-input-frame '() '() #f) dt))))
 
     (define (web-tick dt)
-      (unless *booted*
-        (set! *frames* (+ *frames* 1))
-        ;; The boot waits for the page's "params done" (a second of frames
-        ;; at most): booting the default table first and the parameter's
-        ;; table a frame later announced the wrong deal to the arms
-        ;; (2026-09-18, once the default deal stopped being seed 1).
-        (when (or *params-done* (>= *frames* BOOT-AFTER-FRAMES)) (boot!)))
-      (when *booted* (tick-booted dt)))
-
-    (define (tick-booted dt)
+      (unless *booted* (boot!))
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt))
 
@@ -562,18 +548,15 @@
     ;; --- entry ---------------------------------------------------------------
 
     ;; Boot the table the page asked for: the card table with ?cards, else
-    ;; the stack. Called on the first frame, and again whenever a page
-    ;; parameter (?cards, ?fresh, ?seed, the touch flag) lands after that
-    ;; frame, so the order of the page's dispatches against the first
-    ;; frame does not matter. (The page cannot dispatch before the runtime
-    ;; starts: the loader calls setInstance before sigil_wasm_init, and a
-    ;; dispatch there is dropped with "VM not initialized"; measured
-    ;; 2026-09-17, which is why the page sends its parameters on a later
-    ;; task and the shell boots lazily.)
+    ;; the stack. Called on the first frame rather than from web-main: the
+    ;; page's parameters (?cards, ?fresh, ?seed, the touch flag, the update
+    ;; state) are dispatched once the loader is up, which is after web-main
+    ;; returns (sigil_wasm_start) and before the first frame, so booting
+    ;; here sees every one of them.
     (define (open-menu!)
       (set! *screen* 'menu)
       (set! *announced* #f)
-      (set! *menu* (launch-menu *update*
+      (set! *menu* (launch-menu (and *update* #t)
                                 (and (case (active-game)
                                        ((stack) *session*)
                                        ((cards) *deal*)
@@ -616,23 +599,21 @@
 
     ;; The update's state reaches the stack's session (the game draws it
     ;; and takes the choice, (crash input) step-update) and the menu (its
-    ;; UPDATE entry). Reported for the arm.
+    ;; UPDATE entry); when it lands before the first frame, boot! calls
+    ;; this again once the table is up. Reported for the arm.
     (define (update! state)
-      (set! *update* (and (memq state '(waiting prompt)) state))
+      (set! *update* state)
       (when *session*
         (set! *session* (session-with-update *session* state))
         (say "update" state))
       (when (and *booted* (eq? *screen* 'menu)) (open-menu!))
       0)
 
-    ;; The player's APPLY reaches the page through the store (localStorage,
-    ;; which the page polls): the dispatch ABI's return value cannot carry
-    ;; it (measured 2026-09-17 by P1: the page saw 0 whatever the handler
-    ;; answered). The key is cleared at boot and by the page once read.
-    (define UPDATE-KEY "update")
-
+    ;; The player's APPLY: the page polls ("update", "chosen?") and reads
+    ;; the answer from the dispatch's return value (1 once chosen; the
+    ;; loader hands a handler's integer back to the page since sigil 0.22.2).
     (define (update-chosen!)
-      (store-set! UPDATE-KEY "apply"))
+      (set! *update-chosen* #t))
 
     ;; A menu choice. UPDATE applies the waiting version the same way the
     ;; in-game prompt does.
@@ -651,19 +632,16 @@
       (set! *session* #f)
       (set! *deal* #f)
       (set! *booted* #t)
-      (store-remove! UPDATE-KEY)
       (cond (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
             (else (open-menu!)))
-      ;; the page's update word can land before the boot now that the
-      ;; boot waits for the parameters: the table takes it here
+      ;; the page's update word lands before the first frame, ahead of
+      ;; any session: the table takes it here, once
       (when *update* (update! *update*)))
 
-    ;; A page parameter landed: take it, and if the table is already up,
-    ;; boot again with it.
+    ;; A page parameter landed (before the first frame; see open-menu!).
     (define (param! setter)
       (setter)
-      (when *booted* (boot!))
       0)
 
     (define (web-main)
@@ -685,13 +663,13 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
-            ((string=? type "params") (when (string=? payload "done") (set! *params-done* #t)) 0)
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
             ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))
             ((string=? type "update")
              (cond ((string=? payload "waiting") (update! 'waiting))
                    ((string=? payload "prompt") (update! 'prompt))
+                   ((string=? payload "chosen?") (if *update-chosen* 1 0))
                    (else 0)))
             ((string=? type "seed")
              (param! (lambda ()
