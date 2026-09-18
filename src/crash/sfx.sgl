@@ -1,0 +1,96 @@
+;;; (crash sfx) - Which sounds a frame calls for.
+;;;
+;;; Watches a table before and after a step, the way (crash fx) does for
+;;; motion, and answers the cues to play: select, match, mismatch,
+;;; shuffle, lock, scramble, cleared, severed (the phase plan's P3 row;
+;;; the card table maps its own events onto the same eight). The audio
+;;; module renders and mixes them; this one only reads the rules, so the
+;;; gate can hold it headless. Rules family: no platform, no drawing.
+
+(define-library (crash sfx)
+  (import (sigil struct)
+          (crash stack rules)
+          (crash trace)
+          (crash input)
+          (crash cards rules)
+          (crash cards input))
+
+  (export session-cues deal-cues)
+
+  (begin
+    ;; The stack's frame: cues oldest first.
+    (define (session-cues before after)
+      (let* ((b0 (session-board before))
+             (b1 (session-board after))
+             (t0 (session-trace before))
+             (t1 (session-trace after))
+             (n0 (board-tile-count b0))
+             (n1 (board-tile-count b1))
+             (cues '()))
+        (cond ((not (= (session-seed before) (session-seed after))) '())
+              (else
+               ;; the ICE
+               (when (not (= (trace-ice-count t0) (trace-ice-count t1)))
+                 (case (trace-last-ice t1)
+                   ((lock) (set! cues (cons 'lock cues)))
+                   ((remap) (set! cues (cons 'shuffle cues)))
+                   ((scramble) (set! cues (cons 'scramble cues)))
+                   (else #f)))
+               ;; the phase
+               (when (and (trace-severed? t1) (not (trace-severed? t0)))
+                 (set! cues (cons 'severed cues)))
+               (when (and (board-cleared? b1) (not (board-cleared? b0)))
+                 (set! cues (cons 'cleared cues)))
+               ;; the player
+               (cond ((< n1 n0)
+                      (unless (board-cleared? b1) (set! cues (cons 'match cues))))
+                     ((and (> (length (board-history b1)) (length (board-history b0)))
+                           (not (equal? (vector->list (board-faces b0)) (vector->list (board-faces b1)))))
+                      (set! cues (cons 'shuffle cues)))
+                     ((and (session-refused after)
+                           (not (eqv? (session-refused before) (session-refused after))))
+                      (set! cues (cons 'mismatch cues)))
+                     ((and (board-selected b1)
+                           (not (eqv? (board-selected b0) (board-selected b1))))
+                      (set! cues (cons (if (and (board-selected b0)
+                                                (not (faces-match? b0 (board-selected b0) (board-selected b1))))
+                                           'mismatch
+                                           'select)
+                                       cues))))
+               (reverse cues)))))
+
+    ;; The card table's frame: a move is a match, a pull a select, an
+    ;; undo a mismatch, the ICE's members lock (encrypt) / shuffle (churn)
+    ;; / scramble (obfuscate, corrupt), the win cleared, the sever severed.
+    (define (deal-cues before after)
+      (let* ((g0 (deal-game before))
+             (g1 (deal-game after))
+             (t0 (deal-trace before))
+             (t1 (deal-trace after))
+             (cues '()))
+        (cond ((not (= (deal-seed before) (deal-seed after))) '())
+              (else
+               (when (not (= (trace-ice-count t0) (trace-ice-count t1)))
+                 (case (trace-last-ice t1)
+                   ((encrypt) (set! cues (cons 'lock cues)))
+                   ((churn) (set! cues (cons 'shuffle cues)))
+                   ((corrupt obfuscate) (set! cues (cons 'scramble cues)))
+                   (else #f)))
+               (when (and (trace-severed? t1) (not (trace-severed? t0)))
+                 (set! cues (cons 'severed cues)))
+               (when (and (deal-won? after) (not (deal-won? before)))
+                 (set! cues (cons 'cleared cues)))
+               (cond ((< (length (game-history g1)) (length (game-history g0)))
+                      (set! cues (cons 'mismatch cues)))
+                     ;; a pull: the stock or the waste changed size (a pull
+                     ;; counts as a move too, so it is read before the move)
+                     ((or (not (= (length (game-stock g0)) (length (game-stock g1))))
+                          (not (= (length (game-waste g0)) (length (game-waste g1)))))
+                      (if (> (game-moves g1) (game-moves g0))
+                          (set! cues (cons (if (> (length (game-waste g1)) (length (game-waste g0))) 'select 'match) cues))
+                          (set! cues (cons 'select cues))))
+                     ((> (game-moves g1) (game-moves g0))
+                      (unless (deal-won? after) (set! cues (cons 'match cues))))
+                     ((and (game-selected g1) (not (equal? (game-selected g0) (game-selected g1))))
+                      (set! cues (cons 'select cues))))
+               (reverse cues)))))))

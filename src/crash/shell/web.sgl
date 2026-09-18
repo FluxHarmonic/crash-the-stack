@@ -119,6 +119,8 @@
           (crash look)
           (crash bg)
           (crash shader)
+          (crash sfx)
+          (crash audio)
           (crash shell))
 
   (export web-main web-dispatch)
@@ -158,6 +160,9 @@
     (define *shader* #f)     ; the compiled shader, once the first frame tried it (or #f)
     (define *shader-tried* #f)
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
+    (define *audio-ready* #f) ; the context and sink opened (audio-open!)
+    (define *ambient-chunks* '()) ; base64 chunks of the ambient PCM the page sent, newest first
+    (define *resumed* #f)    ; the context was resumed from a tap
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
     (define *ms-n* 0)
@@ -208,6 +213,61 @@
         (set! *keys* (filter (lambda (x) (not (eq? x sym)))
                              *keys*))))
 
+    ;; --- the sound (P3) ----------------------------------------------------------
+
+    ;; The page fetches assets/audio/ambient.pcm (there is no bytes fetch
+    ;; in the bridges the wasm has; the page has fetch) and hands it over
+    ;; as ("audio-chunk", base64) dispatches, then ("audio-done", count).
+    ;; Decoded here into one s16le bytevector and handed to the mixer.
+    ;;   crash: audio open|closed             the context and sink at boot
+    ;;   crash: audio resumed                 the first tap resumed the context
+    ;;   crash: ambient FRAMES                the loop landed (frames at AMBIENT-RATE)
+    (define B64 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+    ;; code point -> value, a 128-entry table built once (1.1 MB of PCM is
+    ;; 1.5 million characters; a scan per character would be seconds)
+    (define B64-TABLE
+      (let ((t (make-vector 128 #f)))
+        (let loop ((i 0))
+          (when (< i 64)
+            (vector-set! t (char->integer (string-ref B64 i)) i)
+            (loop (+ i 1))))
+        t))
+
+    (define (b64-value c)
+      (let ((k (char->integer c)))
+        (and (< k 128) (vector-ref B64-TABLE k))))
+
+    ;; base64 text -> bytevector (padding tolerated; other characters skipped).
+    (define (b64-decode text)
+      (let* ((chars (filter b64-value (string->list text)))
+             (n (length chars))
+             (out (make-bytevector (quotient (* n 3) 4) 0)))
+        (let loop ((cs chars) (acc 0) (bits 0) (k 0))
+          (cond ((null? cs) out)
+                (else
+                 (let ((acc (+ (* acc 64) (b64-value (car cs))))
+                       (bits (+ bits 6)))
+                   (if (>= bits 8)
+                       (let* ((bits (- bits 8))
+                              (byte (quotient acc (expt 2 bits))))
+                         (when (< k (bytevector-length out))
+                           (bytevector-u8-set! out k byte))
+                         (loop (cdr cs) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
+                       (loop (cdr cs) acc bits k))))))))
+
+    (define (audio-chunk! payload)
+      (set! *ambient-chunks* (cons payload *ambient-chunks*))
+      0)
+
+    (define (audio-done! payload)
+      (let* ((chunks (reverse *ambient-chunks*))
+             (bytes (apply bytevector-append (map b64-decode chunks))))
+        (set! *ambient-chunks* '())
+        (audio-set-ambient! bytes AMBIENT-RATE)
+        (say "ambient" (quotient (bytevector-length bytes) 2))
+        0))
+
     ;; --- pointer -------------------------------------------------------------
 
     ;; "x,y,mods" from the loader: canvas-buffer pixels (the loader applies
@@ -215,6 +275,11 @@
     ;; uses) and a modifier bitmask the game does not read (the web's
     ;; commands are on the canvas, not on chords).
     (define (pointer-down! payload)
+      ;; the first tap is the user gesture the autoplay policy wants
+      (when (and *audio-ready* (not *resumed*))
+        (audio-resume!)
+        (set! *resumed* #t)
+        (say "audio" "resumed"))
       (let ((parts (string-split payload ",")))
         (when (= (length parts) 3)
           (let ((x (string->number (car parts)))
@@ -550,6 +615,7 @@
              (x (card-fx-observe x before after *card-geom*)))
         (set! *deal* after)
         (set! *card-fx* x)
+        (play-cues! (deal-cues before after))
         (set! *bg* (bg-advance *bg* (clock-steps (card-fx-clock x)) (deal-trace before) (deal-trace after)))
         (report-deal-change! before after)
         (report-deal-trace! before after)
@@ -583,6 +649,7 @@
              (x (fx-observe x before after *geom*)))
         (set! *session* after)
         (set! *fx* x)
+        (play-cues! (session-cues before after))
         (set! *bg* (bg-advance *bg* (clock-steps (fx-clock x)) (session-trace before) (session-trace after)))
         (unless (eq? (session-update before) (session-update after))
           (say "update" (session-update after))
@@ -635,7 +702,8 @@
       (set! *since-boot* (+ *since-boot* dt))
       (when *ms* (count-frame! dt))
       (gles3-resize-to-display)
-      (tick-screen (input-this-frame) dt))
+      (tick-screen (input-this-frame) dt)
+      (audio-pump!))
 
     (define (tick-screen f dt)
       (let ((click (input-frame-click f)))
@@ -755,6 +823,8 @@
       (set! *deal* #f)
       (set! *bg* (bg-new 1))
       (set! *booted* #t)
+      (set! *audio-ready* (audio-open!))
+      (say "audio" (if *audio-ready* "open" "closed"))
       (cond (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
             (else (open-menu!)))
@@ -800,4 +870,6 @@
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ((string=? type "shader") (param! (lambda () (set! *shader-mode* (string=? payload "on")))))
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
+            ((string=? type "audio-chunk") (audio-chunk! payload))
+            ((string=? type "audio-done") (audio-done! payload))
             (else 0)))))

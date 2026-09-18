@@ -1,0 +1,106 @@
+;;; (crash synth) - The sound effects, synthesized: eight cues as PCM.
+;;;
+;;; No sample files: every cue is a few oscillators and an envelope,
+;;; rendered once at the audio context's rate into a mono float buffer
+;;; (a bytevector of IEEE singles, the shape the streaming sink takes),
+;;; so the same source sounds the same on both targets and the manifest
+;;; has nothing to carry for them (origin: hand, as code). Cues (the
+;;; phase plan's P3 row): select, match, mismatch, shuffle, lock,
+;;; scramble, cleared, severed. Chip-flavored on purpose (square, saw,
+;;; noise, sine), the demoscene frame's sound. Rules family: no platform.
+
+(define-library (crash synth)
+  (import (sigil math)
+          (crash stack prng))
+
+  (export CUES render-cue cue-frames cue-ref PI2
+          bytes->frames bytes-ref)
+
+  (begin
+    (define PI2 6.283185307179586)
+    (define CUES '(select match mismatch shuffle lock scramble cleared severed))
+    (define GAIN 0.35)
+
+    ;; A mono float buffer of n frames, filled by (f t i) -> sample, t in seconds.
+    (define (render rate seconds f)
+      (let* ((n (exact (floor (* rate seconds))))
+             (bv (make-bytevector (* 4 n) 0)))
+        (let loop ((i 0))
+          (when (< i n)
+            (bytevector-ieee-single-set! bv (* 4 i) (* GAIN (f (/ i (* 1.0 rate)) i)) 'little)
+            (loop (+ i 1))))
+        bv))
+
+    (define (cue-frames bv) (quotient (bytevector-length bv) 4))
+    (define (cue-ref bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
+
+    ;; --- the voices -------------------------------------------------------------
+
+    (define (sine hz t) (sin (* PI2 hz t)))
+    (define (square hz t) (if (< (sine hz t) 0.0) -0.6 0.6))
+    (define (saw hz t) (let ((p (- (* hz t) (floor (* hz t))))) (- (* 2.0 p) 1.0)))
+    ;; a decaying envelope: 1 at 0, e^-k at t
+    (define (decay t k) (exp (- (* k t))))
+    ;; noise from the game's own stream, one draw per sample
+    (define (noise i)
+      (let ((s (prng-next (prng-seed (+ 7 (* 13 i))))))
+        (- (/ (prng-index s 2000) 1000.0) 1.0)))
+
+    ;; --- the cues ---------------------------------------------------------------
+
+    (define (render-cue name rate)
+      (case name
+        ;; a rising blip
+        ((select)
+         (render rate 0.05 (lambda (t i) (* (decay t 40.0) (sine (+ 880.0 (* 8000.0 t)) t)))))
+        ;; two pings, the second a fifth up
+        ((match)
+         (render rate 0.16 (lambda (t i)
+                             (if (< t 0.08)
+                                 (* (decay t 30.0) (+ (* 0.7 (sine 660.0 t)) (* 0.3 (square 660.0 t))))
+                                 (* (decay (- t 0.08) 30.0) (+ (* 0.7 (sine 990.0 t)) (* 0.3 (square 990.0 t))))))))
+        ;; a low buzz
+        ((mismatch)
+         (render rate 0.1 (lambda (t i) (* (decay t 25.0) (square 110.0 t)))))
+        ;; noise under a falling sweep
+        ((shuffle)
+         (render rate 0.2 (lambda (t i)
+                            (* (decay t 12.0)
+                               (+ (* 0.5 (noise i)) (* 0.5 (sine (- 1200.0 (* 4000.0 t)) t)))))))
+        ;; metal: a square with a high partial, hit hard and short
+        ((lock)
+         (render rate 0.15 (lambda (t i)
+                             (* (decay t 28.0)
+                                (+ (* 0.6 (square 220.0 t)) (* 0.4 (sine 726.0 t)))))))
+        ;; six chirps in a row, each a different pitch
+        ((scramble)
+         (render rate 0.24 (lambda (t i)
+                             (let* ((k (exact (floor (/ t 0.04))))
+                                    (u (- t (* k 0.04)))
+                                    (hz (+ 400.0 (* 300.0 (modulo (* k 5) 7)))))
+                               (* (decay u 60.0) (square hz t))))))
+        ;; the win: an arpeggio up
+        ((cleared)
+         (render rate 0.6 (lambda (t i)
+                            (let* ((k (min 3 (exact (floor (/ t 0.15)))))
+                                   (u (- t (* k 0.15)))
+                                   (hz (list-ref '(523.25 659.25 783.99 1046.5) k)))
+                              (* (decay u 8.0) (+ (* 0.6 (sine hz t)) (* 0.4 (square hz t))))))))
+        ;; the loss: a saw falling away under noise
+        ((severed)
+         (render rate 0.8 (lambda (t i)
+                            (* (decay t 3.0)
+                               (+ (* 0.7 (saw (- 300.0 (* 280.0 t)) t))
+                                  (* 0.3 (noise i)))))))
+        (else (render rate 0.01 (lambda (t i) 0.0)))))
+
+    ;; --- the ambient's samples: s16le mono in a bytevector -----------------------
+
+    (define (bytes->frames bv) (quotient (bytevector-length bv) 2))
+
+    ;; The i-th sample as a float in [-1, 1).
+    (define (bytes-ref bv i)
+      (let* ((lo (bytevector-u8-ref bv (* 2 i)))
+             (hi (bytevector-u8-ref bv (+ 1 (* 2 i))))
+             (v (+ lo (* 256 hi))))
+        (/ (if (>= v 32768) (- v 65536) v) 32768.0)))))

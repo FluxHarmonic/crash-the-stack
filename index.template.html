@@ -106,7 +106,35 @@
       if (coarse) app.dispatch("touch", "on");
       updates.app = app;
       updates.ready(app);
+      fetchAmbient(app);
     });
+
+    // The ambient loop (P3): s16le mono PCM under assets/audio/, fetched
+    // here because the wasm's bridges have no bytes fetch, and handed to
+    // the game as base64 chunks through the dispatch ("audio-chunk"),
+    // then ("audio-done", n). Fetched after the boot's first seconds,
+    // outside the service worker's activation window (the same reason the
+    // game's own texture fetches wait), and never fatal: no ambient means
+    // sound effects alone.
+    function fetchAmbient(app) {
+      setTimeout(function () {
+        fetch("assets/audio/ambient.pcm", { cache: "force-cache" }).then(function (r) {
+          if (!r.ok) throw new Error("ambient " + r.status);
+          return r.arrayBuffer();
+        }).then(function (buf) {
+          var bytes = new Uint8Array(buf), CHUNK = 48 * 1024, n = 0;
+          for (var i = 0; i < bytes.length; i += CHUNK) {
+            var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
+            for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
+            app.dispatch("audio-chunk", btoa(s));
+            n++;
+          }
+          app.dispatch("audio-done", String(n));
+        }).catch(function (err) {
+          console.log("crash: ambient failed " + err.message);
+        });
+      }, 2500);
+    }
     globalThis.__crashUpdates = updates;
 
     var canvas = document.getElementById("stage");

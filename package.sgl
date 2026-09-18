@@ -16,6 +16,7 @@
 (define sigil-repo "codeberg:sigil/sigil")
 (define app-repo "codeberg:sigil/sigil-app")
 (define graphics-repo "codeberg:sigil/sigil-graphics")
+(define audio-repo "codeberg:sigil/sigil-audio")
 
 ;; The web build's version, for the service worker and the page: the git
 ;; commit, plus the build's second when the tree was dirty so two dirty
@@ -45,7 +46,8 @@
     ctx))
 
 ;; After link-web-application on a wasm target: copy web/sw.js into the
-;; build with its version stamped, and stamp the page's __VERSION__ too.
+;; build with its version stamped, web/_headers as it is, and stamp the
+;; page's __VERSION__ too.
 (define (stamp-web-version ctx)
   (let* ((out (config-output-dir (context-config ctx)))
          (version (web-version))
@@ -55,6 +57,10 @@
          (page-path (path-join out "index.html"))
          (page (read-file-string page-path)))
     (write-file-string (path-join out "sw.js") (stamp sw))
+    ;; the Pages edge headers (COOP/COEP for the audio worklet), copied
+    ;; as they are; sigil serve ignores the file and sw.js does the same
+    ;; job on the dev host from the second visit on
+    (write-file-string (path-join out "_headers") (read-file-string "web/_headers"))
     (write-file-string page-path (stamp page))
     (display "  web version ") (display version) (newline)
     ctx))
@@ -114,7 +120,13 @@
     (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22" configs: '(web))
     (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22" configs: '(web))
     ;; Web only: localStorage for the saved board ((crash store)).
-    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22" configs: '(web)))
+    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22" configs: '(web))
+    ;; Sound (P3, ruling D9: sigil-audio at its current tag). The facade
+    ;; (sigil audio sink) is sigil-audio's on both targets; its C (sokol
+    ;; audio, vorbis) is skipped on wasm by its own package, and the web
+    ;; backend is the monorepo's WebAudio bridge.
+    (from-git url: audio-repo version: "^0.12.1")
+    (from-git url: sigil-repo package: "sigil-wasm-audio" version: ">=0.22" configs: '(web)))
 
   ;; Built only when tests are built (sigil 0.22.2), so a plain
   ;; `build --config web` no longer compiles the runner's closure for wasm.

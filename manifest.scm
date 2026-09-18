@@ -18,5 +18,9 @@
    "libxi"
    "libxcursor"
 
+   ;; Sound (P3): sokol_audio's ALSA backend natively; vorbis and ogg are
+   ;; vendored in sigil-audio, so nothing else
+   "alsa-lib"
+
    ;; Web build
    "binaryen"))     ; wasm-opt

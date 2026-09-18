@@ -1,0 +1,125 @@
+;;; Gate (P3) leg 3 - the sound reaches the sink.
+;;;
+;;; Native half: every cue renders non-silent and short at both rates the
+;;; targets run (44100 natively, 48000 on most browsers); the mixer's core
+;;; (pure) puts a cue into a buffer with a measurable level, and a silent
+;;; ambient plus no cue gives silence (the positive control of the level
+;;; measure); the cue detector answers the eight cues from the rules'
+;;; own events on the stack and the card table; and, when this box has
+;;; an audio device, the real sink accepts frames from audio-pump!
+;;; (printed as audio: device open|absent, a classification, so a Kiln
+;;; runner without ALSA reads as absent rather than red). The web half,
+;;; the AnalyserNode tap after a match under cross-origin isolation, is
+;;; verify.mjs's audio sub-arm. Sabotage S3: the match cue muted (its
+;;; render made silent) reddens "match: non-silent".
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack turtle)
+        (crash geometry)
+        (crash input)
+        (crash trace)
+        (crash synth)
+        (crash sfx)
+        (crash audio)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input))
+
+(define (rms bv n step)
+  (let loop ((i 0) (sum 0.0) (k 0))
+    (if (>= i n)
+        (if (= k 0) 0.0 (sqrt (/ sum k)))
+        (let ((v (bytevector-ieee-single-ref bv (* step i) 'little)))
+          (loop (+ i 1) (+ sum (* v v)) (+ k 1))))))
+
+(test-group "audio: every cue renders, non-silent and short, at both rates"
+  (for-each (lambda (rate)
+              (for-each (lambda (name)
+                          (let* ((bv (render-cue name rate))
+                                 (n (cue-frames bv)))
+                            (test (string-append (symbol->string name) " at " (number->string rate) ": non-silent")
+                              (assert-true (> (rms bv n 4) 0.01)))
+                            (test (string-append (symbol->string name) " at " (number->string rate) ": under a second, within [-1, 1]")
+                              (assert-true (and (> n 0) (<= n rate)))
+                              (assert-true (let loop ((i 0))
+                                             (or (= i n)
+                                                 (let ((v (cue-ref bv i)))
+                                                   (and (<= v 1.0) (>= v -1.0) (loop (+ i 1))))))))))
+                        CUES))
+            '(44100 48000)))
+
+(test-group "audio: the mix"
+  (let* ((out (make-bytevector (* 8 512) 0))
+         (match (render-cue 'match 48000))
+         (r (mix-into out 512 #f 0 0.0 1.0 (list (cons match 0)) 0.0)))
+    (test "a cue alone gives a level, stereo"
+      (assert-true (> (rms out 512 8) 0.01))
+      (assert-equal (bytevector-ieee-single-ref out 0 'little) (bytevector-ieee-single-ref out 4 'little)))
+    (test "the voice advanced 512 frames and is still playing"
+      (assert-equal 512 (cdr (car (cadr r))))
+      (assert-equal 1 (length (cadr r))))
+    (test "silence in, silence out (the level measure can say zero)"
+      (let ((quiet (make-bytevector (* 8 512) 0)))
+        (mix-into quiet 512 #f 0 0.0 1.0 '() 0.0)
+        (assert-equal 0.0 (rms quiet 512 8))))
+    (test "a finished voice leaves; the ambient loops and resamples"
+      (let* ((short (render-cue 'select 48000))
+             (n (cue-frames short))
+             (out2 (make-bytevector (* 8 (+ n 8)) 0))
+             (amb (make-bytevector 20 0))         ; ten s16 frames of silence
+             (r2 (mix-into out2 (+ n 8) amb 10 0.0 0.5 (list (cons short 0)) 0.5)))
+        (assert-equal '() (cadr r2))
+        (assert-true (< (car r2) 10))))))
+
+(define lay (turtle-layout))
+(define geom (make-geometry lay 640 400))
+(define (frame pressed . rest) (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
+
+(test-group "audio: the cues the stack's frames call for"
+  (let* ((s (session-new lay 5))
+         (pair (car (board-solution (session-board s))))
+         (picked (session-pick s (car pair)))
+         (matched (session-pick picked (cdr pair)))
+         (other (let loop ((id 0)) (if (and (playable? (session-board picked) id) (not (faces-match? (session-board picked) (car pair) id))) id (loop (+ id 1)))))
+         (mismatched (session-pick picked other))
+         (shuffled (session-step matched (frame '(s) '(ctrl)) geom)))
+    (test "a pick is select" (assert-equal '(select) (session-cues s picked)))
+    (test "the partner is match" (assert-equal '(match) (session-cues picked matched)))
+    (test "a non-matching second pick is mismatch" (assert-equal '(mismatch) (session-cues picked mismatched)))
+    (test "a shuffle is shuffle" (assert-equal '(shuffle) (session-cues matched shuffled)))
+    (test "nothing is nothing" (assert-equal '() (session-cues s s)))
+    (test "the ICE's members: lock, remap as shuffle, scramble; the sever; the clear"
+      (let* ((traced (session-advance (session-step (session-step (session-step s (frame '(s) '(ctrl)) geom) (frame '(s) '(ctrl)) geom) (frame '(s) '(ctrl)) geom) 1))
+             (first (session-advance traced (* 60 ICE-FIRST)))
+             (cue (session-cues traced first)))
+        (assert-true (and (memq (trace-last-ice (session-trace first)) '(lock remap scramble)) #t))
+        (assert-equal (case (trace-last-ice (session-trace first)) ((lock) 'lock) ((remap) 'shuffle) (else 'scramble))
+                      (car cue))
+        (let ((severed (session-advance first (* 60 (+ 1 SEVER-AT)))))
+          (assert-true (and (memq 'severed (session-cues first severed)) #t)))))))
+
+(test-group "audio: the cues the card table's frames call for"
+  (let* ((d (deal-restore 1 (game-from-deck (deck-string->cards FIXTURE-DECK) 1) #t (trace-new 'twist)))
+         (g (deal-game d))
+         (moves (legal-moves g))
+         (moved (deal-restore 1 (game-move g (car (car moves)) (cdr (car moves))) #t (deal-trace d)))
+         (drawn (deal-restore 1 (game-draw! g) #t (deal-trace d))))
+    (test "a move is match" (assert-equal '(match) (deal-cues d moved)))
+    (test "a pull is select" (assert-equal '(select) (deal-cues d drawn)))
+    (test "an undo is mismatch" (assert-equal '(mismatch) (deal-cues moved (deal-restore 1 (game-undo (deal-game moved)) #t (deal-trace d)))))))
+
+(test-group "audio: the sink on this box (classified, not required)"
+  (let ((open? (audio-open!)))
+    (display (if open? "  audio: device open" "  audio: device absent")) (newline)
+    (test "the bank rendered at the context's rate, or nothing opened"
+      (assert-true (or (not open?) (> (audio-rate) 0))))
+    (when open?
+      (audio-cue! 'match)
+      (let ((pushed (audio-pump!)))
+        (test "audio-pump! pushed frames into the real sink"
+          (assert-true (> pushed 0)))))))

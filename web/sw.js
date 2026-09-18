@@ -34,6 +34,7 @@ var SHELL = [
   "assets/tiles/block.png",
   "assets/tiles/block-worn.png",
   "assets/packets/portraits.png",
+  "assets/audio/ambient.pcm",
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
   "assets/icon-512.png"
@@ -71,6 +72,27 @@ self.addEventListener("message", function (event) {
   }
 });
 
+// Cross-origin isolation (P3, the coi-serviceworker technique folded into
+// this worker rather than a second one on the same scope): the page's
+// navigation response gains Cross-Origin-Opener-Policy: same-origin and
+// Cross-Origin-Embedder-Policy: require-corp, and every same-origin
+// resource Cross-Origin-Resource-Policy: same-origin, so from the second
+// visit on the page is crossOriginIsolated and the audio bridge takes its
+// AudioWorklet path (SharedArrayBuffer); the first visit, before this
+// worker controls the page, gets the ScriptProcessorNode fallback, which
+// is why the first load is not reloaded here (a reload mid-boot would
+// cost more than one visit's fallback). The public site adds the same
+// headers at the edge (_headers) and is isolated from the first load.
+// Every resource the page loads is same-origin, so require-corp blocks nothing.
+function isolated(res) {
+  if (!res || res.status === 0) return res;
+  var headers = new Headers(res.headers);
+  headers.set("Cross-Origin-Embedder-Policy", "require-corp");
+  headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  headers.set("Cross-Origin-Resource-Policy", "same-origin");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: headers });
+}
+
 self.addEventListener("fetch", function (event) {
   var req = event.request;
   if (req.method !== "GET") return;
@@ -82,7 +104,7 @@ self.addEventListener("fetch", function (event) {
         return cache.match("./").then(function (hit) {
           return hit || fetch(req);
         });
-      })
+      }).then(isolated)
     );
     return;
   }
@@ -95,6 +117,6 @@ self.addEventListener("fetch", function (event) {
           return res;
         });
       });
-    })
+    }).then(isolated)
   );
 });

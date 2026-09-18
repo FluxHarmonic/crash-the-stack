@@ -1,0 +1,145 @@
+;;; (crash audio) - The sound, through one streaming sink on both targets.
+;;;
+;;; (sigil audio sink) is the one door the two targets share: sokol's
+;;; ring natively, the WebAudio bridge on the web (an AudioWorklet when
+;;; the page is cross-origin isolated, a ScriptProcessorNode otherwise;
+;;; [[topics/sigil-wasm-audio-bridge]]). Everything else is Sigil: the
+;;; eight cues of (crash synth) are rendered once at the context's rate
+;;; into a bank, the ambient loop arrives as s16 mono PCM at its own rate
+;;; (the motif render, shipped under assets/audio/), and each frame the
+;;; mixer fills the sink's free room with the ambient resampled by linear
+;;; interpolation plus every voice still playing, stereo, and pushes it.
+;;; The sink's buffer (AMBIENT-LEAD frames) is the only latency; a cue
+;;; lands within it.
+;;;
+;;; The context opens at boot on both targets and must be RESUMED from a
+;;; user gesture on the web (the autoplay policy): the shell calls
+;;; audio-resume! on the first tap. Every entry point is safe without a
+;;; context (the sink missing, the device absent under Kiln): the game
+;;; plays silent. The mixer's core is pure (mix-into), so the gate can
+;;; hold the cues and the mix headless.
+
+(define-library (crash audio)
+  (import (sigil math)
+          (sigil audio sink)
+          (crash synth))
+
+  (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
+          audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
+          audio-voices audio-ambient-frames
+          mix-into
+          AMBIENT-GAIN CUE-GAIN PUSH-MAX)
+
+  (begin
+    (define AMBIENT-GAIN 0.55)
+    (define CUE-GAIN 1.0)
+    (define PUSH-MAX 4096)         ; frames per pump at most (85 ms at 48 kHz)
+    (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the latency ceiling
+
+    ;; --- state ---------------------------------------------------------------
+    (define *ctx* #f)
+    (define *stream* #f)
+    (define *rate* 44100)
+    (define *bank* '())            ; ((cue . float-buffer) ...) at *rate*
+    (define *voices* '())          ; ((buffer . position) ...), playing
+    (define *ambient* #f)          ; s16le mono bytevector, or #f
+    (define *ambient-rate* 22050)
+    (define *ambient-pos* 0.0)     ; frame position in the ambient, fractional
+    (define *muted* #f)
+    (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
+
+    (define (audio-open?) (and *stream* #t))
+    (define (audio-stream) *stream*)
+    (define (audio-rate) *rate*)
+    (define (audio-muted?) *muted*)
+    (define (audio-set-muted! m) (set! *muted* m))
+    (define (audio-voices) *voices*)
+    (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
+
+    ;; Open the context and the stream, render the bank at the context's
+    ;; rate. #t when sound is possible, #f when it is not (no device, no
+    ;; bridge): the game is then silent and nothing else changes.
+    (define (audio-open!)
+      (guard (e (#t (set! *stream* #f) #f))
+        (let ((ctx (audio-context-open)))
+          (set! *ctx* ctx)
+          (when ctx
+            (set! *rate* (audio-context-sample-rate ctx))
+            (set! *stream* (open-audio-stream channels: 2 buffer-frames: BUFFER-FRAMES))
+            (set! *out* (make-bytevector (* 8 PUSH-MAX) 0))
+            (set! *bank* (map (lambda (name) (cons name (render-cue name *rate*))) CUES)))
+          (audio-open?))))
+
+    ;; From a user gesture (the web's autoplay policy; a no-op natively).
+    (define (audio-resume!)
+      (when *ctx*
+        (guard (e (#t #f))
+          (audio-context-resume *ctx*))))
+
+    ;; Start a cue now (queued into the next pump).
+    (define (audio-cue! name)
+      (let ((entry (assq name *bank*)))
+        (when (and entry (not *muted*))
+          (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
+
+    ;; The ambient loop: s16le mono PCM at rate, looping; #f clears it.
+    (define (audio-set-ambient! bytes rate)
+      (set! *ambient* bytes)
+      (set! *ambient-rate* rate)
+      (set! *ambient-pos* 0.0))
+
+    ;; --- the mix ---------------------------------------------------------------
+
+    ;; Fill out with n stereo frames from the ambient (from position pos
+    ;; at ratio ambient-rate/rate, looping over ambient-frames) and the
+    ;; voices; returns (list pos voices) after the n frames. Pure: the gate
+    ;; calls it with a silent ambient and one cue and reads the buffer back.
+    (define (mix-into out n ambient ambient-frames pos ratio voices amb-gain)
+      (let loop ((i 0)
+                 (pos pos)
+                 (voices voices))
+        (if (= i n)
+            (list pos voices)
+            (let* ((amb (if (and ambient (> ambient-frames 0))
+                            (let* ((k (exact (floor pos)))
+                                   (frac (- pos k))
+                                   (a (bytes-ref ambient k))
+                                   (b (bytes-ref ambient (modulo (+ k 1) ambient-frames))))
+                              (* amb-gain (+ a (* frac (- b a)))))
+                            0.0))
+                   (mixed (let sum ((vs voices) (acc amb))
+                            (if (null? vs)
+                                acc
+                                (sum (cdr vs)
+                                     (+ acc (* CUE-GAIN (cue-ref (car (car vs)) (cdr (car vs)))))))))
+                   (sample (max -1.0 (min 1.0 mixed))))
+              (bytevector-ieee-single-set! out (* 8 i) sample 'little)
+              (bytevector-ieee-single-set! out (+ 4 (* 8 i)) sample 'little)
+              (loop (+ i 1)
+                    (if (and ambient (> ambient-frames 0))
+                        (let ((next (+ pos ratio)))
+                          (if (>= next ambient-frames) (- next ambient-frames) next))
+                        pos)
+                    ;; every voice a frame on; finished ones leave
+                    (let advance ((vs voices) (acc '()))
+                      (cond ((null? vs) acc)
+                            ((>= (+ 1 (cdr (car vs))) (cue-frames (car (car vs)))) (advance (cdr vs) acc))
+                            (else (advance (cdr vs) (cons (cons (car (car vs)) (+ 1 (cdr (car vs)))) acc))))))))))
+
+    ;; Once a frame: fill what the sink has room for, PUSH-MAX at most.
+    ;; Answers the frames pushed (0 when there is no stream).
+    (define (audio-pump!)
+      (if (not *stream*)
+          0
+          (let ((n (min PUSH-MAX (audio-stream-room *stream*))))
+            (if (<= n 0)
+                0
+                (let* ((ambient (and (not *muted*) *ambient*))
+                       (frames (if ambient (bytes->frames ambient) 0))
+                       (r (mix-into *out* n ambient frames *ambient-pos*
+                                    (/ (* 1.0 *ambient-rate*) *rate*)
+                                    *voices*
+                                    AMBIENT-GAIN)))
+                  (set! *ambient-pos* (car r))
+                  (set! *voices* (cadr r))
+                  (push-audio-samples *stream* *out* n))))))))

@@ -9,6 +9,7 @@
 ;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
+;;;                   [--mute]            no sound (the context still opens)
 ;;;                   [--shader]          draw the living background with the spike's shader
 ;;;                   [--shader-probe]    open a window, try to compile the shader, print
 ;;;                                       "shader: ok" or "shader: refused", quit
@@ -62,6 +63,8 @@
           (crash look)
           (crash bg)
           (crash shader)
+          (crash sfx)
+          (crash audio)
           (crash shell))
 
   (export native-main load-editor)
@@ -241,6 +244,7 @@
             (display " held: ")
             (write (input-frame-held f))
             (newline)))
+        (play-cues! (session-cues s after))
         (stage a
                session: after
                fx: x
@@ -255,6 +259,7 @@
                         (deal-advance (deal-step d f geom)
                                       (clock-steps (card-fx-clock x))))))
              (x (card-fx-observe x d after geom)))
+        (play-cues! (deal-cues d after))
         (stage a
                deal: after
                card-fx: x
@@ -266,11 +271,23 @@
           (cons (stage-shader a) (stage-bg a))
           (stage-bg a)))
 
-    (define (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode)
+    ;; The sound: the context and the sink, the ambient from its file (a
+    ;; missing file is one line and silence, not a stop).
+    (define (open-audio! mute?)
+      (if (audio-open!)
+          (begin
+            (audio-set-muted! mute?)
+            (if (file-exists? AMBIENT-PATH)
+                (audio-set-ambient! (read-file-bytes AMBIENT-PATH) AMBIENT-RATE)
+                (begin (display "ambient not found: ") (display AMBIENT-PATH) (newline))))
+          (begin (display "audio: no device; playing silent") (newline))))
+
+    (define (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode mute?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
         (set-letterbox-color 0.0 0.0 0.0)
+        (open-audio! mute?)
         (let* ((shader (and shader-mode (shader-load)))
                (lay (turtle-layout))
                (geom (make-geometry lay VW VH))
@@ -314,6 +331,7 @@
                    (draw-frame-ms *frame-ms*)))
                 (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a))))
               (end-frame)
+              (audio-pump!)
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
                     (else (loop a))))))
@@ -453,6 +471,7 @@
              (shader-mode (cond ((member "--shader-probe" args) 'probe)
                                 ((member "--shader" args) 'on)
                                 (else #f)))
+             (mute? (and (member "--mute" args) #t))
              (edit-path (arg-value args "--edit" #f))
              (bench-arg (arg-value args "--bench-probe" #f)))
         (when bench-arg
@@ -463,5 +482,5 @@
                   WINDOW-H
                   (if edit-path
                       (editor-loop edit-path)
-                      (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode)))
+                      (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode mute?)))
         0))))
