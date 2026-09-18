@@ -167,28 +167,35 @@
 
     ;; An encrypted packet: the back under a hot veil with a hot strip
     ;; across its top, the strip labeled, so it reads as the ICE's from
-    ;; the sliver the fan leaves in view (David, 2026-09-18).
+    ;; the sliver the fan leaves in view (David, 2026-09-18). left: the
+    ;; fraction of the lock's time still to run; the veil fades with it
+    ;; and the strip's ground shrinks from the right like a fuse (David:
+    ;; "some way to indicate how much time is left").
     (define ENCRYPTED-LABEL "ENCRYPTED")
     (define ENCRYPTED-STRIP 16)
 
-    (define (draw-locked-back r)
+    (define (draw-locked-back r left)
       (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
         (draw-back r)
-        (color-alpha! C-TRACE-HOT 0.3)
+        (color-alpha! C-TRACE-HOT (+ 0.08 (* 0.25 left)))
         (draw-filled-rect x y w h)
-        (color! C-TRACE-HOT)
+        (color-alpha! C-TRACE-HOT 0.35)
         (draw-filled-rect x y w ENCRYPTED-STRIP)
+        (color! C-TRACE-HOT)
+        (draw-filled-rect x y (exact (round (* w left))) ENCRYPTED-STRIP)
         (color! C-BG)
         (draw-text-mini ENCRYPTED-LABEL
                         (+ x (half (- w (text-width-mini ENCRYPTED-LABEL 2))))
                         (+ y 3)
                         2)))
 
-    ;; flag: the pile entry's flag, #t face up, #f face down, locked
-    ;; encrypted (the waste and the foundations pass #t).
-    (define (draw-card r c flag selected?)
+    ;; flag: the pile entry's flag, #t face up, #f face down, a number
+    ;; the tick an ICE lock expires at (the waste and the foundations
+    ;; pass #t); now: the clock's tick.
+    (define (draw-card r c flag selected? now)
       (cond ((eq? flag #t) (draw-face r c selected?))
-            ((eq? flag 'locked) (draw-locked-back r))
+            ((number? flag)
+             (draw-locked-back r (max 0.0 (min 1.0 (/ (- flag now) ENCRYPT-TICKS)))))
             (else (draw-back r))))
 
     (define (selected-place? game p)
@@ -276,7 +283,7 @@
     ;; over everything.
     (define (draw-movers g x)
       (for-each (lambda (m)
-                  (draw-card (cadr m) (car m) (caddr m) #f))
+                  (draw-card (cadr m) (car m) (caddr m) #f 0))
                 (card-fx-movers x)))
 
     ;; The cascade: each flying card over its trail (the placeholder for
@@ -300,7 +307,7 @@
                                #f))
                   (reverse (card-fx-flying x)))))
 
-    (define (draw-tableau g game x)
+    (define (draw-tableau g game x now)
       (let ((skip (card-fx-moving-cards x)))
         (let loop ((i 0))
           (when (< i PILES)
@@ -318,7 +325,8 @@
                             (draw-card r
                                        (pile-card entry)
                                        (cdr entry)
-                                       (in-selected-run? game i depth))
+                                       (in-selected-run? game i depth)
+                                       now)
                             (draw-hit-flash r hit))))
                       (draw (- depth 1))))))
             (loop (+ i 1))))))
@@ -392,6 +400,11 @@
     ;; 2026-09-18, after a session with them gone and no way back in view).
     (define TAGS-HIDDEN-LINE
       "TAGS HIDDEN: SPACE SHOWS THEM  F PULL  J BUFFER")
+    ;; A jammed stack is not the end: the line says what is left to do,
+    ;; and the cards stay in reach (David, 2026-09-18: the centered
+    ;; message "covers the cards in a way that I can't actually act").
+    (define JAMMED-LINE
+      "STACK JAMMED: NO MOVE HELPS. ROLLBACK, SCRAMBLE OR DUMP")
 
     (define (control-label name game d)
       (case name
@@ -460,11 +473,11 @@
          "LINK SEVERED. TAP: RETRY LINK / NEW DUMP / JACK OUT (^R ^N).")
         (else #f)))
 
-    ;; The state message that sits in the middle, or "": the win and a
-    ;; jammed stack, as the stack's cleared and no-moves states do.
-    ;; Everything else (the ICE's lines, AUTOCOMMIT, a scramble) is a
-    ;; toast sliding in beside the HUD, the stack's way (David,
-    ;; 2026-09-18: the centered boxes got in the way of the game).
+    ;; The state message that sits in the middle, or "": the win only.
+    ;; Everything else (the ICE's lines, AUTOCOMMIT, a scramble, a jammed
+    ;; stack) is a toast sliding in beside the HUD, the stack's way
+    ;; (David, 2026-09-18: the centered boxes got in the way of the game;
+    ;; the jammed one covered the cards while the game went on).
     (define (state-message d)
       (let* ((game (deal-game d))
              (tr (deal-trace d))
@@ -475,8 +488,6 @@
                                     ((eq? (trace-cleared-in tr) 'counter)
                                      (string-append " " TAG-UNDER-ICE))
                                     (else (string-append " " TAG-CLEAN-RUN)))))
-              ((deal-severed? d) "")
-              ((string=? message MSG-STUCK) message)
               (else ""))))
 
     (define (draw-hud d g x)
@@ -497,14 +508,16 @@
         (draw-text right (- vw 8 (text-width right 1)) (+ top 32) 1)
         (draw-controls g game d)
         (draw-meter-in (card-control-rect g 'mode) tr)
-        (let ((line (phase-line tr game)))
+        (let ((line (and (not (string=? (deal-message d) MSG-STUCK)) (phase-line tr game))))
           (if line
               (begin
                 (color! C-HIGHLIGHT)
                 (draw-text line 8 (+ top 32) 1))
               (begin
                 (color! C-TEXT-DIM)
-                (draw-text (if (deal-labels-shown d) TAGS-LINE TAGS-HIDDEN-LINE)
+                (draw-text (cond ((string=? (deal-message d) MSG-STUCK) JAMMED-LINE)
+                                 ((deal-labels-shown d) TAGS-LINE)
+                                 (else TAGS-HIDDEN-LINE))
                            8
                            (+ top 32)
                            1))))
@@ -528,7 +541,7 @@
       (let ((game (deal-game d)))
         (draw-background g)
         (draw-top-row g game x)
-        (draw-tableau g game x)
+        (draw-tableau g game x (if (deal-trace d) (trace-ticks (deal-trace d)) 0))
         (when (and (deal-labels-shown d) (not (deal-auto d)) (not (deal-won? d)))
           (draw-tags d g))
         (draw-movers g x)

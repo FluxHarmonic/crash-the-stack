@@ -42,7 +42,7 @@
           game-draw game-passes game-selected game-history game-moves game-rng
           game-scoring game-score game-corrupt
           game-new game-from-deck game-with-scoring
-          game-corrupted? game-corrupt-waste game-encrypt game-churn
+          game-corrupted? game-corrupt-waste game-encrypt game-unlock-expired game-churn
           encryptable-places
           game-stuck? game-scramble progress-moves SCRAMBLE-TRIES
           PILES FOUNDATIONS DRAW-COUNTS SCORINGS
@@ -50,7 +50,7 @@
           SCORE-FROM-FOUNDATION SCORE-RECYCLE-ONE SCORE-RECYCLE-THREE
           RECYCLE-THREE-FREE
           VEGAS-BUY-IN VEGAS-PER-CARD
-          pile-card pile-up? pile-locked? game-pile game-foundation
+          pile-card pile-up? pile-locked? pile-lock-until game-pile game-foundation
           place-card place-selectable? selection-cards run-length
           valid-pile-move? valid-foundation-move?
           game-move game-draw! game-undo game-select game-with-draw recycle-allowed? reachable-cards
@@ -108,12 +108,15 @@
     ;; --- construction --------------------------------------------------------
 
     ;; A pile entry is (card . flag): #t face up, #f face down as dealt,
-    ;; locked face down by the ICE (an encrypted packet; it looks
-    ;; different, plays like a dealt face-down card, and the uncovering
-    ;; flip turns it up like any other).
+    ;; a number when face down by the ICE (an encrypted packet: the flag
+    ;; is the clock tick the lock expires at; it looks different, plays
+    ;; like a dealt face-down card until then, and the uncovering flip
+    ;; turns it up like any other). David, 2026-09-18: locks that lasted
+    ;; until uncovered "make the game pretty impossible".
     (define (pile-card entry) (car entry))
     (define (pile-up? entry) (eq? (cdr entry) #t))
-    (define (pile-locked? entry) (eq? (cdr entry) 'locked))
+    (define (pile-locked? entry) (number? (cdr entry)))
+    (define (pile-lock-until entry) (cdr entry))
 
     ;; Pile i gets i+1 cards, pile by pile in deck order (Cybersol's loop),
     ;; the last one face up; the rest is the stock, the next card to deal
@@ -458,8 +461,9 @@
                             (loop (+ depth 1) (cons (list 'pile i depth) acc))))))
                   (iota PILES))))
 
-    ;; The card at a pile place turned face down, marked as the ICE's.
-    (define (game-encrypt g p)
+    ;; The card at a pile place turned face down, locked until the
+    ;; clock tick given.
+    (define (game-encrypt g p until)
       (let* ((i (cadr p))
              (depth (caddr p))
              (pile (game-pile g i)))
@@ -469,9 +473,26 @@
                   tableau: (vector-with (game-tableau g)
                                         i
                                         (append (take pile depth)
-                                                (list (cons (pile-card (list-ref pile depth)) 'locked))
+                                                (list (cons (pile-card (list-ref pile depth)) until))
                                                 (drop-n pile (+ depth 1))))
                   selected: #f))))
+
+    ;; Every lock whose tick has come turned face up; the same game (eq?)
+    ;; when none has.
+    (define (game-unlock-expired g now)
+      (let loop ((i 0) (g g))
+        (if (= i PILES)
+            g
+            (let* ((pile (game-pile g i))
+                   (expired? (lambda (e) (and (pile-locked? e) (>= now (pile-lock-until e))))))
+              (loop (+ i 1)
+                    (if (any expired? pile)
+                        (game g
+                              tableau: (vector-with (game-tableau g)
+                                                    i
+                                                    (map (lambda (e) (if (expired? e) (cons (pile-card e) #t) e))
+                                                         pile)))
+                        g))))))
 
     ;; The stock and the waste shuffled together into a new stock with
     ;; the given random state (the caller advances it); the waste empty,

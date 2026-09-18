@@ -149,7 +149,7 @@
     (test "encrypt: applicable when a face-up card lies under another; the pick turns it down; the flip brings it back"
       (assert-equal '() (encryptable-places (deal-game (fixture-deal))))
       (assert-equal '((pile 2 1)) (encryptable-places g))
-      (let* ((e (game-encrypt g '(pile 2 1)))
+      (let* ((e (game-encrypt g '(pile 2 1) 600))
              (entry (list-ref (game-pile e 2) 1)))
         (assert-equal "D3" (card-string (pile-card entry)))
         (assert-false (pile-up? entry))
@@ -164,7 +164,7 @@
           (assert-true (pile-up? (car (game-pile f 2))))
           (assert-equal "D3" (card-string (pile-card (car (game-pile f 2))))))))
     (test "encrypt: the packet is marked as the ICE's, keeps a face-up card's room in the fan, and the mark survives a save"
-      (let* ((e (game-encrypt g '(pile 2 1)))
+      (let* ((e (game-encrypt g '(pile 2 1) 600))
              (entry (list-ref (game-pile e 2) 1)))
         (assert-true (pile-locked? entry))
         (assert-false (pile-locked? (car (game-pile e 2))))
@@ -180,6 +180,24 @@
                (back (datum->deal (deal->datum de))))
           (assert-true (and back #t))
           (assert-true (pile-locked? (list-ref (game-pile (deal-game back) 2) 1))))))
+    (test "encrypt: the lock expires at its tick, on the clock, and not before"
+      (let* ((e (game-encrypt g '(pile 2 1) 600))
+             (entry (list-ref (game-pile e 2) 1)))
+        (assert-equal 600 (pile-lock-until entry))
+        (assert-true (eq? e (game-unlock-expired e 599)))
+        (let ((u (game-unlock-expired e 600)))
+          (assert-true (pile-up? (list-ref (game-pile u 2) 1)))
+          (assert-false (pile-locked? (list-ref (game-pile u 2) 1))))
+        ;; through the deal: the ICE locks for ENCRYPT-SECONDS from the
+        ;; tick it fires at; deal-advance turns the packet back up when
+        ;; the clock gets there
+        (let* ((tr (deal-trace d))
+               (now (trace-ticks tr))
+               (de (deal-restore 1 (game-encrypt g '(pile 2 1) (+ now ENCRYPT-TICKS)) #t tr))
+               (before (deal-advance de (- ENCRYPT-TICKS 1)))
+               (after (deal-advance before 1)))
+          (assert-true (pile-locked? (list-ref (game-pile (deal-game before) 2) 1)))
+          (assert-true (pile-up? (list-ref (game-pile (deal-game after) 2) 1))))))
     (test "corrupt: applicable with a waste; the top is refused for exactly CORRUPT-DRAWS draws"
       (assert-false (corrupt-applicable-for (deal-game (fixture-deal))))
       (let* ((g1 (game-select (deal-game (fixture-deal)) '(stock)))       ; S7 on the waste

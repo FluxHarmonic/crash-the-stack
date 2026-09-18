@@ -12,7 +12,8 @@
 ;;; The counter-hack set, each a member with applicable? and apply like
 ;;; the stack's, picked uniformly with the game's random stream:
 ;;;   encrypt   a face-up tableau card with a card on top of it turns face
-;;;             down; it turns back when uncovered (the ordinary flip)
+;;;             down for ENCRYPT-SECONDS; it turns back when uncovered
+;;;             (the ordinary flip) or when its time is up
 ;;;   corrupt   the waste's top card is unplayable for CORRUPT-DRAWS draws
 ;;;   churn     the stock and the waste are shuffled into a new stock
 ;;; None applicable: the interval passes with a message. Every hit cuts
@@ -28,13 +29,14 @@
   (import (sigil struct)
           (sigil math)
           (crash stack prng)
+          (crash tween)
           (crash trace)
           (crash cards deck)
           (crash cards rules))
 
   (export PASS-COST UNDO-COST SCRAMBLE-COST
           PASS-SEVER-COST UNDO-SEVER-COST SCRAMBLE-SEVER-COST
-          CORRUPT-DRAWS
+          CORRUPT-DRAWS ENCRYPT-SECONDS ENCRYPT-TICKS
           TIME-PENALTY TIME-PENALTY-EVERY BONUS-NUMERATOR BONUS-AFTER
           CARDS-ICE-SET cards-ice-applicable fire-cards-ice
           trace-pass trace-undo trace-scramble
@@ -51,6 +53,8 @@
     (define UNDO-SEVER-COST 5)       ; off the countdown, per undo
     (define SCRAMBLE-SEVER-COST 30)  ; off the countdown, per scramble
     (define CORRUPT-DRAWS 3)         ; draws a corrupted waste top stays unplayable
+    (define ENCRYPT-SECONDS 10)      ; an encrypted packet turns back up after this long (David, 2026-09-18: "maybe like 10 seconds")
+    (define ENCRYPT-TICKS (* ENCRYPT-SECONDS TICKS-PER-SECOND))
 
     ;; Windows' timed Standard game.
     (define TIME-PENALTY 2)          ; points off ...
@@ -71,16 +75,17 @@
 
     ;; --- the counter-hack set -----------------------------------------------------
 
-    ;; Each apply takes the game and the game's advanced random state and
-    ;; returns the game (with its rng set to what it used).
+    ;; Each apply takes the game, the game's advanced random state and
+    ;; the clock's tick, and returns the game (with its rng set to what it
+    ;; used).
 
     (define (encrypt-applicable? g)
       (pair? (encryptable-places g)))
 
-    (define (encrypt-apply g rng)
+    (define (encrypt-apply g rng now)
       (let* ((places (encryptable-places g))
              (p (list-ref places (prng-index rng (length places)))))
-        (game (game-encrypt g p) rng: rng)))
+        (game (game-encrypt g p (+ now ENCRYPT-TICKS)) rng: rng)))
 
     ;; Not while a corruption holds, and never when nothing could be
     ;; drawn past it (the waste can always be turned now, so only an
@@ -90,13 +95,13 @@
            (not (game-corrupted? g))
            (or (pair? (game-stock g)) (pair? (cdr (game-waste g))))))
 
-    (define (corrupt-apply g rng)
+    (define (corrupt-apply g rng now)
       (game (game-corrupt-waste g CORRUPT-DRAWS) rng: rng))
 
     (define (churn-applicable? g)
       (>= (+ (length (game-stock g)) (length (game-waste g))) 4))
 
-    (define (churn-apply g rng)
+    (define (churn-apply g rng now)
       (let ((r (game-churn g rng)))
         (game (car r) rng: (cdr r))))
 
@@ -123,7 +128,7 @@
             (cons g #f)
             (let* ((rng (prng-next (game-rng g)))
                    (m (list-ref members (prng-index rng (length members))))
-                   (hit ((ice-member-apply m) g (prng-next rng))))
+                   (hit ((ice-member-apply m) g (prng-next rng) now)))
               (cons (game hit history: '() selected: #f)
                     (ice-member-name m))))))
 
