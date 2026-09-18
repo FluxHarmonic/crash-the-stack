@@ -19,9 +19,14 @@
 ;;;             live on a ring, so the ramp is cyclic and domains of one
 ;;;             color grow, shrink, split and drift without ever settling.
 ;;;   reaction  Gray-Scott reaction-diffusion (two substances per cell, a
-;;;             laplacian on the grid, feed and kill rates) stepped a few
-;;;             times a tick; the value is the second substance, so spots
-;;;             and worms of color grow and divide over minutes.
+;;;             nine-point laplacian, feed and kill rates in the regime
+;;;             that grows soft coral fronts) stepped a few times a tick,
+;;;             fed by the stream: one cell seeded and one patch cleared
+;;;             every so many ticks, so the fronts keep growing and
+;;;             dissolving instead of settling; the value is the second
+;;;             substance. (The first cut used the bare four-point
+;;;             laplacian at unit diffusion, which is numerically unstable
+;;;             at this step: the field flickered as a checkerboard.)
 ;;;
 ;;; Phase-driven: calm in TRACE, restless under the ICE (more cells, more
 ;;; steps), a burst when a counter-hack fires, a collapse once severed
@@ -58,11 +63,15 @@
     (define LIFE-MUTATE 12)      ; one visit in this many mutates instead of copying
     (define LIFE-DRIFT 0.06)     ; a mutation moves the value this far at most, on the ring
     (define REACT-STEPS 2)       ; Gray-Scott steps per tick at agitation 1
-    (define REACT-FEED 0.037)
-    (define REACT-KILL 0.06)
+    (define REACT-FEED 0.046)    ; the regime measured 2026-09-19: fronts cover 25..50 % and keep moving
+    (define REACT-KILL 0.063)
     (define REACT-DA 1.0)
     (define REACT-DB 0.5)
     (define REACT-DT 1.0)
+    (define REACT-RAIN 4)        ; cells seeded with the second substance every tick (raised to REACT-SEED)
+    (define REACT-SEED 0.5)
+    (define REACT-KILL-EVERY 2)  ; ticks between cleared 3x3 patches
+    (define REACT-SPOTS 12)      ; 3x3 spots of the second substance at the start
     (define AGITATION-TRACE 1.0)
     (define AGITATION-ICE 2.5)
     (define AGITATION-BURST 6.0)
@@ -120,7 +129,7 @@
 
     ;; A field seeded by the stream: life starts from smooth-ish noise
     ;; (each cell a draw, then two smoothing passes); reaction from a full
-    ;; first substance with a dozen spots of the second.
+    ;; first substance with REACT-SPOTS spots of the second.
     (define (bg-new seed . rest)
       (let* ((mode (if (and (pair? rest) (memq (car rest) MODES)) (car rest) 'life))
              (field (make-vector CELLS 0.0))
@@ -133,8 +142,12 @@
                   (let ((u (draw-unit rng)))
                     (vector-set! field i (car u))
                     (loop (+ i 1) (cdr u)))))
+            ;; REACT-SPOTS 3x3 spots of the second substance in a full
+            ;; first: the fronts grow out of them from the first tick (a
+            ;; dozen left the field blank for its first seconds; smoothed
+            ;; noise is too thin to take and dies)
             (let loop ((k 0) (rng rng))
-              (if (= k 12)
+              (if (= k REACT-SPOTS)
                   (bg mode: mode field: field sub: sub rng: rng)
                   (let* ((u1 (draw-unit rng))
                          (u2 (draw-unit (cdr u1)))
@@ -146,8 +159,8 @@
                           (when (<= dx 1)
                             (let ((x (modulo (+ cx dx) GRID-W))
                                   (y (modulo (+ cy dy) GRID-H)))
-                              (vector-set! field (+ x (* y GRID-W)) 0.5)
-                              (vector-set! sub (+ x (* y GRID-W)) 0.5))
+                              (vector-set! field (+ x (* y GRID-W)) REACT-SEED)
+                              (vector-set! sub (+ x (* y GRID-W)) REACT-SEED))
                             (col (+ dx 1))))
                         (spot (+ dy 1))))
                     (loop (+ k 1) (cdr u2))))))))
@@ -214,6 +227,48 @@
 
     ;; --- one tick: reaction -------------------------------------------------------------
 
+    ;; The nine-point laplacian with the usual weights (0.2 on the four
+    ;; sides, 0.05 on the corners, the cell itself -1), which is stable at
+    ;; unit diffusion and a unit step.
+    (define (laplacian f x y v)
+      (- (+ (* 0.2 (+ (at f (- x 1) y) (at f (+ x 1) y) (at f x (- y 1)) (at f x (+ y 1))))
+            (* 0.05 (+ (at f (- x 1) (- y 1)) (at f (+ x 1) (- y 1)) (at f (- x 1) (+ y 1)) (at f (+ x 1) (+ y 1)))))
+         v))
+
+    ;; The stream's touch on the reaction: REACT-RAIN cells seeded with
+    ;; the second substance every tick, and every REACT-KILL-EVERY ticks
+    ;; a 3x3 patch cleared. Measured 2026-09-19 over four seeds and 1200
+    ;; ticks: without the rain a seed's fronts die out within two seconds
+    ;; on two seeds of four and the field stays blank; with it the ground
+    ;; never holds more than 0.75 of the cells after the first half
+    ;; second. Returns (cons field rng).
+    (define (react-feed field rng ticks)
+      (let* ((out (vector-copy field))
+             (rng (let rain ((k 0) (rng rng))
+                    (if (= k REACT-RAIN)
+                        rng
+                        (let* ((u1 (draw-unit rng))
+                               (u2 (draw-unit (cdr u1)))
+                               (i (+ (exact (floor (* (car u1) GRID-W)))
+                                     (* (exact (floor (* (car u2) GRID-H))) GRID-W))))
+                          (vector-set! out i (max (vector-ref out i) REACT-SEED))
+                          (rain (+ k 1) (cdr u2))))))
+             (u2 (cons 0.0 rng)))
+        (if (= 0 (modulo ticks REACT-KILL-EVERY))
+            (let* ((u3 (draw-unit (cdr u2)))
+                   (u4 (draw-unit (cdr u3)))
+                   (kx (exact (floor (* (car u3) GRID-W))))
+                   (ky (exact (floor (* (car u4) GRID-H)))))
+              (let spot ((dy -1))
+                (when (<= dy 1)
+                  (let col ((dx -1))
+                    (when (<= dx 1)
+                      (vector-set! out (+ (modulo (+ kx dx) GRID-W) (* (modulo (+ ky dy) GRID-H) GRID-W)) 0.0)
+                      (col (+ dx 1))))
+                  (spot (+ dy 1))))
+              (cons out (cdr u4)))
+            (cons out (cdr u2)))))
+
     (define (react-step a b)
       (let ((na (make-vector CELLS 0.0))
             (nb (make-vector CELLS 0.0)))
@@ -223,8 +278,8 @@
                    (y (quotient i GRID-W))
                    (av (vector-ref a i))
                    (bv (vector-ref b i))
-                   (la (- (+ (at a (- x 1) y) (at a (+ x 1) y) (at a x (- y 1)) (at a x (+ y 1))) (* 4.0 av)))
-                   (lb (- (+ (at b (- x 1) y) (at b (+ x 1) y) (at b x (- y 1)) (at b x (+ y 1))) (* 4.0 bv)))
+                   (la (laplacian a x y av))
+                   (lb (laplacian b x y bv))
                    (abb (* av bv bv)))
               (vector-set! na i (clamp (+ av (* REACT-DT (+ (* REACT-DA la) (- abb) (* REACT-FEED (- 1.0 av)))))))
               (vector-set! nb i (clamp (+ bv (* REACT-DT (+ (* REACT-DB lb) abb (- (* (+ REACT-KILL REACT-FEED) bv))))))))
@@ -260,13 +315,14 @@
                (let ((r (life-step (bg-field b) (bg-rng b) (exact (floor (* agit LIFE-RATE))))))
                  (bg b field: (car r) rng: (cdr r) ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1)))))
               (else
-               (let loop ((k 0) (a (bg-sub b)) (bb (bg-field b)))
-                 ;; the reaction keeps b at its own scale in field; the
-                 ;; renderer's scale is react-field's
-                 (if (= k (max 1 (exact (floor (* agit REACT-STEPS)))))
-                     (bg b field: bb sub: a ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1)))
-                     (let ((r (react-step a bb)))
-                       (loop (+ k 1) (car r) (cdr r)))))))))
+               (let ((fed (react-feed (bg-field b) (bg-rng b) (bg-ticks b))))
+                 (let loop ((k 0) (a (bg-sub b)) (bb (car fed)))
+                   ;; the reaction keeps b at its own scale in field; the
+                   ;; renderer's scale is react-field's
+                   (if (= k (max 1 (exact (floor (* agit REACT-STEPS)))))
+                       (bg b field: bb sub: a rng: (cdr fed) ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1)))
+                       (let ((r (react-step a bb)))
+                         (loop (+ k 1) (car r) (cdr r))))))))))
 
     (define (bg-tick b n)
       (if (<= n 0) b (bg-tick (bg-step b) (- n 1))))
