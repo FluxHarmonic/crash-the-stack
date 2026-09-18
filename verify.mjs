@@ -120,6 +120,31 @@ const server = http.createServer((req, res) => {
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
 // ---- headless chrome + software WebGL --------------------------------------
+// ---- no leaked chrome ----------------------------------------------------------
+// A headless chrome from an earlier run (its user-data-dir under
+// /tmp/crash-verify-*) once outlived the arm by hours with its GPU process
+// at several cores (David, 2026-09-18). Refuse to start while one is
+// alive, and kill this run's chrome as a whole process group on EVERY
+// way out: normal, a failed assertion, the whole-run timeout, SIGINT,
+// SIGTERM (what `timeout` sends), SIGHUP, an uncaught exception.
+function liveVerifyChromes() {
+  const out = [];
+  for (const pid of fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
+    let cmd = "";
+    try { cmd = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" "); } catch { continue; }
+    const m = cmd.match(/--user-data-dir=(\/tmp\/crash-verify-[^ ]+)/);
+    if (m && /chrome/.test(cmd) && !/--type=/.test(cmd)) out.push({ pid: Number(pid), dir: m[1] });
+  }
+  return out;
+}
+{
+  const live = liveVerifyChromes();
+  if (live.length) {
+    console.log(`SETUP-FAILED: a chrome from an earlier run is still alive: ${live.map((c) => `pid ${c.pid} (${c.dir})`).join(", ")}; kill it (kill -- -<pid> takes its helpers too) and rerun`);
+    process.exit(2);
+  }
+}
+
 const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
@@ -127,36 +152,37 @@ const chrome = spawn("google-chrome", [
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`,
   PHONE ? "--window-size=390,844" : "--window-size=1000,760", "about:blank",
-], { stdio: "ignore" });
+], { stdio: "ignore", detached: true });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Stop chrome and the server, remove the profile dir once chrome has exited
-// (removing it while chrome is still writing leaves it behind), then exit.
+// The one way out. chrome was spawned detached, so -chrome.pid is its
+// process group: the browser and every helper (GPU, renderers) go
+// together, whether or not the browser process is still there.
+function killChromeGroup(sig) {
+  try { process.kill(-chrome.pid, sig); } catch { /* already gone */ }
+}
 let exiting = false;
 function shutdown(code) {
-  if (exiting) return;
-  exiting = true;
-  server.close();
-  // Chrome's helper processes outlive the main one by a moment and keep
-  // writing the profile; retry the removal a few times before giving up.
-  const finish = () => {
-    let tries = 0;
-    const rm = () => {
-      try { fs.rmSync(udd, { recursive: true, force: true }); } catch {}
-      if (fs.existsSync(udd) && ++tries < 10) { setTimeout(rm, 200); return; }
-      process.exit(code);
-    };
-    rm();
+  if (exiting) return; exiting = true;
+  try { server.close(); } catch { /* not listening */ }
+  killChromeGroup("SIGTERM");
+  let tries = 0;
+  const rm = () => {
+    try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* still being written */ }
+    if (fs.existsSync(udd) && ++tries < 15) { setTimeout(rm, 200); return; }
+    if (fs.existsSync(udd)) console.log(`note: profile dir left behind: ${udd}`);
+    process.exit(code);
   };
-  if (chrome.exitCode !== null) { finish(); return; }
-  chrome.once("exit", finish);
-  try { chrome.kill("SIGTERM"); } catch { finish(); return; }
-  setTimeout(() => { try { chrome.kill("SIGKILL"); } catch {} }, 3000).unref();
-  setTimeout(finish, 5000).unref();
+  setTimeout(() => { killChromeGroup("SIGKILL"); rm(); }, 2000).unref();
+  const onExit = () => { rm(); };
+  if (chrome.exitCode !== null) onExit(); else chrome.once("exit", onExit);
 }
-// Nothing below may hang the arm: a thrown CDP call, a chrome that dies
-// mid-run, or a wait that never ends all reach shutdown, so the chrome and
-// its CDP port are never leaked for the next run to drive by mistake.
+// The last line of defense runs synchronously as the process exits, so
+// a chrome never outlives the arm whatever path led here.
+process.on("exit", () => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } });
+process.on("SIGINT", () => shutdown(130));
+process.on("SIGTERM", () => shutdown(143));
+process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 const WHOLE_RUN_MS = 180000;
