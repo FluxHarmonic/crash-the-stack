@@ -9,6 +9,9 @@
 ;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
+;;;                   [--shader]          draw the living background with the spike's shader
+;;;                   [--shader-probe]    open a window, try to compile the shader, print
+;;;                                       "shader: ok" or "shader: refused", quit
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
 ;;;
 ;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
@@ -58,6 +61,7 @@
           (crash menu)
           (crash look)
           (crash bg)
+          (crash shader)
           (crash shell))
 
   (export native-main load-editor)
@@ -153,7 +157,8 @@
       (fx default: #f)
       (deal default: #f)          ; the card table, once opened
       (card-fx default: #f)
-      (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
+      (bg default: #f)            ; the living background, (crash bg), stepped by whichever table is up
+      (shader default: #f))       ; the spike's shader when --shader asked and the backend took it
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
     ;; the saved one; STACK deals a NEW board: the next seed after the
@@ -255,17 +260,27 @@
                card-fx: x
                bg: (bg-advance (stage-bg a) (clock-steps (card-fx-clock x)) (deal-trace d) (deal-trace after)))))
 
-    (define (stage-loop seed texture-first? model log-keys? fresh? cards?)
+    ;; The background as the renderer takes it: the state, or (shader . state).
+    (define (stage-background a)
+      (if (stage-shader a)
+          (cons (stage-shader a) (stage-bg a))
+          (stage-bg a)))
+
+    (define (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
         (set-letterbox-color 0.0 0.0 0.0)
-        (let* ((lay (turtle-layout))
+        (let* ((shader (and shader-mode (shader-load)))
+               (lay (turtle-layout))
                (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
-          (let loop ((a (let ((fresh (stage bg: (bg-new 1))))
+          (when shader-mode
+            (display (if shader "shader: ok" "shader: refused")) (newline)
+            (when (eq? shader-mode 'probe) (request-quit)))
+          (let loop ((a (let ((fresh (stage bg: (bg-new 1) shader: shader)))
                           (if cards?
                               (open-cards (open-menu fresh) seed fresh? #t)
                               (open-menu fresh)))))
@@ -294,10 +309,10 @@
               (case (stage-screen a)
                 ((menu) (draw-menu (stage-menu a) VW VH #f))
                 ((stack)
-                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-bg a))
+                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-background a))
                  (when log-keys?
                    (draw-frame-ms *frame-ms*)))
-                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-bg a))))
+                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a))))
               (end-frame)
               (cond ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
@@ -435,6 +450,9 @@
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
              (cards? (and (member "--cards" args) #t))
+             (shader-mode (cond ((member "--shader-probe" args) 'probe)
+                                ((member "--shader" args) 'on)
+                                (else #f)))
              (edit-path (arg-value args "--edit" #f))
              (bench-arg (arg-value args "--bench-probe" #f)))
         (when bench-arg
@@ -445,5 +463,5 @@
                   WINDOW-H
                   (if edit-path
                       (editor-loop edit-path)
-                      (stage-loop seed texture-first? model log-keys? fresh? cards?)))
+                      (stage-loop seed texture-first? model log-keys? fresh? cards? shader-mode)))
         0))))

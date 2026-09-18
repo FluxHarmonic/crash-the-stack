@@ -9,7 +9,7 @@
 // animation frame the game draws (preserveDrawingBuffer is off) and
 // writes it at 640x400, nearest-neighbor. Actions:
 //   wait:MS            sleep
-//   line:REGEX         wait up to 10 s for a "crash:" console line
+//   line:REGEX         wait up to 30 s for a "crash:" console line, printed
 //   tap:NAME           tap a HUD control at the center the game printed
 //                      ("crash: control NAME X Y")
 //   menu:ID            tap a menu entry ("crash: menu ID X Y ...")
@@ -70,7 +70,7 @@ function shutdown(code) {
 }
 process.on("exit", () => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } });
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => shutdown(130));
-setTimeout(() => { console.log("TIMED-OUT after 90 s"); shutdown(2); }, 90000).unref();
+setTimeout(() => { console.log("TIMED-OUT after 180 s"); shutdown(2); }, 180000).unref();
 
 let pageWs = null;
 for (let i = 0; i < 80 && !pageWs; i++) {
@@ -134,7 +134,7 @@ await sleep(600);
 for (const action of actions) {
   const [kind, rest] = [action.slice(0, action.indexOf(":")), action.slice(action.indexOf(":") + 1)];
   if (kind === "wait") await sleep(parseInt(rest, 10));
-  else if (kind === "line") { const l = await waitLine(new RegExp(rest), 0, 10000); if (!l) { console.log(`SETUP-FAILED: no line matching ${rest}`); shutdown(2); } }
+  else if (kind === "line") { const l = await waitLine(new RegExp(rest), 0, 150000); if (!l) { console.log(`SETUP-FAILED: no line matching ${rest}`); shutdown(2); } console.log(`line: ${l.m[0]}`); }
   else if (kind === "tap") {
     const ctl = await waitLine(new RegExp(`^crash: control ${rest} (-?[\\d.]+) (-?[\\d.]+)$`), 0, 3000);
     if (!ctl) { console.log(`SETUP-FAILED: no control ${rest}`); shutdown(2); }

@@ -117,6 +117,7 @@
           (crash menu)
           (crash look)
           (crash bg)
+          (crash shader)
           (crash shell))
 
   (export web-main web-dispatch)
@@ -152,6 +153,25 @@
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
     (define *bg* #f)         ; the living background, (crash bg), stepped by whichever table is up
+    (define *shader-mode* #f) ; ?shader: try the spike's shader for the background
+    (define *shader* #f)     ; the compiled shader, once the first frame tried it (or #f)
+    (define *shader-tried* #f)
+    (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
+    (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
+    (define *ms-max* 0.0)
+    (define *ms-n* 0)
+    (define MS-EVERY 300)
+    ;;   crash: frame-ms MEAN MAX             over the last MS-EVERY frames (?ms with ?trace)
+    (define (count-frame! dt)
+      (let ((ms (* 1000.0 dt)))
+        (set! *ms-sum* (+ *ms-sum* ms))
+        (set! *ms-max* (max *ms-max* ms))
+        (set! *ms-n* (+ *ms-n* 1))
+        (when (= *ms-n* MS-EVERY)
+          (say "frame-ms" (exact (round (/ *ms-sum* MS-EVERY))) (exact (round *ms-max*)))
+          (set! *ms-sum* 0.0)
+          (set! *ms-max* 0.0)
+          (set! *ms-n* 0))))
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -532,7 +552,8 @@
         (report-deal-change! before after)
         (report-deal-trace! before after)
         (begin-frame)
-        (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) *bg*)
+        (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background))
+        (when *ms* (draw-frame-ms (* 1000.0 dt)))
         (end-frame)
         (ensure-texture! dt PORTRAITS-PATH)))
 
@@ -571,7 +592,8 @@
         (when (not (= (session-seed before) (session-seed after)))
           (set! *announced* #f))
         (begin-frame)
-        (draw-session after *geom* (texture-for after) x *bg*)
+        (draw-session after *geom* (texture-for after) x (background))
+        (when *ms* (draw-frame-ms (* 1000.0 dt)))
         (end-frame)
         (ensure-texture! dt (look-texture (look-ref (session-look after))))))
 
@@ -609,6 +631,7 @@
     (define (web-tick dt)
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
+      (when *ms* (count-frame! dt))
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt))
 
@@ -716,6 +739,15 @@
 
     ;; ?stack and ?cards open their table as CONTINUE would (the saved
     ;; game, or a fresh one), which is what the arms and a bookmark want.
+    ;; The background as the renderer takes it: the state, or (shader . state).
+    ;;   crash: shader ok|refused             the spike's shader compiled, or not (?shader)
+    (define (background)
+      (when (and *shader-mode* (not *shader-tried*))
+        (set! *shader-tried* #t)
+        (set! *shader* (shader-load))
+        (say "shader" (if *shader* "ok" "refused")))
+      (if *shader* (cons *shader* *bg*) *bg*))
+
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
@@ -764,4 +796,6 @@
                        (let ((n (string->number payload)))
                          (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* n))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
+            ((string=? type "shader") (param! (lambda () (set! *shader-mode* (string=? payload "on")))))
+            ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             (else 0)))))

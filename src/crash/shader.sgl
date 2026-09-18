@@ -1,0 +1,114 @@
+;;; (crash shader) - The living background as a fragment shader: the spike.
+;;;
+;;; The phase plan's P3 row asks whether one GLSL source compiles on both
+;;; backends through sokol (desktop GL core, GLES3 on the web). The answer
+;;; the earlier bloom spike gave for Cinder holds here: one BODY, two
+;;; three-line preludes ("#version 410" against "#version 300 es" plus a
+;;; precision line), chosen at compile time by cond-expand. The fragment
+;;; draws (crash bg)'s first BLOBS patches as metaballs: a field summed
+;;; from r^2/d^2 per blob, thresholded, quantized to the CELL grid and to
+;;; the three bar tones, over the whole board area in one textured
+;;; rectangle, no render target (offscreen targets sample black on the
+;;; web's GLES3 path). Uniforms: one vec4 per blob (x y r hue in cell
+;;; units) and u_resolution, which sigil-graphics refreshes itself.
+;;;
+;;; shader-load answers #f when the backend refuses the source, and the
+;;; shells fall back to the CPU drawing; the probe flags (--shader-probe
+;;; natively, ?shader on the web) report which happened.
+
+(define-library (crash shader)
+  (import (sigil graphics)
+          (crash bg))
+
+  (export shader-load shader-set-blobs! BLOBS VERTEX-SOURCE FRAGMENT-SOURCE)
+
+  (begin
+    (define BLOBS 8)
+
+    (cond-expand
+      (wasm
+        (define PRELUDE "#version 300 es\nprecision highp float;\n"))
+      (else
+        (define PRELUDE "#version 410\n")))
+
+    ;; sgp's vertex layout: coord (xy position, zw uv) and color.
+    (define VERTEX-SOURCE
+      (string-append
+        PRELUDE
+        "layout(location = 0) in vec4 coord;\n"
+        "layout(location = 1) in vec4 color;\n"
+        "out vec2 texUV;\n"
+        "out vec4 iColor;\n"
+        "void main() {\n"
+        "    gl_Position = vec4(coord.xy, 0.0, 1.0);\n"
+        "    texUV = coord.zw;\n"
+        "    iColor = color;\n"
+        "}\n"))
+
+    (define (blob-uniforms)
+      (let loop ((i 0) (acc ""))
+        (if (= i BLOBS)
+            acc
+            (loop (+ i 1) (string-append acc "uniform vec4 b" (number->string i) ";\n")))))
+
+    (define (blob-terms)
+      (let loop ((i 0) (acc ""))
+        (if (= i BLOBS)
+            acc
+            (loop (+ i 1)
+                  (string-append acc
+                                 "    f += field(b" (number->string i) ", p);\n"
+                                 "    if (near(b" (number->string i) ", p) < best) { best = near(b" (number->string i) ", p); hue = b" (number->string i) ".w; }\n")))))
+
+    ;; The board area in cells is u_resolution / u_cell; the three bar
+    ;; tones are literal here (the palette's C-BAR-A/B/C), the ground is
+    ;; left as it was (alpha 0) where no blob reaches.
+    (define FRAGMENT-SOURCE
+      (string-append
+        PRELUDE
+        "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+        "uniform vec2 u_resolution;\n"
+        "uniform float u_cell;\n"
+        "uniform float u_top;\n"
+        (blob-uniforms)
+        "in vec2 texUV;\n"
+        "in vec4 iColor;\n"
+        "out vec4 fragColor;\n"
+        "float field(vec4 b, vec2 p) { vec2 d = p - b.xy; return (b.z * b.z) / max(dot(d, d), 0.001); }\n"
+        "float near(vec4 b, vec2 p) { vec2 d = p - b.xy; return dot(d, d) / max(b.z * b.z, 0.001); }\n"
+        "void main() {\n"
+        "    vec2 px = texUV * u_resolution;\n"
+        "    if (px.y >= u_top) { fragColor = vec4(0.0); return; }\n"
+        "    vec2 p = (floor(px / u_cell) + 0.5);\n"
+        "    float f = 0.0; float best = 1e9; float hue = 0.0;\n"
+        (blob-terms)
+        "    if (f < 1.0) { fragColor = vec4(0.0); return; }\n"
+        "    vec3 c = hue < 0.5 ? vec3(0.09, 0.07, 0.18) : (hue < 1.5 ? vec3(0.13, 0.09, 0.24) : vec3(0.18, 0.11, 0.30));\n"
+        ;; the sampler sgp binds must be read once, or the GL compiler drops it
+        ;; and sokol warns about a missing image-sampler at every frame
+        "    fragColor = vec4(c, 1.0);\n"
+        "    if (u_cell < 0.0) fragColor = texture(iTexChannel0_iSmpChannel0, texUV);\n"
+        "}\n"))
+
+    ;; The shader, or #f when the backend refuses it (load-shader raises
+    ;; through the VM's error; a guard turns that into the fallback).
+    (define (shader-load)
+      (guard (e (#t #f))
+        (let ((sh (load-shader VERTEX-SOURCE FRAGMENT-SOURCE)))
+          (and (shader? sh) sh))))
+
+    ;; The first BLOBS patches into the uniforms, in cell units.
+    (define (shader-set-blobs! sh b cell top)
+      (set-shader-uniform sh 'u_cell (* 1.0 cell))
+      (set-shader-uniform sh 'u_top (* 1.0 top))
+      (let loop ((ps (bg-patches b)) (i 0))
+        (when (< i BLOBS)
+          (let ((name (string->symbol (string-append "b" (number->string i)))))
+            (if (null? ps)
+                (set-shader-uniform sh name (list 0.0 0.0 0.0 0.0))
+                (set-shader-uniform sh name
+                                    (list (patch-cx (car ps))
+                                          (patch-cy (car ps))
+                                          (patch-r (car ps))
+                                          (* 1.0 (patch-hue (car ps))))))
+            (loop (if (null? ps) ps (cdr ps)) (+ i 1))))))))
