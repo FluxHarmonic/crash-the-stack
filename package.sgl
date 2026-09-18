@@ -108,37 +108,27 @@
     (from-git url: sigil-repo package: "sigil-test" version: ">=0.22")
     (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22"))
 
-  ;; One build task for every config. The default task compiles the modules
-  ;; and copies assets; it does not link a browser app, and a task's configs:
-  ;; field is not consulted by sigil-build (0.22), so the web-only steps
-  ;; branch on the target inside one task instead.
+  ;; The web build's task. The native configs take sigil-build's default
+  ;; build task, which is the same first three steps (a task's configs:
+  ;; gate is honored since sigil 0.22.2).
   tasks: (list
     (task
       name: 'build
-      description: "Compile the game; on a wasm target also link the browser app"
+      configs: '(web)
+      description: "Compile the game and link the browser app"
       steps: (list
         (compile-sigil-modules sources: "src/**/*.sgl")
         (copy-package-docs)
-        ;; the whole assets/ tree -> build/<config>/assets/ (licence, manifest
+        ;; the whole assets/ tree -> build/web/assets/ (licence, manifest
         ;; and the tile sources included), so the web page fetches the test
         ;; tile from assets/test-tile.png next to the wasm.
         (link-assets)
-        (lambda (ctx)
-          (if (wasm-target? (context-config ctx))
-              ;; The generated native entry inits the Sigil modules but not
-              ;; sigil-graphics' C module; app-register.c hooks the runtime's
-              ;; weak sigil_wasm_app_register to do that. Without it the sokol
-              ;; C is dead-stripped and the wasm imports no `gl` at all.
-              ((compile-c-sources
-                 sources: (list "src/c/app-register.c")
-                 flags: (with-sigil-c-flags (list "-std=c99")))
-               ctx)
-              ctx))
-        (lambda (ctx)
-          (if (wasm-target? (context-config ctx))
-              ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx)
-              ctx))
-        (lambda (ctx)
-          (if (wasm-target? (context-config ctx))
-              (stamp-web-version ctx)
-              ctx))))))
+        ;; The generated native entry inits the Sigil modules but not
+        ;; sigil-graphics' C module; app-register.c hooks the runtime's
+        ;; weak sigil_wasm_app_register to do that. Without it the sokol
+        ;; C is dead-stripped and the wasm imports no `gl` at all.
+        (compile-c-sources
+          sources: (list "src/c/app-register.c")
+          flags: (with-sigil-c-flags (list "-std=c99")))
+        (link-web-application name: "crash-the-stack" html-mount-id: "status")
+        stamp-web-version))))
