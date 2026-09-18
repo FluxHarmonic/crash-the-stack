@@ -96,3 +96,48 @@
     (let ((b (flat-board 34 34 7)))
       (assert-equal 'not-cleared (replay-solution b '((1 . 2))))
       (assert-equal 1 (replay-solution (flat-board 34 7 7) '((1 . 2)))))))
+
+;; A cross-daemon match leaves two daemon faces at odd counts; the
+;; re-deal and the save both count the daemons as one face, so a shuffle
+;; after such a match still deals (the hunt of the slice-2 review: it
+;; raised "odd face count" before), and the board stays saveable.
+(define (cross-daemon-match b)
+  (let loop ((ms (legal-matches b)))
+    (cond ((null? ms) #f)
+          ((and (daemon-face? (tile-face b (car (car ms))))
+                (daemon-face? (tile-face b (cdr (car ms))))
+                (not (= (tile-face b (car (car ms))) (tile-face b (cdr (car ms))))))
+           (car ms))
+          (else (loop (cdr ms))))))
+
+(define (first-cross-daemon-seed)
+  (let loop ((seed 1))
+    (cond ((> seed 200) #f)
+          ((cross-daemon-match (generate (turtle-layout) seed)) seed)
+          (else (loop (+ seed 1))))))
+
+(test-group "generate: a cross-daemon match, then a shuffle"
+  (let ((seed (first-cross-daemon-seed)))
+    (test "some Turtle in seeds 1..200 opens with a cross-daemon match"
+      (assert-true (and seed #t)))
+    (when seed
+      (let* ((b (generate (turtle-layout) seed))
+             (m (cross-daemon-match b))
+             (after (board-select (board-select b (car m)) (cdr m)))
+             (dealt (reshuffle after)))
+        (test (seed-label "the match leaves both daemon tiles" seed)
+          (assert-equal 142 (board-tile-count after)))
+        (test (seed-label "reshuffle after it deals a board (no odd-count refusal)" seed)
+          (assert-true (board? dealt))
+          (assert-false (eq? dealt after))
+          (assert-equal 142 (board-tile-count dealt)))
+        (test (seed-label "the re-dealt board keeps 14 daemon tiles and replays to empty" seed)
+          (let ((daemons (let loop ((id 0) (n 0))
+                           (if (= id (layout-slot-count (turtle-layout)))
+                               n
+                               (loop (+ id 1)
+                                     (if (and (tile-present? dealt id) (daemon-face? (tile-face dealt id)))
+                                         (+ n 1)
+                                         n))))))
+            (assert-equal 14 daemons))
+          (assert-equal #t (replay-solution dealt (board-solution dealt))))))))
