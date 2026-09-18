@@ -1,0 +1,178 @@
+;;; The winnable list is exactly what the rules say it is (P2b, David
+;;; 2026-09-18: "a pre-canned set of known good deals ... sorted by
+;;; difficulty").
+;;;
+;;; docs/p2b/winnable-lines.txt holds, per seed, the line
+;;; scripts/solve-seeds.mjs found. Every line is replayed here through
+;;; (crash cards rules) the way a player would make it: a pool card is
+;;; PULLed from the feed until it tops the buffer (turning the buffer
+;;; back when the feed runs out, as the table allows), every other move
+;;; is game-move at the named places, and the game must be won at the
+;;; end. WINNABLE-SEEDS must be exactly the seeds whose line replays to a
+;;; win, in the file's order (easy to hard), so a change to the rules or
+;;; the shuffle that flips a deal shows here, not in play. The rest of
+;;; the file: the window, the pick and the progression on a deal.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (sigil string)
+        (sigil io)
+        (crash stack prng)
+        (crash trace)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards input)
+        (crash cards save)
+        (crash cards seeds))
+
+(define LINES-FILE "docs/p2b/winnable-lines.txt")
+(define MAX-PULLS 120)   ; a pool card comes round within two turns of the buffer
+
+(define (read-lines path)
+  (call-with-input-file path
+    (lambda (port)
+      (let loop ((lines '()))
+        (let ((line (read-line port)))
+          (if (eof-object? line)
+              (reverse lines)
+              (loop (cons line lines))))))))
+
+;; "seed N moves M nodes K line TOK TOK ..." -> (seed moves nodes tokens)
+(define (parse-entry line)
+  (let ((parts (filter (lambda (s) (> (string-length s) 0)) (string-split line " "))))
+    (and (pair? parts)
+         (string=? (car parts) "seed")
+         (list (string->number (list-ref parts 1))
+               (string->number (list-ref parts 3))
+               (string->number (list-ref parts 5))
+               (drop-n parts 7)))))
+
+(define (entries)
+  (filter (lambda (e) e) (map parse-entry (read-lines LINES-FILE))))
+
+;; "t3.1" -> (pile 3 1); "w17" -> (pool 17); "t3" -> (pile 3); "f0" -> (foundation 0)
+(define (parse-place text)
+  (let ((kind (string-ref text 0))
+        (rest (substring text 1 (string-length text))))
+    (case kind
+      ((#\w) (list 'pool (string->number rest)))
+      ((#\f) (list 'foundation (string->number rest)))
+      ((#\t)
+       (let ((parts (string-split rest ".")))
+         (if (= (length parts) 2)
+             (list 'pile (string->number (car parts)) (string->number (cadr parts)))
+             (list 'pile (string->number (car parts))))))
+      (else #f))))
+
+(define (parse-move tok)
+  (let ((parts (string-split tok ">")))
+    (and (= (length parts) 2)
+         (cons (parse-place (car parts)) (parse-place (cadr parts))))))
+
+;; The game after pulling until card c tops the buffer, or #f when it
+;; never does within MAX-PULLS.
+(define (pull-until g c)
+  (let loop ((g g) (n 0))
+    (cond ((and (pair? (game-waste g)) (= (car (game-waste g)) c)) g)
+          ((>= n MAX-PULLS) #f)
+          (else (loop (game-draw! g) (+ n 1))))))
+
+;; The game after one move of the line, or #f when the rules refuse it.
+(define (replay-move g m)
+  (let ((src (car m)) (dst (cdr m)))
+    (if (eq? (car src) 'pool)
+        (let ((g (pull-until g (cadr src))))
+          (and g (game-move g '(waste) dst)))
+        (game-move g src dst))))
+
+;; Does the line win the deal under the rules?
+(define (line-wins? seed tokens)
+  (let loop ((g (game-new seed 1)) (toks tokens))
+    (cond ((null? toks) (game-won? g))
+          (else
+           (let* ((m (parse-move (car toks)))
+                  (g (and m (replay-move g m))))
+             (and g (loop g (cdr toks))))))))
+
+(test-group "the winnable list replays through the rules"
+  (let* ((es (entries))
+         (verified (filter (lambda (e) (line-wins? (car e) (cadddr e))) es)))
+    (display (string-append "  lines " (number->string (length es))
+                            " replay to a win " (number->string (length verified))))
+    (newline)
+    (test "the file has lines"
+      (assert-true (>= (length es) 400)))
+    (test "every line in the file replays to a win"
+      (assert-equal (map car es) (map car verified)))
+    (test "WINNABLE-SEEDS is exactly the verified seeds, in the file's order"
+      (assert-equal (map car verified) (vector->list WINNABLE-SEEDS)))
+    (test "the file is sorted easy to hard: nodes, then moves"
+      (let loop ((es es))
+        (when (and (pair? es) (pair? (cdr es)))
+          (let ((a (car es)) (b (cadr es)))
+            (assert-true (or (< (caddr a) (caddr b))
+                             (and (= (caddr a) (caddr b)) (<= (cadr a) (cadr b))))))
+          (loop (cdr es)))))
+    (test "no seed twice"
+      (let ((seeds (map car es)))
+        (assert-equal (length seeds) (length (distinct seeds)))))))
+
+(define (distinct xs)
+  (let loop ((xs xs) (acc '()))
+    (cond ((null? xs) (reverse acc))
+          ((memv (car xs) acc) (loop (cdr xs) acc))
+          (else (loop (cdr xs) (cons (car xs) acc))))))
+
+(test-group "the window and the pick"
+  (test "level 0 draws from the first WINDOW-WIDTH entries; the first deal is the first entry"
+    (assert-equal WINDOW-WIDTH (length (window-seeds 0)))
+    (assert-equal (vector-ref WINNABLE-SEEDS 0) (car (window-seeds 0)))
+    (assert-equal (vector-ref WINNABLE-SEEDS 0) (first-seed)))
+  (test "a win moves the level up WINDOW-STEP; the top level still holds a full window"
+    (assert-equal WINDOW-STEP (level-after-win 0))
+    (let ((top (level-after-win 100000)))
+      (assert-equal (- (vector-length WINNABLE-SEEDS) WINDOW-WIDTH) top)
+      (assert-equal WINDOW-WIDTH (length (window-seeds top)))))
+  (test "the pick is inside the window and skips the recent seeds"
+    (let* ((window (window-seeds 0))
+           (recent (take window 10)))
+      (let loop ((rng (prng-seed 7)) (n 0))
+        (when (< n 60)
+          (let ((picked (pick-seed 0 recent rng)))
+            (assert-true (and (memv (car picked) window) #t))
+            (assert-false (memv (car picked) recent))
+            (loop (cdr picked) (+ n 1)))))))
+  (test "with the whole window recent, the pick still lands in the window"
+    (let* ((window (window-seeds 0))
+           (picked (pick-seed 0 window (prng-seed 3))))
+      (assert-true (and (memv (car picked) window) #t)))))
+
+(test-group "the progression on a deal"
+  (let* ((d0 (deal-new (first-seed) 1))
+         (d1 (deal-next d0)))
+    (test "a fresh deal starts at level 0 with nothing recent"
+      (assert-equal 0 (deal-level d0))
+      (assert-equal '() (deal-recent d0)))
+    (test "DUMP on an uncleared deal keeps the level and deals from its window, remembering the seed"
+      (assert-equal 0 (deal-level d1))
+      (assert-true (and (memv (deal-seed d1) (window-seeds 0)) #t))
+      (assert-equal (list (deal-seed d1)) (deal-recent d1)))
+    (test "the recent list never exceeds RECENT-MAX"
+      (let loop ((d d1) (n 0))
+        (if (< n (* 2 RECENT-MAX))
+            (loop (deal-next d) (+ n 1))
+            (assert-equal RECENT-MAX (length (deal-recent d))))))
+    (test "the progression survives a save"
+      (let* ((d (deal-with-progress d1 3 '(4 9)))
+             (back (datum->deal (deal->datum d))))
+        (assert-true (and back #t))
+        (assert-equal 3 (deal-level back))
+        (assert-equal '(4 9) (deal-recent back))))
+    (test "a save without a progression field restores at level 0"
+      (let* ((datum (deal->datum d1))
+             (stripped (filter (lambda (f) (not (and (pair? f) (eq? (car f) 'progress)))) datum))
+             (back (datum->deal stripped)))
+        (assert-true (and back #t))
+        (assert-equal 0 (deal-level back))
+        (assert-equal '() (deal-recent back))))))

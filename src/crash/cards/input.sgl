@@ -42,7 +42,9 @@
           (crash cards rules)
           (crash cards geometry)
           (crash trace)
-          (crash cards trace))
+          (crash cards trace)
+          (crash stack prng)
+          (crash cards seeds))
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
@@ -51,6 +53,7 @@
           deal-step deal-advance deal-undo deal-next deal-toggle-draw
           deal-toggle-scoring deal-with-bank deal-toggle-mode deal-with-mode
           deal-scrambles deal-with-scrambles deal-scramble
+          deal-level deal-recent deal-with-progress
           SCRAMBLE-START SCRAMBLE-MAX MSG-SCRAMBLED MSG-NO-SCRAMBLE MSG-SCRAMBLE-FAILED
           jack-out-tap?
           AUTO-TICKS
@@ -89,6 +92,8 @@
       (bank default: 0)              ; the Vegas bankroll carried between deals
       (trace default: #f)            ; the ICE, (crash trace) driven by (crash cards trace)
       (scrambles default: 0)         ; scrambles banked, 0..SCRAMBLE-MAX
+      (level default: 0)             ; the progression's window start ((crash cards seeds))
+      (recent default: '())          ; the last seeds dealt, newest first, at most RECENT-MAX
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -323,16 +328,30 @@
               ((eq? g g1) d)
               (else (with-game (deal d trace: (trace-undo (deal-trace d))) g1)))))
 
-    ;; The next seed, the draw count, the scoring and the settings kept; a
+    ;; The next dump: a seed from the progression's window ((crash cards
+    ;; seeds); a cleared dump moves the window up first), not among the
+    ;; recent ones, drawn with the game's random stream salted by the
+    ;; clock's ticks and the move count (the moment of the DUMP tap, so
+    ;; two plays of one deal rarely get the same next deal; no platform
+    ;; is read). The draw count, the scoring and the settings are kept; a
     ;; Vegas deal's result joins the bankroll.
     (define (deal-next d)
       (let* ((g (deal-game d))
              (vegas? (eq? (game-scoring g) 'vegas))
-             (fresh (deal-new (+ 1 (deal-seed d)) (game-draw g))))
+             (level (if (deal-won? d) (level-after-win (deal-level d)) (deal-level d)))
+             (salt (+ (game-rng g)
+                      (if (deal-trace d) (trace-ticks (deal-trace d)) 0)
+                      (* 7919 (game-moves g))))
+             (picked (pick-seed level (deal-recent d) (prng-seed salt)))
+             (seed (car picked))
+             (fresh (deal-new seed (game-draw g))))
         (deal-with-mode (deal fresh
                               labels-shown: (deal-labels-shown d)
                               bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d))
-                              scrambles: (max SCRAMBLE-START (deal-scrambles d)))
+                              scrambles: (max SCRAMBLE-START (deal-scrambles d))
+                              level: level
+                              recent: (take (cons seed (deal-recent d))
+                                            (min RECENT-MAX (+ 1 (length (deal-recent d))))))
                         (trace-mode (deal-trace d)))))
 
     ;; Standard <-> Vegas is the clean <-> twist flip.
@@ -341,6 +360,11 @@
 
     (define (deal-with-bank d bank)
       (deal d bank: bank))
+
+    ;; The progression's state from a save: the window start and the
+    ;; recent seeds.
+    (define (deal-with-progress d level recent)
+      (deal d level: (max 0 level) recent: (take recent (min RECENT-MAX (length recent)))))
 
     ;; One or three: the next draw honors it.
     (define (deal-toggle-draw d)

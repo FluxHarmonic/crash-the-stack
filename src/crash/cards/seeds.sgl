@@ -1,0 +1,113 @@
+;;; (crash cards seeds) - The dumps the progression hands out.
+;;;
+;;; WINNABLE-SEEDS: seeds of deals a full-knowledge solver
+;;; (scripts/solve-seeds.mjs) found a winning line for under the table's
+;;; rules, every line replayed through (crash cards rules) by
+;;; test/test-cards-seeds before the seed is listed. The list is sorted
+;;; easy to hard by the positions the search had to visit to find the
+;;; line (the hardness signal: lines run 62..101 moves whatever the deal,
+;;; while the search spans four orders of magnitude), then by the line's
+;;; length. David re-grades from play if the order disagrees with felt
+;;; difficulty.
+;;;
+;;; A player draws from a WINDOW of WINDOW-WIDTH entries starting at
+;;; their LEVEL: 0 at first, up WINDOW-STEP per cleared dump, never
+;;; down, capped so the window stays full; at random within the window,
+;;; skipping the last RECENT-MAX deals while the window has others
+;;; (David, 2026-09-18: a pre-canned set of known good deals, sorted by
+;;; difficulty, "keep the selection within a specific difficulty window
+;;; while still not replaying the last 5-20 or so deals"). The first deal
+;;; of a fresh install is the list's first entry.
+;;;
+;;; The list is data: docs/p2b/winnable-lines.txt holds the lines the
+;;; solver found (2026-09-18: seeds 1..600 at 1.5M positions each gave
+;;; 503 winnable, 33 lost, 64 undecided; the 400 easiest are kept, the
+;;; hardest of them needing 6326 positions where the median needs 90),
+;;; test/test-cards-seeds replays every one and asserts
+;;; this vector is exactly the seeds that replay to a win, in the file's
+;;; order, so a rules change that flips a deal's winnability fails the
+;;; gate instead of drifting. The fixture and ?seed=N / --seed N are raw
+;;; seeds and never come through here. Rules family: no platform.
+
+(define-library (crash cards seeds)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash stack prng))
+
+  (export WINNABLE-SEEDS WINDOW-WIDTH WINDOW-STEP RECENT-MAX
+          first-seed pick-seed level-after-win window-seeds window-start)
+
+  (begin
+    (define WINDOW-WIDTH 40)
+    (define WINDOW-STEP 8)
+    (define RECENT-MAX 10)
+
+    ;; GENERATED from docs/p2b/winnable-lines.txt (the seed column, in
+    ;; file order; scripts/solve-seeds.mjs --emit writes it); do not
+    ;; edit by hand.
+    (define WINNABLE-SEEDS
+      #(280 170 117 186 223 451 501 561 21 80 85 144
+        303 358 445 168 218 264 267 112 124 174 185 201
+        244 340 391 54 192 219 477 547 62 194 572 578
+        33 122 176 12 35 164 202 266 268 458 486 496
+        509 14 72 105 118 121 270 277 304 341 354 363
+        371 392 434 435 487 528 530 11 39 81 83 116
+        171 230 240 254 275 464 476 489 79 167 179 183
+        249 348 364 430 468 493 129 188 246 346 485 490
+        571 93 162 256 283 406 412 592 597 591 78 145
+        147 148 156 158 234 289 377 421 427 384 146 198
+        291 394 440 503 516 520 575 13 18 30 53 55
+        57 214 269 296 306 309 405 420 453 538 539 576
+        153 206 248 502 527 598 28 331 300 48 44 109
+        150 160 196 220 312 320 355 426 549 551 568 209
+        226 390 16 163 369 433 436 479 494 510 518 316
+        32 97 149 232 374 413 428 448 459 508 429 94
+        159 43 58 107 119 126 257 311 334 342 425 443
+        449 466 524 544 569 588 593 200 274 372 378 447
+        517 590 567 478 359 469 23 27 82 141 180 243
+        297 417 480 512 513 599 365 423 273 36 317 319
+        329 382 491 495 594 216 471 212 237 361 379 504
+        366 106 337 362 353 584 123 211 352 505 281 400
+        570 193 314 154 134 460 407 20 333 545 555 563
+        279 111 325 15 26 499 595 91 376 461 488 38
+        92 96 195 437 301 22 422 128 299 408 284 579
+        398 565 525 66 313 182 431 322 236 560 282 305
+        203 360 389 553 484 287 548 213 173 88 522 56
+        197 500 215 566 217 397 444 68 261 402 199 140
+        335 155 151 204 104 227 583 207 169 298 409 294
+        251 550 286 51 40 345 295 326 414 475 224 225
+        210 324 535 396 25 507 470 424 41 84 357 450
+        343 205 432 292 108 350 4 546 474 554 69 89
+        250 288 537 404 95 506 74 452 99 42 556 557
+        411 65 87 446))
+
+    (define (first-seed)
+      (vector-ref WINNABLE-SEEDS 0))
+
+    ;; The window's first index for a level: the level itself, held
+    ;; back so that a full window fits.
+    (define (window-start level)
+      (max 0 (min level (- (vector-length WINNABLE-SEEDS) WINDOW-WIDTH))))
+
+    ;; The seeds a level draws from.
+    (define (window-seeds level)
+      (let* ((start (window-start level))
+             (end (min (vector-length WINNABLE-SEEDS) (+ start WINDOW-WIDTH))))
+        (let loop ((i (- end 1)) (acc '()))
+          (if (< i start)
+              acc
+              (loop (- i 1) (cons (vector-ref WINNABLE-SEEDS i) acc))))))
+
+    (define (level-after-win level)
+      (window-start (+ level WINDOW-STEP)))
+
+    ;; (cons seed rng): one seed from the level's window, not among the
+    ;; recent ones when the window has others, with the given random
+    ;; state advanced once.
+    (define (pick-seed level recent rng)
+      (let* ((window (window-seeds level))
+             (fresh (filter (lambda (s) (not (memv s recent))) window))
+             (pool (if (pair? fresh) fresh window))
+             (rng (prng-next rng)))
+        (cons (list-ref pool (prng-index rng (length pool))) rng)))))
