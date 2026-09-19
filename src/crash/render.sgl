@@ -33,13 +33,15 @@
           (crash look)
           (crash glyphs)
           (crash bg)
+          (crash gpu bg)
+          (crash gpu copper)
           (crash menu)
           (crash hud)
           (crash glyphs tools))
 
   (export frame-begin!
-          draw-session draw-editor draw-frame-ms draw-menu
-          draw-bg-in
+          draw-session draw-editor draw-frame-ms draw-phosphor-probe draw-menu
+          draw-bg-in draw-background draw-board-background
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
           draw-tool-button draw-menu-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
           draw-keys-mark phase-color)
@@ -80,58 +82,84 @@
     ;; --- background -----------------------------------------------------------
 
     ;; roll: pixels the copper bars have scrolled (the cleared sequence
-    ;; rolls them; 0 otherwise). bg: the living background ((crash bg)) or #f.
-    (define (draw-background g roll bg)
-      (let ((vw (geometry-vw g))
-            (vh (geometry-vh g))
-            (shift (modulo (exact (floor roll)) 36)))
+    ;; rolls them; 0 otherwise). bg: the living background ((crash bg)) or
+    ;; #f. copper: when the raster draws over the field: 'roll (during the
+    ;; cleared sequence only, the default), 'always (David's comparison
+    ;; switch, ?copper=always), 'off (never over the field), 'bitmap (the
+    ;; painted bars, the reference the scanline leg reads the raster
+    ;; against; goes once the raster is proven). With no field the bars
+    ;; are the background, as they were before P3.
+    (define (draw-background g roll bg copper)
+      (draw-board-background (geometry-vw g)
+                             (geometry-vh g)
+                             (- (geometry-vh g) (geometry-hud-h g))
+                             roll
+                             bg
+                             copper))
+
+    ;; The same on any table's numbers: the viewport vw x vh, the board
+    ;; area's bottom at top (the card table calls this with its own
+    ;; geometry).
+    (define (draw-board-background vw vh top roll bg copper)
+      (let ((rolling? (> roll 0)))
         (color! C-BG)
         (draw-filled-rect 0 0 vw vh)
-        (if bg
-            (draw-bg-in bg (- vh (geometry-hud-h g)))
-            ;; no field (bg off): copper bars, three tones stepping through
-            ;; the board area
+        (when bg
+          (draw-bg-in bg top))
+        (when (or (not bg)
+                  (eq? copper 'always)
+                  (and rolling? (or (eq? copper 'roll) (eq? copper 'bitmap))))
+          (draw-copper vw top roll copper))))
+
+    ;; The copper bars over the board area: the raster ((crash gpu copper):
+    ;; split from the middle and the colors sweeping while the roll runs),
+    ;; or the painted bars: three tones stepping through the area, 6 px
+    ;; every 12, rolled down by `roll`.
+    (define (draw-copper vw top roll copper)
+      (if (eq? copper 'bitmap)
+          (let ((shift (modulo (exact (floor roll)) 36)))
             (let loop ((y (- shift 36)) (i 0))
-              (when (< y (- vh (geometry-hud-h g)))
+              (when (< y top)
                 (color! (case (modulo i 3)
-                           ((0) C-BAR-A)
-                           ((1) C-BAR-B)
-                           (else C-BAR-C)))
+                          ((0) C-BAR-A)
+                          ((1) C-BAR-B)
+                          (else C-BAR-C)))
                 (draw-filled-rect 0 y vw 6)
-                (loop (+ y 12) (+ i 1)))))))
+                (loop (+ y 12) (+ i 1)))))
+          (copper-draw! 0 0 vw top roll (> roll 0) (copper-phase roll))))
+
+    ;; The sweep: the bar colors rotate one place every period of the roll.
+    (define (copper-phase roll)
+      (modulo (quotient (exact (floor roll)) PERIOD) 3))
 
     ;; The living background's field over the board area (the same field
-    ;; on the card table): one rectangle per run of half cells on a row,
-    ;; each in its ramp tone. The ramp is a ring of RAMP dark tones from
-    ;; three hue families of the palette (David, 2026-09-18: colorful, low
-    ;; saturation, so the tiles pop): ground, the two purples, the violet
-    ;; seal, the teal wire, the slate static, the middle purple.
-    ;; The ring of RAMP tones (the dither neighbors each with the next and
-    ;; the last with the first): three dark hue families plus the moss
-    ;; accent David asked for (2026-09-19).
+    ;; on the card table). On the GPU (the default, P3c) the field is
+    ;; presented from its render target through the view shader that
+    ;; dithers and maps the tones; on the CPU (the fallback, ?bg=life-cpu)
+    ;; one rectangle per run of half cells on a row, each in its ramp
+    ;; tone. The ramp is a ring of RAMP dark tones from three hue families
+    ;; of the palette (David, 2026-09-18: colorful, low saturation, so the
+    ;; tiles pop): ground, the two purples, the violet seal, the moss
+    ;; accent David asked for (2026-09-19), the teal wire, the slate
+    ;; static, the middle purple; the list is (crash gpu bg)'s RAMP-COLORS,
+    ;; the same eight the view shader's palette uniform holds.
     (define (ramp-color tone)
-      (case tone
-        ((0) C-BG)
-        ((1) C-BAR-A)
-        ((2) C-BAR-C)
-        ((3) C-ARCHIVE)
-        ((4) C-MOSS)
-        ((5) C-WIRE-DARK)
-        ((6) C-STATIC-B)
-        (else C-BAR-B)))
+      (list-ref RAMP-COLORS tone))
 
     ;; The runs come grouped by tone, so the color is set once per group.
     (define (draw-bg-in bg top)
-      (let loop ((runs (bg-runs bg)) (tone -1))
-        (unless (null? runs)
-          (let ((run (car runs)))
-            (unless (= (car run) tone) (color! (ramp-color (car run))))
-            (when (< (caddr run) top)
-              (draw-filled-rect (cadr run)
-                                (caddr run)
-                                (cadddr run)
-                                (min (list-ref run 4) (- top (caddr run)))))
-            (loop (cdr runs) (car run))))))
+      (if (bg-gpu? bg)
+          (gpu-bg-draw! bg 0 0 (* CELL GRID-W) (* CELL GRID-H))
+          (let loop ((runs (bg-runs bg)) (tone -1))
+            (unless (null? runs)
+              (let ((run (car runs)))
+                (unless (= (car run) tone) (color! (ramp-color (car run))))
+                (when (< (caddr run) top)
+                  (draw-filled-rect (cadr run)
+                                    (caddr run)
+                                    (cadddr run)
+                                    (min (list-ref run 4) (- top (caddr run)))))
+                (loop (cdr runs) (car run)))))))
 
     ;; --- tiles ----------------------------------------------------------------
 
@@ -973,11 +1001,35 @@
         (color! C-TEXT-DIM)
         (draw-text version (- vw 8 (text-width version 1)) (- vh 14) 1)))
 
-    ;; Frame-time readout for --log-keys: last frame in ms, top-right.
-    (define (draw-frame-ms ms)
-      (let ((text (string-append "MS " (number->string (exact (round ms))))))
+    ;; Frame-time readout for --log-keys / ?ms, top-right: the last frame's
+    ;; wall time in ms, and under it the field's cost this frame, CPU side:
+    ;; the step (the CPU rule, or issuing the GPU passes) and the present
+    ;; pass (GPU field only), in ms to a tenth.
+    (define (draw-frame-ms ms step present)
+      (let ((text (string-append "MS " (number->string (exact (round ms)))))
+            (line2 (string-append "STEP " (tenths step) " PRES " (tenths present))))
         (color! C-LABEL-LIT)
-        (draw-text text (- 640 8 (text-width text 2)) 6 2)))
+        (draw-text text (- 640 8 (text-width text 2)) 6 2)
+        (draw-text line2 (- 640 8 (text-width line2 1)) 22 1)))
+
+    (define (tenths x)
+      (let* ((t (exact (round (* 10 x))))
+             (whole (quotient t 10))
+             (frac (modulo t 10)))
+        (string-append (number->string whole) "." (number->string frac))))
+
+    ;; The phosphor probe (?phosphor=probe, the arm's door): a block over
+    ;; the board in C-SELECTED on even frames and C-HIGHLIGHT on odd, so
+    ;; with persistence on every presented frame carries a mix of the two
+    ;; and neither pure color.
+    (define (draw-phosphor-probe frame)
+      (color! (if (even? frame) C-SELECTED C-HIGHLIGHT))
+      (draw-filled-rect PROBE-X PROBE-Y PROBE-W PROBE-H))
+
+    (define PROBE-X 200)
+    (define PROBE-Y 120)
+    (define PROBE-W 240)
+    (define PROBE-H 100)
 
     ;; --- one frame ------------------------------------------------------------
 
@@ -1054,11 +1106,12 @@
           (draw-message g (editor-message e) top 1.0 0.0))))
 
     ;; x: the frame's effects from (crash fx), already advanced; bg: the
-    ;; living background, already stepped, or #f.
-    (define (draw-session s g tex x bg)
+    ;; living background, already stepped, or #f; copper: when the raster
+    ;; draws over the field (draw-background).
+    (define (draw-session s g tex x bg copper)
       (let ((cleared (fx-cleared x))
             (glitch (fx-glitch x)))
-        (draw-background g (if cleared (* cleared 400.0) 0.0) bg)
+        (draw-background g (if cleared (* cleared 400.0) 0.0) bg copper)
         (draw-tiles s g tex x)
         (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
           (draw-hint-labels s g))

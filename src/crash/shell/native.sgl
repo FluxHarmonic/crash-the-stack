@@ -10,7 +10,14 @@
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;                   [--mute]            no sound (the context still opens)
-;;;                   [--bg life|reaction]  the living background's rule (life by default)
+;;;                   [--bg life|reaction|life-cpu|reaction-cpu|off]
+;;;                                       the living background's rule (life on the GPU by default;
+;;;                                       -cpu the fallback field, the oracle)
+;;;                   [--copper roll|always|off|bitmap]  the copper raster over the field (roll: cleared only)
+;;;                   [--raster N]        the raster at a fixed roll N with the split, over everything
+;;;                   [--phosphor on|off|probe]  persistence on the cascade
+;;;                   [--bg-hold N]       the field stops after N steps and says "crash: bg held N"
+;;;                   [--bg-only]         the background alone, no table drawn over it
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
 ;;;
 ;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
@@ -61,6 +68,8 @@
           (crash look)
           (crash hud)
           (crash bg)
+          (crash gpu bg)
+          (crash gpu phosphor)
           (crash sfx)
           (crash audio)
           (crash shell))
@@ -142,6 +151,47 @@
 
     ;; Last frame's wall time in ms, shown in the HUD under --log-keys.
     (define *frame-ms* 0.0)
+    (define *advance-ms* 0.0)   ; the last frame's bg-advance time
+    (define *frame-n* 0)        ; frames presented
+    (define *copper* 'roll)     ; --copper / --raster, see the header
+    (define *phosphor* 'on)     ; --phosphor
+    (define *bg-only* #f)       ; --bg-only
+    (define *bg-said* #f)       ; the hold's line was said
+
+    ;; One presented frame, as the web shell's present!: draw (a thunk)
+    ;; to the swap chain, or through the phosphor targets while the
+    ;; cascade runs (ruling D36.2) or the probe is on; the readout under
+    ;; --log-keys; a held field's line once its frame is out:
+    ;;   crash: bg held N
+    (define (present! cascading? log-keys? draw)
+      (frame-begin!)
+      (cond ((eq? *phosphor* 'probe)
+             (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
+            ((and cascading? (eq? *phosphor* 'on))
+             (phosphor-frame! VW VH PHOSPHOR draw))
+            (else
+             (phosphor-reset!)
+             (draw)))
+      (when log-keys?
+        (let ((gpu (gpu-bg-ms)))
+          (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
+      (end-frame)
+      (set! *frame-n* (+ *frame-n* 1)))
+
+    (define (say-held! b)
+      (when (and b (bg-held? b) (not *bg-said*)
+                 (or (not (bg-gpu? b)) (= (gpu-bg-steps) (bg-steps b))))
+        (set! *bg-said* #t)
+        (display "crash: bg held ")
+        (display (bg-steps b))
+        (newline)))
+
+    ;; (crash shell)'s bg-advance, timed for the readout.
+    (define (advance-bg b steps before after)
+      (let* ((t0 (current-milliseconds))
+             (b (bg-advance b steps before after)))
+        (set! *advance-ms* (inexact (- (current-milliseconds) t0)))
+        b))
 
     ;; --- the three screens ----------------------------------------------------
     ;;
@@ -240,8 +290,8 @@
                       (session-advance (session-step s f geom)
                                        (clock-steps (fx-clock x)))))
              (x (fx-observe x s after geom)))
+        (set! *frame-ms* (* 1000.0 dt))
         (when log-keys?
-          (set! *frame-ms* (* 1000.0 dt))
           (when (pair? (input-frame-pressed f))
             (display "keys: ")
             (write (input-frame-pressed f))
@@ -252,7 +302,7 @@
         (stage a
                session: after
                fx: x
-               bg: (bg-advance (stage-bg a) (clock-steps (fx-clock x)) (session-trace s) (session-trace after)))))
+               bg: (advance-bg (stage-bg a) (clock-steps (fx-clock x)) (session-trace s) (session-trace after)))))
 
     (define (step-cards a f dt geom)
       (let* ((d (stage-deal a))
@@ -267,7 +317,7 @@
         (stage a
                deal: after
                card-fx: x
-               bg: (bg-advance (stage-bg a) (clock-steps (card-fx-clock x)) (deal-trace d) (deal-trace after)))))
+               bg: (advance-bg (stage-bg a) (clock-steps (card-fx-clock x)) (deal-trace d) (deal-trace after)))))
 
     (define (stage-background a) (stage-bg a))
 
@@ -282,7 +332,7 @@
                 (begin (display "ambient not found: ") (display AMBIENT-PATH) (newline))))
           (begin (display "audio: no device; playing silent") (newline))))
 
-    (define (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode mute?)
+    (define (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
@@ -293,7 +343,7 @@
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
-          (let loop ((a (let ((fresh (stage bg: (and (memq bg-mode MODES) (bg-new 1 bg-mode)))))
+          (let loop ((a (let ((fresh (stage bg: (bg-choose bg-mode 1 bg-hold))))
                           (if cards?
                               (open-cards (open-menu fresh) seed fresh? #t)
                               (open-menu fresh)))))
@@ -330,15 +380,23 @@
                                (if (deal-request d)
                                    (open-menu (stage a deal: (deal-clear-request d)))
                                    a)))))))
-              (frame-begin!)
-              (case (stage-screen a)
-                ((menu) (draw-menu (stage-menu a) VW VH "NATIVE"))
-                ((stack)
-                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-background a))
-                 (when log-keys?
-                   (draw-frame-ms *frame-ms*)))
-                (else (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a))))
-              (end-frame)
+              (present! (case (stage-screen a)
+                          ((stack) (and (fx-cleared (stage-fx a)) #t))
+                          ((cards) (card-fx-cascading? (stage-card-fx a)))
+                          (else #f))
+                        (and log-keys? (not (eq? (stage-screen a) 'menu)))
+                        (lambda ()
+                          (case (stage-screen a)
+                            ((menu) (draw-menu (stage-menu a) VW VH "NATIVE"))
+                            ((stack)
+                             (if *bg-only*
+                                 (draw-board-background VW VH (- VH (geometry-hud-h geom)) 0.0 (stage-background a) 'off)
+                                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-background a) *copper*)))
+                            (else
+                             (if *bg-only*
+                                 (draw-board-background VW VH (- VH (card-geometry-hud-h card-geom)) 0.0 (stage-background a) 'off)
+                                 (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a) *copper*))))))
+              (say-held! (stage-bg a))
               (audio-pump!)
               (cond ((and on-menu? (key-pressed? 'escape)) (request-quit))
                     ((quit-requested?) #t)
@@ -401,7 +459,7 @@
                         (after (session-advance (session-step s f g) (clock-steps (fx-clock x))))
                         (x (fx-observe x s after g)))
                    (frame-begin!)
-                   (draw-session after g #f x #f)
+                   (draw-session after g #f x #f 'roll)
                    (end-frame)
                    (cond ((key-pressed? 'escape) (request-quit))
                          ((quit-requested?) #t)
@@ -476,11 +534,18 @@
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
              (cards? (and (member "--cards" args) #t))
-             ;; --bg life|reaction|off
+             ;; --bg life|reaction|life-cpu|reaction-cpu|off
              (bg-mode (string->symbol (arg-value args "--bg" "life")))
+             (bg-hold (let ((h (arg-value args "--bg-hold" #f))) (and h (string->number h))))
              (mute? (and (member "--mute" args) #t))
              (edit-path (arg-value args "--edit" #f))
              (bench-arg (arg-value args "--bench-probe" #f)))
+        (set! *copper* (let ((r (arg-value args "--raster" #f)))
+                         (if r
+                             (or (string->number r) 'roll)
+                             (copper-choice (string->symbol (arg-value args "--copper" "roll"))))))
+        (set! *phosphor* (phosphor-choice (string->symbol (arg-value args "--phosphor" "on"))))
+        (set! *bg-only* (and (member "--bg-only" args) #t))
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))
@@ -489,5 +554,5 @@
                   WINDOW-H
                   (if edit-path
                       (editor-loop edit-path)
-                      (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode mute?)))
+                      (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)))
         0))))

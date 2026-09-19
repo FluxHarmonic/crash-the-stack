@@ -1,0 +1,78 @@
+;;; (crash gpu phosphor) - Phosphor persistence on the cascade (P3c,
+;;; ruling D36.2).
+;;;
+;;; A CRT's phosphor keeps glowing after the beam has passed; the previous
+;;; frame lingers under the new one. During the cascade (the cleared
+;;; board's glyph rain, the card table's bounce) and there only, the frame
+;;; is drawn into a render target instead of the swap chain, the previous
+;;; frame's target is drawn over it at PHOSPHOR alpha ('normal blending,
+;;; so the result is 1-PHOSPHOR of the new frame and PHOSPHOR of the
+;;; old, which itself carried its own past: a geometric fade), and that
+;;; target is presented 1:1 over the viewport. Two targets, swapped each
+;;; frame; no readback. Off at rest: the shell calls phosphor-frame! only
+;;; while the cascade runs, and phosphor-reset! when it ends, so the
+;;; first frame of the next cascade blends with nothing stale.
+;;;
+;;; The targets are the virtual viewport's size (VW x VH) with 'nearest
+;;; sampling. Presented over the letterboxed viewport that is a
+;;; nearest-neighbor upscale, which for everything the game draws at
+;;; integer virtual coordinates lands on exactly the device pixels
+;;; direct drawing covers (a device pixel center c is inside a rect
+;;; either way iff floor(c / scale) is), so entering and leaving the
+;;; path moves nothing; a tweened position snaps to a virtual pixel
+;;; while the path is on. The mix is between two palette frames and is
+;;; not itself a palette color where they differ: the capture through
+;;; the color-count gate says how far outside the allowance it lands.
+
+(define-library (crash gpu phosphor)
+  (import (sigil graphics))
+
+  (export phosphor-frame! phosphor-reset! phosphor-active?
+          PHOSPHOR)
+
+  (begin
+    (define PHOSPHOR 0.12)       ; the previous frame's share (David: 10-15 %)
+
+    (define *a* #f)
+    (define *b* #f)
+    (define *cur* #f)
+    (define *prev* #f)
+    (define *w* 0)
+    (define *h* 0)
+    (define *primed* #f)         ; *prev* holds a presented frame of this cascade
+
+    (define (phosphor-active?) *primed*)
+
+    (define (ensure! w h)
+      (unless (and *a* (= w *w*) (= h *h*))
+        (when *a* (render-target-free! *a*) (render-target-free! *b*))
+        (set! *a* (make-render-target w h 'nearest))
+        (set! *b* (make-render-target w h 'nearest))
+        (set! *cur* *a*)
+        (set! *prev* *b*)
+        (set! *w* w)
+        (set! *h* h)
+        (set! *primed* #f)))
+
+    ;; Draw the frame (draw: a thunk drawing in virtual coordinates over
+    ;; w x h) with the previous frame lingering under it, and present it.
+    ;; mix: the previous frame's share (PHOSPHOR, or a probe's value).
+    (define (phosphor-frame! w h mix draw)
+      (ensure! w h)
+      (with-render-target *cur*
+        (set-blend-mode 'normal)
+        (draw)
+        (when *primed*
+          (set-color 1.0 1.0 1.0 mix)
+          (draw-render-target *prev* 0.0 0.0 (inexact w) (inexact h))))
+      (set-blend-mode 'normal)
+      (set-color 1.0 1.0 1.0 1.0)
+      (draw-render-target *cur* 0.0 0.0 (inexact w) (inexact h))
+      (let ((t *cur*))
+        (set! *cur* *prev*)
+        (set! *prev* t))
+      (set! *primed* #t))
+
+    ;; The cascade ended: the next one starts from a clean slate.
+    (define (phosphor-reset!)
+      (set! *primed* #f))))

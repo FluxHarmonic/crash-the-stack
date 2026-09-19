@@ -124,6 +124,8 @@
           (crash look)
           (crash hud)
           (crash bg)
+          (crash gpu bg)
+          (crash gpu phosphor)
           (crash sfx)
           (crash audio)
           (crash shell))
@@ -163,7 +165,15 @@
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
     (define *bg* #f)         ; the living background, (crash bg), stepped by whichever table is up
-    (define *bg-mode* 'life) ; ?bg=reaction: the living background's other rule; ?bg=off: none
+    (define *bg-mode* 'life) ; ?bg=reaction: the other rule; ?bg=life-cpu: the CPU field; ?bg=off: none
+    (define *bg-hold* #f)    ; ?bghold=N: the field stops after N steps (the field leg's door)
+    (define *bg-only* #f)    ; ?bgonly: draw the background alone, no table over it (the field leg reads every cell)
+    (define *bg-said* #f)    ; the hold's line was said
+    (define *copper* 'roll)  ; ?copper=always|off|bitmap; ?raster=N: the raster at a fixed roll N, split (the scanline leg)
+    (define *phosphor* 'on)  ; ?phosphor=off|probe
+    (define *frame-n* 0)     ; frames presented (the probe alternates on it)
+    (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
+    (define *frame-ms* 0.0)   ; the frame's wall dt, ms
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
     (define *ambient-chunks* '()) ; the ambient PCM's decoded chunks, newest first
@@ -647,15 +657,16 @@
         (set! *deal* after)
         (set! *card-fx* x)
         (play-cues! (deal-cues before after))
-        (set! *bg* (bg-advance *bg* (clock-steps (card-fx-clock x)) (deal-trace before) (deal-trace after)))
+        (advance-bg! (clock-steps (card-fx-clock x)) (deal-trace before) (deal-trace after))
         (report-deal-change! before after)
         (report-deal-trace! before after)
         (unless (eq? (tools-open? (deal-tools before)) (tools-open? (deal-tools after)))
           (say-tools (deal-tools after) (deal-tools-list after)))
-        (frame-begin!)
-        (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background))
-        (when *ms* (draw-frame-ms (* 1000.0 dt)))
-        (end-frame)
+        (present! (card-fx-cascading? x)
+                  (lambda ()
+                    (if *bg-only*
+                        (draw-board-background VW VH (- VH (card-geometry-hud-h *card-geom*)) 0.0 (background) 'off)
+                        (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background) *copper*))))
         (ensure-texture! dt PORTRAITS-PATH)))
 
     (define (stack-tick f dt)
@@ -684,7 +695,7 @@
         (set! *session* after)
         (set! *fx* x)
         (play-cues! (session-cues before after))
-        (set! *bg* (bg-advance *bg* (clock-steps (fx-clock x)) (session-trace before) (session-trace after)))
+        (advance-bg! (clock-steps (fx-clock x)) (session-trace before) (session-trace after))
         (unless (eq? (session-update before) (session-update after))
           (say "update" (session-update after))
           (when (eq? (session-update after) 'apply) (update-chosen!)))
@@ -696,10 +707,11 @@
           (say-tools (session-tools after) (session-tools-list after)))
         (when (not (= (session-seed before) (session-seed after)))
           (set! *announced* #f))
-        (frame-begin!)
-        (draw-session after *geom* (texture-for after) x (background))
-        (when *ms* (draw-frame-ms (* 1000.0 dt)))
-        (end-frame)
+        (present! (and (fx-cleared x) #t)
+                  (lambda ()
+                    (if *bg-only*
+                        (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (background) 'off)
+                        (draw-session after *geom* (texture-for after) x (background) *copper*))))
         (ensure-texture! dt (look-texture (look-ref (session-look after))))))
 
     ;; The tool stack opening or closing, and while it opens each entry's
@@ -754,6 +766,7 @@
     (define (web-tick dt)
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
+      (set! *frame-ms* (* 1000.0 dt))
       (when *ms* (count-frame! dt))
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
@@ -880,10 +893,49 @@
     ;; game, or a fresh one), which is what the arms and a bookmark want.
     (define (background) *bg*)
 
+    ;; The background after a table's frame: (crash shell)'s bg-advance,
+    ;; timed for ?ms (the CPU field's step, or the GPU field's schedule).
+    ;; A held field says so once, after the frame that shows the held
+    ;; step has been presented (the field leg reads the canvas after
+    ;; the line):
+    ;;   crash: bg held N
+    (define (advance-bg! steps before after)
+      (let ((t0 (current-milliseconds)))
+        (set! *bg* (bg-advance *bg* steps before after))
+        (set! *advance-ms* (inexact (- (current-milliseconds) t0)))))
+
+    (define (say-held!)
+      (when (and *bg* (bg-held? *bg*) (not *bg-said*)
+                 (or (not (bg-gpu? *bg*)) (= (gpu-bg-steps) (bg-steps *bg*))))
+        (set! *bg-said* #t)
+        (say "bg" "held" (bg-steps *bg*))))
+
+    ;; One presented frame: draw (a thunk over the virtual viewport)
+    ;; straight to the swap chain, or through the phosphor targets while
+    ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
+    ;; readout over it; then the held line, once the frame is out.
+    (define (present! cascading? draw)
+      (frame-begin!)
+      (cond ((eq? *phosphor* 'probe)
+             (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
+            ((and cascading? (eq? *phosphor* 'on))
+             (phosphor-frame! VW VH PHOSPHOR draw))
+            (else
+             (phosphor-reset!)
+             (draw)))
+      (when *ms*
+        (let ((gpu (gpu-bg-ms)))
+          (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
+      (end-frame)
+      (set! *frame-n* (+ *frame-n* 1))
+      (say-held!))
+
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
-      (set! *bg* (and (memq *bg-mode* MODES) (bg-new 1 *bg-mode*)))
+      (set! *bg* (bg-choose *bg-mode* 1 *bg-hold*))
+      (set! *bg-said* #f)
+      (when *bg* (say "bg" (if (bg-gpu? *bg*) "gpu" "cpu") (bg-mode *bg*)))
       (set! *booted* #t)
       (set! *audio-ready* (audio-open!))
       (say "audio" (if *audio-ready* "open" "closed"))
@@ -941,8 +993,13 @@
                        (let ((n (string->number payload)))
                          (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* n))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
-            ;; ?bg=life|reaction|off (a name outside the rule table is off)
+            ;; ?bg=life|reaction|life-cpu|reaction-cpu|off (a name outside the rule table is off)
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)))))
+            ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
+            ((string=? type "bgonly") (param! (lambda () (set! *bg-only* (string=? payload "on")))))
+            ((string=? type "copper") (param! (lambda () (set! *copper* (copper-choice (string->symbol payload))))))
+            ((string=? type "raster") (param! (lambda () (set! *copper* (or (string->number payload) *copper*)))))
+            ((string=? type "phosphor") (param! (lambda () (set! *phosphor* (phosphor-choice (string->symbol payload))))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)

@@ -1,0 +1,430 @@
+;;; (crash gpu bg) - The living background on the GPU (P3c, ruling D35).
+;;;
+;;; The field of (crash bg) as a render-target ping-pong: two 'nearest
+;;; targets at the field's grid (GRID-W x GRID-H texels, one per cell),
+;;; a step shader per rule bound INSIDE a pass on the next target that
+;;; reads the current one through draw-render-target (channel 0), then
+;;; a swap; the present draws the current target over the board area
+;;; through a view shader that does the 2x2 dither and the tone mapping,
+;;; the ramp's eight palette colors as `uniform vec4 palette[8]`. The
+;;; cell state is seeded once by draw-filled-rect (880 cells from the
+;;; CPU seed) and never touches the CPU again: one field step is one
+;;; full-target draw of 880 fragments, the present one full-board draw.
+;;; David's phone read of the CPU field (2026-09-19: life 50-60 ms with
+;;; spikes past 100, reaction never under 100) was the draw path, ~1900
+;;; rectangles a frame, as much as the step; here both are the GPU's.
+;;;
+;;; The rules are (crash bg)'s, written a second time in GLSL: the same
+;;; hash (lowbias32 on uint), the same visit/copy/mutate decisions from
+;;; the same bits, the same laplacian, feed and kill, the same 16-bit
+;;; packing of the reaction's two substances (pack/unpack recover the
+;;; 16-bit integers exactly; the float arithmetic between is float32
+;;; here and double there, which is the one source of drift the arm's
+;;; reaction tolerance covers). The step's random choices (its key, the
+;;; rain cells, the kill patch) are (crash bg)'s, handed in as uniforms,
+;;; so the shader hashes only per cell. Life's ring integer is the red
+;;; byte (k/255 in, floor(r*255+0.5) out: exact); the reaction's u is
+;;; (r, g) and v is (b, a), hi byte then lo, and its pipelines are loaded
+;;; with 'none blending because alpha carries data.
+;;;
+;;; Orientation: the target's memory is bottom-up (gl_FragCoord.y = 0 is
+;;; the last virtual row), draw-render-target flips on sample, so a
+;;; virtual row y is texel row (GRID-H - 1 - y); the hash and the rain
+;;; use virtual rows, and a neighbor "below" (virtual y + 1) is texel
+;;; y - 1. The view shader gets texUV with v = 1 at the top.
+;;;
+;;; Schedule: the (crash bg) struct the shell steps (gpu?: #t) carries
+;;; the step count, agitation, burst, hold and severed flag; gpu-bg-draw!
+;;; runs the passes that bring the targets to that count (normally one
+;;; step every STRIDE ticks) and presents. A gap over CATCH-UP steps
+;;; (a table opened after a long menu) is skipped rather than replayed:
+;;; the look is the same and the arm never pauses. A new seed or mode
+;;; (a new bg struct) reseeds the targets.
+;;;
+;;; Cost is reported through gpu-bg-ms: the CPU time spent issuing the
+;;; step passes and the present pass in the last frame (a jiffy clock;
+;;; the GPU's own time is not observable from here), for `?ms`.
+
+(define-library (crash gpu bg)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math)
+          (sigil time)
+          (sigil graphics)
+          (crash bg)
+          (crash palette)
+          (crash gpu glsl))
+
+  (export gpu-bg-draw! gpu-bg-ms gpu-bg-steps gpu-bg-ready? gpu-bg-reset!
+          RAMP-COLORS CATCH-UP)
+
+  (begin
+    (define CATCH-UP 8)          ; more steps behind than this: jump, do not replay
+
+    ;; The ring of RAMP tones (the dither neighbors each with the next and
+    ;; the last with the first): three dark hue families plus the moss
+    ;; accent David asked for (2026-09-19). The same list (crash render)
+    ;; maps the CPU field's tones through; the order is the ramp.
+    (define RAMP-COLORS
+      (list C-BG C-BAR-A C-BAR-C C-ARCHIVE C-MOSS C-WIRE-DARK C-STATIC-B C-BAR-B))
+
+    ;; --- GLSL ------------------------------------------------------------------------
+
+    (define HASH-GLSL
+      (string-append
+       "uint hash32(uint x) {\n"
+       "    x ^= x >> 16; x *= 0x7feb352du;\n"
+       "    x ^= x >> 15; x *= 0x846ca68bu;\n"
+       "    x ^= x >> 16;\n"
+       "    return x;\n"
+       "}\n"))
+
+    ;; The ring integer of a texel (wrapping on the target's size).
+    (define RING-GLSL
+      (string-append
+       "int cellk(ivec2 q, ivec2 size) {\n"
+       "    q = (q + size) % size;\n"
+       "    return int(floor(texelFetch(iTexChannel0_iSmpChannel0, q, 0).r * 255.0 + 0.5));\n"
+       "}\n"))
+
+    ;; The reaction's packed state: u in (r, g), v in (b, a), hi then lo.
+    (define PACK-GLSL
+      (string-append
+       "vec2 pack(float x) {\n"
+       "    float s = floor(clamp(x, 0.0, 1.0) * 65535.0 + 0.5);\n"
+       "    float hi = floor(s / 256.0);\n"
+       "    return vec2(hi, s - hi * 256.0) / 255.0;\n"
+       "}\n"
+       "float unpack(vec2 p) {\n"
+       "    int hi = int(floor(p.x * 255.0 + 0.5));\n"
+       "    int lo = int(floor(p.y * 255.0 + 0.5));\n"
+       "    return float(hi * 256 + lo) / 65535.0;\n"
+       "}\n"
+       "vec2 state(vec4 c) { return vec2(unpack(c.rg), unpack(c.ba)); }\n"
+       "vec2 cell(ivec2 q, ivec2 size) {\n"
+       "    q = (q + size) % size;\n"
+       "    return state(texelFetch(iTexChannel0_iSmpChannel0, q, 0));\n"
+       "}\n"))
+
+    ;; Life: every cell from the previous state. u_key is the step's key
+    ;; in two 16-bit halves (a float carries 24 bits exactly, not 32);
+    ;; u_visit the per-mille visited. The bits are (crash bg)'s: 0-9 the
+    ;; visit, 10-11 the neighbor, 12-15 the mutation roll, 16 up the drift.
+    (define LIFE-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_resolution;\n"
+       "uniform vec2 u_key;\n"
+       "uniform float u_visit;\n"
+       "uniform float u_mutate;\n"
+       "uniform float u_drift;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       HASH-GLSL
+       RING-GLSL
+       "void main() {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    int vy = size.y - 1 - p.y;\n"
+       "    int k = cellk(p, size);\n"
+       "    uint key = uint(u_key.x) * 65536u + uint(u_key.y);\n"
+       "    uint h = hash32(key + uint(p.x) + uint(vy) * 64u);\n"
+       "    if (h % 1000u < uint(u_visit)) {\n"
+       "        uint dir = (h >> 10) % 4u;\n"
+       "        uint roll = (h >> 12) % uint(u_mutate);\n"
+       "        int span = 2 * int(u_drift) + 1;\n"
+       "        int drift = int((h >> 16) % uint(span)) - int(u_drift);\n"
+       "        if (roll == 0u) k = (k + drift + 256) % 256;\n"
+       "        else if (dir == 0u) k = cellk(p + ivec2(1, 0), size);\n"
+       "        else if (dir == 1u) k = cellk(p + ivec2(-1, 0), size);\n"
+       "        else if (dir == 2u) k = cellk(p + ivec2(0, -1), size);\n"
+       "        else k = cellk(p + ivec2(0, 1), size);\n"
+       "    }\n"
+       "    fragColor = vec4(float(k) / 255.0, 0.0, 0.0, 1.0);\n"
+       "}\n"))
+
+    ;; The reaction's feed: the rain cells raised to u_seed in v, the kill
+    ;; patch (when u_kill_on) cleared in v; u untouched.
+    (define FEED-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_resolution;\n"
+       "uniform vec2 u_rain[4];\n"
+       "uniform vec2 u_kill;\n"
+       "uniform float u_kill_on;\n"
+       "uniform float u_seed;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       PACK-GLSL
+       "void main() {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    ivec2 c = ivec2(p.x, size.y - 1 - p.y);\n"
+       "    vec2 s = cell(p, size);\n"
+       "    for (int i = 0; i < 4; i++) {\n"
+       "        if (ivec2(u_rain[i]) == c) s.y = max(s.y, u_seed);\n"
+       "    }\n"
+       "    if (u_kill_on > 0.5) {\n"
+       "        int dx = (c.x - int(u_kill.x) + size.x) % size.x;\n"
+       "        int dy = (c.y - int(u_kill.y) + size.y) % size.y;\n"
+       "        if ((dx <= 1 || dx == size.x - 1) && (dy <= 1 || dy == size.y - 1)) s.y = 0.0;\n"
+       "    }\n"
+       "    fragColor = vec4(pack(s.x), pack(s.y));\n"
+       "}\n"))
+
+    ;; One Gray-Scott iteration: (crash bg)'s react-step.
+    (define REACTION-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_resolution;\n"
+       "uniform float u_feed;\n"
+       "uniform float u_kill;\n"
+       "uniform vec2 u_diffuse;\n"
+       "uniform float u_dt;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       PACK-GLSL
+       "void main() {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    vec2 c = cell(p, size);\n"
+       "    vec2 lap = 0.2 * (cell(p + ivec2(1, 0), size) + cell(p + ivec2(-1, 0), size)\n"
+       "                    + cell(p + ivec2(0, 1), size) + cell(p + ivec2(0, -1), size))\n"
+       "             + 0.05 * (cell(p + ivec2(1, 1), size) + cell(p + ivec2(-1, 1), size)\n"
+       "                     + cell(p + ivec2(1, -1), size) + cell(p + ivec2(-1, -1), size))\n"
+       "             - c;\n"
+       "    float uvv = c.x * c.y * c.y;\n"
+       "    float du = u_diffuse.x * lap.x - uvv + u_feed * (1.0 - c.x);\n"
+       "    float dv = u_diffuse.y * lap.y + uvv - (u_feed + u_kill) * c.y;\n"
+       "    vec2 n = c + u_dt * vec2(du, dv);\n"
+       "    fragColor = vec4(pack(n.x), pack(n.y));\n"
+       "}\n"))
+
+    ;; Severed: every value falls toward the ground (u_rule 0 life on the
+    ;; ring, 1 reaction on the grid), by u_collapse per step.
+    (define COLLAPSE-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_resolution;\n"
+       "uniform float u_rule;\n"
+       "uniform float u_collapse;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       PACK-GLSL
+       RING-GLSL
+       "void main() {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    if (u_rule < 0.5) {\n"
+       "        int k = int(floor(u_collapse * float(cellk(p, size))));\n"
+       "        fragColor = vec4(float(k) / 255.0, 0.0, 0.0, 1.0);\n"
+       "    } else {\n"
+       "        vec2 s = cell(p, size);\n"
+       "        fragColor = vec4(pack(s.x), pack(u_collapse * s.y));\n"
+       "    }\n"
+       "}\n"))
+
+    ;; The present: the cell under the fragment (nearest), its shown
+    ;; value (u_rule 0: k/256; 1: min(u_shown.y, u_shown.x * v)), the
+    ;; 2x2 ordered dither of (crash bg): level = value * 8, base its
+    ;; floor, the quarter which of the four patterns, the half cell
+    ;; from the fraction of the cell coordinate (v = 1 at the top, so
+    ;; the virtual row is (1 - v) * rows); the tone through the palette.
+    ;; Patterns, (top-left top-right bottom-left bottom-right), up = base
+    ;; + 1 on the ring: 0 (b b b b), 1 (u b b b), 2 (u b b u), 3 (u u b u).
+    (define VIEW-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec4 palette[8];\n"
+       "uniform vec2 u_grid;\n"
+       "uniform float u_rule;\n"
+       "uniform vec2 u_shown;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       PACK-GLSL
+       "void main() {\n"
+       "    vec2 cellpos = vec2(texUV.x, 1.0 - texUV.y) * u_grid;\n"
+       "    vec4 c = texture(iTexChannel0_iSmpChannel0, texUV);\n"
+       "    int base; int quarter;\n"
+       "    if (u_rule < 0.5) {\n"
+       "        int k = int(floor(c.r * 255.0 + 0.5));\n"
+       "        base = k / 32; quarter = (k % 32) / 8;\n"
+       "    } else {\n"
+       "        float v = min(u_shown.y, u_shown.x * unpack(c.ba));\n"
+       "        float level = v * 8.0;\n"
+       "        float fl = floor(level);\n"
+       "        base = int(fl) % 8;\n"
+       "        float frac = level - fl;\n"
+       "        quarter = frac < 0.25 ? 0 : (frac < 0.5 ? 1 : (frac < 0.75 ? 2 : 3));\n"
+       "    }\n"
+       "    bool right = fract(cellpos.x) >= 0.5;\n"
+       "    bool bottom = fract(cellpos.y) >= 0.5;\n"
+       "    bool up = (quarter == 1 && !right && !bottom)\n"
+       "           || (quarter == 2 && (right == bottom))\n"
+       "           || (quarter == 3 && !(!right && bottom));\n"
+       "    int tone = up ? (base + 1) % 8 : base;\n"
+       "    fragColor = palette[tone];\n"
+       "}\n"))
+
+    ;; --- state ----------------------------------------------------------------------------
+
+    (define *a* #f)              ; the two targets
+    (define *b* #f)
+    (define *cur* #f)            ; the one holding the field
+    (define *next* #f)
+    (define *life* #f)           ; the shaders
+    (define *feed* #f)
+    (define *reaction* #f)
+    (define *collapse* #f)
+    (define *view* #f)
+    (define *seeded* #f)         ; (seed . mode) the targets hold, or #f
+    (define *done* 0)            ; field steps the targets have taken
+    (define *step-ms* 0.0)       ; the last frame's costs (CPU side)
+    (define *present-ms* 0.0)
+
+    (define (gpu-bg-steps) *done*)
+    (define (gpu-bg-ms) (cons *step-ms* *present-ms*))
+    (define (gpu-bg-ready?) (and *seeded* #t))
+
+    ;; Forget the targets' field: the next draw reseeds (the tests' door).
+    (define (gpu-bg-reset!) (set! *seeded* #f))
+
+    (define (now-ms)
+      (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
+
+    (define (ensure-resources!)
+      (unless *a*
+        (set! *a* (make-render-target GRID-W GRID-H 'nearest))
+        (set! *b* (make-render-target GRID-W GRID-H 'nearest))
+        (set! *cur* *a*)
+        (set! *next* *b*)
+        (set! *life* (load-shader VERT-SOURCE LIFE-SOURCE 'none))
+        (set! *feed* (load-shader VERT-SOURCE FEED-SOURCE 'none))
+        (set! *reaction* (load-shader VERT-SOURCE REACTION-SOURCE 'none))
+        (set! *collapse* (load-shader VERT-SOURCE COLLAPSE-SOURCE 'none))
+        (set! *view* (load-shader VERT-SOURCE VIEW-SOURCE 'none))
+        (set-shader-uniform *life* 'u_mutate (inexact LIFE-MUTATE))
+        (set-shader-uniform *life* 'u_drift (inexact LIFE-DRIFT-MAX))
+        (set-shader-uniform *feed* 'u_seed REACT-SEED)
+        (set-shader-uniform *reaction* 'u_feed REACT-FEED)
+        (set-shader-uniform *reaction* 'u_kill REACT-KILL)
+        (set-shader-uniform *reaction* 'u_diffuse (list REACT-DA REACT-DB))
+        (set-shader-uniform *reaction* 'u_dt REACT-DT)
+        (set-shader-uniform *collapse* 'u_collapse LIFE-COLLAPSE)
+        (set-shader-uniform *view* 'u_grid (list (inexact GRID-W) (inexact GRID-H)))
+        (set-shader-uniform *view* 'u_shown (list REACT-SHOWN-SCALE REACT-SHOWN-MAX))
+        (set-shader-uniform *view* 'palette
+                            (map (lambda (c) (list (car c) (cadr c) (caddr c) 1.0)) RAMP-COLORS))))
+
+    ;; --- seeding ------------------------------------------------------------------------
+
+    ;; The CPU seed drawn cell by cell into *cur*: life's ring integer as
+    ;; the red byte; the reaction's two substances packed (u hi, u lo, v
+    ;; hi, v lo). 'none blending: alpha is data, and the pass clears to
+    ;; transparent first.
+    (define (seed! b)
+      (let ((field (bg-field b))
+            (sub (bg-sub b))
+            (life? (eq? (bg-mode b) 'life)))
+        (with-render-target *cur*
+          (set-blend-mode 'none)
+          (let loop ((i 0))
+            (when (< i CELLS)
+              (let ((x (modulo i GRID-W))
+                    (y (quotient i GRID-W)))
+                (if life?
+                    (set-color (/ (vector-ref field i) 255.0) 0.0 0.0 1.0)
+                    (let ((u (packed (vector-ref sub i)))
+                          (v (packed (vector-ref field i))))
+                      (set-color (car u) (cdr u) (car v) (cdr v))))
+                (draw-filled-rect (inexact x) (inexact y) 1.0 1.0))
+              (loop (+ i 1)))))
+        (set-blend-mode 'normal)
+        (set-color 1.0 1.0 1.0 1.0)
+        (set! *seeded* (cons (bg-seed b) (bg-mode b)))
+        (set! *done* 0)))
+
+    ;; A value on the 16-bit grid as (hi . lo) channel values in 0..1.
+    (define (packed v)
+      (let* ((s (exact (floor (+ (* (max 0.0 (min 1.0 v)) 65535.0) 0.5))))
+             (hi (quotient s 256))
+             (lo (- s (* hi 256))))
+        (cons (/ hi 255.0) (/ lo 255.0))))
+
+    ;; --- stepping -----------------------------------------------------------------------
+
+    ;; One pass of shader sh from *cur* into *next*, then swap.
+    (define (pass! sh)
+      (with-render-target *next*
+        (with-shader sh
+          (draw-render-target *cur* 0.0 0.0 (inexact GRID-W) (inexact GRID-H))))
+      (let ((t *cur*))
+        (set! *cur* *next*)
+        (set! *next* t)))
+
+    ;; Field step number `step` of b (the key is the step's, the
+    ;; agitation the struct's now).
+    (define (step! b step)
+      (let ((key (bg-step-key (bg-seed b) step)))
+        (cond ((bg-severed b)
+               (set-shader-uniform *collapse* 'u_rule (if (eq? (bg-mode b) 'life) 0.0 1.0))
+               (pass! *collapse*))
+              ((eq? (bg-mode b) 'life)
+               (set-shader-uniform *life* 'u_key (list (inexact (quotient key 65536)) (inexact (modulo key 65536))))
+               (set-shader-uniform *life* 'u_visit (inexact (bg-visit-permille (bg-agit b))))
+               (pass! *life*))
+              (else
+               (let ((rain (bg-rain key))
+                     (kill (bg-kill key step))
+                     (iterations (min REACT-STEPS-MAX (max 1 (exact (floor (* (bg-agit b) REACT-STEPS)))))))
+                 (set-shader-uniform *feed* 'u_rain
+                                     (map (lambda (c) (list (inexact (car c)) (inexact (cdr c)))) rain))
+                 (set-shader-uniform *feed* 'u_kill
+                                     (if kill (list (inexact (car kill)) (inexact (cdr kill))) (list 0.0 0.0)))
+                 (set-shader-uniform *feed* 'u_kill_on (if kill 1.0 0.0))
+                 (pass! *feed*)
+                 (let loop ((k 0))
+                   (when (< k iterations)
+                     (pass! *reaction*)
+                     (loop (+ k 1)))))))))
+
+    ;; Bring the targets to b's step count: reseed for a new field, skip
+    ;; a long gap, else one pass set per missing step.
+    (define (sync! b)
+      (let ((want (bg-steps b)))
+        (unless (and *seeded* (equal? *seeded* (cons (bg-seed b) (bg-mode b))) (<= *done* want))
+          (seed! b))
+        (when (> (- want *done*) CATCH-UP)
+          (set! *done* want))
+        (let loop ()
+          (when (< *done* want)
+            (step! b *done*)
+            (set! *done* (+ *done* 1))
+            (loop)))))
+
+    ;; --- the frame ------------------------------------------------------------------------
+
+    ;; Sync the field to b and draw it in the rect (x y w h), virtual px.
+    ;; Both times are the CPU's, issuing; see the header.
+    (define (gpu-bg-draw! b x y w h)
+      (ensure-resources!)
+      (let ((t0 (now-ms)))
+        (sync! b)
+        (let ((t1 (now-ms)))
+          (set-shader-uniform *view* 'u_rule (if (eq? (bg-mode b) 'life) 0.0 1.0))
+          (set-color 1.0 1.0 1.0 1.0)
+          (with-shader *view*
+            (draw-render-target *cur* (inexact x) (inexact y) (inexact w) (inexact h)))
+          (set-blend-mode 'normal)
+          (set! *step-ms* (- t1 t0))
+          (set! *present-ms* (- (now-ms) t1)))))))

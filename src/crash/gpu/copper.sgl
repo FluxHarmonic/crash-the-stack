@@ -1,0 +1,105 @@
+;;; (crash gpu copper) - Copper bars as a raster shader (P3c, ruling D36.1).
+;;;
+;;; The Amiga's copper wrote a color register per scanline; here one
+;;; full-width quad through a fragment shader does the same from a
+;;; per-band uniform array. `bars[BANDS]` is one period of the pattern,
+;;; BAND-H scanlines per entry, so a bar is a run of entries in one of
+;;; the three C-BAR colors and a gap is an entry with alpha 0, which the
+;;; shader discards (whatever is under the raster shows through the
+;;; gaps: the field during the cleared roll, C-BG at rest). Bands of
+;;; the three C-BAR colors, never a blend (the bible, section 1).
+;;;
+;;; What moves is the array and one offset: `u_roll` shifts the pattern
+;;; down by whole scanlines (the cleared sequence rolls it, as the
+;;; painted bars rolled); `u_split` makes the rows below the middle
+;;; roll the other way, so the bars stream out from the center on STACK
+;;; CRASHED / SYSTEM ONLINE; the sweep is a change to the array, the
+;;; three colors rotating through the bars' entries as the roll
+;;; advances (copper-bars takes the phase). Zero draw cost beyond one
+;;; quad.
+;;;
+;;; The quad is a 1x1 white texture drawn over the rect, so the
+;;; fragment's texUV spans it (0 at the top): the virtual scanline is
+;;; u_top + texUV.y * u_height, and the shader never needs the device
+;;; viewport. The period today: 6 px bar, 6 px gap, A B C, as (crash
+;;; render) painted them: [A A . . B B . . C C . .] at BAND-H 3.
+
+(define-library (crash gpu copper)
+  (import (sigil list)
+          (sigil math)
+          (sigil graphics)
+          (crash palette)
+          (crash gpu glsl))
+
+  (export copper-draw! copper-bars copper-ready?
+          BANDS BAND-H PERIOD)
+
+  (begin
+    (define BANDS 12)
+    (define BAND-H 3)
+    (define PERIOD (* BANDS BAND-H))   ; 36 scanlines
+
+    (define COPPER-SOURCE
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec4 bars[12];\n"
+       "uniform float u_roll;\n"
+       "uniform float u_split;\n"
+       "uniform float u_top;\n"
+       "uniform float u_height;\n"
+       "uniform float u_mid;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       "void main() {\n"
+       "    float y = u_top + texUV.y * u_height;\n"
+       "    float roll = (u_split > 0.5 && y >= u_mid) ? -u_roll : u_roll;\n"
+       "    int line = int(floor(y - roll));\n"
+       "    int band = ((line % 36) + 36) % 36 / 3;\n"
+       "    vec4 c = bars[band];\n"
+       "    if (c.a < 0.5) discard;\n"
+       "    fragColor = vec4(c.rgb, 1.0);\n"
+       "}\n"))
+
+    (define *shader* #f)
+    (define *quad* #f)
+
+    (define (copper-ready?) (and *shader* #t))
+
+    (define (ensure!)
+      (unless *shader*
+        (set! *shader* (load-shader VERT-SOURCE COPPER-SOURCE 'none))
+        (set! *quad* (make-texture-from-pixels 1 1 (make-bytevector 4 255) 'nearest))))
+
+    ;; The period's entries at a sweep phase: bars of two entries each,
+    ;; gaps of two, the bar colors A B C rotated by phase (0, 1, 2).
+    (define (copper-bars phase)
+      (let ((colors (list C-BAR-A C-BAR-B C-BAR-C)))
+        (let loop ((i 0) (acc '()))
+          (if (= i BANDS)
+              (reverse acc)
+              (let* ((bar (quotient i 4))
+                     (gap? (>= (modulo i 4) 2))
+                     (c (list-ref colors (modulo (+ bar phase) 3))))
+                (loop (+ i 1)
+                      (cons (if gap?
+                                (list 0.0 0.0 0.0 0.0)
+                                (list (car c) (cadr c) (caddr c) 1.0))
+                            acc)))))))
+
+    ;; The raster over the rect (x y w h), virtual px: the pattern rolled
+    ;; `roll` scanlines down (split?: the rows below mid roll up), the
+    ;; array at sweep phase `phase`.
+    (define (copper-draw! x y w h roll split? phase)
+      (ensure!)
+      (set-shader-uniform *shader* 'bars (copper-bars phase))
+      (set-shader-uniform *shader* 'u_roll (inexact (floor roll)))
+      (set-shader-uniform *shader* 'u_split (if split? 1.0 0.0))
+      (set-shader-uniform *shader* 'u_top (inexact y))
+      (set-shader-uniform *shader* 'u_height (inexact h))
+      (set-shader-uniform *shader* 'u_mid (inexact (+ y (quotient h 2))))
+      (set-color 1.0 1.0 1.0 1.0)
+      (with-shader *shader*
+        (draw-texture *quad* (inexact x) (inexact y) (inexact w) (inexact h)))
+      (set-blend-mode 'normal))))
