@@ -919,9 +919,31 @@
     ;; time from the menu tick and the menu is live when the last is done.
     ;;   crash: boot step NAME done
     ;;   crash: boot done N                   all N steps done (or forced by the timeout)
+    ;; Is the title's reveal over (or was there none)? The boot's steps
+    ;; after the backdrop wait for it: a PNG decode (load-image-from-memory,
+    ;; on this thread), a texture upload, the atlas bake and the ambient's
+    ;; chunk decodes each cost a frame or more, and inside the reveal they
+    ;; read as stutter under the modem beeps (David, on the phone). After
+    ;; settle they run under the CONNECTING line, before the menu is live:
+    ;; D40 holds, the reveal stays smooth. A ?stack boot has no reveal and
+    ;; the steps run at once.
+    (define (reveal-over?)
+      (or (not *menu*)
+          (not (menu-title *menu*))
+          (title-gated? (menu-title *menu*))      ; behind the gate screen a stall is invisible
+          (title-settled? (menu-title *menu*))))
+
+    ;; Is the reveal itself running (ungated, not settled)? The page holds
+    ;; the ambient's chunks and the worker's registration while it is.
+    (define (reveal-running?)
+      (and *booted* *menu* (menu-title *menu*)
+           (not (title-gated? (menu-title *menu*)))
+           (not (title-settled? (menu-title *menu*)))))
+
     (define (boot-steps!)
       (boot-reset!)
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list BACKDROP-PATH PORTRAITS-PATH)))
+      ;; the backdrop first (it belongs under the reveal), then the rest
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH)))
                      (if (null? names)
                          (reverse acc)
                          (let ((p (look-texture (look-ref (car names)))))
@@ -933,15 +955,15 @@
                                       ;; fetch in flight and advances its retry clock; a second
                                       ;; call with the real dt ran that clock at twice wall time
                                       ;; and gave textures up after 1 s instead of 2 (the review)
-                                      (ensure-texture! 0.0 path)
-                                      (and (assoc path *textures*) #t))))
+                                      (and (or (equal? path BACKDROP-PATH) (reveal-over?))
+                                           (begin (ensure-texture! 0.0 path)
+                                                  (and (assoc path *textures*) #t))))))
                   paths))
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
-      ;; a frame; called from boot-run! outside one, the bake left the frame's
-      ;; later rectangles undrawn: measured, the items vanished with the atlas
-      ;; on), so the step only waits for it
-      (boot-add-step! 'atlas (lambda () (atlas-ready?)))
-      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) *ambient-ready*))))
+      ;; a frame), after the reveal; the step waits for it
+      (boot-add-step! 'atlas (lambda () (and (reveal-over?) (atlas-ready?))))
+      ;; the rest of the cue bank, one cue a frame, then the ambient
+      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) *ambient-ready*)))))
 
     (define (boot-tick! dt)
       ;;   crash: boot timeout                  the deadline forced the rest
@@ -955,21 +977,38 @@
     ;; tick once, a digest of the shown frame every tick while it runs,
     ;; and at settle the digest and the grid row by row (glyph codes, fg
     ;; roles, bg roles; the arm holds them to the data module).
+    ;;   crash: title gate LINE               the boot screen is up, waiting for a tap or a key (D42)
+    ;;   crash: title connect                 the gate opened
     ;;   crash: title seed N baud B glitch L settle T cells C
-    ;;   crash: title tick T digest D
+    ;;   crash: title tick T digest D ms M      (M: the frame's wall time)
     ;;   crash: title settled T digest D shear S   (S: the slant in thousandths of a cell per row)
+    ;;   crash: title reveal frames N max M over33 K mean A   the reveal's frame cost, ms (David: stutter under the beeps)
     ;;   crash: title row Y GLYPHS FG BG
+    (define *reveal-n* 0)
+    (define *reveal-max* 0.0)
+    (define *reveal-over33* 0)
+    (define *reveal-sum* 0.0)
     (define (say-title before after)
       (let ((t0 (menu-title before))
             (t1 (menu-title after)))
         (when (and t0 t1)
-          (when (and (title-running? t0) (= (title-tick t0) 0))
+          (when (and (title-gated? t1) (= (title-gate-frames t1) 1))
+            (say "title" "gate" (title-gate-line t1)))
+          (when (and (title-gated? t0) (not (title-gated? t1)))
+            (say "title" "connect"))
+          (when (and (title-running? t0) (not (title-gated? t0)) (= (title-tick t0) 0))
             (say "title" "seed" (title-seed t1) "baud" (title-baud t1) "glitch" (title-level t1)
                  "settle" (title-settle-tick t1) "cells" (title-drawn-count (title-skip t1))))
-          (when (title-running? t1)
-            (say "title" "tick" (title-tick t1) "digest" (title-frame-digest t1)))
+          (when (and (title-running? t1) (not (title-gated? t1)))
+            (set! *reveal-n* (+ *reveal-n* 1))
+            (set! *reveal-sum* (+ *reveal-sum* *frame-ms*))
+            (set! *reveal-max* (max *reveal-max* *frame-ms*))
+            (when (> *frame-ms* 33.0) (set! *reveal-over33* (+ *reveal-over33* 1)))
+            (say "title" "tick" (title-tick t1) "digest" (title-frame-digest t1) "ms" (exact (round *frame-ms*))))
           (when (and (title-running? t0) (title-settled? t1))
             (say "title" "settled" (title-tick t1) "digest" (title-frame-digest t1) "shear" (exact (round (* 1000 (title-shear t1)))))
+            (say "title" "reveal" "frames" *reveal-n* "max" (exact (round *reveal-max*)) "over33" *reveal-over33*
+                 "mean" (exact (round (/ *reveal-sum* (max 1 *reveal-n*)))))
             (let loop ((y 0))
               (when (< y LOGO-H)
                 (let ((row (vector-ref LOGO-ROWS y)))
@@ -992,7 +1031,7 @@
         (if (eq? *screen* 'menu)
             (begin
               (frame-begin!)
-              (atlas-ensure!)   ; P3c's atlas, baked inside this frame (the boot's atlas step waits on it)
+              (when (reveal-over?) (atlas-ensure!))   ; P3c's atlas, baked inside this frame once the reveal is over (the boot's atlas step waits on it)
               (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH))   ; the title's backdrop (P3d)
               (end-frame)
               (ensure-texture! dt BACKDROP-PATH))
@@ -1209,6 +1248,8 @@
       (set! *booted* #t)
       (set! *audio-ready* (audio-open!))
       (boot-steps!)   ; D40: what the menu waits for
+      ;; the gate (D42): the reveal waits for a tap or a key, the gesture that lets audio play
+      (title-gate! (if *touch* "TAP TO CONNECT" "PRESS ANY KEY TO CONNECT"))
       (say "audio" (if *audio-ready* "open" "closed"))
       ;; the quoted literals' shapes (see (crash shell)): one line the arm asserts
       (let ((bad (literal-check)))
@@ -1296,4 +1337,7 @@
             ((string=? type "audio-done") (audio-done! payload))
             ;; the page's service worker is active (or absent): fetches are safe (D40)
             ((string=? type "sw") (param! (lambda () (set! *sw-ready* #t))))
+            ;; the page asks whether the reveal is still running (it holds the
+            ;; ambient's chunks and the worker's registration until it is over)
+            ((string=? type "title") (if (and (string=? payload "running?") (or (not *booted*) (reveal-running?))) 1 0))
             (else 0)))))

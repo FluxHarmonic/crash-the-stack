@@ -431,22 +431,27 @@
     ;; names, loaded from disk (one step each, done in the frame it runs),
     ;; then P3c's glyph atlas, then the audio (opened above, the ambient read from its file). The
     ;; menu is live once (crash title) has run them all.
+    (define *reveal-over* #f)   ; the title's reveal has settled (or there was none); the loop keeps it
     (define (boot-steps!)
       (boot-reset!)
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list BACKDROP-PATH PORTRAITS-PATH)))
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH)))
                      (if (null? names)
                          (reverse acc)
                          (let ((p (look-texture (look-ref (car names)))))
                            (loop (cdr names) (if (and p (not (member p acc))) (cons p acc) acc)))))))
         (for-each (lambda (path)
-                    (boot-add-step! (string->symbol path) (lambda () (texture-path path) #t)))
+                    ;; the backdrop first (under the reveal); the rest once the reveal is
+                    ;; over, so their loads do not stutter it (as on the web)
+                    (boot-add-step! (string->symbol path)
+                                    (lambda () (and (or (equal? path BACKDROP-PATH) *reveal-over*)
+                                                    (begin (texture-path path) #t)))))
                   paths))
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
       ;; a frame; called from boot-run! outside one, the bake left the frame's
       ;; later rectangles undrawn: measured, the items vanished with the atlas
       ;; on), so the step only waits for it
-      (boot-add-step! 'atlas (lambda () (atlas-ready?)))
-      (boot-add-step! 'audio (lambda () #t)))
+      (boot-add-step! 'atlas (lambda () (and *reveal-over* (atlas-ready?))))
+      (boot-add-step! 'audio (lambda () (audio-render-next!))))   ; the rest of the cue bank, one a frame
 
     (define (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)
       (lambda ()
@@ -471,6 +476,7 @@
             (let* ((dt (wait-frame))
                    (dt (begin (set! *frame-ms* (* 1000.0 dt)) dt))
                    (f (poll-frame))
+                   (_ (set! *reveal-over* (let ((m (stage-menu a))) (or (not m) (not (menu-title m)) (title-settled? (menu-title m))))))
                    (_ (boot-run!))   ; the boot's steps, one frame at a time, whatever the screen (D40)
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);

@@ -59,6 +59,9 @@
   (function () {
     "use strict";
     var POINTER_FORWARDING = true;
+    var revealOver = null;
+    window.crashRevealOver = new Promise(function (resolve) { revealOver = resolve; });
+    setTimeout(function () { revealOver(); }, 20000);
 
     // The canvas backing resolution (P3c, the phone's budget): the art is
     // integer-scaled pixel art, so a device pixel ratio above DPR_CAP buys
@@ -210,7 +213,18 @@
       if (coarse) app.dispatch("touch", "on");
       updates.app = app;
       updates.ready(app);
-      swReady.then(function () { app.dispatch("sw", "ready"); fetchAmbient(app); });
+      // The reveal's frames belong to the reveal (David, on the phone:
+      // "extremely glitchy at startup ... with the typing beeps"): the
+      // ambient's chunk decodes and the worker's precache of a new version
+      // wait until the game says the reveal is over (("title", "running?")
+      // answers 1 while it runs; a ?stack boot has none), or 20 s. The
+      // promise itself is made at script load (the worker script reads it).
+      (function poll() {
+        if (app.dispatch("title", "running?") !== 1) { revealOver(); return; }
+        setTimeout(poll, 200);
+      })();
+      swReady.then(function () { app.dispatch("sw", "ready"); });
+      Promise.all([swReady, window.crashRevealOver]).then(function () { fetchAmbient(app); });
     });
 
     // The ambient loop (P3): s16le mono PCM under assets/audio/, fetched
@@ -424,8 +438,13 @@
         c.postMessage({ type: "VERSION" }, [ch.port2]);
       });
     };
-    navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then(function (reg) {
+    // registered once the reveal is over (its install precaches the whole
+    // version, which the reveal's frames on a phone cannot spare); the
+    // promise is the first script's, resolved by the game's word or at 20 s
+    (window.crashRevealOver || Promise.resolve()).then(function () {
+    return navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }); }).then(function (reg) {
       if (status.state === "none") status.state = "registered";
+      console.log("crash: sw registered");   // the arms read it (the registration waits for the reveal, D42)
       track(reg);
     }).catch(function (err) {
       status.state = "failed";
