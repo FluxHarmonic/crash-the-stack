@@ -45,7 +45,7 @@
           draw-bg-in draw-background draw-board-background
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
           draw-tool-button draw-menu-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
-          draw-keys-mark phase-color)
+          draw-keys-mark phase-color tiles-ensure!)
 
   (begin
     ;; Every frame starts here: sokol_gp's begin resets its state, and its
@@ -229,13 +229,78 @@
     ;; Drawing every side in a layer before any face makes each face cover
     ;; every side strip that overlaps it, which is what a stack looks like.
 
-    (define (draw-sides-primitives g x y w h)
+    ;; --- the tile bodies, baked (P3c) ------------------------------------------
+    ;;
+    ;; A primitives-look tile body is four rectangles (the face, two edge
+    ;; lines, the open right edge) and its sides two more; 144 tiles a
+    ;; frame made them the largest rectangle count left after the glyph
+    ;; atlas. Every variant a frame can need is baked once into one small
+    ;; 'nearest render target at the geometry's tile size: three body
+    ;; states (plain, strong lock, weak lock) by right-open (no, yes), and
+    ;; the side piece (the left and bottom strips, alpha 0 elsewhere, drawn
+    ;; with normal blending so the transparent part leaves the tiles under
+    ;; it alone). A tile is then one draw-texture-region for its sides and
+    ;; one for its body; the selected tile keeps the rectangles, its face
+    ;; color breathes with the glow. Keyed by (look tile-w tile-h side):
+    ;; a look or layout change re-bakes. tiles-ensure! runs from the shells'
+    ;; present! before any other pass (a bake inside the phosphor's pass
+    ;; would be a pass inside a pass); a draw with nothing baked falls back
+    ;; to the rectangles. The atlas leg holds the two paths identical.
+    (define *tiles-rt* #f)
+    (define *tiles-tex* #f)
+    (define *tiles-key* #f)
+    (define *tiles-h* 0)
+    (define TILE-VARIANTS 6)             ; (plain strong weak) x (closed open)
+
+    (define (tile-variant lock right-open?)
+      (+ (cond ((eq? lock 'strong) 1) ((eq? lock 'weak) 2) (else 0))
+         (if right-open? 3 0)))
+
+    (define (tiles-ensure! look g)
+      (let* ((w (geometry-tile-w g))
+             (h (geometry-tile-h g))
+             (side (geometry-side g))
+             (key (list (look-name look) w h side)))
+        (unless (equal? key *tiles-key*)
+          (when *tiles-rt* (render-target-free! *tiles-rt*))
+          (let ((rt (make-render-target (+ (* TILE-VARIANTS w) w side) (+ h side) 'nearest)))
+            (with-render-target rt
+              (set-blend-mode 'none)
+              (let variants ((v 0))
+                (when (< v TILE-VARIANTS)
+                  (draw-face-rects look (* v w) 0 w h #f
+                                   (case (modulo v 3) ((1) 'strong) ((2) 'weak) (else #f))
+                                   (>= v 3)
+                                   0.0)
+                  (variants (+ v 1))))
+              (draw-sides-rects g (+ (* TILE-VARIANTS w) side) 0 w h))
+            (set-blend-mode 'normal)
+            (set! *tiles-rt* rt)
+            (set! *tiles-tex* (render-target->texture rt))
+            (set! *tiles-h* (+ h side))
+            (set! *tiles-key* key)))))
+
+    ;; A baked cell (cx, 0, cw, ch) at (x, y), white-tinted, upright (the
+    ;; target is bottom-up: (crash atlas) has the flip).
+    (define (draw-tile-cell x y cx cw ch)
+      (set-color 1.0 1.0 1.0 1.0)
+      (draw-texture-region *tiles-tex*
+                           (inexact x) (inexact y) (inexact cw) (inexact ch)
+                           (inexact cx) (inexact *tiles-h*) (inexact cw) (inexact (- ch))))
+
+    (define (draw-sides-rects g x y w h)
       (let ((side (geometry-side g)))
         ;; the bottom strip runs the full width plus the side so the corner is filled
         (color! C-SIDE-DARK)
         (draw-filled-rect (- x side) (+ y h) (+ w side) side)
         (color! C-SIDE)
         (draw-filled-rect (- x side) y side h)))
+
+    (define (draw-sides-primitives g x y w h)
+      (if (and (atlas-on?) *tiles-tex*)
+          (let ((side (geometry-side g)))
+            (draw-tile-cell (- x side) y (* TILE-VARIANTS w) (+ w side) (+ h side)))
+          (draw-sides-rects g x y w h)))
 
     ;; glow: 0..1, how bright the selected face breathes this frame. lock:
     ;; #f, 'strong or 'weak: a locked face is dimmed and barred, red for a
@@ -253,6 +318,11 @@
     ;; against 40 before the atlas. Tiles on one layer never overlap, so
     ;; the grouping draws the same pixels.
     (define (draw-face-body g look face x y w h selected? lock right-open? glow)
+      (if (and (atlas-on?) *tiles-tex* (not selected?))
+          (draw-tile-cell x y (* (tile-variant lock right-open?) w) w h)
+          (draw-face-rects look x y w h selected? lock right-open? glow)))
+
+    (define (draw-face-rects look x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
