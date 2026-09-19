@@ -9,8 +9,9 @@
 ;;; (the motif render, shipped under assets/audio/), and each frame the
 ;;; mixer fills the sink's free room with the ambient resampled by linear
 ;;; interpolation plus every voice still playing, stereo, and pushes it
-;;; up to TARGET-DEPTH frames ahead of the output: that depth is the
-;;; latency a cue lands within (64 ms at 48 kHz, plus the device's own),
+;;; up to TARGET-DEPTH frames ahead of the output: that depth is both the
+;;; latency a cue lands within (128 ms at 48 kHz, plus the device's own)
+;;; and the stall a frame may take before the output runs dry (P3c),
 ;;; and the sink's ring (BUFFER-FRAMES) is the headroom for a frame that
 ;;; runs long, not the latency. A pump that always filled the ring put
 ;;; every cue 170..190 ms after its tap (the slices 5-7 review).
@@ -29,6 +30,7 @@
 
   (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
+          audio-set-depth! audio-depth
           audio-voices audio-ambient-frames
           audio-state
           mix-into
@@ -39,7 +41,15 @@
     (define CUE-GAIN 1.0)
     (define PUSH-MAX 4096)         ; frames per pump at most (85 ms at 48 kHz)
     (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the stall headroom
-    (define TARGET-DEPTH 3072)     ; frames kept ahead of the output: the cue latency (64 ms at 48 kHz)
+    ;; TARGET-DEPTH is two things at once: the latency a cue lands within,
+    ;; and the stall a frame may take before the output runs dry. At 3072
+    ;; (64 ms at 48 kHz) any frame past ~64 ms underran; David heard the
+    ;; tap hitch on his phone (2026-09-19, 5f26a45). 6144 rides a 100 ms
+    ;; hitch on top of a 30 fps frame at 128 ms of cue latency (139 at
+    ;; 44.1 kHz), plus the device's own; ?adepth=N on the web and
+    ;; --audio-depth N natively set it for a comparison.
+    (define TARGET-DEPTH 6144)
+    (define *target-depth* TARGET-DEPTH)
 
     ;; --- state ---------------------------------------------------------------
     (define *ctx* #f)
@@ -54,6 +64,11 @@
     (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
 
     (define (audio-open?) (and *stream* #t))
+    ;; The frames kept ahead of the output: TARGET-DEPTH unless set; a
+    ;; value past the ring's headroom is held under BUFFER-FRAMES - 1024.
+    (define (audio-depth) *target-depth*)
+    (define (audio-set-depth! frames)
+      (set! *target-depth* (max 1024 (min (- BUFFER-FRAMES 1024) frames))))
     ;; The context's state: running | suspended | closed, or #f without one.
     (define (audio-state)
       (and *ctx*
@@ -144,7 +159,7 @@
           0
           (let ((n (min PUSH-MAX
                         (audio-stream-room *stream*)
-                        (- TARGET-DEPTH (audio-stream-depth *stream*)))))
+                        (- *target-depth* (audio-stream-depth *stream*)))))
             (if (<= n 0)
                 0
                 (let* ((ambient (and (not *muted*) *ambient*))

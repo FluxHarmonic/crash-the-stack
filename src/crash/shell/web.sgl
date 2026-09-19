@@ -213,10 +213,19 @@
     (define *ms-sim* 0.0)
     (define *ms-draw* 0.0)
     (define *ms-flush* 0.0)
+    ;; The sim's parts on the stack table (the tap hitch, David on 5f26a45),
+    ;; and the worst frame of the window with its parts: what ran in it.
+    (define *part-step* 0.0)     ; session-step (the input: a tap's hit test and pick)
+    (define *part-advance* 0.0)  ; session-advance (the trace, the counter-hacks)
+    (define *part-save* 0.0)     ; the store write
+    (define *part-cues* 0.0)     ; play-cues! (the synth, the sink)
+    (define *part-fx* 0.0)       ; fx-frame + fx-observe
+    (define *worst* #f)          ; (ms sim draw flush step advance save cues fx) of the window's longest frame
+    (define *worst-text* "")     ; the readout's third line: the last window's worst frame, its parts, the GC pauses
 
     (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
-    (define MS-EVERY 300)
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES sim MEAN draw MEAN flush MEAN
+    (define MS-EVERY 120)      ; two seconds at 60 fps: the worst-frame readout refreshes often enough to catch a tap
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
     ;;                                        collections and bytes allocated in the window
@@ -231,6 +240,8 @@
         (set! *ms-sim* (+ *ms-sim* *sim-ms*))
         (set! *ms-draw* (+ *ms-draw* *draw-ms*))
         (set! *ms-flush* (+ *ms-flush* *flush-ms*))
+        (when (or (not *worst*) (> ms (car *worst*)))
+          (set! *worst* (list ms *sim-ms* *draw-ms* *flush-ms* *part-step* *part-advance* *part-save* *part-cues* *part-fx*)))
         (when (= *ms-n* MS-EVERY)
           (let* ((now (gc-snapshot))
                  (was (or *gc-last* now)))
@@ -238,7 +249,23 @@
                  "step" (tenth (/ *ms-step* MS-EVERY)) "present" (tenth (/ *ms-present* MS-EVERY))
                  "gc" (- (car now) (car was)) (- (cadr now) (cadr was))
                  "alloc" (- (caddr now) (caddr was))
+                 "gcms" (tenth (/ (- (cadddr now) (cadddr was)) 1000000.0))
                  "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY)))
+            ;;   crash: worst-frame MS sim S draw D flush F step A advance B save C cues D fx E
+            (when *worst*
+              (apply say "worst-frame" (exact (round (car *worst*)))
+                     (let loop ((names (list "sim" "draw" "flush" "step" "advance" "save" "cues" "fx")) (vals (cdr *worst*)) (acc '()))
+                       (if (null? names) (reverse acc) (loop (cdr names) (cdr vals) (cons (tenth (car vals)) (cons (car names) acc))))))
+              (set! *worst-text*
+                    (string-append "WORST " (number->string (exact (round (car *worst*))))
+                                   " SIM " (number->string (exact (round (cadr *worst*))))
+                                   " DRAW " (number->string (exact (round (caddr *worst*))))
+                                   " TAP " (number->string (exact (round (list-ref *worst* 4))))
+                                   " SAVE " (number->string (exact (round (list-ref *worst* 6))))
+                                   " CUE " (number->string (exact (round (list-ref *worst* 7))))
+                                   " GC " (number->string (- (car now) (car was)))
+                                   "X " (number->string (exact (round (/ (- (cadddr now) (cadddr was)) 1000000.0))))))
+              (set! *worst* #f))
             (set! *ms-sim* 0.0)
             (set! *ms-draw* 0.0)
             (set! *ms-flush* 0.0)
@@ -251,12 +278,13 @@
 
     (define (tenth x) (/ (round (* 10.0 x)) 10.0))
 
-    ;; (minor major bytes-allocated) from (sigil gc); a runtime without
+    ;; (minor major bytes-allocated gc-time-ns) from (sigil gc); a runtime without
     ;; the stat answers zeros, so a window's delta reads 0.
     (define (gc-snapshot)
       (let* ((stats (guard (e (#t '())) (gc-stats)))
              (get (lambda (key) (let ((p (assq key stats))) (if p (cdr p) 0)))))
-        (list (get 'minor-collections) (get 'major-collections) (get 'bytes-allocated))))
+        (list (get 'minor-collections) (get 'major-collections) (get 'bytes-allocated)
+              (+ (get 'minor-time-ns) (get 'major-time-ns)))))
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -750,17 +778,28 @@
                    "locked" (board-locked-slots b))))
         (set! *announced* #t))
       (let* ((before *session*)
+             (t0 (now-ms))
              (x (fx-frame *fx* dt))
-             (after (save-session-after-frame!
-                      before
-                      (session-advance (if *demo-armed*
-                                           (begin (set! *demo-armed* #f) (session-demo-finish before))
-                                           (session-step before f *geom*))
-                                       (clock-steps (fx-clock x)))))
-             (x (fx-observe x before after *geom*)))
+             (t1 (now-ms))
+             (stepped (if *demo-armed*
+                          (begin (set! *demo-armed* #f) (session-demo-finish before))
+                          (session-step before f *geom*)))
+             (t2 (now-ms))
+             (advanced (session-advance stepped (clock-steps (fx-clock x))))
+             (t3 (now-ms))
+             (after (save-session-after-frame! before advanced))
+             (t4 (now-ms))
+             (x (fx-observe x before after *geom*))
+             (t5 (now-ms)))
+        (set! *part-fx* (+ (- t1 t0) (- t5 t4)))
+        (set! *part-step* (- t2 t1))
+        (set! *part-advance* (- t3 t2))
+        (set! *part-save* (- t4 t3))
         (set! *session* after)
         (set! *fx* x)
-        (play-cues! (session-cues before after))
+        (let ((t0 (now-ms)))
+          (play-cues! (session-cues before after))
+          (set! *part-cues* (- (now-ms) t0)))
         (advance-bg! (clock-steps (fx-clock x)) (session-trace before) (session-trace after))
         (unless (eq? (session-update before) (session-update after))
           (say "update" (session-update after))
@@ -1015,7 +1054,7 @@
                (draw)))
         (when *ms*
           (let ((gpu (gpu-bg-ms)))
-            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
+            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text*)))
         (set! *draw-ms* (- (now-ms) t1))
         (end-frame)
         (set! *flush-ms* (- (now-ms) t1 *draw-ms*)))
@@ -1101,6 +1140,7 @@
             ((string=? type "phosphor") (param! (lambda () (set! *phosphor* (phosphor-choice (string->symbol payload))))))
             ((string=? type "demo") (param! (lambda () (set! *demo* (and (string=? payload "cleared") 'cleared)))))
             ((string=? type "atlas") (param! (lambda () (atlas-set! (not (string=? payload "off"))))))
+            ((string=? type "adepth") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n)) (audio-set-depth! n))))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)
