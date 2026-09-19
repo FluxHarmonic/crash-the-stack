@@ -39,19 +39,24 @@
 ;;; between the twist face (the bar) and the clean face (GNOME's clock)
 ;;; while the game is still in TRACE.
 ;;;
-;;; Always: tab switches model, return deselects, backspace or ctrl+z
-;;; undoes (backspace erases a typed tag letter first), ctrl+s shuffles,
-;;; ctrl+n deals the next seed, ctrl+t toggles the test-tile renderer,
-;;; ctrl+h asks for a hint. Commands take ctrl because in hint mode every
-;;; letter is a tag key. (Escape is the shell's: it quits.)
+;;; Always: Tab shows and hides the tags (shift+Tab switches model),
+;;; return deselects, backspace or ctrl+z undoes (backspace erases a
+;;; typed tag letter first), ctrl+s shuffles, ctrl+n deals the next seed,
+;;; ctrl+t steps the look, ctrl+h asks for a hint, ? shows and hides the
+;;; keys line. Commands take ctrl because in hint mode every letter is a
+;;; tag key. (Escape is the shell's: it quits.)
 ;;;
-;;; The same commands sit in the HUD as controls (UNDO SHUF HINT NEXT), the
-;;; rects coming from (crash geometry). A click on one is rewritten into
-;;; the key frame the command already handles, so a tap on a phone and a
-;;; ctrl chord on a desktop are one code path. The HINT control cannot wait
-;;; for a face key (a phone has none), so it gives GNOME's hint instead: a
-;;; legal pair, the selected tile's partner when one is selected. The
-;;; keyboard gets the same by pressing ctrl+h twice.
+;;; The same commands are the tool stack (ruling D33, (crash hud)):
+;;; Space or a tap on the corner button opens it, a tool's tag letter or
+;;; digit, arrows and Return, or a tap on its entry fires it, and while it
+;;; is open nothing else reaches the board. A chosen tool is rewritten
+;;; into the key frame the command already handles, so a tap on a phone
+;;; and a ctrl chord on a desktop are one code path. The HINT tool cannot
+;;; wait for a face key (a phone has none), so it gives GNOME's hint
+;;; instead: a legal pair, the selected tile's partner when one is
+;;; selected. The keyboard gets the same by pressing ctrl+h twice. MENU
+;;; is the shell's: the session carries it as a request the shell reads
+;;; after the step and clears.
 
 (define-library (crash input)
   (import (sigil struct)
@@ -61,7 +66,8 @@
           (crash stack generate)
           (crash trace)
           (crash geometry)
-          (crash look))
+          (crash look)
+          (crash hud))
 
   (export input-frame input-frame? make-input-frame
           input-frame-pressed input-frame-held input-frame-click
@@ -74,6 +80,10 @@
           session-update session-with-update
           session-best session-with-best session-restore
           session-retry session-next
+          session-tools session-tools-list session-with-tools-touch
+          session-hud session-with-hud session-keys-shown
+          session-request session-clear-request
+          session-instruction
           session-labels session-labels-shown
           hint-labels uncovered-slots HINT-ALPHABET
           hint-label hint-label-length label-key?
@@ -112,6 +122,10 @@
       (update default: #f)                ; a new version of the web build: #f | waiting | prompt | apply
       (best default: #f)                  ; best trace on this layout so far, or #f
       (look default: DEFAULT-LOOK)        ; a name from (crash look): the glyph sheet and tile skin
+      (tools default: (tools-new))        ; the tool stack, (crash hud)
+      (hud default: DEFAULT-LAYOUT)       ; the bar's layout, (crash hud): zones | strip
+      (keys-shown default: #f)            ; the keys line in place of the instruction line (?)
+      (request default: #f)               ; for the shell: menu, or #f
       (seed default: 1)
       (message default: ""))
 
@@ -365,31 +379,24 @@
         ;; pick: the highlight homes silently after a match so nothing looks
         ;; pre-chosen (David, 2026-09-16).
         (cond (dir (session (cursor-move s dir) cursor-shown: #t))
-              ((and (pressed? f 'space) (session-highlight s))
-               (session-pick s (session-highlight s)))
               (else s))))
 
     ;; --- the hint model -----------------------------------------------------
 
     ;; Each tag letter extends what has been typed; a complete tag picks its
     ;; tile (a blocked tile's tag does nothing, like a click on it) and the
-    ;; typed text clears either way. Space clears a half-typed tag, or with
-    ;; nothing typed hides the tags and shows them again (David, 2026-09-16:
-    ;; every tile wearing a tag can be visually noisy). Backspace erases a
-    ;; typed letter; with nothing typed it is the undo command instead.
+    ;; typed text clears either way. Tab hides the tags and shows them
+    ;; again (David, 2026-09-16: every tile wearing a tag can be visually
+    ;; noisy; Space did this until the tool stack took Space, D33).
+    ;; Backspace erases a typed letter; with nothing typed it is the undo
+    ;; command instead.
     (define (step-hint s f)
       (let loop ((keys (input-frame-pressed f)) (s s))
         (if (null? keys)
             s
             (let ((key (car keys))
                   (typed (session-typed s)))
-              (cond ((eq? key 'space)
-                     (loop (cdr keys)
-                           (if (> (string-length typed) 0)
-                               (session s typed: "")
-                               (session s labels-shown:
-                                        (not (session-labels-shown s))))))
-                    ((and (eq? key 'backspace)
+              (cond ((and (eq? key 'backspace)
                           (> (string-length typed) 0))
                      (loop (cdr keys)
                            (session s typed: (substring typed
@@ -568,8 +575,9 @@
     ;; trace-advance, which fires the counter-hacks its seconds cover; the
     ;; board it hands back replaces the session's, with tags and cursor
     ;; recomputed, and the last event becomes the HUD message.
-    (define (session-advance s ticks)
-      (let ((b (session-board s)))
+    (define (session-advance s0 ticks)
+      (let* ((s (session s0 tools: (tools-advance (session-tools s0) ticks)))
+             (b (session-board s)))
         (if (or (finished? s) (= ticks 0))
             s
             (let* ((r (trace-advance (session-trace s) b ticks))
@@ -635,8 +643,19 @@
     (define (step-commands s f)
       (let ((b (session-board s))
             (ctrl (held? f 'ctrl)))
-        (cond ((pressed? f 'tab)
+        (cond ((and (pressed? f 'tab) (held? f 'shift))
                (session s model: (next-model (session-model s)) typed: ""))
+              ((pressed? f 'tab)
+               (session s labels-shown: (not (session-labels-shown s)) typed: ""))
+              ((pressed? f '?)
+               (session s keys-shown: (not (session-keys-shown s))))
+              ;; the cursor model: Return picks the ringed tile (Space did,
+              ;; until the tool stack took Space)
+              ((and (pressed? f 'return)
+                    (eq? (session-model s) 'cursor)
+                    (session-cursor-shown s)
+                    (session-highlight s))
+               (session-pick s (session-highlight s)))
               ((pressed? f 'return)
                (let ((sel (board-selected b)))
                  (if sel (session-pick s sel) (session s typed: ""))))
@@ -666,8 +685,9 @@
 
     ;; --- one frame ----------------------------------------------------------
 
-    ;; The key frame a HUD control stands for. pair-hint is not a key any
-    ;; keyboard sends; it is the control's own command.
+    ;; The key frame a HUD control or a tool stands for. pair-hint is not
+    ;; a key any keyboard sends; it is the control's own command. keys is
+    ;; the ? mark at the bar's right end; menu is answered as a request.
     (define (control-command name)
       (case name
         ((undo) (make-input-frame '(backspace) '() #f))
@@ -676,25 +696,77 @@
         ((next) (make-input-frame '(n) '(ctrl) #f))
         ((mode) (make-input-frame '(trace-mode) '() #f))
         ((look) (make-input-frame '(t) '(ctrl) #f))
+        ((keys) (make-input-frame '(?) '() #f))
         (else #f)))
 
     ;; A click on a control replaces the frame with that control's command
     ;; (keys pressed in the same frame wait: a tap on a phone comes alone).
-    (define (with-control f g)
+    (define (with-control f g s)
       (let ((click (input-frame-click f)))
         (or (and click
-                 (control-command (hit-control g (car click) (cdr click))))
+                 (control-command (hit-control g (session-hud s) (car click) (cdr click))))
             f)))
 
+    ;; --- the tool stack --------------------------------------------------------
+
+    ;; This table's tools for the frame (ruling D33): under SEVERED only
+    ;; NEXT and MENU; on a finished board UNDO, SHUFFLE and HINT are done.
+    (define (session-tools-list s)
+      (let ((play? (not (finished? s))))
+        (list (make-tool 'undo "UNDO" 'u #f #f play?)
+              (make-tool 'shuf "SHUFFLE" 's SHUFFLE-COST #f play?)
+              (make-tool 'hint "HINT" 'h HINT-COST #f play?)
+              (make-tool 'look "LOOK" 'l #f #f (not (severed? s)))
+              (make-tool 'next "NEXT" 'n)
+              (make-tool 'menu "MENU" 'm))))
+
+    (define (session-with-tools-touch s touch?)
+      (session s tools: (tools-with-touch (session-tools s) touch?)))
+
+    (define (session-with-hud s name)
+      (session s hud: (if (layout-name? name) name DEFAULT-LAYOUT)))
+
+    (define (session-clear-request s)
+      (session s request: #f))
+
+    ;; A chosen tool fires as its command; MENU is left for the shell.
+    (define (fire-tool s name g)
+      (if (eq? name 'menu)
+          (session s request: 'menu)
+          (let ((f (control-command name)))
+            (or (and f (step-commands s f)) s))))
+
+    ;; The instruction line: what the bar says under the readouts when the
+    ;; keys line is hidden (D33: a new player's first minute depends on it).
+    (define (session-instruction s)
+      (let ((b (session-board s)))
+        (cond ((session-hint-armed s) "HINT: PRESS A FACE KEY")
+              ((board-cleared? b) "STACK CRASHED. NEXT DEALS ANOTHER.")
+              ((null? (legal-matches b)) "NO MOVES LEFT: SHUFFLE.")
+              ((board-selected b) "NOW ITS MATCH.")
+              (else "TAP TWO MATCHING TILES."))))
+
     (define (session-step s f0 g)
-      (let ((f (with-control f0 g)))
-        (cond ((step-commands s f) => (lambda (s) s))
-            ((session-hint-armed s) (step-armed-hint s f))
-            (else
-             (let ((s (step-pointer s f g)))
-               (if (held? f 'ctrl)
-                   s
-                   (case (session-model s)
-                     ((hint) (step-hint s f))
-                     ((cursor) (step-cursor s f))
-                     (else s))))))))))
+      (let* ((f (with-control f0 g s))
+             (was-open (tools-open? (session-tools s)))
+             (r (tools-step (session-tools s)
+                            (cons (input-frame-pressed f) (input-frame-click f))
+                            (session-tools-list s)
+                            (geometry-vw g)
+                            (geometry-vh g)))
+             (s (session s tools: (car r))))
+        (cond (was-open
+               ;; modal: the frame was the stack's, whatever it held
+               (if (cdr r) (fire-tool s (cdr r) g) s))
+              ((tools-open? (car r))
+               (session s typed: ""))
+              ((step-commands s f) => (lambda (s) s))
+              ((session-hint-armed s) (step-armed-hint s f))
+              (else
+               (let ((s (step-pointer s f g)))
+                 (if (held? f 'ctrl)
+                     s
+                     (case (session-model s)
+                       ((hint) (step-hint s f))
+                       ((cursor) (step-cursor s f))
+                       (else s))))))))))

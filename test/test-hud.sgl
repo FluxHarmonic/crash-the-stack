@@ -1,0 +1,250 @@
+;;; Gate (P3, S8) - the tool stack and the bar's layouts (ruling D33).
+;;;
+;;; The widget alone first: where the button and the entries sit (the
+;;; column stands on the button, never reaches the meter's row, and a
+;;; touch screen gets taller entries), how it opens, what chooses, what
+;;; closes, that a disabled tool refuses, and that the slide's timing is
+;;; the note's (8 ticks, 2 of stagger from the bottom up).
+;;;
+;;; Then the tables: each tag fires the tool the note names and nothing
+;;; else (sabotage S8, ruled: a tag firing the wrong tool, H made to
+;;; shuffle, reddens "H is HINT"); a digit fires the n-th; while the
+;;; stack is open a tag letter never reaches the board (the hint model's
+;;; tile tags share the alphabet); under SEVERED only NEXT and MENU
+;;; fire; MENU comes out as a request the shell reads; and the layout
+;;; setting steps and round-trips.
+
+(import (sigil test)
+        (sigil struct)
+        (sigil list)
+        (sigil math)
+        (crash hud)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack turtle)
+        (crash geometry)
+        (crash input)
+        (crash trace)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input))
+
+(define VW 640)
+(define VH 400)
+
+(define LIST
+  (list (make-tool 'undo "UNDO" 'u)
+        (make-tool 'shuf "SHUFFLE" 's 60)
+        (make-tool 'hint "HINT" 'h 30)
+        (make-tool 'next "NEXT" 'n)
+        (make-tool 'menu "MENU" 'm #f #f #f)))
+
+(define (frame keys . rest)
+  (cons keys (and (pair? rest) (car rest))))
+
+(define (open-stack)
+  (car (tools-step (tools-new) (frame '(space)) LIST VW VH)))
+
+(test-group "hud: the widget's geometry"
+  (test "the button is 24x24 at the bar's left end, 28 above the bottom"
+    (assert-equal (list 4 (- VH 28) 24 24) (tool-button-rect VH)))
+  (test "the column stands on the button: the last entry ends a gap above it, the first is highest"
+    (let ((rects (tool-entry-rects VH 5 #f)))
+      (assert-equal 5 (length rects))
+      (assert-equal (- VH 28 4) (+ (cadr (list-ref rects 4)) (cadddr (list-ref rects 4))))
+      (assert-true (< (cadr (car rects)) (cadr (list-ref rects 4))))
+      (assert-true (every (lambda (r) (and (= (car r) 4) (= (caddr r) ENTRY-W) (= (cadddr r) 24))) rects))))
+  (test "entries are 4 apart and never overlap"
+    (let loop ((rects (tool-entry-rects VH 6 #f)))
+      (when (pair? (cdr rects))
+        (assert-equal (+ (cadr (car rects)) (cadddr (car rects)) 4) (cadr (cadr rects)))
+        (loop (cdr rects)))))
+  (test "a touch screen gets 32-tall entries"
+    (assert-equal 32 (cadddr (tool-entry-rect VH 0 3 #t))))
+  (test "six entries with the touch height still start below the top of the board"
+    (assert-true (> (cadr (tool-entry-rect VH 0 6 #t)) 40)))
+  (test "the column never covers the meter (the bar's middle) even at full height"
+    (let ((col (tool-column-rect VH 8 #t)))
+      (assert-true (< (+ (car col) (caddr col)) (- (half VW) 100)))))
+  (test "hit-tool-entry names the entry under a point and nothing beside the column"
+    (let ((r (tool-entry-rect VH 2 5 #f)))
+      (assert-equal 2 (hit-tool-entry VH 5 #f (+ (car r) 3) (+ (cadr r) 3)))
+      (assert-equal #f (hit-tool-entry VH 5 #f 300 (+ (cadr r) 3)))))
+  (test "the slide: the bottom entry runs 0..1 over 8 ticks, the one above starts 2 later"
+    (assert-equal 0.0 (entry-progress 0 4 5))
+    (assert-equal 1.0 (entry-progress 8 4 5))
+    (assert-equal 0.5 (entry-progress 4 4 5))
+    (assert-equal 0.0 (entry-progress 2 3 5))
+    (assert-equal 1.0 (entry-progress 10 3 5))
+    (assert-equal 1.0 (entry-progress 16 0 5))))
+
+(test-group "hud: opening, choosing, closing"
+  (test "closed, an ordinary key passes and nothing opens"
+    (let ((r (tools-step (tools-new) (frame '(h)) LIST VW VH)))
+      (assert-false (tools-open? (car r)))
+      (assert-equal #f (cdr r))))
+  (test "Space opens; a tap on the button opens"
+    (assert-true (tools-open? (open-stack)))
+    (assert-true (tools-open? (car (tools-step (tools-new) (frame '() (cons 10 (- VH 20))) LIST VW VH)))))
+  (test "open, a tag chooses its tool and the stack closes with the button lit"
+    (let ((r (tools-step (open-stack) (frame '(h)) LIST VW VH)))
+      (assert-equal 'hint (cdr r))
+      (assert-false (tools-open? (car r)))
+      (assert-equal FLASH-TICKS (tools-flash (car r)))))
+  (test "open, a digit chooses the n-th tool in order"
+    (assert-equal 'undo (cdr (tools-step (open-stack) (frame '(|1|)) LIST VW VH)))
+    (assert-equal 'next (cdr (tools-step (open-stack) (frame '(|4|)) LIST VW VH)))
+    (assert-equal #f (cdr (tools-step (open-stack) (frame '(|9|)) LIST VW VH))))
+  (test "open, arrows move the highlight and Return chooses it"
+    (let* ((st (car (tools-step (open-stack) (frame '(down)) LIST VW VH)))
+           (st (car (tools-step st (frame '(down)) LIST VW VH))))
+      (assert-equal 2 (tools-highlight st))
+      (assert-equal 'hint (cdr (tools-step st (frame '(return)) LIST VW VH)))
+      (assert-equal 4 (tools-highlight (car (tools-step (open-stack) (frame '(up)) LIST VW VH))))))
+  (test "open, a tap on an entry chooses it"
+    (let ((r (tool-entry-rect VH 1 5 #f)))
+      (assert-equal 'shuf (cdr (tools-step (open-stack) (frame '() (cons (+ (car r) 5) (+ (cadr r) 5))) LIST VW VH)))))
+  (test "open, Space, Escape, a tap on the button or outside the column close without a choice"
+    (for-each (lambda (f)
+                (let ((r (tools-step (open-stack) f LIST VW VH)))
+                  (assert-false (tools-open? (car r)))
+                  (assert-equal #f (cdr r))))
+              (list (frame '(space))
+                    (frame '(escape))
+                    (frame '() (cons 10 (- VH 20)))
+                    (frame '() (cons 400 200)))))
+  (test "a disabled tool refuses: the stack stays open, the entry becomes the highlight"
+    (let ((r (tools-step (open-stack) (frame '(m)) LIST VW VH)))
+      (assert-true (tools-open? (car r)))
+      (assert-equal #f (cdr r))
+      (assert-equal 4 (tools-highlight (car r)))))
+  (test "open, a key that names no tool changes nothing and reaches nobody"
+    (let ((r (tools-step (open-stack) (frame '(x)) LIST VW VH)))
+      (assert-true (tools-open? (car r)))
+      (assert-equal #f (cdr r))))
+  (test "the clock: the age grows, the flash fades"
+    (let ((st (tools-advance (car (tools-step (open-stack) (frame '(u)) LIST VW VH)) 10)))
+      (assert-equal (- FLASH-TICKS 10) (tools-flash st)))
+    (assert-equal 5 (tools-open (tools-advance (open-stack) 5)))))
+
+(test-group "hud: the layouts"
+  (test "two layouts, zones the default, stepping cycles"
+    (assert-equal '(zones strip) HUD-LAYOUTS)
+    (assert-equal 'zones DEFAULT-LAYOUT)
+    (assert-equal 'strip (layout-after 'zones))
+    (assert-equal 'zones (layout-after 'strip))
+    (assert-true (layout-name? 'strip))
+    (assert-false (layout-name? 'c))))
+
+;; --- the stack table -------------------------------------------------------------
+
+(define (stack-session)
+  (session-new (turtle-layout) 1))
+
+(define (geom) (make-geometry (turtle-layout) VW VH))
+
+(define (step s keys . rest)
+  (session-step s (make-input-frame keys '() (and (pair? rest) (car rest))) (geom)))
+
+(test-group "hud: the stack table's tools"
+  (test "the list is the note's: UNDO U, SHUFFLE S (60), HINT H (30), LOOK L, NEXT N, MENU M"
+    (let ((tools (session-tools-list (stack-session))))
+      (assert-equal '(undo shuf hint look next menu) (map tool-name tools))
+      (assert-equal '(u s h l n m) (map tool-tag tools))
+      (assert-equal (list #f 60 30 #f #f #f) (map tool-price tools))))
+  (test "Space opens the stack; a tag letter then never reaches a tile"
+    (let* ((s0 (stack-session))
+           (s1 (step s0 '(space))))
+      (assert-true (tools-open? (session-tools s1)))
+      ;; every hint tag starts with a letter; the first tile's tag is 'a' something
+      (let ((s2 (step s1 '(a))))
+        (assert-true (tools-open? (session-tools s2)))
+        (assert-equal (board-selected (session-board s0)) (board-selected (session-board s2)))
+        (assert-equal "" (session-typed s2)))))
+  (test "H is HINT: the pair hint rings a tile and charges the trace"
+    (let* ((s1 (step (stack-session) '(space)))
+           (s2 (step s1 '(h))))
+      (assert-false (tools-open? (session-tools s2)))
+      (assert-true (and (session-hint s2) #t))
+      (assert-equal 1 (session-hints s2))
+      (assert-equal (board-faces (session-board s1)) (board-faces (session-board s2)))))
+  (test "S is SHUFFLE: the faces move and the trace is charged, no hint"
+    (let* ((s1 (step (stack-session) '(space)))
+           (s2 (step s1 '(s))))
+      (assert-false (equal? (board-faces (session-board s1)) (board-faces (session-board s2))))
+      (assert-equal 0 (session-hints s2))
+      (assert-equal 1 (trace-shuffles (session-trace s2)))))
+  (test "the digits fire in order: 3 is HINT"
+    (assert-equal 1 (session-hints (step (step (stack-session) '(space)) '(|3|)))))
+  (test "N is NEXT: the seed advances"
+    (assert-equal 2 (session-seed (step (step (stack-session) '(space)) '(n)))))
+  (test "L is LOOK: the look steps"
+    (let ((s (stack-session)))
+      (assert-false (eq? (session-look s) (session-look (step (step s '(space)) '(l)))))))
+  (test "M is MENU: the session carries the request for the shell, which clears it"
+    (let ((s (step (step (stack-session) '(space)) '(m))))
+      (assert-equal 'menu (session-request s))
+      (assert-equal #f (session-request (session-clear-request s)))))
+  (test "Tab toggles the tags now; shift+Tab switches the model"
+    (let* ((s0 (stack-session))
+           (s1 (step s0 '(tab))))
+      (assert-equal (not (session-labels-shown s0)) (session-labels-shown s1))
+      (assert-equal (session-model s0) (session-model s1))
+      (assert-equal 'cursor (session-model (session-step s0 (make-input-frame '(tab) '(shift) #f) (geom))))))
+  (test "? toggles the keys line"
+    (let ((s0 (stack-session)))
+      (assert-false (session-keys-shown s0))
+      (assert-true (session-keys-shown (step s0 '(?))))))
+  (test "the ctrl chords still fire directly with the stack closed"
+    (assert-equal 1 (session-hints (session-step (session-step (stack-session) (make-input-frame '(h) '(ctrl) #f) (geom))
+                                                 (make-input-frame '(h) '(ctrl) #f)
+                                                 (geom)))))
+  (test "under SEVERED every tool but NEXT and MENU is disabled"
+    (let* ((s (session-advance (session-advance (stack-session) (* 60 (+ 1 SEVER-AT))) (* 60 (+ 1 SEVER-AT))))
+           (tools (session-tools-list s)))
+      (assert-true (trace-severed? (session-trace s)))
+      (assert-equal '(#f #f #f #f #t #t) (map tool-enabled tools))
+      (let ((s2 (step (step s '(space)) '(h))))
+        (assert-true (tools-open? (session-tools s2)))
+        (assert-equal 0 (session-hints s2)))))
+  (test "the layout setting: default zones, stepping, a save round-trip is the shell's (store)"
+    (let ((s (stack-session)))
+      (assert-equal 'zones (session-hud s))
+      (assert-equal 'strip (session-hud (session-with-hud s 'strip))))))
+
+;; --- the card table -------------------------------------------------------------
+
+(define (card-deal)
+  (deal-restore 1 (game-from-deck (deck-string->cards FIXTURE-DECK) 1) #t (trace-new 'twist)))
+
+(define (cgeom) (make-card-geometry VW VH))
+
+(define (cstep d keys . rest)
+  (deal-step d (make-input-frame keys '() (and (pair? rest) (car rest))) (cgeom)))
+
+(test-group "hud: the card table's tools"
+  (test "the list is the note's: PULL P, ROLLBACK R, PROBE O, SCRAMBLE C, NEXT N, MENU M"
+    (let ((tools (deal-tools-list (card-deal))))
+      (assert-equal '(draw undo probe scram next menu) (map tool-name tools))
+      (assert-equal '(p r o c n m) (map tool-tag tools))))
+  (test "in clean mode SCRAMBLE and PROBE are absent, not disabled"
+    (assert-equal '(draw undo next menu) (map tool-name (deal-tools-list (deal-with-mode (card-deal) 'clean)))))
+  (test "Space opens; a pile key then never picks a pile"
+    (let* ((d1 (cstep (card-deal) '(space)))
+           (d2 (cstep d1 '(a))))
+      (assert-true (tools-open? (deal-tools d2)))
+      (assert-equal (game-selected (deal-game d1)) (game-selected (deal-game d2)))))
+  (test "P is PULL: the draw count flips"
+    (let ((d (card-deal)))
+      (assert-equal 3 (game-draw (deal-game (cstep (cstep d '(space)) '(p)))))))
+  (test "R is ROLLBACK: a move comes back"
+    (let* ((d (card-deal))
+           (moves (legal-moves (deal-game d)))
+           (moved (deal-restore 1 (game-move (deal-game d) (car (car moves)) (cdr (car moves))) #t (deal-trace d))))
+      (assert-equal (game-moves (deal-game d))
+                    (game-moves (deal-game (cstep (cstep moved '(space)) '(r)))))))
+  (test "M is MENU: the request for the shell"
+    (assert-equal 'menu (deal-request (cstep (cstep (card-deal) '(space)) '(m)))))
+  (test "? toggles the keys line on this table too"
+    (assert-true (deal-keys-shown (cstep (card-deal) '(?))))))

@@ -1,0 +1,253 @@
+;;; (crash hud) - The tool stack and the status bar's layouts (ruling D33).
+;;;
+;;; David, 2026-09-18: a button in the lower left corner stands for the
+;;; tool list; tap it and the tools slide up above it as labelled icons;
+;;; the bottom bar keeps its room for the trace and the other status.
+;;; This module is the widget as data and arithmetic, shared by both
+;;; tables: what a tool is (its name, label, tag key, price, bank,
+;;; whether it can fire now), the stack's state (closed, or open for so
+;;; many ticks with a highlight), where the button and each entry sit,
+;;; and one frame of input against it. Each table supplies its own tool
+;;; list and fires the chosen tool itself, so a tool chosen here is
+;;; exactly the ctrl chord or HUD control it always was. Nothing here
+;;; reads a platform or draws; (crash render) draws what this measures.
+;;;
+;;; Open: a tap on the button, or Space. While open the stack is modal:
+;;; a tool's tag letter, its digit (1..n in order), arrows and Return, or
+;;; a tap on its entry chooses it and the stack closes; Space, Escape, a
+;;; tap on the button or anywhere outside the column closes it; nothing
+;;; else reaches the board, so a tag letter can never pick a tile. A
+;;; disabled tool refuses the choice and the stack stays open.
+;;;
+;;; The bar's layouts (ruled 2026-09-19): A zones and B strip ship behind
+;;; a setting; the third was not built.
+
+(define-library (crash hud)
+  (import (sigil struct)
+          (sigil list)
+          (sigil math))
+
+  (export tool tool? make-tool
+          tool-name tool-label tool-tag tool-price tool-bank tool-enabled
+          tools tools? tools-new
+          tools-open tools-highlight tools-flash tools-touch
+          tools-open? tools-advance tools-close tools-with-touch
+          tools-step tools-choice
+          tool-by-tag tool-by-digit
+          HUD-LAYOUTS DEFAULT-LAYOUT layout-name? layout-after layout-label
+          TOOL-BUTTON-SIZE TOOL-BUTTON-X TOOL-BUTTON-RISE
+          ENTRY-W ENTRY-H ENTRY-H-TOUCH ENTRY-GAP
+          OPEN-TICKS STAGGER-TICKS FLASH-TICKS
+          tool-button-rect tool-entry-rect tool-entry-rects tool-column-rect
+          hit-tool-button hit-tool-entry
+          entry-progress)
+
+  (begin
+    ;; --- a tool -----------------------------------------------------------------
+
+    ;; name: the symbol the table fires on (its control name); label: the
+    ;; entry's text; tag: the key symbol that chooses it; price: the trace
+    ;; cost shown after the label, or #f; bank: a banked count shown as
+    ;; "xN", or #f; enabled: whether it can fire this frame.
+    (define-struct tool
+      (name default: #f)
+      (label default: "")
+      (tag default: #f)
+      (price default: #f)
+      (bank default: #f)
+      (enabled default: #t))
+
+    (define (make-tool name label tag . rest)
+      (tool name: name
+            label: label
+            tag: tag
+            price: (and (pair? rest) (car rest))
+            bank: (and (pair? rest) (pair? (cdr rest)) (cadr rest))
+            enabled: (or (null? rest) (null? (cdr rest)) (null? (cddr rest)) (caddr rest))))
+
+    ;; --- the layouts --------------------------------------------------------------
+
+    (define HUD-LAYOUTS '(zones strip))
+    (define DEFAULT-LAYOUT 'zones)
+
+    (define (layout-name? x) (and (memq x HUD-LAYOUTS) #t))
+
+    (define (layout-after name)
+      (let ((rest (cdr (memq name HUD-LAYOUTS))))
+        (if (null? rest) (car HUD-LAYOUTS) (car rest))))
+
+    (define (layout-label name)
+      (case name
+        ((zones) "ZONES")
+        ((strip) "STRIP")
+        (else "?")))
+
+    ;; --- where things sit -------------------------------------------------------------
+
+    (define TOOL-BUTTON-SIZE 24)
+    (define TOOL-BUTTON-X 4)
+    ;; the button's top is this far above the viewport's bottom edge
+    (define TOOL-BUTTON-RISE 28)
+    ;; the note asked 110; ROLLBACK at scale 2 with a bank and the tag box
+    ;; needs 150 (the font is 5x7 at scale 2, no narrower face exists)
+    (define ENTRY-W 150)
+    (define ENTRY-H 24)
+    ;; a touch screen gets taller entries (the note asks 44 CSS px; at the
+    ;; fixed virtual viewport six of those would cover the board)
+    (define ENTRY-H-TOUCH 32)
+    (define ENTRY-GAP 4)
+    ;; the slide up: each entry over OPEN-TICKS, the next starting
+    ;; STAGGER-TICKS after the one below it
+    (define OPEN-TICKS 8)
+    (define STAGGER-TICKS 2)
+    ;; the button lights this long after a choice
+    (define FLASH-TICKS 30)
+
+    ;; (the same test (crash geometry) has; this module imports nothing of the game's)
+    (define (inside? r x y)
+      (and (>= x (car r)) (< x (+ (car r) (caddr r)))
+           (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
+
+    ;; (x y w h) of the corner button.
+    (define (tool-button-rect vh)
+      (list TOOL-BUTTON-X (- vh TOOL-BUTTON-RISE) TOOL-BUTTON-SIZE TOOL-BUTTON-SIZE))
+
+    (define (entry-h touch?) (if touch? ENTRY-H-TOUCH ENTRY-H))
+
+    ;; (x y w h) of entry i of n, i counted from the top of the list (the
+    ;; first tool is the topmost entry); the column stands on the button.
+    (define (tool-entry-rect vh i n touch?)
+      (let* ((h (entry-h touch?))
+             (bottom (- vh TOOL-BUTTON-RISE ENTRY-GAP))
+             (from-bottom (- n 1 i)))
+        (list TOOL-BUTTON-X
+              (- bottom (* (+ from-bottom 1) h) (* from-bottom ENTRY-GAP))
+              ENTRY-W
+              h)))
+
+    (define (tool-entry-rects vh n touch?)
+      (let loop ((i 0) (acc '()))
+        (if (= i n)
+            (reverse acc)
+            (loop (+ i 1) (cons (tool-entry-rect vh i n touch?) acc)))))
+
+    ;; (x y w h) around the whole column, button included.
+    (define (tool-column-rect vh n touch?)
+      (let ((top (if (> n 0) (cadr (tool-entry-rect vh 0 n touch?)) (- vh TOOL-BUTTON-RISE))))
+        (list TOOL-BUTTON-X top ENTRY-W (- vh top))))
+
+    (define (hit-tool-button vh x y)
+      (inside? (tool-button-rect vh) x y))
+
+    ;; The index of the entry under a point, or #f.
+    (define (hit-tool-entry vh n touch? x y)
+      (let loop ((i 0))
+        (cond ((= i n) #f)
+              ((inside? (tool-entry-rect vh i n touch?) x y) i)
+              (else (loop (+ i 1))))))
+
+    ;; 0..1 of entry i's slide, from the stack's age in ticks: the bottom
+    ;; entry starts first.
+    (define (entry-progress age i n)
+      (let* ((from-bottom (- n 1 i))
+             (t (- age (* from-bottom STAGGER-TICKS))))
+        (max 0.0 (min 1.0 (/ t (* 1.0 OPEN-TICKS))))))
+
+    ;; --- the state -------------------------------------------------------------------
+
+    ;; open: #f, or the ticks since it opened; highlight: the entry the
+    ;; arrows point at; flash: ticks of the button's confirmation left;
+    ;; touch: taller entries.
+    (define-struct tools
+      (open default: #f)
+      (highlight default: 0)
+      (flash default: 0)
+      (touch default: #f))
+
+    (define (tools-new) (tools))
+
+    (define (tools-open? t) (and (tools-open t) #t))
+
+    (define (tools-with-touch t touch?) (tools t touch: touch?))
+
+    ;; The clock: the slide and the flash run on sim ticks.
+    (define (tools-advance t n)
+      (tools t
+             open: (and (tools-open t) (+ (tools-open t) n))
+             flash: (max 0 (- (tools-flash t) n))))
+
+    (define (tools-close t) (tools t open: #f))
+
+    ;; --- one frame -----------------------------------------------------------------------
+
+    (define (pressed? f key) (and (memq key (input-pressed f)) #t))
+
+    ;; The frame here is a plain record the tables build from their own
+    ;; input frame: (pressed . click), so this module owes nothing to
+    ;; (crash input).
+    (define (input-pressed f) (car f))
+    (define (input-click f) (cdr f))
+
+    (define (tool-by-tag list key)
+      (find (lambda (t) (eq? (tool-tag t) key)) list))
+
+    ;; '|1| .. '|9|: the n-th tool, in order.
+    (define (tool-by-digit list key)
+      (let* ((name (symbol->string key))
+             (d (and (= (string-length name) 1)
+                     (char-numeric? (string-ref name 0))
+                     (- (char->integer (string-ref name 0)) (char->integer #\0)))))
+        (and d (>= d 1) (<= d (length list)) (list-ref list (- d 1)))))
+
+    (define (index-of list t)
+      (let loop ((l list) (i 0))
+        (cond ((null? l) 0)
+              ((eq? (car l) t) i)
+              (else (loop (cdr l) (+ i 1))))))
+
+    ;; Choose t: the stack closes and flashes and the choice is its name;
+    ;; a disabled tool refuses and the stack stays.
+    (define (choose st t)
+      (if (and t (tool-enabled t))
+          (cons (tools st open: #f flash: FLASH-TICKS) (tool-name t))
+          (cons st #f)))
+
+    ;; One frame against the stack. f: (pressed-keys . click-or-#f), click
+    ;; in virtual pixels; list: this table's tools for the frame; answers
+    ;; (cons state choice), choice a tool name or #f. Closed: Space or a
+    ;; tap on the button opens (the state's highlight resets); anything
+    ;; else passes untouched. Open: as the header says.
+    (define (tools-step st f list vw vh)
+      (let ((click (input-click f))
+            (n (length list)))
+        (cond ((not (tools-open st))
+               (if (or (pressed? f 'space)
+                       (and click (hit-tool-button vh (car click) (cdr click))))
+                   (cons (tools st open: 0 highlight: 0) #f)
+                   (cons st #f)))
+              ((or (pressed? f 'space) (pressed? f 'escape))
+               (cons (tools-close st) #f))
+              ((pressed? f 'return)
+               (choose st (and (< (tools-highlight st) n) (list-ref list (tools-highlight st)))))
+              ((pressed? f 'up)
+               (cons (tools st highlight: (modulo (- (tools-highlight st) 1) (max 1 n))) #f))
+              ((pressed? f 'down)
+               (cons (tools st highlight: (modulo (+ (tools-highlight st) 1) (max 1 n))) #f))
+              (click
+               (let ((i (hit-tool-entry vh n (tools-touch st) (car click) (cdr click))))
+                 (cond (i (let ((r (choose st (list-ref list i))))
+                            ;; a refused entry becomes the highlight
+                            (if (cdr r) r (cons (tools (car r) highlight: i) #f))))
+                       (else (cons (tools-close st) #f)))))
+              (else
+               ;; a tag or a digit, the first that names a tool
+               (let loop ((keys (input-pressed f)))
+                 (cond ((null? keys) (cons st #f))
+                       ((or (tool-by-tag list (car keys)) (tool-by-digit list (car keys)))
+                        => (lambda (t)
+                             (let ((r (choose st t)))
+                               (if (cdr r) r (cons (tools (car r) highlight: (index-of list t)) #f)))))
+                       (else (loop (cdr keys)))))))))
+
+    ;; The choice of a step, or #f.
+    (define (tools-choice r) (cdr r))))

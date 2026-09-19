@@ -17,6 +17,7 @@
 (define-library (crash render)
   (import (sigil struct)
           (sigil math)
+          (sigil list)
           (sigil graphics)
           (crash stack layout)
           (crash stack rules)
@@ -32,13 +33,27 @@
           (crash look)
           (crash glyphs)
           (crash bg)
-          (crash menu))
+          (crash menu)
+          (crash hud))
 
-  (export draw-session draw-editor draw-frame-ms draw-menu
+  (export frame-begin!
+          draw-session draw-editor draw-frame-ms draw-menu
           draw-bg-in
-          draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in)
+          draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
+          draw-tool-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
+          draw-keys-mark phase-color)
 
   (begin
+    ;; Every frame starts here: sokol_gp's begin resets its state, and its
+    ;; default blend mode is none, under which color-alpha! paints opaque.
+    ;; Found 2026-09-19 building the tool stack's dim: every fade the
+    ;; game had drawn so far (ghosts, rings, toasts, the glitch's bands,
+    ;; the severed overlay) had been a pop. Normal blending from the
+    ;; frame's first draw, both shells.
+    (define (frame-begin!)
+      (begin-frame)
+      (set-blend-mode 'normal))
+
     ;; The bible's section 3: four suits of eight (MEM, PWR, TX, DSK) and
     ;; the four daemons in the look's daemon color. On the charcoal face
     ;; the PWR red is the palette's hot red, C-TRACE-HOT (David,
@@ -394,9 +409,9 @@
     ;; Row 2: the keys of the model in use.
 
     (define HINT-KEYS-LINE
-      "TAGS: TYPE ONE  SPACE HIDE  ENTER DESELECT  TAB CURSOR  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+      "TAGS: TYPE ONE  TAB HIDE  ENTER DESELECT  SHIFT+TAB CURSOR  BKSP UNDO  SPACE TOOLS  ^S ^H ^N ^T  ? KEYS")
     (define CURSOR-KEYS-LINE
-      "CURSOR: ARROWS MOVE  SPACE PICK  ENTER DESELECT  TAB TAGS  BKSP UNDO  ^S SHUFFLE  ^H HINT  ^N NEXT  ^T TILE")
+      "CURSOR: ARROWS MOVE  ENTER PICK  SHIFT+TAB TAGS  BKSP UNDO  SPACE TOOLS  ^S SHUFFLE  ^H HINT  ^N NEXT  ? KEYS")
     ;; Row 2 under the ICE and after the sever, in place of the keys line
     ;; (David, 2026-09-17: make the phase unmistakable, and say that being
     ;; traced does not end the game).
@@ -417,56 +432,175 @@
          "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
         (else #f)))
 
-    (define (control-label name)
-      (case name
-        ((undo) "UNDO")
-        ((shuf) "SHUF")
-        ((hint) "HINT")
-        ((next) "NEXT")
-        ((menu) "MENU")
-        (else "?")))
+    ;; The phase's color for a line of the bar (bible section 1: the ICE
+    ;; speaks in C-ICE; a severed link is C-TRACE-HOT).
+    (define (phase-color tr)
+      (case (trace-phase tr)
+        ((counter) C-ICE)
+        ((severed) C-TRACE-HOT)
+        (else C-TEXT-DIM)))
 
-    (define (draw-controls g)
-      (for-each (lambda (c)
-                  (let* ((name (car c))
-                         (x (cadr c)) (y (caddr c))
-                         (w (cadddr c)) (h (list-ref c 4))
-                         (label (control-label name))
-                         (tw (text-width label 2)))
-                    (color! C-BAR-C)
-                    (draw-filled-rect x y w h)
-                    (color! C-TEXT-DIM)
-                    (draw-filled-rect x y w 1)
-                    (draw-filled-rect x (+ y h -1) w 1)
-                    (draw-filled-rect x y 1 h)
-                    (draw-filled-rect (+ x w -1) y 1 h)
-                    (color! C-TEXT)
-                    (draw-text label
-                               (+ x (exact (floor (/ (- w tw) 2))))
-                               (+ y 3)
-                               2)))
-                (filter (lambda (c) (not (memq (car c) '(mode look))))
-                        (geometry-controls g))))
+    ;; --- the tool stack (ruling D33) ------------------------------------------------
 
-    ;; The meter, in the rect (crash geometry) reserves for it. TRACE: a bar
-    ;; filling toward the trace, going hot as it nears, with GNOME's number;
-    ;; COUNTER-HACK: the bar counts down to the sever, hot; SEVERED: empty;
-    ;; CLEARED: the score. Clean: GNOME's clock. Tapping it flips the face
-    ;; while the game is still in TRACE ((crash input)).
-    (define (draw-meter g tr)
-      (draw-meter-in (control-rect g 'mode) tr))
+    ;; The corner button: three stacked bars, SPC beneath in the mini font,
+    ;; lit while the stack is open or just after a choice, a badge at the
+    ;; top right when a tool is banked or disabled.
+    (define (draw-tool-button vh st badge?)
+      (let* ((r (tool-button-rect vh))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (lit? (or (tools-open? st) (> (tools-flash st) 0))))
+        (color! (if lit? C-SELECTED C-BAR-C))
+        (draw-filled-rect x y w h)
+        (color! (if lit? C-HIGHLIGHT C-TEXT-DIM))
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (color! (if lit? C-BG C-TEXT))
+        (let bars ((k 0))
+          (when (< k 3)
+            (draw-filled-rect (+ x 5) (+ y 3 (* k 4)) (- w 10) 2)
+            (bars (+ k 1))))
+        (color! (if lit? C-BG C-TEXT-DIM))
+        (draw-text-mini "SPC" (+ x 6) (+ y 16) 1)
+        (when badge?
+          (color! C-LABEL-LIT)
+          (draw-filled-rect (+ x w -7) (+ y 1) 6 6))))
 
-    ;; The meter in any rect (the card table has its own HUD, P2).
+    ;; A tag key's letter, upper case (the font has no lower case).
+    (define (tag-text key)
+      (let ((c (string-ref (symbol->string key) 0)))
+        (string (if (char-lower-case? c) (char-upcase c) c))))
+
+    ;; The column: entries sliding up from the button (out-quad over
+    ;; OPEN-TICKS, a STAGGER-TICKS stagger from the bottom up, scale 0.6 to
+    ;; 1 and alpha 0 to 1), each a 12x12 icon in the tool's color, the
+    ;; label, a price in C-TRACE-HOT or a bank as xN, and the tag key in
+    ;; a C-LABEL-LIT box at the right (hollow when disabled). The board
+    ;; is dimmed to 70 % while the stack is open.
+    (define (draw-tool-stack vw vh st tools)
+      (let* ((n (length tools))
+             (age (tools-open st))
+             (touch? (tools-touch st)))
+        (color-alpha! C-BG 0.3)
+        (draw-filled-rect 0 0 vw (- vh HUD-HEIGHT))
+        (let loop ((ts tools) (i 0))
+          (when (pair? ts)
+            (let* ((t (car ts))
+                   (r (tool-entry-rect vh i n touch?))
+                   (p (ease 'out-quad (entry-progress age i n)))
+                   (sc (+ 0.6 (* 0.4 p)))
+                   (w (exact (floor (* (caddr r) sc))))
+                   (h (exact (floor (* (cadddr r) sc))))
+                   (x (car r))
+                   (y (+ (cadr r) (- (cadddr r) h)))
+                   (on? (tool-enabled t))
+                   (hi? (= i (tools-highlight st)))
+                   (ink (cond ((not on?) C-TEXT-DIM) (else C-TEXT)))
+                   ;; the icon's color: the tool's kind in the suit colors
+                   ;; (undo MEM blue, shuffle and scramble TX green, hint
+                   ;; and probe DSK violet), look and pull in the tag
+                   ;; color, next in the trace's, menu dim
+                   (tone (case (tool-name t)
+                           ((undo) C-SUIT-0)
+                           ((shuf scram) C-SUIT-2)
+                           ((hint probe) C-SUIT-3)
+                           ((look draw) C-LABEL-LIT)
+                           ((next) C-TRACE)
+                           (else C-TEXT-DIM))))
+              (when (> p 0.0)
+                (color-alpha! (if hi? C-BAR-B C-BAR-C) p)
+                (draw-filled-rect x y w h)
+                (color-alpha! (if hi? C-HIGHLIGHT C-TEXT-DIM) p)
+                (draw-filled-rect x y w 1)
+                (draw-filled-rect x (+ y h -1) w 1)
+                (draw-filled-rect x y 1 h)
+                (draw-filled-rect (+ x w -1) y 1 h)
+                (when (>= p 1.0)
+                  (let ((ty (+ y (exact (floor (/ (- h 14) 2))))))
+                    ;; the icon: a 12x12 block in the tool's color
+                    (color! (if on? tone C-TEXT-DIM))
+                    (draw-filled-rect (+ x 6) (+ ty 1) 12 12)
+                    (color! C-BG)
+                    (draw-filled-rect (+ x 9) (+ ty 4) 6 6)
+                    (color! ink)
+                    (draw-text (tool-label t) (+ x 22) ty 2)
+                    (let* ((after (+ x 22 (text-width (tool-label t) 2) 4))
+                           (after (if (tool-price t)
+                                      (let ((p (number->string (tool-price t))))
+                                        (color! (if on? C-TRACE-HOT C-TEXT-DIM))
+                                        (draw-text-mini p after (+ ty 3) 1)
+                                        (+ after (text-width-mini p 1) 4))
+                                      after)))
+                      (when (tool-bank t)
+                        (color! (if on? C-LABEL-LIT C-TEXT-DIM))
+                        (draw-text-mini (string-append "X" (number->string (tool-bank t))) after (+ ty 3) 1)))
+                    ;; the tag box
+                    (let ((bx (+ x w -15)) (by (+ y (exact (floor (/ (- h 12) 2))))))
+                      (color! C-LABEL-LIT)
+                      (if on?
+                          (draw-filled-rect bx by 12 12)
+                          (begin
+                            (draw-filled-rect bx by 12 1)
+                            (draw-filled-rect bx (+ by 11) 12 1)
+                            (draw-filled-rect bx by 1 12)
+                            (draw-filled-rect (+ bx 11) by 1 12)))
+                      (color! (if on? C-BG C-LABEL-LIT))
+                      (draw-text (tag-text (tool-tag t)) (+ bx 3) (+ by 2) 1)))))
+              (loop (cdr ts) (+ i 1)))))))
+
+    ;; --- the bar (ruling D33: status only) --------------------------------------------
+
+    ;; The band, its top rule (a full-width phase-colored strip in the
+    ;; strip layout, with the meter drawn over it) and the tool button.
+    (define (draw-bar-frame vw vh top layout tr st badge?)
+      (color! C-BG)
+      (draw-filled-rect 0 top vw (- vh top))
+      (color! C-BAR-C)
+      (draw-filled-rect 0 top vw 1)
+      (draw-tool-button vh st badge?))
+
+    ;; A readout at the right of the first row (zones) or inside the strip
+    ;; (strip), right-aligned in its rect.
+    (define (draw-readout r layout text color)
+      (let ((strip? (eq? layout 'strip)))
+        (color! color)
+        (if strip?
+            (draw-text text (- (+ (car r) (caddr r)) (text-width text 1)) (+ (cadr r) 2) 1)
+            (draw-text text (- (+ (car r) (caddr r)) (text-width text 2)) (+ (cadr r) 3) 2))))
+
+    ;; The second line: the keys line when shown, else the phase line in
+    ;; its color, else the instruction; centered, clear of the button and
+    ;; the ? mark.
+    (define (draw-line-2 vw top text color)
+      (let ((x (max 34 (exact (floor (/ (- vw (text-width text 1)) 2))))))
+        (color! color)
+        (draw-text text x (+ top 32) 1)))
+
+    ;; The ? mark at the bar's right end: the keys line's toggle, tappable.
+    (define (draw-keys-mark r shown?)
+      (color! (if shown? C-HIGHLIGHT C-TEXT-DIM))
+      (draw-text "?" (+ (car r) 4) (+ (cadr r) 3) 2))
+
+    ;; The meter in the rect the layout gives it: zones a 200x16 box on
+    ;; the first row, strip the band's top 12 px across the width.
+    (define (draw-meter g layout tr)
+      (draw-meter-in (control-rect g layout 'mode) tr))
+
+    ;; The meter in any rect (both tables' bars): the text at scale 2 in
+    ;; a box 16 or taller, scale 1 in the strip.
     (define (draw-meter-in r tr)
       (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
              (phase (trace-phase tr))
-             (clean? (eq? (trace-mode tr) 'clean)))
+             (clean? (eq? (trace-mode tr) 'clean))
+             (sc (if (>= h 16) 2 1))
+             (ty (+ y (exact (floor (/ (- h (* 7 sc)) 2))))))
         (color! C-BG)
         (draw-filled-rect x y w h)
         (if (and clean? (not (eq? phase 'cleared)))
             (let ((text (string-append "TIME " (trace-clock-string tr))))
               (color! C-TEXT)
-              (draw-text text (+ x 4) (+ y 3) 2))
+              (draw-text text (+ x 4) ty sc))
             (let* ((frac (trace-fraction tr))
                    (fill (exact (floor (* (- w 2) frac))))
                    (text (case phase
@@ -487,7 +621,7 @@
               (color! bar)
               (draw-filled-rect (+ x 1) (+ y 1) fill (- h 2))
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
-              (draw-text text (+ x 4) (+ y 3) 2)))))
+              (draw-text text (+ x 4) ty sc)))))
 
     ;; A box with a label, the shape of every control.
     (define (draw-box r label fill edge ink)
@@ -599,58 +733,57 @@
 
     (define (draw-hud s g x)
       (let* ((b (session-board s))
+             (tr (session-trace s))
              (vw (geometry-vw g))
              (vh (geometry-vh g))
              (top (- vh (geometry-hud-h g)))
-             (left (string-append "TILES " (number->string (board-tile-count b))))
-             ;; the look's name under the counter: the counter is the tap
+             (layout (session-hud s))
+             (st (session-tools s))
+             (tools (session-tools-list s))
+             (readout (string-append "TILES " (number->string (board-tile-count b))))
+             ;; the look's name under the readout: the readout is the tap
              ;; target that steps it (P3, the sheet switch)
              (look-label (look-label (look-ref (session-look s))))
-             (right (string-append "SEED " (number->string (session-seed s))))
-             (cleared (fx-cleared x)))
-        (color! C-BG)
-        (draw-filled-rect 0 top vw (geometry-hud-h g))
-        (color! C-BAR-C)
-        (draw-filled-rect 0 top vw 1)
-        (color! C-TEXT)
-        (draw-text left 8 (+ top 7) 2)
-        ;; under the counter, in the gap between the two rows (after the
-        ;; counter it would sit under the UNDO box)
+             (cleared (fx-cleared x))
+             (look-rect (control-rect g layout 'look)))
+        (draw-bar-frame vw vh top layout tr st (not (every tool-enabled tools)))
+        (draw-meter g layout tr)
+        (draw-readout look-rect layout readout C-TEXT)
         (color! C-TEXT-DIM)
-        (draw-text look-label 8 (+ top 23) 1)
-        ;; the right slot: the update mark when one waits, the ICE countdown
-        ;; under the ICE (bible section 5: the interval beside the meter; at
-        ;; scale 2 "ICE 0:30" is what fits after the meter), else the seed
-        (cond ((memq (session-update s) '(waiting prompt))
-               (draw-update-mark g))
-              ((eq? (trace-phase (session-trace s)) 'counter)
-               (let ((ice (string-append "ICE " (trace-ice-string (session-trace s)))))
+        (draw-text-mini look-label (- (+ (car look-rect) (caddr look-rect)) (text-width-mini look-label 1))
+                        (if (eq? layout 'strip) (+ top 16) (+ top 24))
+                        1)
+        ;; beside the meter: the ICE countdown under the ICE (bible
+        ;; section 5), else the seed in the mini font
+        (let ((m (control-rect g layout 'mode)))
+          (cond ((eq? (trace-phase tr) 'counter)
                  (color! C-ICE)
-                 (draw-text ice (- vw 8 (text-width ice 2)) (+ top 7) 2)))
-              (else
-               (draw-text right (- vw 8 (text-width right 2)) (+ top 7) 2)))
-        (draw-controls g)
-        (draw-meter g (session-trace s))
-        ;; row 2, centered (David, 2026-09-17)
-        (let* ((line (phase-line (session-trace s) b))
-               (text (or line
-                         (if (eq? (session-model s) 'hint) HINT-KEYS-LINE CURSOR-KEYS-LINE)))
-               (x (max 8 (exact (floor (/ (- vw (text-width text 1)) 2))))))
-          ;; the phase line in the phase's color (bible section 1: the ICE
-          ;; speaks in C-ICE; a severed link is C-TRACE-HOT)
-          (color! (cond ((not line) C-TEXT-DIM)
-                        ((trace-severed? (session-trace s)) C-TRACE-HOT)
-                        (else C-ICE)))
-          (draw-text text x (+ top 32) 1))
+                 (if (eq? layout 'strip)
+                     (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
+                     (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ (car m) (caddr m) 8) (+ top 8) 1)))
+                (else
+                 (color! C-TEXT-DIM)
+                 (if (eq? layout 'strip)
+                     (draw-text (string-append "SEED " (number->string (session-seed s))) (+ 100 (half vw)) (+ top 3) 1)
+                     (draw-text-mini (string-append "SEED " (number->string (session-seed s))) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
+        (when (memq (session-update s) '(waiting prompt))
+          (draw-update-mark g))
+        (draw-keys-mark (control-rect g layout 'keys) (session-keys-shown s))
+        ;; line 2: the keys line when asked for, else the phase line, else
+        ;; the instruction (David, 2026-09-17: centered)
+        (let ((line (phase-line tr b)))
+          (cond ((session-keys-shown s)
+                 (draw-line-2 vw top (if (eq? (session-model s) 'hint) HINT-KEYS-LINE CURSOR-KEYS-LINE) C-TEXT-DIM))
+                (line (draw-line-2 vw top line (phase-color tr)))
+                (else (draw-line-2 vw top (session-instruction s) C-TEXT-DIM))))
         (when (> (string-length (session-typed s)) 0)
           (color! C-HIGHLIGHT)
           (draw-text (string-append "> " (session-typed s))
-                     (- vw 8 (text-width right 2) 24 (text-width (string-append "> " (session-typed s)) 2))
+                     (- (car look-rect) 12 (text-width (string-append "> " (session-typed s)) 2))
                      (+ top 7)
                      2))
         ;; state messages sit; everything else is a toast from (crash fx)
-        (let* ((tr (session-trace s))
-               (state (cond ((board-cleared? b)
+        (let* ((state (cond ((board-cleared? b)
                              (string-append "STACK CRASHED " (trace-clock-string tr)
                                             (cond ((eq? (trace-mode tr) 'clean) "")
                                                   ((eq? (trace-cleared-in tr) 'counter)
@@ -667,7 +800,10 @@
                                                1.0)
                                0.0))
                 ((and toast (not (trace-severed? tr)))
-                 (draw-toast g (car toast) top (cdr toast)))))))
+                 (draw-toast g (car toast) top (cdr toast)))))
+        ;; the stack over everything of the board, under the update prompt
+        (when (tools-open? st)
+          (draw-tool-stack vw vh st tools))))
 
     ;; --- the trace's screens -------------------------------------------------
 
@@ -695,29 +831,44 @@
               (draw-filled-rect dx y vw h)
               (loop (+ k 1) r3))))))
 
-    ;; The severed connection: static over the board and the two choices.
+    ;; The severed connection: static over the board and the three choices.
     (define (draw-severed g x)
       (draw-severed-in (geometry-vw g)
                        (- (geometry-vh g) (geometry-hud-h g))
                        (fx-ticks x)
-                       '("RETRY LINK" "NEW STACK" "JACK OUT")))
+                       '("RETRY LINK" "NEW STACK" "JACK OUT")
+                       (fx-sever x)))
 
     ;; labels: the three choices, left to right, each a third of the board.
-    (define (draw-severed-in vw top ticks labels)
-      (begin
-        (color-alpha! C-BG 0.75)
+    ;; static: the sever's progress 0..1 while the static decays (bible
+    ;; section 5: C-STATIC-A/B over 30 ticks), #f once it has; the overlay
+    ;; and the choices fade in as the static fades out.
+    (define (draw-severed-in vw top ticks labels static)
+      (let ((p (or static 1.0)))
+        (color-alpha! C-BG (* 0.75 p))
         (draw-filled-rect 0 0 vw top)
+        ;; the static: horizontal bands in the static colors, dense at
+        ;; the sever and thinning out
+        (when static
+          (let loop ((k 0) (rng (prng-seed (+ 29 ticks))))
+            (when (< k (exact (floor (* 60 (- 1.0 p)))))
+              (let* ((r1 (prng-next rng))
+                     (r2 (prng-next r1))
+                     (r3 (prng-next r2)))
+                (color-alpha! (if (even? k) C-STATIC-A C-STATIC-B) (* 0.9 (- 1.0 p)))
+                (draw-filled-rect 0 (prng-index r1 top) vw (+ 1 (prng-index r2 4)))
+                (loop (+ k 1) r3)))))
         (let loop ((k 0) (rng (prng-seed (+ 17 ticks))))
           (when (< k 160)
             (let* ((r1 (prng-next rng))
                    (r2 (prng-next r1))
                    (r3 (prng-next r2)))
-              (color-alpha! C-TEXT-DIM (+ 0.15 (* 0.5 (/ (prng-index r3 100) 100.0))))
+              (color-alpha! C-TEXT-DIM (* p (+ 0.15 (* 0.5 (/ (prng-index r3 100) 100.0)))))
               (draw-filled-rect (prng-index r1 vw) (prng-index r2 top) 3 2)
               (loop (+ k 1) r3))))
         (let* ((title "LINK SEVERED")
                (tw (text-width title 3)))
-          (color! C-TRACE-HOT)
+          (color-alpha! C-TRACE-HOT p)
           (draw-text title (exact (floor (/ (- vw tw) 2))) (- (half top) 40) 3))
         (for-each (lambda (choice)
                     (let* ((label (car choice))
@@ -726,14 +877,14 @@
                            (h 40)
                            (bx (- cx (half w)))
                            (by (+ (half top) 10)))
-                      (color! C-BAR-C)
+                      (color-alpha! C-BAR-C p)
                       (draw-filled-rect bx by w h)
-                      (color! C-SELECTED)
+                      (color-alpha! C-SELECTED p)
                       (draw-filled-rect bx by w 1)
                       (draw-filled-rect bx (+ by h -1) w 1)
                       (draw-filled-rect bx by 1 h)
                       (draw-filled-rect (+ bx w -1) by 1 h)
-                      (color! C-TEXT)
+                      (color-alpha! C-TEXT p)
                       (draw-text label
                                  (- cx (half (text-width label 2)))
                                  (+ by 13)
@@ -747,7 +898,9 @@
 
     ;; The first screen (P2, ruling D14's placeholder): the title, the
     ;; entries from (crash menu) in their rects, the highlighted one lit.
-    ;; version: a short string for the corner, or #f.
+    ;; The title (P3, S8's placeholder for P4's real one) in the bible's
+    ;; hero colors: the wordmark in C-SELECTED over a C-HIGHLIGHT shadow,
+    ;; a C-HOT rule under it. version: a short string for the corner, or #f.
     (define (draw-menu m vw vh version)
       (color! C-BG)
       (draw-filled-rect 0 0 vw vh)
@@ -759,16 +912,22 @@
                      (else C-BAR-C)))
           (draw-filled-rect 0 y vw 6)
           (loop (+ y 12) (+ i 1))))
-      (let ((tw (text-width MENU-TITLE 4)))
+      (let* ((tw (text-width MENU-TITLE 4))
+             (x (exact (floor (/ (- vw tw) 2)))))
+        (color! C-HIGHLIGHT)
+        (draw-text MENU-TITLE (+ x 3) 63 4)
         (color! C-SELECTED)
-        (draw-text MENU-TITLE (exact (floor (/ (- vw tw) 2))) 60 4))
+        (draw-text MENU-TITLE x 60 4)
+        (color! C-HOT)
+        (draw-filled-rect x 94 tw 2))
       (let loop ((ids (menu-entries m)) (i 0))
         (unless (null? ids)
           (let* ((r (menu-entry-rect i vw vh))
                  (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
-                 (label (if (eq? (car ids) 'look)
-                            (string-append "LOOK: " (look-label (look-ref (menu-look m))))
-                            (menu-label (car ids))))
+                 (label (case (car ids)
+                          ((look) (string-append "LOOK: " (look-label (look-ref (menu-look m)))))
+                          ((hud) (string-append "HUD: " (layout-label (menu-hud m))))
+                          (else (menu-label (car ids)))))
                  (lit? (= i (menu-highlight m)))
                  (tw (text-width label 3)))
             (color! (if lit? C-BAR-C C-BG))
@@ -786,6 +945,7 @@
       (color! C-TEXT-DIM)
       (draw-text "ARROWS OR TAP. ENTER PICKS." 8 (- vh 14) 1)
       (when version
+        (color! C-TEXT-DIM)
         (draw-text version (- vw 8 (text-width version 1)) (- vh 14) 1)))
 
     ;; Frame-time readout for --log-keys: last frame in ms, top-right.

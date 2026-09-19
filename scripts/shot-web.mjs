@@ -128,7 +128,7 @@ async function key(k) {
 
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${QUERY}` });
 const boot = await waitLine(/^crash: (seed|cards seed|menu) /, 0, 30000);
-if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(-10))); shutdown(2); }
+if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(0, 14))); shutdown(2); }
 await sleep(600);
 
 let lineFrom = 0;
@@ -172,4 +172,7 @@ const ox = Math.floor((dims[0] - VW * scale) / 2), oy = Math.floor((dims[1] - VH
 execFileSync("convert", [raw, "-crop", `${Math.round(VW * scale)}x${Math.round(VH * scale)}+${ox}+${oy}`, "+repage", "-filter", "point", "-resize", `${VW}x${VH}!`, "PNG24:" + OUT]);
 fs.rmSync(raw);
 console.log(`shot -> ${OUT} (canvas ${dims[0]}x${dims[1]}, scale ${scale.toFixed(2)}, ${lines.length} console lines)`);
+// the first error, if the game threw one, so a black frame explains itself
+const firstError = lines.findIndex((l) => /error|unbound|expected|trap|panic/i.test(l));
+if (firstError >= 0) console.log("console error: " + lines.slice(Math.max(0, firstError - 2), firstError + 3).join(" | "));
 shutdown(0);

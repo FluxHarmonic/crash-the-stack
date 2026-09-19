@@ -38,7 +38,12 @@
 ;;;   crash: update waiting|prompt|apply   the web build's waiting update, as
 ;;;                                         the game shows it (ruling D14)
 ;;;   crash: control apply X Y             the prompt's APPLY box (with later, update)
-;;;   crash: control NAME X Y              the centre of each HUD control
+;;;   crash: control NAME X Y              the centre of each HUD control (mode look keys tool)
+;;;   crash: tools open|closed             the tool stack (D33) opened or closed
+;;;   crash: tool NAME X Y on|off          each entry's centre while it opens
+;;;   crash: hud zones|strip               the bar's layout at boot and after a HUD choice
+;;;   crash: cards draw 1|3                the pull count flipped (the PULL tool)
+;;;   crash: literal-check ok|FAILED ...   the quoted literals' shapes at boot
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
 ;;;   crash: undo tiles N                  an undo put tiles back
@@ -117,6 +122,7 @@
           (crash cards fx)
           (crash menu)
           (crash look)
+          (crash hud)
           (crash bg)
           (crash sfx)
           (crash audio)
@@ -142,6 +148,8 @@
     (define *restored* #f)   ; the boot restored a saved board
     (define *fresh* #f)      ; ?fresh: ignore the saved board
     (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
+    (define *hud* #f)        ; the bar's layout after a HUD choice or ?hud= (the store holds it)
+    (define *version* #f)    ; the page's build stamp, for the menu's corner
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
     (define *screen* 'menu)  ; menu | stack | cards
@@ -495,7 +503,7 @@
                          (car c)
                          (+ (cadr c) (half (cadddr c)))
                          (+ (caddr c) (half (list-ref c 4)))))
-                  (append (geometry-controls *geom*) (update-controls *geom*)))))
+                  (append (geometry-controls *geom* (session-hud s)) (update-controls *geom*)))))
 
     ;; What changed on the card table between two deals, as one line.
     (define (report-deal-change! before after)
@@ -517,6 +525,8 @@
                (say "cards" "ice" (or (trace-last-ice (deal-trace after)) 'nothing)))
               ((< (deal-scrambles after) (deal-scrambles before))
                (say "cards" "scramble" (deal-scrambles after)))
+              ((not (= (game-draw g0) (game-draw g1)))
+               (say "cards" "draw" (game-draw g1)))
               ((game-won? g1) (say "cards" "won" "moves" m1))
               ((and (deal-auto after) (not (deal-auto before))) (say "cards" "auto"))
               ((< h1 h0) (say "cards" "undo" m1))
@@ -577,7 +587,7 @@
                        (car c)
                        (+ (cadr c) (half (cadddr c)))
                        (+ (caddr c) (half (list-ref c 4)))))
-                (card-controls *card-geom*)))
+                (card-controls *card-geom* (deal-hud d))))
 
     ;; --- one frame -----------------------------------------------------------
 
@@ -622,6 +632,7 @@
     (define (cards-tick f dt)
       (when (and *trace* (not *announced*))
         (say-deal *deal*)
+        (say "hud" (deal-hud *deal*))
         (set! *announced* #t))
       (let* ((before *deal*)
              (x (card-fx-frame *card-fx* dt *card-geom*))
@@ -637,7 +648,9 @@
         (set! *bg* (bg-advance *bg* (clock-steps (card-fx-clock x)) (deal-trace before) (deal-trace after)))
         (report-deal-change! before after)
         (report-deal-trace! before after)
-        (begin-frame)
+        (unless (eq? (tools-open? (deal-tools before)) (tools-open? (deal-tools after)))
+          (say-tools (deal-tools after) (deal-tools-list after)))
+        (frame-begin!)
         (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background))
         (when *ms* (draw-frame-ms (* 1000.0 dt)))
         (end-frame)
@@ -649,6 +662,7 @@
       (when (and *trace* (not *announced*))
         (say-first-pair *session*)
         (say "look" (session-look *session*))
+        (say "hud" (session-hud *session*))
         (when *restored*
           (let ((b (session-board *session*)))
             (apply say "restored"
@@ -676,13 +690,33 @@
         (report-trace! before after)
         (unless (eq? (session-look before) (session-look after))
           (say "look" (session-look after)))
+        (unless (eq? (tools-open? (session-tools before)) (tools-open? (session-tools after)))
+          (say-tools (session-tools after) (session-tools-list after)))
         (when (not (= (session-seed before) (session-seed after)))
           (set! *announced* #f))
-        (begin-frame)
+        (frame-begin!)
         (draw-session after *geom* (texture-for after) x (background))
         (when *ms* (draw-frame-ms (* 1000.0 dt)))
         (end-frame)
         (ensure-texture! dt (look-texture (look-ref (session-look after))))))
+
+    ;; The tool stack opening or closing, and while it opens each entry's
+    ;; center and whether it can fire, so the arm taps what the player sees:
+    ;;   crash: tools open|closed
+    ;;   crash: tool NAME X Y on|off
+    (define (say-tools st tools)
+      (say "tools" (if (tools-open? st) "open" "closed"))
+      (when (tools-open? st)
+        (let ((n (length tools)))
+          (let loop ((ts tools) (i 0))
+            (when (pair? ts)
+              (let ((r (tool-entry-rect VH i n (tools-touch st))))
+                (say "tool"
+                     (tool-name (car ts))
+                     (+ (car r) (half (caddr r)))
+                     (+ (cadr r) (half (cadddr r)))
+                     (if (tool-enabled (car ts)) "on" "off")))
+              (loop (cdr ts) (+ i 1)))))))
 
     ;; The menu's boot line: each shown entry with its center.
     (define (say-menu m)
@@ -710,8 +744,8 @@
           (choose! (cdr r)))
         (if (eq? *screen* 'menu)
             (begin
-              (begin-frame)
-              (draw-menu *menu* VW VH #f)
+              (frame-begin!)
+              (draw-menu *menu* VW VH *version*)
               (end-frame))
             (tick-screen (make-input-frame '() '() #f) dt))))
 
@@ -728,15 +762,24 @@
         (case *screen*
           ((menu) (menu-tick f dt))
           ((stack)
-           (cond ((or (menu-frame? f (and click (hit-control *geom* (car click) (cdr click))))
+           (cond ((or (menu-frame? f)
                       (jack-out? *session* f VW VH (geometry-hud-h *geom*)))
                   (open-menu!))
-                 (else (stack-tick f dt))))
+                 (else
+                  (stack-tick f dt)
+                  ;; the MENU tool: the session asks, the shell answers
+                  (when (session-request *session*)
+                    (set! *session* (session-clear-request *session*))
+                    (open-menu!)))))
           (else
-           (if (or (menu-frame? f (and click (hit-card-control *card-geom* (car click) (cdr click))))
+           (if (or (menu-frame? f)
                    (jack-out-tap? *deal* f *card-geom*))
                (open-menu!)
-               (cards-tick f dt))))))
+               (begin
+                 (cards-tick f dt)
+                 (when (deal-request *deal*)
+                   (set! *deal* (deal-clear-request *deal*))
+                   (open-menu!))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -772,7 +815,7 @@
                           (*session* (session-next *session*))
                           ((cdr booted) (session-next (car booted)))
                           (else (car booted)))))
-            (set! *session* (if *touch* (session s labels-shown: #f) s))
+            (set! *session* (session-with-tools-touch (if *touch* (session s labels-shown: #f) s) *touch*))
             (set! *restored* (and resume? (cdr booted)))
             (set! *fx* (fx-new))))))
 
@@ -786,7 +829,7 @@
                         (*deal* (deal-next *deal*))
                         ((cdr booted) (deal-next (car booted)))
                         (else (car booted)))))
-          (set! *deal* (if *touch* (deal d labels-shown: #f) d))
+          (set! *deal* (deal-with-tools-touch (if *touch* (deal d labels-shown: #f) d) *touch*))
           (set! *restored* (and resume? (cdr booted)))
           (set! *card-fx* (card-fx-new)))))
 
@@ -823,6 +866,12 @@
                     (set! *menu* (menu-with-look *menu* next))
                     (when *session* (set! *session* (session-with-look *session* next)))
                     (say "look" next)))
+          ((hud) (let ((next (step-hud!)))
+                   (set! *hud* next)
+                   (set! *menu* (menu-with-hud *menu* next))
+                   (when *session* (set! *session* (session-with-hud *session* next)))
+                   (when *deal* (set! *deal* (deal-with-hud *deal* next)))
+                   (say "hud" next)))
           (else #f))))
 
     ;; ?stack and ?cards open their table as CONTINUE would (the saved
@@ -836,9 +885,18 @@
       (set! *booted* #t)
       (set! *audio-ready* (audio-open!))
       (say "audio" (if *audio-ready* "open" "closed"))
+      ;; the quoted literals' shapes (see (crash shell)): one line the arm asserts
+      (let ((bad (literal-check)))
+        (if (null? bad)
+            (say "literal-check" "ok")
+            (apply say "literal-check" "FAILED" bad)))
       (cond (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
-            (else (open-menu!)))
+            ;; a boot that throws says why (the loader prints only the
+            ;; message, and a menu that never opened is a struct-ref
+            ;; storm every frame after)
+            (else (guard (e (#t (say "boot-error" (error-object-message e) (error-object-irritants e))))
+                    (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
       (when *update* (update! *update*)))
@@ -880,6 +938,9 @@
                          (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* n))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (if (string=? payload "reaction") 'reaction 'life)))))
+            ;; ?hud=strip: the bar's layout for this boot (and stored)
+            ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
+            ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))

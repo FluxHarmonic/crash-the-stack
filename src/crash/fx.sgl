@@ -36,7 +36,7 @@
   (export fx fx? fx-new fx-clock fx-effects
           fx-frame fx-observe fx-idle?
           fx-tile-view fx-ghosts fx-particles fx-ring-alpha fx-cleared fx-glow
-          fx-glitch fx-ticks fx-toast
+          fx-glitch fx-sever fx-ticks fx-toast SEVER-TICKS
           LOCK-TICKS LOCK-SHAKE GLITCH-TICKS TOAST-TICKS
           effect effect? effect-kind effect-ids effect-tween effect-data
           PULSE-TICKS PULSE-SCALE
@@ -72,6 +72,7 @@
     (define LOCK-SHAKE 1.5)        ; and gently: pixels of amplitude (David, 2026-09-17: too violent at the mismatch's)
     (define UNLOCK-TICKS 24)       ; a broken lock: both tiles swell and settle
     (define GLITCH-TICKS 45)       ; the full-screen glitch when the trace completes
+    (define SEVER-TICKS 30)        ; the static when the link severs (bible section 5), decaying
     (define TOAST-TICKS 160)       ; a message: slides in from the right, holds about 2 s, slides out
     (define UNLOCK-SCALE 1.22)
 
@@ -347,10 +348,13 @@
                         (not (board-cleared? (session-board before))))
                    (spawn-cleared x)
                    x)))
-        (if (and (eq? (trace-phase (session-trace after)) 'counter)
-                 (not (eq? (trace-phase (session-trace before)) 'counter)))
-            (spawn x (effect kind: 'glitch tween: (life GLITCH-TICKS 'linear)))
-            x)))
+        (cond ((and (eq? (trace-phase (session-trace after)) 'counter)
+                    (not (eq? (trace-phase (session-trace before)) 'counter)))
+               (spawn x (effect kind: 'glitch tween: (life GLITCH-TICKS 'linear))))
+              ((and (eq? (trace-phase (session-trace after)) 'severed)
+                    (not (eq? (trace-phase (session-trace before)) 'severed)))
+               (spawn x (effect kind: 'sever tween: (life SEVER-TICKS 'linear))))
+              (else x))))
 
     ;; Everything the step changed, as effects, one observer per kind of
     ;; change. g is the geometry the tiles were drawn with (ghosts keep
@@ -533,6 +537,11 @@
     ;; Progress of the glitch in 0..1, or #f.
     (define (fx-glitch x)
       (let ((e (find (lambda (e) (eq? (effect-kind e) 'glitch)) (fx-effects x))))
+        (and e (progress e (alpha-of x)))))
+
+    ;; Progress of the sever's static in 0..1, or #f once it has decayed.
+    (define (fx-sever x)
+      (let ((e (find (lambda (e) (eq? (effect-kind e) 'sever)) (fx-effects x))))
         (and e (progress e (alpha-of x)))))
 
     ;; The live toast as (text . progress), or #f.

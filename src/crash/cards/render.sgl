@@ -19,6 +19,7 @@
 (define-library (crash cards render)
   (import (sigil struct)
           (sigil math)
+          (sigil list)
           (sigil graphics)
           (crash geometry)
           (crash cards deck)
@@ -32,6 +33,7 @@
           (crash render)
           (crash font)
           (crash glyphs)
+          (crash hud)
           (crash palette))
 
   (export draw-deal PORTRAITS-PATH PORTRAIT-W PORTRAIT-H)
@@ -421,9 +423,14 @@
 
     ;; The cascade: each flying card over its trail (the placeholder for
     ;; P3's glyph streams), on the board area only.
+    ;; The cascade: each flyer's trail of faces, then the flyer, and
+    ;; (bible section 5, P3) the 2 px fragments it sheds in its class
+    ;; color along its bottom edge, scattered from the frame's tick so
+    ;; they flicker as the packet passes.
     (define (draw-cascade g x)
       (let ((w (card-geometry-card-w g))
-            (h (card-geometry-card-h g)))
+            (h (card-geometry-card-h g))
+            (ticks (card-fx-ticks x)))
         (for-each (lambda (f)
                     (let loop ((trail (reverse (flyer-trail f))) (k 0))
                       (unless (null? trail)
@@ -437,8 +444,36 @@
                                      (exact (floor (flyer-y f)))
                                      w h)
                                (flyer-card f)
-                               #f))
+                               #f)
+                    (draw-fragments (flyer-card f)
+                                    (exact (floor (flyer-x f)))
+                                    (+ (exact (floor (flyer-y f))) h)
+                                    w
+                                    (flyer-trail f)
+                                    ticks))
                   (reverse (card-fx-flying x)))))
+
+    ;; Fragments under a flyer's bottom edge (x, y its left and bottom)
+    ;; and behind it along the trail: 2 px squares in the class color,
+    ;; one draw per fragment from the tick-seeded stream.
+    (define FRAGMENTS 6)
+    (define (draw-fragments c x y w trail ticks)
+      (color! (suit-color c))
+      (let loop ((k 0) (rng (prng-seed (+ 41 ticks (* 7 (card-rank c))))))
+        (when (< k FRAGMENTS)
+          (let* ((r1 (prng-next rng))
+                 (r2 (prng-next r1)))
+            (draw-filled-rect (+ x (prng-index r1 (max 1 w))) (+ y 1 (prng-index r2 6)) 2 2)
+            (loop (+ k 1) r2))))
+      (let loop ((t trail) (k 0))
+        (when (and (pair? t) (< k 4))
+          (let* ((rng (prng-seed (+ 43 ticks k)))
+                 (r1 (prng-next rng)))
+            (draw-filled-rect (+ (exact (floor (car (car t)))) (prng-index r1 (max 1 w)))
+                              (+ (exact (floor (cdr (car t)))) (quotient (* 3 w) 4))
+                              2
+                              2)
+            (loop (cdr t) (+ k 1))))))
 
     (define (draw-tableau g game x now)
       (let ((skip (card-fx-moving-cards x)))
@@ -558,55 +593,16 @@
     ;; --- HUD ----------------------------------------------------------------------
 
     (define TAGS-LINE
-      "TAGS: TYPE ONE  F PULL  J BUFFER  SPACE HIDE  ENTER CLEAR")
+      "TAGS: TYPE ONE  F PULL  J BUFFER  TAB HIDE  ENTER CLEAR  SPACE TOOLS  ? KEYS")
     ;; With the tags hidden the line says how they come back (David,
     ;; 2026-09-18, after a session with them gone and no way back in view).
     (define TAGS-HIDDEN-LINE
-      "TAGS HIDDEN: SPACE SHOWS THEM  F PULL  J BUFFER")
+      "TAGS HIDDEN: TAB SHOWS THEM  F PULL  J BUFFER  SPACE TOOLS")
     ;; A jammed stack is not the end: the line says what is left to do,
     ;; and the cards stay in reach (David, 2026-09-18: the centered
     ;; message "covers the cards in a way that I can't actually act").
     (define JAMMED-LINE
       "STACK JAMMED: NO MOVE HELPS. ROLLBACK, SCRAMBLE OR DUMP")
-
-    (define (control-label name game d)
-      (case name
-        ((undo) "ROLLBACK")
-        ((draw) (if (= (game-draw game) 3) "PULL 3" "PULL 1"))
-        ((next) "DUMP")
-        ((menu) "MENU")
-        ((scram) "SCRAMBLE")
-        ((probe) "PROBE")
-        (else "?")))
-
-    ;; The buttons; the SCORE readout and the meter are drawn on their own.
-    (define (draw-controls g game d)
-      (for-each (lambda (c)
-                  (let* ((name (car c))
-                         (x (cadr c)) (y (caddr c))
-                         (w (cadddr c)) (h (list-ref c 4))
-                         (label (control-label name game d))
-                         (tw (text-width label 2)))
-                    (color! C-BAR-C)
-                    (draw-filled-rect x y w h)
-                    (draw-outline (list x y w h) C-TEXT-DIM)
-                    (color! C-TEXT)
-                    (draw-text label
-                               (+ x (exact (floor (/ (- (if (eq? name 'scram) (- w 12) w) tw) 2))))
-                               (+ y 3)
-                               2)
-                    ;; the bank count, a small badge in the button's corner
-                    (when (eq? name 'scram)
-                      (let ((n (number->string (deal-scrambles d))))
-                        (color! C-LABEL-LIT)
-                        (draw-filled-rect (+ x w -11) (+ y 1) 10 9)
-                        (color! C-BG)
-                        (draw-text n (+ x w -9) (+ y 2) 1)))))
-                (filter (lambda (c)
-                          (and (not (memq (car c) '(score mode)))
-                               (or (not (eq? (car c) 'scram))
-                                   (eq? (game-scoring game) 'vegas))))
-                        (card-controls g))))
 
     ;; The score as Windows shows it: the timed Standard total on the
     ;; clean face, the bankroll on the twist face.
@@ -660,35 +656,38 @@
              (vw (card-geometry-vw g))
              (vh (card-geometry-vh g))
              (top (- vh (card-geometry-hud-h g)))
+             (layout (deal-hud d))
+             (st (deal-tools d))
+             (tools (deal-tools-list d))
              (right (score-line d))
-             (score-rect (card-control-rect g 'score)))
-        (color! C-BG)
-        (draw-filled-rect 0 top vw (card-geometry-hud-h g))
-        (color! C-BAR-C)
-        (draw-filled-rect 0 top vw 1)
-        (color! C-TEXT)
-        (draw-text (score-text d) (car score-rect) (+ (cadr score-rect) 3) 2)
+             (score-rect (card-control-rect g layout 'score))
+             (meter-rect (card-control-rect g layout 'mode)))
+        (draw-bar-frame vw vh top layout tr st (not (every tool-enabled tools)))
+        (draw-meter-in meter-rect tr)
+        (draw-readout score-rect layout (score-text d) C-TEXT)
+        ;; the scoring's name, the bankroll and the dump under the score
         (color! C-TEXT-DIM)
-        (draw-text right (- vw 8 (text-width right 1)) (+ top 32) 1)
-        (draw-controls g game d)
-        (draw-meter-in (card-control-rect g 'mode) tr)
+        (draw-text-mini right (- (+ (car score-rect) (caddr score-rect)) (text-width-mini right 1))
+                        (if (eq? layout 'strip) (+ top 16) (+ top 24))
+                        1)
+        ;; beside the meter: the ICE countdown under the ICE
+        (when (eq? (trace-phase tr) 'counter)
+          (color! C-ICE)
+          (if (eq? layout 'strip)
+              (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
+              (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ (car meter-rect) (caddr meter-rect) 8) (+ top 8) 1)))
+        (draw-keys-mark (card-control-rect g layout 'keys) (deal-keys-shown d))
         (let ((line (and (not (string=? (deal-message d) MSG-STUCK)) (phase-line tr game))))
-          (if line
-              (begin
-                (color! (if (trace-severed? tr) C-TRACE-HOT C-ICE))
-                (draw-text line 8 (+ top 32) 1))
-              (begin
-                (color! C-TEXT-DIM)
-                (draw-text (cond ((string=? (deal-message d) MSG-STUCK) JAMMED-LINE)
-                                 ((deal-labels-shown d) TAGS-LINE)
-                                 (else TAGS-HIDDEN-LINE))
-                           8
-                           (+ top 32)
-                           1))))
+          (cond ((deal-keys-shown d)
+                 (draw-line-2 vw top (if (deal-labels-shown d) TAGS-LINE TAGS-HIDDEN-LINE) C-TEXT-DIM))
+                (line (draw-line-2 vw top line (phase-color tr)))
+                ((string=? (deal-message d) MSG-STUCK)
+                 (draw-line-2 vw top JAMMED-LINE C-TEXT-DIM))
+                (else (draw-line-2 vw top (deal-instruction d) C-TEXT-DIM))))
         (when (> (string-length (deal-typed d)) 0)
           (color! C-HIGHLIGHT)
           (draw-text (string-append "> " (deal-typed d))
-                     (- vw 8 (text-width (string-append "> " (deal-typed d)) 2))
+                     (- (car score-rect) 12 (text-width (string-append "> " (deal-typed d)) 2))
                      (+ top 7)
                      2))
         (let ((state (state-message d))
@@ -696,7 +695,9 @@
           (cond ((not (string=? state ""))
                  (draw-message-in vw state top 1.0 0.0))
                 ((and toast (not (deal-severed? d)))
-                 (draw-toast-in vw (car toast) top (cdr toast)))))))
+                 (draw-toast-in vw (car toast) top (cdr toast)))))
+        (when (tools-open? st)
+          (draw-tool-stack vw vh st tools))))
 
     ;; --- one frame ------------------------------------------------------------------
 
@@ -723,5 +724,6 @@
             (draw-severed-in (card-geometry-vw g)
                              top
                              (card-fx-ticks x)
-                             '("RETRY LINK" "NEW DUMP" "JACK OUT"))))
+                             '("RETRY LINK" "NEW DUMP" "JACK OUT")
+                             (card-fx-sever x))))
         (draw-hud d g x)))))

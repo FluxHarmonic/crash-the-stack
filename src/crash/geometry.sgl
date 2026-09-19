@@ -25,7 +25,7 @@
           geometry-draw-order
           make-geometry make-canvas-geometry cell-rect
           TILE-RATIO LAYER-OFFSET HUD-HEIGHT
-          CONTROL-NAMES CONTROL-W CONTROL-H
+          CONTROL-NAMES CONTROL-H METER-W STRIP-H READOUT-W
           slot-rect slot-extent slot-centre rect-contains? hit-slot
           column-x row-y
           geometry-controls control-rect hit-control
@@ -39,21 +39,22 @@
     ;; Pixels a layer shifts up and to the right over the one below (the
     ;; Mesche prototype's +3/-3), which is also the width of the side face.
     (define LAYER-OFFSET 3)
-    ;; Band at the bottom of the viewport: the tile counter, the on-canvas
-    ;; controls and the trace meter on one row, the key hints on a second.
+    ;; Band at the bottom of the viewport (ruling D33: status only). The
+    ;; tool button at its left end is (crash hud)'s; the rest is the trace
+    ;; meter, the readouts and the instruction line, composed by the
+    ;; layout in force: zones (the meter centred on the first row, the
+    ;; readout at the right) or strip (the meter is the band's top STRIP-H
+    ;; pixels across the width, the readout inside it).
     (define HUD-HEIGHT 48)
-    ;; The tappable controls in the HUD, left to right from CONTROLS-X: the
-    ;; same commands the ctrl chords give the keyboard, so a phone has them.
-    ;; MENU (P2) opens the first screen; the shell handles it before the
-    ;; session sees the frame.
-    (define CONTROL-NAMES '(undo shuf hint next menu))
-    ;; The trace meter sits after the last control and is tappable too (it
-    ;; flips between its twist and clean faces), so it is a control named mode.
-    (define METER-W 120)
-    (define CONTROLS-X 122)
-    (define CONTROL-W 48)
+    ;; The tappable controls: mode (the meter, flipping its twist and
+    ;; clean faces), look (the TILES readout, stepping the look), keys
+    ;; (the ? mark, showing the keys line), tool (the stack's button, which
+    ;; (crash hud) handles; listed so the web shell can say where it is).
+    (define CONTROL-NAMES '(mode look keys tool))
+    (define METER-W 200)
+    (define STRIP-H 12)
+    (define READOUT-W 112)
     (define CONTROL-H 20)
-    (define CONTROL-GAP 6)
     (define CONTROL-Y 4)
     ;; Space around the board for the tags on the top row and breathing room.
     (define GUTTER 22)
@@ -175,46 +176,46 @@
 
     ;; --- the HUD controls -----------------------------------------------------
 
-    ;; ((name x y w h) ...) for every control, in the HUD band. Drawing and
-    ;; hit-testing both read this list, so a button is tapped where it is seen.
-    ;; The TILES counter at the HUD's left edge is a control too (look): a
-    ;; tap on it steps the look, the phone's stand-in for ctrl+t (P3).
-    (define LOOK-W 100)
-
-    (define (geometry-controls g)
-      (let ((top (- (geometry-vh g) (geometry-hud-h g))))
-        (let loop ((names CONTROL-NAMES)
-                   (x CONTROLS-X)
-                   (acc (list (list 'look 8 (+ top CONTROL-Y) LOOK-W CONTROL-H))))
-          (if (null? names)
-              (reverse (cons (list 'mode x (+ top CONTROL-Y) METER-W CONTROL-H) acc))
-              (loop (cdr names)
-                    (+ x CONTROL-W CONTROL-GAP)
-                    (cons (list (car names) x (+ top CONTROL-Y) CONTROL-W CONTROL-H)
-                          acc))))))
+    ;; ((name x y w h) ...) for every control, in the HUD band, for the
+    ;; layout named. Drawing and hit-testing both read this list, so a
+    ;; control is tapped where it is seen. The TILES readout is the look
+    ;; control: a tap on it steps the look, the phone's stand-in for ctrl+t.
+    (define (geometry-controls g layout)
+      (let* ((vw (geometry-vw g))
+             (vh (geometry-vh g))
+             (top (- vh (geometry-hud-h g)))
+             (strip? (eq? layout 'strip)))
+        (list (if strip?
+                  (list 'mode 0 (+ top 1) vw STRIP-H)
+                  (list 'mode (- (half vw) (half METER-W)) (+ top CONTROL-Y) METER-W 16))
+              (if strip?
+                  (list 'look (- vw 8 READOUT-W) (+ top 1) READOUT-W STRIP-H)
+                  (list 'look (- vw 8 READOUT-W) (+ top CONTROL-Y) READOUT-W CONTROL-H))
+              (list 'keys (- vw 22) (+ top 26) 18 20)
+              (list 'tool 4 (- vh 28) 24 24))))
 
     ;; (x y w h) of a named control, or #f.
-    (define (control-rect g name)
-      (let ((entry (assq name (geometry-controls g))))
+    (define (control-rect g layout name)
+      (let ((entry (assq name (geometry-controls g layout))))
         (and entry (cdr entry))))
 
     ;; The control under a point, by name, or #f.
-    (define (hit-control g x y)
-      (let loop ((cs (geometry-controls g)))
+    (define (hit-control g layout x y)
+      (let loop ((cs (geometry-controls g layout)))
         (cond ((null? cs) #f)
               ((rect-contains? (cdr (car cs)) x y) (car (car cs)))
               (else (loop (cdr cs))))))
 
     ;; The update prompt's two boxes above the HUD and the UPDATE mark at
-    ;; the HUD's right end (over the seed), for the web build's waiting
-    ;; update: ((apply x y w h) (later x y w h) (update x y w h)).
+    ;; the HUD's right end, before the readout, for the web build's
+    ;; waiting update: ((apply x y w h) (later x y w h) (update x y w h)).
     (define (update-controls g)
       (let* ((vw (geometry-vw g))
              (top (- (geometry-vh g) (geometry-hud-h g)))
              (mid (half vw)))
         (list (list 'apply (- mid 130) (- top 44) 120 26)
               (list 'later (+ mid 10) (- top 44) 120 26)
-              (list 'update (- vw 8 78) (+ top CONTROL-Y) 78 CONTROL-H))))
+              (list 'update (- vw 8 READOUT-W 8 78) (+ top CONTROL-Y) 78 CONTROL-H))))
 
     (define (hit-update-control g x y)
       (let loop ((cs (update-controls g)))

@@ -102,7 +102,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "look", "assets", "traced", "reload", "audio", "update", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "look", "assets", "hud", "traced", "reload", "audio", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -320,8 +320,13 @@ const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
 const boot = await waitLine(BOOT_RE, 0, 20000);
 if (!boot) { fail("boot", "no boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
 const [, seed, tiles0, A, AX, AY, B, BX, BY] = boot.m;
+// the quoted literals' shapes (a sigil wasm runtime bug corrupted one on
+// 2026-09-19; the game checks them at boot and says so)
+const literals = await waitLine(/^crash: literal-check (ok|FAILED.*)$/, 0, 2000);
 if (tiles0 !== "144") fail("boot", `expected a fresh 144-tile board, got tiles ${tiles0}`);
-else pass("boot", `seed ${seed} tiles ${tiles0} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY})`);
+else if (!literals) fail("boot", "no \"crash: literal-check\" boot line");
+else if (literals.m[1] !== "ok") fail("boot", `the game's literal check: ${literals.m[1]}`);
+else pass("boot", `seed ${seed} tiles ${tiles0} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY}); literals ok`);
 await sleep(1500); // a few frames so the first draw has happened
 
 // ---- 3. render --------------------------------------------------------------
@@ -400,6 +405,28 @@ async function key(type, k) {
 }
 async function press(k) { await key("keydown", k); await sleep(40); await key("keyup", k); await sleep(120); }
 async function type(tag) { for (const ch of tag) await press(ch); }
+// A tool through the pointer path (ruling D33): tap the corner button
+// ("crash: control tool X Y"), wait for the stack to open and print its
+// entries, tap the named one, wait for the stack to close. Answers "" or
+// what went wrong.
+async function tool(name) {
+  const btn = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  if (!btn) return "no \"crash: control tool\" boot line";
+  const from = consoleLines.length;
+  await tap(btn.m[1], btn.m[2]);
+  const open = await waitLine(/^crash: tools open$/, from, 2000);
+  if (!open) return "the tool button opened no stack";
+  const entry = await waitLine(new RegExp(`^crash: tool ${name} (-?[\\d.]+) (-?[\\d.]+) (on|off)$`), from, 2000);
+  if (!entry) return `no "crash: tool ${name}" entry line`;
+  if (entry.m[3] !== "on") return `the ${name} tool is disabled`;
+  // the slide takes 8 ticks plus the stagger; wait it out before the tap
+  await sleep(350);
+  const before = consoleLines.length;
+  await tap(entry.m[1], entry.m[2]);
+  const closed = await waitLine(/^crash: tools closed$/, before, 2000);
+  if (!closed) return `the ${name} entry did not close the stack`;
+  return "";
+}
 const labels = await waitLine(/^crash: labels (\d+) ([a-z]+) (\d+) ([a-z]+)$/, 0, 2000);
 let keysOk = false, keysDetail = "";
 if (!labels) keysDetail = "no \"crash: labels\" boot line";
@@ -408,21 +435,20 @@ else {
   const tapped = results.some((r) => r[0] === "tap-match" && r[1] === "PASS");
   if (!EXPECT_NO_SELECTION && !tapped) keysDetail = "SKIP: no pair removed by tap-match, nothing to undo";
   else if (!EXPECT_NO_SELECTION) {
-    const ctl = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
-    if (!ctl) keysDetail = "no \"crash: control undo\" boot line";
+    mark = consoleLines.length;
+    const err = await tool("undo");
+    if (err) keysDetail = `UNDO through the tool stack: ${err}`;
     else {
-      mark = consoleLines.length;
-      await tap(ctl.m[1], ctl.m[2]);
       const undo = await waitLine(/^crash: undo tiles (\d+)$/, mark, 2000);
-      if (!undo) keysDetail = `UNDO control at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: undo" line`;
+      if (!undo) keysDetail = `the UNDO tool produced no "crash: undo" line`;
     }
   }
   if (!keysDetail) {
-    // a touch screen starts with the tags hidden; Space shows them (the game's
-    // own "crash: tags" boot line says which)
+    // a touch screen starts with the tags hidden; Tab shows them (the game's
+    // own "crash: tags" boot line says which; Space is the tool stack's, D33)
     const tags = await waitLine(/^crash: tags (shown|hidden) touch (on|off)/, 0, 2000);
     if (PHONE && (!tags || tags.m[2] !== "on")) keysDetail = `phone emulation but the game saw touch ${tags ? tags.m[2] : "?"}`;
-    else if (tags && tags.m[1] === "hidden") { await press(" "); await sleep(150); }
+    else if (tags && tags.m[1] === "hidden") { await press("Tab"); await sleep(150); }
   }
   if (!keysDetail) {
     mark = consoleLines.length;
@@ -443,6 +469,56 @@ else {
 if (keysOk) pass("keys-match", keysDetail);
 else if (keysDetail.startsWith("SKIP: ")) skip("keys-match", keysDetail.slice(6));
 else fail("keys-match", keysDetail);
+
+// ---- 6a. tools: the tool stack by keyboard (ruling D33) ---------------------
+// Space opens it (a "crash: tools open" line); while it is open a tile's
+// tag letter reaches nothing (no "crash: select"); H fires HINT (the trace
+// line counts one hint) and closes it; a tap outside closes it without a
+// choice. With forwarding off the taps cannot land, so only the keys run.
+{
+  let detail = "";
+  const tags = await waitLine(/^crash: tags (shown|hidden) touch (on|off)/, 0, 2000);
+  mark = consoleLines.length;
+  await press(" ");
+  const open = await waitLine(/^crash: tools open$/, mark, 2000);
+  if (!open) detail = "Space opened no stack (no \"crash: tools open\" line)";
+  else {
+    if (tags && tags.m[1] === "shown") {
+      // a tile tag's letter while the stack is open (a, no tool's tag):
+      // modal, nothing selected, the stack still open
+      const before = consoleLines.length;
+      await press("a");
+      await sleep(200);
+      const sel = consoleLines.slice(before).find((l) => /^crash: select /.test(l));
+      if (sel) detail = `a tile tag typed with the stack open selected a tile (${sel})`;
+      else if (consoleLines.slice(before).some((l) => l === "crash: tools closed")) detail = "a tile tag's letter closed the stack";
+    }
+    if (!detail) {
+      mark = consoleLines.length;
+      await press("h");
+      const closed = await waitLine(/^crash: tools closed$/, mark, 2000);
+      const traced = await waitLine(/^crash: trace (\d+) 1 (\d+) trace 0$/, mark, 2000);
+      if (!closed) detail = "H did not close the stack";
+      else if (!traced) detail = "H fired no hint (no trace line counting one hint)";
+    }
+    if (!detail && !EXPECT_NO_SELECTION) {
+      mark = consoleLines.length;
+      await press(" ");
+      const open2 = await waitLine(/^crash: tools open$/, mark, 2000);
+      if (!open2) detail = "Space did not reopen the stack";
+      else {
+        await sleep(350);
+        mark = consoleLines.length;
+        await tap(600, 60);
+        const closed2 = await waitLine(/^crash: tools closed$/, mark, 2000);
+        if (!closed2) detail = "a tap outside the column did not close the stack";
+        else if (consoleLines.slice(mark).some((l) => /^crash: (trace|shuffle|undo|select)/.test(l))) detail = "a tap outside the column fired something";
+      }
+    }
+  }
+  if (detail) fail("tools", detail);
+  else pass("tools", "Space opens, a tile tag is refused while open, H fires HINT and closes, a tap outside closes");
+}
 
 // ---- 6b. look: the TILES counter steps the look (P3) ----------------------
 {
@@ -492,6 +568,36 @@ else fail("keys-match", keysDetail);
   }
 }
 
+// ---- 6d. hud: the bar's layouts behind the setting (ruling D33) -----------
+// ?hud=strip boots the strip layout (its boot line says so, and the meter
+// control moves to the band's top edge across the width), stored for the
+// next boot; a plain reload keeps it, so the arm sets it back to zones.
+{
+  let detail = "";
+  const zones = await waitLine(/^crash: hud (zones|strip)$/, 0, 2000);
+  const meterZones = await waitLine(/^crash: control mode (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  if (!zones || zones.m[1] !== "zones") detail = `the first boot's layout line was ${zones ? zones.m[0] : "missing"}, not zones`;
+  else {
+    mark = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=strip` });
+    const strip = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
+    const meterStrip = await waitLine(/^crash: control mode (-?[\d.]+) (-?[\d.]+)$/, mark, 5000);
+    if (!strip || strip.m[1] !== "strip") detail = `?hud=strip booted ${strip ? strip.m[0] : "no layout line"}`;
+    else if (!meterZones || !meterStrip) detail = "no \"crash: control mode\" line on one of the boots";
+    else if (!(parseFloat(meterStrip.m[2]) < parseFloat(meterZones.m[2]) && parseFloat(meterStrip.m[1]) === 320)) detail = `the meter did not move to the strip: zones (${meterZones.m[1]},${meterZones.m[2]}) strip (${meterStrip.m[1]},${meterStrip.m[2]})`;
+    else {
+      await sleep(800);
+      mark = consoleLines.length;
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=zones` });
+      const back = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
+      if (!back || back.m[1] !== "zones") detail = "?hud=zones did not set the layout back";
+      else pass("hud", `zones meter at (${meterZones.m[1]},${meterZones.m[2]}), strip meter at (${meterStrip.m[1]},${meterStrip.m[2]}), stored and restored`);
+    }
+    await sleep(1500);
+  }
+  if (detail) fail("hud", detail);
+}
+
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
 // Each shuffle costs SHUFFLE_COST on the trace, so SHUFFLES taps take the
 // value past TRACE_AT and the next tick completes the trace ("crash: trace
@@ -503,16 +609,17 @@ else fail("keys-match", keysDetail);
 const TRACE_AT = 180, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
 let iceLock = null;
 {
-  const ctl = await waitLine(/^crash: control shuf (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
   if (EXPECT_NO_SELECTION) skip("traced", "controls are not tappable with forwarding off");
-  else if (!ctl) fail("traced", "no \"crash: control shuf\" boot line");
   else {
     let detail = "";
     for (let i = 0; i < SHUFFLES && !detail; i++) {
       mark = consoleLines.length;
-      await tap(ctl.m[1], ctl.m[2]);
-      const sh = await waitLine(/^crash: shuffle$/, mark, 2000);
-      if (!sh) detail = `shuffle ${i + 1}: no "crash: shuffle" line`;
+      const err = await tool("shuf");
+      if (err) detail = `shuffle ${i + 1} through the tool stack: ${err}`;
+      else {
+        const sh = await waitLine(/^crash: shuffle$/, mark, 2000);
+        if (!sh) detail = `shuffle ${i + 1}: no "crash: shuffle" line`;
+      }
       await sleep(150);
     }
     if (!detail) {
@@ -588,10 +695,9 @@ let iceLock = null;
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
-      const next = await waitLine(/^crash: control next (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
-      if (!next) detail = "no \"crash: control next\" line";
+      const nextErr = await tool("next");
+      if (nextErr) detail = `NEXT through the tool stack: ${nextErr}`;
       else {
-        await tap(next.m[1], next.m[2]);
         const pair = await waitLine(/^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/, mark, 5000);
         const resumed = consoleLines.some((l) => l === "crash: audio resumed");
         if (!pair) detail = "no boot line after NEXT";

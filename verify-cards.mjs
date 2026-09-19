@@ -70,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "probe", "traced", "reload", "won", "console"];
+const planned = ["menu", "boot", "render", "draw", "two-tap", "undo", "keys", "tools", "probe", "traced", "reload", "won", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -399,14 +399,33 @@ if (first && first.m[1]) {
   }
 } else fail("two-tap", "no first move to play");
 
-// ---- undo ------------------------------------------------------------------------
-const ctl = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
-if (!ctl) fail("undo", "no \"crash: control undo\" boot line");
-else {
+// ---- undo: ROLLBACK through the tool stack (ruling D33) --------------------------
+// A tool through the pointer path: tap the corner button ("crash: control
+// tool X Y"), wait for the stack to open and print its entries, tap the
+// named one, wait for the stack to close. Answers "" or what went wrong.
+async function tool(name) {
+  const btn = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
+  if (!btn) return "no \"crash: control tool\" boot line";
+  const from = consoleLines.length;
+  await tap(btn.m[1], btn.m[2]);
+  const open = await waitLine(/^crash: tools open$/, from, 2000);
+  if (!open) return "the tool button opened no stack";
+  const entry = await waitLine(new RegExp(`^crash: tool ${name} (-?[\\d.]+) (-?[\\d.]+) (on|off)$`), from, 2000);
+  if (!entry) return `no "crash: tool ${name}" entry line`;
+  if (entry.m[3] !== "on") return `the ${name} tool is disabled`;
+  await sleep(350);
+  const before = consoleLines.length;
+  await tap(entry.m[1], entry.m[2]);
+  const closed = await waitLine(/^crash: tools closed$/, before, 2000);
+  if (!closed) return `the ${name} entry did not close the stack`;
+  return "";
+}
+{
   mark = consoleLines.length;
-  await tap(ctl.m[1], ctl.m[2]);
-  const undo = await waitLine(/^crash: cards undo (\d+)$/, mark, 3000);
-  if (!undo) fail("undo", "no \"crash: cards undo\" line after a tap on UNDO");
+  const err = await tool("undo");
+  const undo = err ? null : await waitLine(/^crash: cards undo (\d+)$/, mark, 3000);
+  if (err) fail("undo", `ROLLBACK through the tool stack: ${err}`);
+  else if (!undo) fail("undo", "no \"crash: cards undo\" line after the ROLLBACK tool");
   else if (undo.m[1] !== "1") fail("undo", `expected undo back to move 1, got "${undo.m[0]}"`);
   else pass("undo", undo.m[0]);
 }
@@ -431,9 +450,10 @@ async function type(tag) { for (const ch of tag) await press(ch); }
     if (!back) fail("keys", "Backspace did not undo the draw back to move 0");
     // a touch screen starts every launch with the tags hidden (headless
     // Chrome reads as one whatever the emulated media say; the boot line
-    // "crash: cards tagsshown on|off" is the game's own word); Space shows them
+    // "crash: cards tagsshown on|off" is the game's own word); Tab shows them
+    // (Space is the tool stack's, D33)
     const shown = await waitLine(/^crash: cards tagsshown (on|off) /, bootMark, 2000);
-    if (shown && shown.m[1] === "off") await press(" ");
+    if (shown && shown.m[1] === "off") await press("Tab");
     mark = consoleLines.length;
     await type(tags.m[1]); await type(tags.m[2]);
     const moved = back && await waitLine(/^crash: cards moved (\d+)$/, mark, 3000);
@@ -449,12 +469,47 @@ async function type(tag) { for (const ch of tag) await press(ch); }
 // arm's seed 1 has no known line, so the solver runs to its budget here,
 // spread over frames: the time it takes is printed, the wasm build's
 // solver speed).
+// ---- tools: the stack by keyboard (ruling D33) ----------------------------------------
+// Space opens it; a pile key while it is open reaches no pile; P fires
+// PULL (the draw count flips, "crash: cards draw 3") and closes it.
 {
-  const ctl = await waitLine(/^crash: control probe (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
-  if (!ctl) fail("probe", "no PROBE control line");
+  let detail = "";
+  mark = consoleLines.length;
+  await press(" ");
+  const open = await waitLine(/^crash: tools open$/, mark, 2000);
+  if (!open) detail = "Space opened no stack";
   else {
-    mark = consoleLines.length;
-    await tap(parseFloat(ctl.m[1]), parseFloat(ctl.m[2]));
+    const before = consoleLines.length;
+    await press("f");
+    await sleep(200);
+    if (consoleLines.slice(before).some((l) => /^crash: cards (drew|select)/.test(l))) detail = "F pulled with the stack open";
+    else if (consoleLines.slice(before).some((l) => l === "crash: tools closed")) detail = "F closed the stack";
+    else {
+      mark = consoleLines.length;
+      await press("p");
+      const closed = await waitLine(/^crash: tools closed$/, mark, 2000);
+      const draw3 = await waitLine(/^crash: cards draw (\d)$/, mark, 2000);
+      if (!closed) detail = "P did not close the stack";
+      else if (!draw3 || draw3.m[1] !== "3") detail = `P did not flip the pull to 3 (${draw3 ? draw3.m[0] : "no draw line"})`;
+      else {
+        // back to pull one, for the probe (it refuses pull three)
+        mark = consoleLines.length;
+        await press(" "); await sleep(150); await press("p");
+        const draw1 = await waitLine(/^crash: cards draw 1$/, mark, 2000);
+        if (!draw1) detail = "P again did not flip the pull back to 1";
+      }
+    }
+  }
+  if (detail) fail("tools", detail);
+  else pass("tools", "Space opens, F is refused while open, P flips PULL and closes");
+}
+
+// ---- probe ---------------------------------------------------------------------------------
+{
+  mark = consoleLines.length;
+  const err = await tool("probe");
+  if (err) fail("probe", `PROBE through the tool stack: ${err}`);
+  else {
     const t0 = Date.now();
     const hint = await waitLine(/^crash: cards probe (.+)$/, mark, 60000);
     if (!hint) fail("probe", "no \"crash: cards probe\" line within 60 s of a PROBE tap");
@@ -466,8 +521,7 @@ async function type(tag) { for (const ch of tag) await press(ch); }
 {
   const UNDOS = 20;
   const stock2 = await waitLine(/^crash: cards stock (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
-  const ctl2 = await waitLine(/^crash: control undo (-?[\d.]+) (-?[\d.]+)$/, bootMark, 2000);
-  if (!stock2 || !ctl2) fail("traced", "no stock or UNDO control line to tap");
+  if (!stock2) fail("traced", "no stock line to tap");
   else {
     mark = consoleLines.length;
     let ok = true;
@@ -476,7 +530,7 @@ async function type(tag) { for (const ch of tag) await press(ch); }
       await tap(stock2.m[1], stock2.m[2]);
       const drew = await waitLine(/^crash: cards drew (\d+)$/, m0, 3000);
       const m1 = consoleLines.length;
-      if (drew) await tap(ctl2.m[1], ctl2.m[2]);
+      if (drew) await press("Backspace");
       const undo = drew && await waitLine(/^crash: cards undo (\d+)$/, m1, 3000);
       if (!undo) { ok = false; fail("traced", `pair ${i + 1}: ${drew ? "no undo line" : "no drew line"}`); }
     }

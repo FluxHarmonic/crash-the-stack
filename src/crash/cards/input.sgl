@@ -16,8 +16,13 @@
 ;;;
 ;;; A tap lands on a PLACE through (crash cards geometry)'s hit-place and
 ;;; ends in game-select, the one door of (crash cards rules): tap-tap,
-;;; with the stock a tap away. The HUD controls (UNDO, DRAW, NEXT) are
-;;; hit-tested first, from the same rects the renderer draws.
+;;; with the stock a tap away. The tools (PULL, ROLLBACK, PROBE, SCRAMBLE,
+;;; NEXT, MENU) are the tool stack's (ruling D33, (crash hud)): Space or
+;;; the corner button opens it, a tag or a tap fires one, and while it is
+;;; open no key reaches a pile. The bar's own controls (the score, the
+;;; meter, the ? mark) are hit-tested first, from the rects the renderer
+;;; draws. ? shows the keys line; MENU comes out as a request for the
+;;; shell.
 ;;;
 ;;; The keyboard is the stack's hint model (David, 2026-09-17: "the hint
 ;;; key overlay in the stack game works really well, we should use the
@@ -46,7 +51,8 @@
           (crash stack prng)
           (crash cards seeds)
           (crash cards lines)
-          (crash cards solve))
+          (crash cards solve)
+          (crash hud))
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
@@ -57,6 +63,9 @@
           deal-scrambles deal-with-scrambles deal-scramble
           deal-level deal-recent deal-with-progress
           deal-probe deal-probe-step deal-probe-running? deal-hint hint-move
+          deal-tools deal-tools-list deal-with-tools-touch
+          deal-hud deal-with-hud deal-keys-shown deal-request deal-clear-request
+          deal-instruction
           PROBE-STEP PROBE-BUDGET HINT-TICKS
           MSG-PROBING MSG-NO-LINE MSG-PROBE-LOST MSG-PROBE-PULL-3
           SCRAMBLE-START SCRAMBLE-MAX MSG-SCRAMBLED MSG-NO-SCRAMBLE MSG-SCRAMBLE-FAILED
@@ -105,6 +114,10 @@
       (recent default: '())          ; the last seeds dealt, newest first, at most RECENT-MAX
       (probing default: #f)          ; a PROBE search in progress ((crash cards solve)), or #f
       (shown default: #f)            ; the move PROBE shows: (src dst ticks-left), or #f
+      (tools default: (tools-new))   ; the tool stack, (crash hud)
+      (hud default: DEFAULT-LAYOUT)  ; the bar's layout, (crash hud)
+      (keys-shown default: #f)       ; the keys line in place of the instruction line (?)
+      (request default: #f)          ; for the shell: menu, or #f
       (message default: ""))
 
     ;; --- places and their tags ----------------------------------------------
@@ -225,7 +238,8 @@
     ;; The frame's sim ticks reach the trace here (one at a time inside
     ;; trace-advance*, which fires the counter-hacks its seconds cover);
     ;; the game it hands back replaces the deal's. Then auto-complete.
-    (define (deal-advance d ticks)
+    (define (deal-advance d0 ticks)
+      (define d (deal d0 tools: (tools-advance (deal-tools d0) ticks)))
       (cond ((= ticks 0) d)
             ((not (deal-trace d)) (auto-advance (hint-advance d ticks) ticks))
             ((deal-finished? d) d)
@@ -523,7 +537,9 @@
 
     (define (step-commands d f)
       (let ((ctrl (held? f 'ctrl)))
-        (cond ((pressed? f 'return) (deselect d))
+        (cond ((pressed? f 'tab) (deal d labels-shown: (not (deal-labels-shown d)) typed: ""))
+              ((pressed? f '?) (deal d keys-shown: (not (deal-keys-shown d))))
+              ((pressed? f 'return) (deselect d))
               ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
               ((and ctrl (pressed? f 'r)) (deal-retry d))
               ((and ctrl (pressed? f 'n)) (deal-next d))
@@ -532,20 +548,15 @@
               (else #f))))
 
     ;; Tags: each letter extends what has been typed; a complete tag taps
-    ;; its place; Space clears a half-typed tag or toggles the overlay;
-    ;; Backspace erases a letter.
+    ;; its place; Tab toggles the overlay (Space did, until the tool stack
+    ;; took Space); Backspace erases a letter.
     (define (step-tags d f)
       (let loop ((keys (input-frame-pressed f)) (d d))
         (if (null? keys)
             d
             (let ((key (car keys))
                   (typed (deal-typed d)))
-              (cond ((eq? key 'space)
-                     (loop (cdr keys)
-                           (if (typing? d)
-                               (deal d typed: "")
-                               (deal d labels-shown: (not (deal-labels-shown d))))))
-                    ((and (eq? key 'backspace) (typing? d))
+              (cond ((and (eq? key 'backspace) (typing? d))
                      (loop (cdr keys)
                            (deal d typed: (substring typed 0 (- (string-length typed) 1)))))
                     ((eq? key STOCK-KEY) (loop (cdr keys) (deal (pick d '(stock)) typed: "")))
@@ -572,7 +583,47 @@
         ((score mode) (deal-toggle-mode d))
         ((scram) (deal-scramble d))
         ((probe) (deal-probe d))
+        ((keys) (deal d keys-shown: (not (deal-keys-shown d))))
+        ((menu) (deal d request: 'menu))
         (else d)))
+
+    ;; --- the tool stack --------------------------------------------------------
+
+    ;; This table's tools for the frame (ruling D33): PULL with its count,
+    ;; ROLLBACK, PROBE and SCRAMBLE (twist only: in clean mode they are
+    ;; absent, not disabled; SCRAMBLE shows its bank), NEXT, MENU. Under
+    ;; SEVERED only NEXT and MENU; while the auto-complete or a probe runs
+    ;; the board's tools wait.
+    (define (deal-tools-list d)
+      (let* ((g (deal-game d))
+             (twist? (eq? (trace-mode (deal-trace d)) 'twist))
+             (play? (and (not (deal-finished? d)) (not (busy? d)))))
+        (append (list (make-tool 'draw (if (= (game-draw g) 1) "PULL 1" "PULL 3") 'p #f #f play?)
+                      (make-tool 'undo "ROLLBACK" 'r #f #f play?))
+                (if twist?
+                    (list (make-tool 'probe "PROBE" 'o HINT-COST #f play?)
+                          (make-tool 'scram "SCRAMBLE" 'c SCRAMBLE-COST (deal-scrambles d)
+                                     (and play? (> (deal-scrambles d) 0))))
+                    '())
+                (list (make-tool 'next "NEXT" 'n)
+                      (make-tool 'menu "MENU" 'm)))))
+
+    (define (deal-with-tools-touch d touch?)
+      (deal d tools: (tools-with-touch (deal-tools d) touch?)))
+
+    (define (deal-with-hud d name)
+      (deal d hud: (if (layout-name? name) name DEFAULT-LAYOUT)))
+
+    (define (deal-clear-request d)
+      (deal d request: #f))
+
+    ;; The instruction line under the readouts when the keys line is hidden.
+    (define (deal-instruction d)
+      (cond ((deal-won? d) "SYSTEM ONLINE. NEXT DEALS ANOTHER.")
+            ((deal-auto d) "AUTOCOMMIT RUNNING.")
+            ((deal-probe-running? d) "PROBING THE BUFFER.")
+            ((game-selected (deal-game d)) "NOW WHERE IT GOES.")
+            (else "STACK THE PACKETS BY CLASS. F PULLS.")))
 
     ;; On a severed table the choices are the board area's thirds: RETRY
     ;; LINK (the same deal again), NEW DEAL, JACK OUT (the menu; the shell
@@ -593,9 +644,9 @@
                      (cond ((< (car click) third) (deal-retry d))
                            ((< (car click) (* 2 third)) (deal-next d))
                            (else d)))
-                   (let ((name (hit-card-control g (car click) (cdr click))))
-                     (if (memq name '(next menu)) (step-control d name) d))))
-              ((hit-card-control g (car click) (cdr click))
+                   (let ((name (hit-card-control g (deal-hud d) (car click) (cdr click))))
+                     (if (eq? name 'keys) (step-control d name) d))))
+              ((hit-card-control g (deal-hud d) (car click) (cdr click))
                => (lambda (name) (step-control d name)))
               (else
                (let ((place (hit-place g (deal-game d) (car click) (cdr click))))
@@ -604,7 +655,19 @@
     ;; --- one frame ----------------------------------------------------------------
 
     (define (deal-step d f g)
-      (cond ((step-commands d f) => (lambda (d) d))
-            ((held? f 'ctrl) (step-pointer d f g))
-            (else
-             (step-tags (step-pointer d f g) f))))))
+      (let* ((was-open (tools-open? (deal-tools d)))
+             (r (tools-step (deal-tools d)
+                            (cons (input-frame-pressed f) (input-frame-click f))
+                            (deal-tools-list d)
+                            (card-geometry-vw g)
+                            (card-geometry-vh g)))
+             (d (deal d tools: (car r))))
+        (cond (was-open
+               ;; modal: the frame was the stack's, whatever it held
+               (if (cdr r) (step-control d (cdr r)) d))
+              ((tools-open? (car r))
+               (deal d typed: ""))
+              ((step-commands d f) => (lambda (d) d))
+              ((held? f 'ctrl) (step-pointer d f g))
+              (else
+               (step-tags (step-pointer d f g) f)))))))

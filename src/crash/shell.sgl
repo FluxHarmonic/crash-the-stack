@@ -21,15 +21,22 @@
           (crash cards save)
           (crash cards seeds)
           (crash look)
+          (crash hud)
           (crash bg)
           (crash sfx)
           (crash audio)
-          (crash menu))
+          (crash menu)
+          (crash font)
+          (crash glyphs)
+          (crash palette)
+          (only (crash stack generate) FACE-ORDER))
 
   (export VW VH MODIFIERS bg-advance
+          literal-check LITERAL-NAMES
           AMBIENT-PATH AMBIENT-RATE play-cues!
-          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY LOOK-KEY
+          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY LOOK-KEY HUD-KEY
           stored-look set-stored-look! step-look!
+          stored-hud set-stored-hud! step-hud!
           boot-session save-after-frame!
           boot-deal save-deal-after-frame!
           active-game set-active-game! saved-game?
@@ -40,6 +47,75 @@
     (define VH 400)
     (define MODIFIERS '(ctrl shift))
 
+    ;; --- the literal check (2026-09-19) ---------------------------------------
+    ;;
+    ;; On the web build a quoted literal came out of module load with its
+    ;; cells overwritten (see (crash menu)'s MENU-ENTRIES); a sigil wasm
+    ;; runtime bug, filed. Until it is fixed, boot checks the shape of
+    ;; every quoted literal the game leans on and says so in one trace
+    ;; line, so the arm reddens instead of a corrupt board shipping.
+    ;; Answers the names that failed, '() when all hold.
+    (define LITERAL-NAMES '(glyphs mini-glyphs sheets class-marks face-order palette menu-entries looks))
+
+    (define (rows? x n len)
+      (and (list? x)
+           (= (length x) n)
+           (every (lambda (r) (and (string? r) (= (string-length r) len))) x)))
+
+    (define (literal-check)
+      (let ((bad '()))
+        (define (check name ok?)
+          (unless (guard (e (#t #f)) ok?)
+            (set! bad (cons name bad))))
+        (check 'glyphs
+               (and (list? GLYPHS)
+                    (> (length GLYPHS) 40)
+                    (every (lambda (g) (and (pair? g) (char? (car g)) (rows? (cdr g) GLYPH-H GLYPH-W))) GLYPHS)))
+        (check 'mini-glyphs
+               (and (list? MINI-GLYPHS)
+                    (> (length MINI-GLYPHS) 30)
+                    (every (lambda (g) (and (pair? g) (char? (car g)) (rows? (cdr g) MINI-H MINI-W))) MINI-GLYPHS)))
+        (check 'sheets
+               (every (lambda (entry)
+                        (let ((v (cdr entry)))
+                          (and (symbol? (car entry))
+                               (vector? v)
+                               (= (vector-length v) FACE-COUNT)
+                               (let loop ((i 0))
+                                 (or (= i FACE-COUNT)
+                                     (and (rows? (vector-ref v i) GLYPH-H GLYPH-W) (loop (+ i 1))))))))
+                      SHEETS))
+        (check 'class-marks
+               (and (vector? CLASS-MARKS)
+                    (= (vector-length CLASS-MARKS) 4)
+                    (let loop ((i 0))
+                      (or (= i 4)
+                          (and (rows? (vector-ref CLASS-MARKS i) MARK-H MARK-W) (loop (+ i 1)))))))
+        (check 'face-order
+               (and (vector? FACE-ORDER)
+                    (= (vector-length FACE-ORDER) 72)
+                    (every (lambda (f) (and (integer? f) (>= f 0) (< f FACE-COUNT))) (vector->list FACE-ORDER))))
+        (check 'palette
+               (and (list? PALETTE)
+                    (> (length PALETTE) 30)
+                    (every (lambda (e)
+                             (and (pair? e)
+                                  (symbol? (car e))
+                                  (list? (cdr e))
+                                  (= (length (cdr e)) 3)
+                                  (every (lambda (v) (and (number? v) (>= v 0.0) (<= v 1.0))) (cdr e))))
+                           PALETTE)))
+        (check 'menu-entries
+               (and (list? MENU-ENTRIES)
+                    (= (length MENU-ENTRIES) 6)
+                    (every (lambda (e) (and (pair? e) (symbol? (car e)) (pair? (cdr e)) (string? (cadr e)))) MENU-ENTRIES)))
+        (check 'looks
+               (and (list? LOOK-NAMES)
+                    (>= (length LOOK-NAMES) 8)
+                    (every symbol? LOOK-NAMES)
+                    (every (lambda (name) (string? (look-label (look-ref name)))) LOOK-NAMES)))
+        (reverse bad)))
+
     (define BOARD-KEY "board")
     (define BEST-KEY "best")
     (define CARDS-KEY "cards")
@@ -48,6 +124,20 @@
     ;; The look in force (P3, the sheet switch), a name from (crash look);
     ;; its own key so it outlives a deal and reaches both tables.
     (define LOOK-KEY "look")
+    ;; The bar's layout (P3, ruling D33): zones | strip, its own key too.
+    (define HUD-KEY "hud")
+
+    (define (stored-hud)
+      (let ((d (store-read-datum HUD-KEY)))
+        (if (layout-name? d) d DEFAULT-LAYOUT)))
+
+    (define (set-stored-hud! name)
+      (store-write-datum! HUD-KEY name))
+
+    (define (step-hud!)
+      (let ((next (layout-after (stored-hud))))
+        (set-stored-hud! next)
+        next))
 
     ;; The stored look, or #f when nothing is stored yet.
     (define (stored-look*)
@@ -80,7 +170,7 @@
              (s (session-with-best (or saved (session-new lay (or seed 1))) best))
              (stored (stored-look*)))
         (unless stored (set-stored-look! (session-look s)))
-        (cons (if stored (session-with-look s stored) s)
+        (cons (session-with-hud (if stored (session-with-look s stored) s) (stored-hud))
               (and saved #t))))
 
     ;; After a frame: save the session when the step warrants it, and when
@@ -109,7 +199,7 @@
     (define (boot-deal seed fresh?)
       (let ((saved (and (not fresh?)
                         (datum->deal (store-read-datum CARDS-KEY)))))
-        (cons (or saved (deal-new (or seed (first-seed)) 1))
+        (cons (deal-with-hud (or saved (deal-new (or seed (first-seed)) 1)) (stored-hud))
               (and saved #t))))
 
     ;; After a frame on the card table: save the deal when the game changed.
@@ -165,19 +255,19 @@
     ;; STACK, DEFRAG, UPDATE when the page says one is waiting.
     (define (launch-menu update-waiting? held?)
       (let ((continue? (or held? (saved-game? (active-game)))))
-        (menu-with-look (menu-new (append (if continue? '(continue) '())
-                                          '(stack cards look)
-                                          (if update-waiting? '(update) '()))
-                                  (if continue? 'continue 'stack))
-                        (stored-look))))
+        (menu-with-hud (menu-with-look (menu-new (append (if continue? '(continue) '())
+                                                         '(stack cards look hud)
+                                                         (if update-waiting? '(update) '()))
+                                                 (if continue? 'continue 'stack))
+                                       (stored-look))
+                       (stored-hud))))
 
-    ;; Does this frame ask for the menu: a tap on a MENU control (its
-    ;; name from either table's hit-test, passed in), or ctrl+e?
-    (define (menu-frame? f control)
-      (or (eq? control 'menu)
-          (and (memq 'ctrl (input-frame-held f))
-               (memq 'e (input-frame-pressed f))
-               #t)))
+    ;; Does this frame ask for the menu by key: ctrl+e? (The MENU tool
+    ;; comes out of the table's step as a request, read after it.)
+    (define (menu-frame? f)
+      (and (memq 'ctrl (input-frame-held f))
+           (memq 'e (input-frame-pressed f))
+           #t))
 
     ;; A severed stack's third choice, JACK OUT: the right third of the
     ;; board area (see (crash input) step-pointer for the other two).

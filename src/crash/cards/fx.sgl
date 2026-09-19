@@ -32,7 +32,7 @@
   (export card-fx card-fx? card-fx-new card-fx-clock
           card-fx-frame card-fx-observe card-fx-idle?
           card-fx-flying card-fx-launched card-fx-cascading? card-fx-ticks
-          card-fx-glitch card-fx-toast
+          card-fx-glitch card-fx-sever card-fx-toast SEVER-TICKS
           card-fx-movers card-fx-moving-cards card-fx-hit
           GLITCH-TICKS TOAST-TICKS TOAST-HOLD MOVE-TICKS MOVE-MAX HIT-TICKS HIT-SHAKE
           flyer flyer-card flyer-x flyer-y flyer-trail
@@ -49,6 +49,7 @@
     (define LAUNCH-VX-MAX 4.2)
     (define LAUNCH-VY -1.5)         ; a small hop off the foundation
     (define GLITCH-TICKS 45)        ; the full-screen glitch when the trace completes
+    (define SEVER-TICKS 30)         ; the static when the link severs, decaying
     (define HIT-TICKS 36)           ; a packet the ICE hit shakes and flashes this long
     (define HIT-SHAKE 4.0)          ; pixels of sideways shake, 6 Hz like the stack's mismatch
     (define MOVE-TICKS 12)          ; a card slides to its new place over this many ticks (200 ms;
@@ -78,6 +79,7 @@
       (flying default: '())
       (rng default: 1)
       (glitch-ticks default: 0)              ; ticks of glitch left
+      (sever-ticks default: 0)               ; ticks of the sever's static left
       (toast-state default: #f)              ; (message . ticks-left), or #f
       (moving default: '())                  ; cards sliding: (card from-rect to-rect up? ticks-left)
       (hits default: '()))                   ; places the ICE just hit: (place . ticks-left)
@@ -89,6 +91,7 @@
       (and (not (card-fx-cascading? x))
            (null? (card-fx-flying x))
            (= 0 (card-fx-glitch-ticks x))
+           (= 0 (card-fx-sever-ticks x))
            (not (card-fx-toast-state x))
            (null? (card-fx-moving x))
            (null? (card-fx-hits x))))
@@ -230,6 +233,11 @@
       (and (> (card-fx-glitch-ticks x) 0)
            (- 1.0 (/ (card-fx-glitch-ticks x) GLITCH-TICKS))))
 
+    ;; The sever's static, 0..1, or #f once it has decayed.
+    (define (card-fx-sever x)
+      (and (> (card-fx-sever-ticks x) 0)
+           (- 1.0 (/ (card-fx-sever-ticks x) SEVER-TICKS))))
+
     ;; (message . progress 0..1), or #f.
     (define (card-fx-toast x)
       (let ((t (card-fx-toast-state x)))
@@ -259,6 +267,10 @@
                        (card-fx x cascading?: #f flying: '() game: #f launched: (vector 0 0 0 0)))
                       (else x)))
              ;; the trace completing: the glitch
+             (x (if (and (eq? (trace-phase (deal-trace after)) 'severed)
+                         (not (eq? (trace-phase (deal-trace before)) 'severed)))
+                    (card-fx x sever-ticks: SEVER-TICKS)
+                    x))
              (x (if (and (eq? (trace-phase (deal-trace after)) 'counter)
                          (not (eq? (trace-phase (deal-trace before)) 'counter)))
                     (card-fx x glitch-ticks: GLITCH-TICKS)
@@ -354,6 +366,9 @@
       (let* ((x (fly x g))
              (x (if (> (card-fx-glitch-ticks x) 0)
                     (card-fx x glitch-ticks: (- (card-fx-glitch-ticks x) 1))
+                    x))
+             (x (if (> (card-fx-sever-ticks x) 0)
+                    (card-fx x sever-ticks: (- (card-fx-sever-ticks x) 1))
                     x))
              (x (let ((t (card-fx-toast-state x)))
                   (cond ((not t) x)
