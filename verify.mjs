@@ -113,7 +113,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "menu-return", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -234,7 +234,7 @@ process.on("SIGTERM", () => shutdown(143));
 process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 180000;
+const WHOLE_RUN_MS = 420000;   // P3d added three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -1136,6 +1136,79 @@ let iceLock = null;
   delete slowPaths["/assets/audio/ambient.pcm"];
   if (detail) fail("preload", detail);
   else pass("preload", `ambient held ${BOOT_SLOW} ms: reveal settled with the boot pending, a tap chose nothing and booted nothing, boot done after ${done.m[1]} steps (audio last), then the tap chose STACK and a board booted`);
+}
+
+// ---- 9d. menu-return: board -> menu -> board stays drawn and under a bound --
+// David (laptop, 9f897bc): "went back to the main menu and then it got
+// completely bogged down and then the screen went black". A fresh boot
+// on the board with ?ms, a minute of frames, Escape to the menu, then: the
+// menu's boot is done (nothing re-runs), five canvas reads over three
+// seconds are each non-black in the menu region, and the game's own
+// frame-ms window on the menu stays under MENU_FRAME_FACTOR times the
+// board's; then Enter on CONTINUE boots the board again.
+{
+  const MENU_FRAME_FACTOR = 2.5;
+  let detail = "";
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&ms&seed=1&fresh` });
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) detail = "no boot line";
+  let boardMs = null, menuMs = null;
+  const MS_RE = /^crash: frame-ms (\d+) (\d+)/;
+  if (!detail) {
+    const l = await waitLine(MS_RE, booted.index, 60000);
+    if (!l) detail = "no frame-ms line on the board within 60 s";
+    else boardMs = parseInt(l.m[1], 10);
+  }
+  const readMenu = () => evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+    const c = document.getElementById("stage");
+    const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+    const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const y0 = Math.floor(oy + 8 * scale), y1 = Math.floor(oy + 356 * scale);
+    const d = g.getImageData(Math.floor(ox), y0, Math.floor(${VW} * scale), y1 - y0).data;
+    let lit = 0, n = 0; for (let i = 0; i < d.length; i += 16) { n++; if (d[i] + d[i + 1] + d[i + 2] > 90) lit++; }
+    resolve({ lit, n });
+  }))`);
+  if (!detail) {
+    const m0 = consoleLines.length;
+    await press("Escape");
+    const menu = await waitLine(/^crash: menu (continue) /, m0, 5000);
+    if (!menu) detail = "Escape did not open the menu";
+    else {
+      // nothing re-runs on the return: no new boot step line, no new title seed line
+      await sleep(1500);
+      const after = consoleLines.slice(m0);
+      if (after.some((l) => /^crash: boot step /.test(l))) detail = "the return to the menu re-ran the boot's steps";
+      else if (after.some((l) => /^crash: title seed /.test(l))) detail = "the return to the menu re-ran the reveal";
+    }
+  }
+  const reads = [];
+  if (!detail) {
+    for (let i = 0; i < 5; i++) { reads.push(await readMenu()); await sleep(600); }
+    const black = reads.filter((r) => r.lit < r.n * 0.05);
+    if (black.length) detail = `${black.length} of 5 menu frames black (lit ${reads.map((r) => r.lit).join("/")} of ${reads[0].n})`;
+  }
+  if (!detail) {
+    const m1 = consoleLines.length;
+    const l = await waitLine(MS_RE, m1, 40000);
+    if (!l) detail = "no frame-ms line on the menu within 40 s";
+    else {
+      menuMs = parseInt(l.m[1], 10);
+      if (menuMs > boardMs * MENU_FRAME_FACTOR) detail = `the menu's frame mean ${menuMs} ms is over ${MENU_FRAME_FACTOR} x the board's ${boardMs} ms`;
+    }
+  }
+  if (!detail) {
+    const m2 = consoleLines.length;
+    await press("Enter");
+    const chose = await waitLine(/^crash: menu chose continue$/, m2, 3000);
+    const back = chose && await waitLine(BOOT_ANY, m2, 5000);
+    if (!chose) detail = "Enter on the menu did not choose CONTINUE";
+    else if (!back) detail = "CONTINUE did not boot the board";
+  }
+  if (detail) fail("menu-return", detail);
+  else pass("menu-return", `board ${boardMs} ms, menu ${menuMs} ms a frame (mean over 300), 5 menu frames lit (${reads.map((r) => r.lit).join("/")} of ${reads[0].n}), nothing re-ran, CONTINUE back`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------
