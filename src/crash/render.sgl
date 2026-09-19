@@ -244,7 +244,15 @@
     ;; nothing) and gets a dark line to read as an edge (David, 2026-09-17:
     ;; a tile's right boundary was hard to see against the tiles under it;
     ;; two faces side by side on one layer stay seamless).
-    (define (draw-face-primitives g look face x y w h selected? lock right-open? glow scramble)
+    ;; The face is drawn in three parts so a layer's draws come grouped by
+    ;; texture (P3c): every body (rectangles on sgp's white texture), then
+    ;; every glyph (the atlas), then the lock bars (rectangles again, over
+    ;; the glyph). sokol_gp merges a draw into a batch only across draws
+    ;; that share a texture (and looks back eight commands), so a glyph
+    ;; between two bodies cost a draw call per tile: 170 GL calls a frame
+    ;; against 40 before the atlas. Tiles on one layer never overlap, so
+    ;; the grouping draws the same pixels.
+    (define (draw-face-body g look face x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
@@ -256,8 +264,12 @@
       (draw-filled-rect x y 1 h)
       (when right-open?
         (color! (if selected? C-SELECTED C-SIDE-DARK))
-        (draw-filled-rect (+ x w -1) y 1 h))
-      (when face (draw-glyph-on g look face x y w h selected? scramble))
+        (draw-filled-rect (+ x w -1) y 1 h)))
+
+    (define (draw-face-glyph-part g look face x y w h selected? scramble)
+      (when face (draw-glyph-on g look face x y w h selected? scramble)))
+
+    (define (draw-face-lock x y w h lock)
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
@@ -347,21 +359,36 @@
                              (session-highlight s)
                              (tile-present? b (session-highlight s))
                              (session-highlight s)))
+             ;; every present tile once: (id face x y w h selected?) per
+             ;; tile, bucketed by layer in draw order, so the four passes
+             ;; a layer takes walk a list instead of re-reading the layout
+             ;; and the effects (20 walks of the draw order a frame before
+             ;; this, P3c: the walk was most of the stack's draw time)
+             (layers (let ((buckets (make-vector (layout-layer-count lay) '())))
+                       (for-each
+                         (lambda (id)
+                           (when (tile-present? b id)
+                             (let* ((layer (slot-layer (layout-slot lay id)))
+                                    (view (fx-tile-view x id))
+                                    (r (viewed-rect (slot-rect g id) view))
+                                    (face (or (and view (list-ref view 4))
+                                              (tile-face b id))))
+                               (vector-set! buckets layer
+                                            (cons (vector id face (car r) (cadr r) (caddr r) (cadddr r) (eqv? selected id))
+                                                  (vector-ref buckets layer))))))
+                         (geometry-draw-order g))
+                       (let fix ((i 0))
+                         (when (< i (vector-length buckets))
+                           (vector-set! buckets i (reverse (vector-ref buckets i)))
+                           (fix (+ i 1))))
+                       buckets))
              (each-on-layer
                (lambda (layer proc)
                  (for-each
-                   (lambda (id)
-                     (when (and (tile-present? b id)
-                                (= layer (slot-layer (layout-slot lay id))))
-                       (let* ((view (fx-tile-view x id))
-                              (r (viewed-rect (slot-rect g id) view))
-                              (face (or (and view (list-ref view 4))
-                                        (tile-face b id))))
-                         (proc id
-                               face
-                               (car r) (cadr r) (caddr r) (cadddr r)
-                               (eqv? selected id)))))
-                   (geometry-draw-order g)))))
+                   (lambda (t)
+                     (proc (vector-ref t 0) (vector-ref t 1) (vector-ref t 2) (vector-ref t 3)
+                           (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)))
+                   (vector-ref layers layer)))))
         (let loop ((layer 0))
           (when (< layer (layout-layer-count lay))
             (each-on-layer layer
@@ -371,14 +398,21 @@
                                  (draw-sides-primitives g x y w h))))
             (each-on-layer layer
                            (lambda (id face x y w h selected?)
-                             (let ((scramble (and (tile-scrambled? b id) (cons ticks id))))
-                               (if textured?
-                                   (draw-face-texture g look b id face tex x y w h selected? scramble)
-                                   (draw-face-primitives g look face x y w h selected?
-                                                         (lock-state b id now)
-                                                         (not (blocked-right? b id))
-                                                         glow
-                                                         scramble)))))
+                             (if textured?
+                                 (draw-face-texture g look b id face tex x y w h selected?
+                                                    (and (tile-scrambled? b id) (cons ticks id)))
+                                 (draw-face-body g look face x y w h selected?
+                                                 (lock-state b id now)
+                                                 (not (blocked-right? b id))
+                                                 glow))))
+            (unless textured?
+              (each-on-layer layer
+                             (lambda (id face x y w h selected?)
+                               (draw-face-glyph-part g look face x y w h selected?
+                                                     (and (tile-scrambled? b id) (cons ticks id)))))
+              (each-on-layer layer
+                             (lambda (id face x y w h selected?)
+                               (draw-face-lock x y w h (lock-state b id now)))))
             (loop (+ layer 1))))
         (draw-ghosts g look x)
         (draw-particles g look x)
@@ -433,25 +467,30 @@
     ;; tag in the 3x5 set, centered on the tile's top edge so the glyph stays
     ;; readable under it; the letters typed so far are drawn lit.
 
+    ;; The labels' boxes first, then their text (one texture each: two
+    ;; batches, not one per label).
     (define (draw-hint-labels s g)
       (let ((typed (session-typed s)))
-        (for-each
-          (lambda (entry)
-            (let* ((r (slot-rect g (car entry)))
-                   (label (cdr entry))
-                   (tw (text-width-mini label 1))
-                   (w (+ 4 tw))
-                   (x (+ (car r) (exact (floor (/ (- (caddr r) w) 2)))))
-                   (y (- (cadr r) 3))
-                   (prefix? (and (> (string-length typed) 0)
-                                 (<= (string-length typed) (string-length label))
-                                 (string=? typed
-                                           (substring label 0 (string-length typed))))))
-              (color! C-BG)
-              (draw-filled-rect x y w 7)
-              (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-              (text-mini! label (+ x 2) (+ y 1) 1)))
-          (session-labels s))))
+        (define (each-label proc)
+          (for-each
+            (lambda (entry)
+              (let* ((r (slot-rect g (car entry)))
+                     (label (cdr entry))
+                     (tw (text-width-mini label 1))
+                     (w (+ 4 tw))
+                     (x (+ (car r) (exact (floor (/ (- (caddr r) w) 2)))))
+                     (y (- (cadr r) 3))
+                     (prefix? (and (> (string-length typed) 0)
+                                   (<= (string-length typed) (string-length label))
+                                   (string=? typed
+                                             (substring label 0 (string-length typed))))))
+                (proc label x y w prefix?)))
+            (session-labels s)))
+        (color! C-BG)
+        (each-label (lambda (label x y w prefix?) (draw-filled-rect x y w 7)))
+        (each-label (lambda (label x y w prefix?)
+                      (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
+                      (text-mini! label (+ x 2) (+ y 1) 1)))))
 
     ;; --- HUD ------------------------------------------------------------------
     ;;

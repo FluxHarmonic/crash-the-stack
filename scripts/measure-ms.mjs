@@ -135,7 +135,7 @@ for (const q of QUERIES) {
   if (lines.length < WINDOWS + 1) { rows.push({ q, buffer, note: `only ${lines.length} windows in 180 s`, errors }); continue; }
   const kept = lines.slice(1, WINDOWS + 1);
   const mean = (i) => (kept.reduce((a, m) => a + parseFloat(m[i]), 0) / kept.length);
-  rows.push({ q, buffer, ms: mean(1), max: Math.max(...kept.map((m) => parseFloat(m[2]))), step: mean(3), present: mean(4), gc: kept.map((m) => m[5] ? `${m[5]}/${m[6]}/${(parseInt(m[7], 10) / 1048576).toFixed(1)}MB` : "-").join(" "), phases: kept[0][8] ? `sim ${mean(8).toFixed(1)} draw ${mean(9).toFixed(1)} flush ${mean(10).toFixed(1)}` : "", windows: kept.map((m) => `${m[1]}/${m[2]}/${m[3]}/${m[4]}`).join(" "), errors, gl });
+  rows.push({ q, buffer, ms: mean(1), max: Math.max(...kept.map((m) => parseFloat(m[2]))), step: mean(3), present: mean(4), gc: kept.map((m) => m[5] ? `${m[5]}/${m[6]}/${(parseInt(m[7], 10) / 1048576).toFixed(1)}MB` : "-").join(" "), phases: kept[0][8] ? `sim ${mean(8).toFixed(1)} draw ${mean(9).toFixed(1)} (min ${Math.min(...kept.map((m) => parseFloat(m[9]))).toFixed(1)}) flush ${mean(10).toFixed(1)}` : "", windows: kept.map((m) => `${m[1]}/${m[2]}/${m[3]}/${m[4]}`).join(" "), errors, gl });
 }
 console.log(`viewport ${PHONE ? "phone 390x844 dpr 3" : "desktop 1000x760 dpr 2"}; ${WINDOWS} windows of 300 frames after the first; SwiftShader`);
 console.log("config                     buffer      MS    MAX   STEP  PRESENT  windows (ms/max/step/present)");
