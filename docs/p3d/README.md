@@ -83,3 +83,18 @@ Ruled and built: the hero ramp colors and the slant, the backdrop
 - **D39.** `title-menu-d39.png`: the tower shows under the logo; the items
   are plain text over a one-cell C-BG shadow, the selected one in the
   ramp with a block cursor at its left blinking with the reveal's cursor.
+
+## The second read (2026-09-19, later)
+
+- **Slant**: it snapped to the character grid before (a whole-cell stair,
+  one cell per two rows). Now row r of a letter line sits slant × (5 − r)
+  cells right, resolved to whole pixels; default 0.25 cells a row (half
+  the old angle), `?slant=N` to compare (`0.5` is the old angle, smooth;
+  `0` upright).
+- **Backdrop**: `backdrop-hero-o8x8-a` (the label sits below its image on
+  the sheet; the pick was the one above the `-b` label).
+- **D40, the boot**: textures and the audio are readied before the menu
+  is live; the reveal covers it, and if the steps outlast the reveal the
+  cursor blinks on `CONNECTING n/6`. Nothing pops in after the menu is
+  live. `title-menu-d40.png` (web), `title-native-d40.png` (the release
+  under Xvfb).
