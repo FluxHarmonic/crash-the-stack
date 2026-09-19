@@ -20,6 +20,7 @@
           (crash palette)
           (crash title)
           (crash title logo)
+          (crash title alphabet)
           (crash menu)
           (crash look)
           (crash hud))
@@ -85,39 +86,108 @@
             (rows (+ y 1))))))
 
 
-    ;; --- the menu's items (ruling D39) ---------------------------------------------
-    ;;
-    ;; Plain text in the 5x7 font at scale 3, no box (David: "we can't
-    ;; really see the tower behind the menu"): the selected item in the
-    ;; logo's hero ramp (its glyph rows cyan over magenta), the others in
-    ;; C-LABEL-LIT, every one over a one-cell C-BG shadow for contrast on
-    ;; the backdrop, and a block cursor at the selected item's left,
-    ;; blinking with the reveal's cursor. Centered in the rect the menu
-    ;; keeps as the tap target.
-    (define ITEM-SCALE 3)
-    (define RAMP-ROWS 4)   ; glyph rows 0..3 in the top color, 4..6 in the bottom
 
+    ;; --- text in the block alphabet (ruling D41) ------------------------------------
+    ;;
+    ;; The menu's items are set in the logo's own alphabet at ITEM-CELL
+    ;; (4 px: half the logo's cell, a quarter-cell dot of 1 px, which is
+    ;; two or three device pixels on the phone), the way a DOOM menu reuses
+    ;; its title font. Letters are 7 cells wide with one between, a space
+    ;; three; a one-cell ▒ shadow in the static dark is cast into every
+    ;; empty cell down-right of a lit one, then the letters go over it.
+    ;; A ramp item takes the logo's hero ramp row by row (A A ▓ ▒ ░ B, the
+    ;; spec's `rows`); a flat item is one color.
+    (define ITEM-CELL 4)
+    (define ITEM-RAMP (list 'a 'a #\3 #\2 #\1 'b))
+
+    ;; the alphabet as an alist of one-char strings to their six rows
+    (define GLYPHS-BY-CHAR
+      (map (lambda (g) (cons (string-ref (car g) 0) (cdr g)))
+           (vector->list ALPHABET)))
+
+    (define (block-glyph ch)
+      (let ((entry (assv (char-upcase ch) GLYPHS-BY-CHAR)))
+        (and entry (cdr entry))))
+
+    ;; the width of a string in cells: letters 7 + 1, a space 3 + 1, no gap after the last
+    (define (block-text-width text)
+      (let loop ((cs (string->list text)) (w 0))
+        (if (null? cs)
+            (max 0 (- w 1))
+            (loop (cdr cs) (+ w (if (char=? (car cs) #\space) 4 8))))))
+
+    ;; the cell of a glyph at (r, c), space outside the box
+    (define (glyph-code rows r c)
+      (if (or (< r 0) (>= r ALPHABET-H) (< c 0) (>= c ALPHABET-W))
+          #\space
+          (string-ref (list-ref rows r) c)))
+
+    ;; Draw text with its top-left at (x, y) in cells of cell px; style
+    ;; 'ramp (the hero ramp) or 'flat (C-LABEL-LIT).
+    (define (draw-block-text text x y cell style)
+      (let loop ((cs (string->list text)) (x x))
+        (unless (null? cs)
+          (let ((rows (and (not (char=? (car cs) #\space)) (block-glyph (car cs)))))
+            (when rows
+              ;; the shadow, into empty cells down-right of lit ones
+              (color! C-STATIC-B)
+              (let sr ((r 0))
+                (when (< r ALPHABET-H)
+                  (let sc ((c 0))
+                    (when (< c ALPHABET-W)
+                      (when (and (not (char=? (glyph-code rows r c) #\space))
+                                 (char=? (glyph-code rows (+ r 1) (+ c 1)) #\space))
+                        (draw-block #\2 (+ x (* (+ c 1) cell)) (+ y (* (+ r 1) cell)) cell))
+                      (sc (+ c 1))))
+                  (sr (+ r 1))))
+              ;; the letter
+              (let lr ((r 0))
+                (when (< r ALPHABET-H)
+                  (let ((token (if (eq? style 'ramp) (list-ref ITEM-RAMP r) 'flat)))
+                    (let lc ((c 0))
+                      (when (< c ALPHABET-W)
+                        (let ((code (glyph-code rows r c))
+                              (px (+ x (* c cell)))
+                              (py (+ y (* r cell))))
+                          (unless (char=? code #\space)
+                            (cond ((eq? token 'flat)
+                                   (color! C-LABEL-LIT)
+                                   (draw-block code px py cell))
+                                  ((char=? code #\#)
+                                   (cond ((eq? token 'a) (color! C-SELECTED) (draw-block #\# px py cell))
+                                         ((eq? token 'b) (color! C-HIGHLIGHT) (draw-block #\# px py cell))
+                                         (else (color! C-HIGHLIGHT)
+                                               (draw-block #\# px py cell)
+                                               (color! C-SELECTED)
+                                               (draw-block token px py cell))))
+                                  (else
+                                   ;; a half block takes the row's ink: A over ▓ and ▒, B under
+                                   (color! (if (or (eq? token 'a) (eqv? token #\3) (eqv? token #\2)) C-SELECTED C-HIGHLIGHT))
+                                   (draw-block code px py cell)))))
+                        (lc (+ c 1)))))
+                  (lr (+ r 1))))))
+          (loop (cdr cs) (+ x (* cell (if (char=? (car cs) #\space) 4 8)))))))
+
+    ;; --- the menu's items (rulings D39 and D41) -------------------------------
+    ;;
+    ;; Set in the block alphabet at ITEM-CELL, no box (David: "we can't
+    ;; really see the tower behind the menu"): the selected item in the
+    ;; logo's hero ramp, the others flat C-LABEL-LIT, every one with the
+    ;; one-cell shadow, and a block cursor at the selected item's left,
+    ;; blinking with the reveal's cursor. Centered in the rect the menu
+    ;; keeps as the tap target. The 5x7 font at 2x with a shadow was the
+    ;; fallback if the block letters did not read at item size; they do.
     (define (draw-menu-item label rect lit? frames)
       (let* ((x (car rect)) (y (cadr rect)) (w (caddr rect)) (h (cadddr rect))
-             (tw (text-width label ITEM-SCALE))
+             (tw (* ITEM-CELL (block-text-width label)))
+             (th (* ITEM-CELL ALPHABET-H))
              (tx (+ x (quotient (- w tw) 2)))
-             (ty (+ y (quotient (- h (* GLYPH-H ITEM-SCALE)) 2))))
-        (color! C-BG)
-        (draw-text label (+ tx ITEM-SCALE) (+ ty ITEM-SCALE) ITEM-SCALE)
-        (if lit?
-            (begin
-              (color! C-SELECTED)
-              (draw-text-rows label tx ty ITEM-SCALE 0 RAMP-ROWS)
-              (color! C-HIGHLIGHT)
-              (draw-text-rows label tx ty ITEM-SCALE RAMP-ROWS GLYPH-H)
-              (when (cursor-on? frames)
-                (color! C-SELECTED)
-                (draw-filled-rect (- tx (* 3 ITEM-SCALE) (* GLYPH-W ITEM-SCALE)) ty
-                                  (* GLYPH-W ITEM-SCALE) (* GLYPH-H ITEM-SCALE))))
-            (begin
-              (color! C-LABEL-LIT)
-              (draw-text label tx ty ITEM-SCALE)))))
-
+             (ty (+ y (quotient (- h th ITEM-CELL) 2))))
+        (draw-block-text label tx ty ITEM-CELL (if lit? 'ramp 'flat))
+        (when (and lit? (cursor-on? frames))
+          (color! C-SELECTED)
+          (draw-filled-rect (- tx (* 3 ITEM-CELL) (* ALPHABET-W ITEM-CELL)) ty
+                            (* ALPHABET-W ITEM-CELL) th))))
 
     ;; The menu's items, or the boot's CONNECTING line (ruling D40): the
     ;; items only once the menu is live (the reveal settled, every boot
@@ -148,23 +218,6 @@
         ((hud) (string-append "HUD: " (layout-label (menu-hud m))))
         (else (menu-label id))))
 
-    ;; Rows r0..r1 (exclusive) of every glyph of a string, in the current
-    ;; color: the two-tone split at text size.
-    (define (draw-text-rows text x y scale r0 r1)
-      (let ((advance (* scale (+ GLYPH-W 1))))
-        (let loop ((chars (string->list text)) (x x))
-          (unless (null? chars)
-            (let ((rows (glyph-rows-of (car chars))))
-              (when rows
-                (draw-rows (list-tail-take rows r0 r1) x (+ y (* r0 scale)) scale GLYPH-W)))
-            (loop (cdr chars) (+ x advance))))))
-
-    ;; rows r0..r1 of a list
-    (define (list-tail-take rows r0 r1)
-      (let loop ((rows rows) (i 0) (acc '()))
-        (cond ((or (null? rows) (= i r1)) (reverse acc))
-              ((< i r0) (loop (cdr rows) (+ i 1) acc))
-              (else (loop (cdr rows) (+ i 1) (cons (car rows) acc))))))
 
     ;; The title screen's top: the backdrop, when the shell has it loaded,
     ;; then the logo on its grid. t may be #f (a menu built without one).

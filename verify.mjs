@@ -278,7 +278,7 @@ await send("Page.addScriptToEvaluateOnNewDocument", { source: `(function () {
     try {
       if (dest && dest.context && dest === dest.context.destination) {
         var an = dest.context.createAnalyser();
-        an.fftSize = 2048;
+        an.fftSize = 32768;   // 680 ms at 48 kHz: a 160 ms cue cannot fall between two 50 ms reads under load (peaks of 0.02-0.03 did, three runs in ten)
         connect.call(this, an);
         tap.analysers.push(an);
         tap.nodes.push(this.constructor.name);
@@ -777,7 +777,7 @@ let iceLock = null;
             await sleep(50);
           }
           await evalJS("window.__crashUpdates.app.dispatch('ambient', 'off')");
-          await sleep(400);
+          await sleep(1000);   // past the analyser's 680 ms window, so the ambient's tail is out of the before-read
           let before = 0;
           for (let i = 0; i < 4; i++) { before = Math.max(before, await evalJS(rms)); await sleep(50); }
           mark = consoleLines.length;
@@ -915,6 +915,11 @@ let iceLock = null;
     const rows = consoleLines.slice(settled.index).filter((l) => /^crash: title row /.test(l)).map((l) => l.slice("crash: title row ".length));
     return { head: head.m, settled: settled.m, ticks, rows };
   };
+  // the backdrop held off for this leg (the texture step gives it up after its
+  // tries): the dots with no bg then show the bars, never a backdrop pixel
+  // that happens to be the fg color
+  slowPaths["/assets/title/backdrop.png"] = 120000;
+  await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   let a = null;
   if (!detail) {
     a = await bootTitle(TITLE_SEED);
@@ -947,33 +952,55 @@ let iceLock = null;
       const scale = Math.min(c.width / ${VW}, c.height / ${VH});
       const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
       const rows = ${JSON.stringify(moduleRows)}, roles = ${JSON.stringify(rolesM)}, hexes = ${JSON.stringify(hexes)};
-      const shear = ${parseInt(a.settled[3], 10) / 1000}, lineTops = ${JSON.stringify(lineTops)};
+      const shear = ${parseInt(a.settled[3], 10) / 1000}, lineTops = ${JSON.stringify(lineTops)}, shadowRole = roles.length === 3 ? "c" : null;
       const lineRowOf = ${lineRowOf.toString()}, stairOf = ${stairOf.toString()};
       const ink = ${ink.toString()};
-      let dots = 0, wrong = 0, sample = null;
+      let dots = 0, wrong = 0, sample = null, negatives = 0, negTotal = 0;
       for (let y = 0; y < rows.length; y++) for (let x = 0; x < rows[y][0].length; x++) {
         const gl = rows[y][0][x]; if (gl === " ") continue;
         const fg = rows[y][1][x], bg = rows[y][2][x];
         for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) {
-          const role = ink(gl, dx, dy) ? fg : bg; if (role === "-") continue;
-          const want = hexes[roles[role.charCodeAt(0) - 97]]; if (!want) continue;
+          // an ink dot must be the fg; a dot with no bg must NOT be the fg (a draw
+          // that painted every code as a full block passed the ink-only read: the
+          // review); the backdrop is held off this boot so the ground is the bars
+          const isInk = ink(gl, dx, dy); const role = isInk ? fg : bg;
+          // (a shadow cell's fg is a bar tone, and the bars are what shows through: no negative read there)
+          const negative = role === "-"; if (negative && (fg === "-" || fg === shadowRole)) continue;
+          const want = hexes[roles[(negative ? fg : role).charCodeAt(0) - 97]]; if (!want) continue;
           const stair = stairOf(lineRowOf(y));
           // Math.round is half-up, Sigil's round half-even: they agree except at an exact .5, which the default slant never makes
           const vx = ${TX} + x * ${CELL} + Math.round(stair * shear * ${CELL}) + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
           const px = Math.floor(ox + vx * scale), py = Math.floor(oy + vy * scale);
           const i = (py * c.width + px) * 4; dots++;
-          if (Math.abs(d[i] - want[0]) > 12 || Math.abs(d[i + 1] - want[1]) > 12 || Math.abs(d[i + 2] - want[2]) > 12) { wrong++; if (!sample) sample = [x, y, gl, dx, dy, [d[i], d[i + 1], d[i + 2]], want]; }
+          const near = Math.abs(d[i] - want[0]) <= 12 && Math.abs(d[i + 1] - want[1]) <= 12 && Math.abs(d[i + 2] - want[2]) <= 12;
+          if (negative ? near : !near) { wrong++; if (negative) negatives++; if (!sample) sample = [x, y, gl, dx, dy, [d[i], d[i + 1], d[i + 2]], want, negative ? "must not be fg" : "want"]; }
+          if (negative) negTotal++;
         }
       }
-      resolve({ dots, wrong, sample, w: c.width, h: c.height });
+      resolve({ dots, wrong, sample, negTotal, w: c.width, h: c.height });
     }))`);
     if (pix.dots < 1000) detail = `only ${pix.dots} dots sampled`;
-    else if (pix.wrong > 0) detail = `${pix.wrong} of ${pix.dots} dots off: first at cell ${pix.sample[0]},${pix.sample[1]} glyph ${pix.sample[2]} dot ${pix.sample[3]},${pix.sample[4]} read ${pix.sample[5]} want ${pix.sample[6]}`;
+    else if (pix.negTotal < 500) detail = `only ${pix.negTotal} no-bg dots sampled`;
+    else if (pix.wrong > 0) detail = `${pix.wrong} of ${pix.dots} dots off: first at cell ${pix.sample[0]},${pix.sample[1]} glyph ${pix.sample[2]} dot ${pix.sample[3]},${pix.sample[4]} read ${pix.sample[5]} ${pix.sample[7]} ${pix.sample[6]}`;
   }
-  // still: the settled digest does not change
+  // still: the settled canvas does not change over 300 ms (two reads of the
+  // logo band, every 4th pixel, compared; the tick-line check alone was
+  // tautological, the game prints none after settle: the review)
   if (!detail) {
-    const from = consoleLines.length; await sleep(300);
-    if (consoleLines.slice(from).some((l) => /^crash: title tick /.test(l))) detail = "tick lines after settle: the title is not still";
+    const readBand = () => evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+      const c = document.getElementById("stage");
+      const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+      const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+      const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+      const oy = (c.height - ${VH} * scale) / 2;
+      const y0 = Math.floor(oy + ${TY} * scale), y1 = Math.floor(oy + (${TY} + 14 * ${CELL}) * scale);
+      const d = g.getImageData(0, y0, c.width, y1 - y0).data;
+      let h = 7; for (let i = 0; i < d.length; i += 16) h = (h * 31 + d[i] + d[i + 1] * 3 + d[i + 2] * 7) % 1000000007;
+      resolve(h);
+    }))`);
+    const h1 = await readBand(); await sleep(300); const h2 = await readBand();
+    if (h1 !== h2) detail = `the settled logo band changed between two reads 300 ms apart (${h1} vs ${h2}): not still`;
+    else if (consoleLines.slice(0).filter((l) => /^crash: title tick /.test(l)).length === 0) detail = "no tick lines at all";
   }
   // reproduces: the same seed, the same digests; another seed, different ones
   let b = null, c = null;
@@ -1024,6 +1051,7 @@ let iceLock = null;
       else if (chose) detail = `the skipping tap also chose: ${chose.m[0]}`;
     }
   }
+  delete slowPaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips`);
 }
@@ -1118,11 +1146,14 @@ let iceLock = null;
 const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
 // A texture fetch the page's own reload aborts is logged by the gles3
 // bridge as console.error ("image fetch failed: TypeError: Failed to
-// fetch"); the game asks again on the next boot (P3d, D40: fetches start
+// fetch") and by the browser as "Failed to load resource: net::ERR_FAILED"
+// (the title leg holds the backdrop 120 s and then navigates away from it;
+// the game asks again on the next boot; P3d, D40: fetches start
 // as soon as the worker is ready, so a reload the arm forces mid-boot
 // can cut one). Counted and shown, not failed.
-const abortedFetches = consoleErrors.filter((l) => /image fetch failed: TypeError: Failed to fetch/.test(l));
-const realErrors = consoleErrors.filter((l) => !/image fetch failed: TypeError: Failed to fetch/.test(l));
+const ABORTED = /image fetch failed: TypeError: Failed to fetch|Failed to load resource: net::ERR_FAILED/;
+const abortedFetches = consoleErrors.filter((l) => ABORTED.test(l));
+const realErrors = consoleErrors.filter((l) => !ABORTED.test(l));
 // the three lines before the first error are the context a reader needs
 const firstErrorAt = consoleLines.findIndex((l) => /^Error: /.test(l));
 if (firstErrorAt > 0) console.log(`  before the first error: ${JSON.stringify(consoleLines.slice(Math.max(0, firstErrorAt - 3), firstErrorAt))}`);

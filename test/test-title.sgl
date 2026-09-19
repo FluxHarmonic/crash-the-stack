@@ -22,7 +22,9 @@
         (crash menu)
         (crash title)
         (crash title draw)
-        (crash title logo))
+        (crash title logo)
+        (crash title alphabet)
+        (rename (crash font) (BLOCK-CODES FONT-BLOCK-CODES)))
 
 (define VW 640)
 (define VH 400)
@@ -53,6 +55,9 @@
       (assert-true (string-contains? log "80x14 cells"))
       (assert-equal (read-file-string (string-append dir "/logo.sgl")) (read-file-string "src/crash/title/logo.sgl"))
       (assert-equal (read-file-bytes (string-append dir "/logo.png")) (read-file-bytes "assets/title/logo.png"))
+      ;; and the alphabet module (D41), the same way
+      (assert-true (string-contains? (process-output->string "scripts/art/ansi" "--alphabet" "blocky" "--out-dir" dir) "glyphs"))
+      (assert-equal (read-file-string (string-append dir "/alphabet.sgl")) (read-file-string "src/crash/title/alphabet.sgl"))
       (process-run "rm" "-rf" dir)))
   (test "the grid's shape holds"
     (assert-true (logo-check))
@@ -98,7 +103,11 @@
                       (assert-true (<= (glitch-to g) (title-settle-tick t)))
                       (assert-true (< (glitch-from g) (glitch-to g))))
                     (title-plan t))
-          (assert-true (>= (length (title-plan t)) 3)))
+          (assert-true (>= (length (title-plan t)) 3))
+          ;; and one tick before settle, still running, no glitch is live: the
+          ;; windows end on their own, not by the done flag (the review)
+          (assert-equal '() (title-live-glitches (title t tick: (- (title-settle-tick t) 1) done: #f)))
+          (assert-equal '() (title-live-glitches (title t tick: (title-slam-tick t) done: #f))))
         (loop (+ seed 1)))))
   (test "the same seed gives the same digest sequence; a different seed does not"
     (let ((a (cdr (run-to-settle 11)))
@@ -296,3 +305,27 @@
     (boot-reset!)
     (assert-false (menu-live? (menu-new '(stack cards) 'stack 9)))
     (assert-true (menu-live? (menu-new '(stack cards) 'stack)))))
+
+(test-group "the alphabet module (D41)"
+  (test "every glyph is a one-character name and six rows of seven codes; the menu's labels are all set"
+    (assert-true (vector? ALPHABET))
+    (assert-true (>= (vector-length ALPHABET) 38))
+    (for-each (lambda (g)
+                (assert-equal 1 (string-length (car g)))
+                (assert-equal ALPHABET-H (length (cdr g)))
+                (for-each (lambda (row)
+                            (assert-equal ALPHABET-W (string-length row))
+                            (assert-true (every (lambda (c) (memv c (cons #\space BLOCK-CODES))) (string->list row))))
+                          (cdr g)))
+              (vector->list ALPHABET))
+    (let ((names (map car (vector->list ALPHABET))))
+      (for-each (lambda (label)
+                  (for-each (lambda (c)
+                              (unless (char=? c #\space)
+                                (assert-true (and (member (string c) names) #t))))
+                            (string->list label)))
+                (list "CONTINUE" "STACK" "DEFRAG" "LOOK: FACES A" "HUD: ZONES" "UPDATE" "CONNECTING 0/6")))))
+
+(test-group "the two BLOCK-CODES lists agree (the font draws what the title plans)"
+  (test "identical"
+    (assert-equal BLOCK-CODES FONT-BLOCK-CODES)))
