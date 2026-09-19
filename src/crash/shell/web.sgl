@@ -168,6 +168,9 @@
     (define *stack* #f)      ; ?stack: straight to the stack
     (define *seed* #f)       ; ?seed=N: the raw seed a fresh deal or board starts from; none given: the tables' own first ones
     (define *clock* #f)      ; the page's clock at boot (ms): the title reveal's seed when ?seed is not given (P3d)
+    (define *sw-ready* #f)   ; the page said its service worker is active (or there is none): fetches are safe (P3d, D40)
+    (define *ambient-ready* #f) ; the ambient landed, or the page gave it up: the boot's audio step (D40)
+    (define *frame-dt* 0.0)  ; this frame's wall dt, for the boot's texture steps
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
@@ -431,8 +434,14 @@
     (define (audio-done! payload)
       (let ((bytes (apply bytevector-append (reverse *ambient-chunks*))))
         (set! *ambient-chunks* '())
-        (audio-set-ambient! bytes AMBIENT-RATE)
-        (say "ambient" (quotient (bytevector-length bytes) 2))
+        (set! *ambient-ready* #t)
+        ;; no chunks: the page gave the ambient up (a failed fetch); sound
+        ;; effects alone, and the boot's audio step is done
+        (if (> (bytevector-length bytes) 0)
+            (begin
+              (audio-set-ambient! bytes AMBIENT-RATE)
+              (say "ambient" (quotient (bytevector-length bytes) 2)))
+            (say "ambient" 0))
         0))
 
     ;; A user gesture (a pointer down, a key, the page's pointerup and
@@ -527,7 +536,7 @@
              (ensure-fetch! dt))
             ((not want) #f)
             ((assoc want *textures*) #f)
-            ((< *since-boot* TEXTURE-BOOT-DELAY) #f)
+            ((and (not *sw-ready*) (< *since-boot* TEXTURE-BOOT-DELAY)) #f)   ; D40: the page says when the worker is active
             (else (fetch-texture! want))))
 
     ;; The fetch in flight: decode it when it lands, retry or give it up.
@@ -900,13 +909,47 @@
                                  (cons (+ (car r) (half (caddr r)))
                                        (cons (car ids) acc)))))))))
 
+    ;; --- the boot (ruling D40) --------------------------------------------------
+    ;;
+    ;; The steps the menu and the first board need, registered at boot in
+    ;; the order they run: every texture a look or the title names (each
+    ;; through the same on-demand fetch, one in flight at a time, so the
+    ;; steps run one after another), then the audio (the context opened
+    ;; at boot; the ambient the page fetches, or gives up). Each is a
+    ;; thunk that answers done; (crash title) runs them one frame at a
+    ;; time from the menu tick and the menu is live when the last is done.
+    ;;   crash: boot step NAME done
+    ;;   crash: boot done N                   all N steps done (or forced by the timeout)
+    (define (boot-steps!)
+      (boot-reset!)
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list BACKDROP-PATH PORTRAITS-PATH)))
+                     (if (null? names)
+                         (reverse acc)
+                         (let ((p (look-texture (look-ref (car names)))))
+                           (loop (cdr names) (if (and p (not (member p acc))) (cons p acc) acc)))))))
+        (for-each (lambda (path)
+                    (boot-add-step! (string->symbol path)
+                                    (lambda ()
+                                      (ensure-texture! *frame-dt* path)
+                                      (and (assoc path *textures*) #t))))
+                  paths))
+      ;; P3c's glyph atlas (its present! call stays as the fallback)
+      (boot-add-step! 'atlas (lambda () (atlas-ensure!) (atlas-ready?)))
+      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) *ambient-ready*))))
+
+    (define (boot-tick! dt)
+      (set! *frame-dt* dt)
+      (unless (boot-done?)
+        (for-each (lambda (name) (say "boot" "step" name "done")) (boot-run!))
+        (when (boot-done?) (say "boot" "done" (cdr (boot-progress))))))
+
     ;; The title reveal's trace (P3d), for the arm: its seed and settle
     ;; tick once, a digest of the shown frame every tick while it runs,
     ;; and at settle the digest and the grid row by row (glyph codes, fg
     ;; roles, bg roles; the arm holds them to the data module).
     ;;   crash: title seed N baud B glitch L settle T cells C
     ;;   crash: title tick T digest D
-    ;;   crash: title settled T digest D shear S   (S: cells, the slant's stair per row)
+    ;;   crash: title settled T digest D shear S   (S: the slant in thousandths of a cell per row)
     ;;   crash: title row Y GLYPHS FG BG
     (define (say-title before after)
       (let ((t0 (menu-title before))
@@ -918,7 +961,7 @@
           (when (title-running? t1)
             (say "title" "tick" (title-tick t1) "digest" (title-frame-digest t1)))
           (when (and (title-running? t0) (title-settled? t1))
-            (say "title" "settled" (title-tick t1) "digest" (title-frame-digest t1) "shear" (exact (round (title-shear t1))))
+            (say "title" "settled" (title-tick t1) "digest" (title-frame-digest t1) "shear" (exact (round (* 1000 (title-shear t1)))))
             (let loop ((y 0))
               (when (< y LOGO-H)
                 (let ((row (vector-ref LOGO-ROWS y)))
@@ -950,6 +993,7 @@
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
+      (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
       (when *ms* (count-frame! dt))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
@@ -1155,6 +1199,7 @@
       (say "atlas" (if (atlas-on?) "on" "off"))
       (set! *booted* #t)
       (set! *audio-ready* (audio-open!))
+      (boot-steps!)   ; D40: what the menu waits for
       (say "audio" (if *audio-ready* "open" "closed"))
       ;; the quoted literals' shapes (see (crash shell)): one line the arm asserts
       (let ((bad (literal-check)))
@@ -1231,6 +1276,8 @@
             ((string=? type "baud") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (title-baud! n))))))
             ;; ?glitch=N: the title reveal's glitch level, 0..3 (P3d)
             ((string=? type "glitch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (title-glitch! n))))))
+            ;; ?slant=N: the logo's slant at rest, cells per row, 0 upright (P3d)
+            ((string=? type "slant") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n)) (title-slant! (* 1.0 n)))))))
             ;; the page's clock at boot: the title reveal's seed when none is asked for
             ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n))))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
@@ -1238,4 +1285,6 @@
             ;; the ambient off (the browser arm mutes it to hear a cue alone)
             ((string=? type "ambient") (when (string=? payload "off") (audio-set-ambient! #f AMBIENT-RATE)) 0)
             ((string=? type "audio-done") (audio-done! payload))
+            ;; the page's service worker is active (or absent): fetches are safe (D40)
+            ((string=? type "sw") (param! (lambda () (set! *sw-ready* #t))))
             (else 0)))))

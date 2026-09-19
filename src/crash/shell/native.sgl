@@ -427,12 +427,31 @@
                 (begin (display "ambient not found: ") (display AMBIENT-PATH) (newline))))
           (begin (display "audio: no device; playing silent") (newline))))
 
+    ;; The boot's steps (ruling D40): every texture a look or the title
+    ;; names, loaded from disk (one step each, done in the frame it runs),
+    ;; then P3c's glyph atlas, then the audio (opened above, the ambient read from its file). The
+    ;; menu is live once (crash title) has run them all.
+    (define (boot-steps!)
+      (boot-reset!)
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list BACKDROP-PATH PORTRAITS-PATH)))
+                     (if (null? names)
+                         (reverse acc)
+                         (let ((p (look-texture (look-ref (car names)))))
+                           (loop (cdr names) (if (and p (not (member p acc))) (cons p acc) acc)))))))
+        (for-each (lambda (path)
+                    (boot-add-step! (string->symbol path) (lambda () (texture-path path) #t)))
+                  paths))
+      ;; P3c's glyph atlas (its present! call stays as the fallback)
+      (boot-add-step! 'atlas (lambda () (atlas-ensure!) (atlas-ready?)))
+      (boot-add-step! 'audio (lambda () #t)))
+
     (define (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
         (set-letterbox-color 0.0 0.0 0.0)
         (open-audio! mute?)
+        (boot-steps!)   ; D40: what the menu waits for
         (let* ((lay (turtle-layout))
                (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
@@ -449,6 +468,7 @@
             (let* ((dt (wait-frame))
                    (dt (begin (set! *frame-ms* (* 1000.0 dt)) dt))
                    (f (poll-frame))
+                   (_ (boot-run!))   ; the boot's steps, one frame at a time, whatever the screen (D40)
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
                    ;; Escape on the menu quits
