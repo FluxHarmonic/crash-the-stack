@@ -64,13 +64,15 @@
     ;; the PWR red is the palette's hot red, C-TRACE-HOT (David,
     ;; 2026-09-18: C-SUIT-1's tone "doesn't feel right on charcoal"; keep
     ;; it hot), and C-SUIT-1 stays the light face's.
+    ;; A cond on the suit, not a case: every case clause the native codegen
+    ;; tests allocates its datum list (96 bytes a tile a frame, 2026-09-20).
     (define (suit-color look face)
-      (case (face-suit face)
-        ((0) C-SUIT-0)
-        ((1) (if (eq? (look-face look) 'light) C-SUIT-1 C-TRACE-HOT))
-        ((2) C-SUIT-2)
-        ((3) C-SUIT-3)
-        (else (if (eq? (look-daemon look) 'orange) C-HOT C-DAEMON))))
+      (let ((suit (face-suit face)))
+        (cond ((eqv? suit 0) C-SUIT-0)
+              ((eqv? suit 1) (if (eq? (look-face look) 'light) C-SUIT-1 C-TRACE-HOT))
+              ((eqv? suit 2) C-SUIT-2)
+              ((eqv? suit 3) C-SUIT-3)
+              (else (if (eq? (look-daemon look) 'orange) C-HOT C-DAEMON)))))
 
     ;; The tile face in the look's color: charcoal (ruled) or the P0 light
     ;; face; and its rim, which on charcoal is the mid gray of the side,
@@ -286,8 +288,8 @@
     (define (draw-tile-cell x y cx cw ch)
       (set-color 1.0 1.0 1.0 1.0)
       (draw-texture-region *tiles-tex*
-                           (inexact x) (inexact y) (inexact cw) (inexact ch)
-                           (inexact cx) (inexact *tiles-h*) (inexact cw) (inexact (- ch))))
+                           x y cw ch
+                           cx *tiles-h* cw (- ch)))
 
     (define (draw-sides-rects g x y w h)
       (let ((side (geometry-side g)))
@@ -460,6 +462,58 @@
             (vector-set! *layer-count* l (+ 1 (vector-ref *layer-count* l))))
           (place (+ i 1)))))
 
+    ;; The fill, a procedure of its own with the tile's rect computed in
+    ;; place: as a named let over slot-rect and viewed-rect it allocated
+    ;; 192 bytes a tile a frame (2026-09-20: the loop's closure at every
+    ;; entry, the rect's list, fx-tile-view's loop), 28 KB a frame.
+    (define (fill-tiles! g b x lay selected ids n)
+      (cond ((null? ids) n)
+            ((tile-present? b (car ids))
+             (let* ((id (car ids))
+                    (view (fx-tile-view x id))
+                    (o (* n TILE-FIELDS))
+                    (x0 (slot-x g id))
+                    (y0 (slot-y g id))
+                    (w (geometry-tile-w g))
+                    (h (geometry-tile-h g)))
+               (vector-set! *tile-fields* o id)
+               (vector-set! *tile-fields* (+ o 1) (or (and view (list-ref view 4)) (tile-face b id)))
+               (if view
+                   ;; viewed-rect: moved by (dx dy), scaled about the centre by (sx sy)
+                   (let ((w2 (* w (caddr view)))
+                         (h2 (* h (cadddr view))))
+                     (vector-set! *tile-fields* (+ o 2) (+ x0 (car view) (/ (- w w2) 2.0)))
+                     (vector-set! *tile-fields* (+ o 3) (+ y0 (cadr view) (/ (- h h2) 2.0)))
+                     (vector-set! *tile-fields* (+ o 4) w2)
+                     (vector-set! *tile-fields* (+ o 5) h2))
+                   (begin
+                     (vector-set! *tile-fields* (+ o 2) x0)
+                     (vector-set! *tile-fields* (+ o 3) y0)
+                     (vector-set! *tile-fields* (+ o 4) w)
+                     (vector-set! *tile-fields* (+ o 5) h)))
+               (vector-set! *tile-fields* (+ o 6) (eqv? selected id))
+               (vector-set! *tile-layer* n (slot-layer (layout-slot lay id)))
+               (fill-tiles! g b x lay selected (cdr ids) (+ n 1))))
+            (else (fill-tiles! g b x lay selected (cdr ids) n))))
+
+    ;; Pass proc over the tiles of a layer, in draw order.
+    (define (walk-layer! k end proc)
+      (when (< k end)
+        (let ((o (* (vector-ref *tile-order* k) TILE-FIELDS)))
+          (proc (vector-ref *tile-fields* o)
+                (vector-ref *tile-fields* (+ o 1))
+                (vector-ref *tile-fields* (+ o 2))
+                (vector-ref *tile-fields* (+ o 3))
+                (vector-ref *tile-fields* (+ o 4))
+                (vector-ref *tile-fields* (+ o 5))
+                (vector-ref *tile-fields* (+ o 6))))
+        (walk-layer! (+ k 1) end proc)))
+
+    (define (each-on-layer layer proc)
+      (walk-layer! (vector-ref *layer-start* layer)
+                   (+ (vector-ref *layer-start* layer) (vector-ref *layer-count* layer))
+                   proc))
+
     (define (draw-tiles s g tex x)
       (let* ((b (session-board s))
              (lay (board-layout b))
@@ -481,68 +535,36 @@
              ;; counting sort by layer, so the four passes a layer takes
              ;; walk an index range instead of re-reading the layout and
              ;; the effects (20 walks of the draw order a frame before)
-             (n (let ((slots (length (geometry-draw-order g))))
-                  (ensure-tile-buffers! slots (layout-layer-count lay))
-                  (let fill ((ids (geometry-draw-order g)) (n 0))
-                    (cond ((null? ids) n)
-                          ((tile-present? b (car ids))
-                           (let* ((id (car ids))
-                                  (view (fx-tile-view x id))
-                                  (r (viewed-rect (slot-rect g id) view))
-                                  (face (or (and view (list-ref view 4))
-                                            (tile-face b id)))
-                                  (o (* n TILE-FIELDS)))
-                             (vector-set! *tile-fields* o id)
-                             (vector-set! *tile-fields* (+ o 1) face)
-                             (vector-set! *tile-fields* (+ o 2) (car r))
-                             (vector-set! *tile-fields* (+ o 3) (cadr r))
-                             (vector-set! *tile-fields* (+ o 4) (caddr r))
-                             (vector-set! *tile-fields* (+ o 5) (cadddr r))
-                             (vector-set! *tile-fields* (+ o 6) (eqv? selected id))
-                             (vector-set! *tile-layer* n (slot-layer (layout-slot lay id)))
-                             (fill (cdr ids) (+ n 1))))
-                          (else (fill (cdr ids) n))))))
-             (each-on-layer
-               (begin
-                 (sort-tiles-by-layer! n (layout-layer-count lay))
-                 (lambda (layer proc)
-                   (let ((end (+ (vector-ref *layer-start* layer) (vector-ref *layer-count* layer))))
-                     (let walk ((k (vector-ref *layer-start* layer)))
-                       (when (< k end)
-                         (let ((o (* (vector-ref *tile-order* k) TILE-FIELDS)))
-                           (proc (vector-ref *tile-fields* o)
-                                 (vector-ref *tile-fields* (+ o 1))
-                                 (vector-ref *tile-fields* (+ o 2))
-                                 (vector-ref *tile-fields* (+ o 3))
-                                 (vector-ref *tile-fields* (+ o 4))
-                                 (vector-ref *tile-fields* (+ o 5))
-                                 (vector-ref *tile-fields* (+ o 6))))
-                         (walk (+ k 1)))))))))
-        (let loop ((layer 0))
-          (when (< layer (layout-layer-count lay))
-            (each-on-layer layer
-                           (lambda (id face x y w h selected?)
-                             (if textured?
-                                 (draw-sides-texture g look b id tex x y w h selected?)
-                                 (draw-sides-primitives g x y w h))))
-            (each-on-layer layer
-                           (lambda (id face x y w h selected?)
-                             (if textured?
-                                 (draw-face-texture g look b id face tex x y w h selected?
-                                                    (and (tile-scrambled? b id) (cons ticks id)))
-                                 (draw-face-body g look face x y w h selected?
-                                                 (lock-state b id now)
-                                                 (not (blocked-right? b id))
-                                                 glow))))
-            (unless textured?
-              (each-on-layer layer
-                             (lambda (id face x y w h selected?)
-                               (draw-face-glyph-part g look face x y w h selected?
-                                                     (and (tile-scrambled? b id) (cons ticks id)))))
-              (each-on-layer layer
-                             (lambda (id face x y w h selected?)
-                               (draw-face-lock x y w h (lock-state b id now)))))
-            (loop (+ layer 1))))
+             (n (begin
+                  (ensure-tile-buffers! (length (geometry-draw-order g)) (layout-layer-count lay))
+                  (fill-tiles! g b x lay selected (geometry-draw-order g) 0)))
+             (sorted (sort-tiles-by-layer! n (layout-layer-count lay))))
+        ;; the four passes' procedures, made once a frame, not once a layer
+        (let ((sides (lambda (id face x y w h selected?)
+                       (if textured?
+                           (draw-sides-texture g look b id tex x y w h selected?)
+                           (draw-sides-primitives g x y w h))))
+              (bodies (lambda (id face x y w h selected?)
+                        (if textured?
+                            (draw-face-texture g look b id face tex x y w h selected?
+                                               (and (tile-scrambled? b id) (cons ticks id)))
+                            (draw-face-body g look face x y w h selected?
+                                            (lock-state b id now)
+                                            (not (blocked-right? b id))
+                                            glow))))
+              (glyphs (lambda (id face x y w h selected?)
+                        (draw-face-glyph-part g look face x y w h selected?
+                                              (and (tile-scrambled? b id) (cons ticks id)))))
+              (locks (lambda (id face x y w h selected?)
+                       (draw-face-lock x y w h (lock-state b id now)))))
+          (let loop ((layer 0))
+            (when (< layer (layout-layer-count lay))
+              (each-on-layer layer sides)
+              (each-on-layer layer bodies)
+              (unless textured?
+                (each-on-layer layer glyphs)
+                (each-on-layer layer locks))
+              (loop (+ layer 1)))))
         (draw-ghosts g look x)
         (draw-particles g look x)
         (when highlight (draw-ring g highlight C-HIGHLIGHT 1.0))
@@ -597,29 +619,48 @@
     ;; readable under it; the letters typed so far are drawn lit.
 
     ;; The labels' boxes first, then their text (one texture each: two
-    ;; batches, not one per label).
+    ;; batches, not one per label), each walk a procedure of its own over
+    ;; the slot's x and y, with the typed prefix compared in place: as a
+    ;; for-each of lambdas over slot-rect and substring it allocated 46 KB
+    ;; a frame (2026-09-20).
     (define (draw-hint-labels s g)
-      (let ((typed (session-typed s)))
-        (define (each-label proc)
-          (for-each
-            (lambda (entry)
-              (let* ((r (slot-rect g (car entry)))
-                     (label (cdr entry))
-                     (tw (text-width-mini label 1))
-                     (w (+ 4 tw))
-                     (x (+ (car r) (exact (floor (/ (- (caddr r) w) 2)))))
-                     (y (- (cadr r) 3))
-                     (prefix? (and (> (string-length typed) 0)
-                                   (<= (string-length typed) (string-length label))
-                                   (string=? typed
-                                             (substring label 0 (string-length typed))))))
-                (proc label x y w prefix?)))
-            (session-labels s)))
+      (let ((typed (session-typed s))
+            (labels (session-labels s)))
         (color! C-BG)
-        (each-label (lambda (label x y w prefix?) (draw-filled-rect x y w 7)))
-        (each-label (lambda (label x y w prefix?)
-                      (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-                      (text-mini! label (+ x 2) (+ y 1) 1)))))
+        (label-boxes! g labels)
+        (label-texts! g labels typed)))
+
+    (define (label-w label) (+ 4 (text-width-mini label 1)))
+    (define (label-x g id w) (+ (slot-x g id) (exact (floor (/ (- (geometry-tile-w g) w) 2)))))
+    (define (label-y g id) (- (slot-y g id) 3))
+
+    (define (label-boxes! g labels)
+      (when (pair? labels)
+        (let* ((entry (car labels))
+               (w (label-w (cdr entry))))
+          (draw-filled-rect (label-x g (car entry) w) (label-y g (car entry)) w 7))
+        (label-boxes! g (cdr labels))))
+
+    (define (label-texts! g labels typed)
+      (when (pair? labels)
+        (let* ((entry (car labels))
+               (label (cdr entry))
+               (w (label-w label)))
+          (color! (if (label-prefix? typed label) C-HIGHLIGHT C-LABEL-LIT))
+          (text-mini! label (+ (label-x g (car entry) w) 2) (+ (label-y g (car entry)) 1) 1))
+        (label-texts! g (cdr labels) typed)))
+
+    ;; typed is a non-empty prefix of label.
+    (define (label-prefix? typed label)
+      (let ((n (string-length typed)))
+        (and (> n 0)
+             (<= n (string-length label))
+             (chars-match? typed label 0 n))))
+
+    (define (chars-match? a b i n)
+      (or (= i n)
+          (and (char=? (string-ref a i) (string-ref b i))
+               (chars-match? a b (+ i 1) n))))
 
     ;; --- HUD ------------------------------------------------------------------
     ;;
@@ -644,22 +685,22 @@
               (else " A STRONG LOCK HOLDS UNTIL IT WEAKENS."))))
 
     (define (phase-line tr b)
-      (case (trace-phase tr)
-        ((counter)
-         (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
-                        ". LINK SEVERS IN " (trace-countdown-string tr) "."
-                        (lock-line b (trace-ticks tr))))
-        ((severed)
-         "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
-        (else #f)))
+      (let ((phase (trace-phase tr)))
+        (cond ((eq? phase 'counter)
+               (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
+                              ". LINK SEVERS IN " (trace-countdown-string tr) "."
+                              (lock-line b (trace-ticks tr))))
+              ((eq? phase 'severed)
+               "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
+              (else #f))))
 
     ;; The phase's color for a line of the bar (bible section 1: the ICE
     ;; speaks in C-ICE; a severed link is C-TRACE-HOT).
     (define (phase-color tr)
-      (case (trace-phase tr)
-        ((counter) C-ICE)
-        ((severed) C-TRACE-HOT)
-        (else C-TEXT-DIM)))
+      (let ((phase (trace-phase tr)))
+        (cond ((eq? phase 'counter) C-ICE)
+              ((eq? phase 'severed) C-TRACE-HOT)
+              (else C-TEXT-DIM))))
 
     ;; --- the tool stack (ruling D33) ------------------------------------------------
 
@@ -667,6 +708,13 @@
     (define (icon-rows name)
       (let ((entry (assq name ICONS)))
         (if entry (cdr entry) (cdr (car ICONS)))))
+
+    ;; The icon through the atlas (one region), or the rect path with
+    ;; ?atlas=off: the two bar buttons' icons were 2.6 KB a frame each
+    ;; through draw-rows (2026-09-20).
+    (define (icon! name x y scale)
+      (unless (and (atlas-on?) (atlas-icon name x y scale))
+        (draw-rows (icon-rows name) x y scale ICON-W)))
 
     ;; A 24x24 bar button: the icon at scale 1 over a mini key name, lit
     ;; or not.
@@ -683,7 +731,7 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! (if lit? C-BG C-TEXT))
-        (draw-rows (icon-rows icon) (+ x 6) (+ y 2) 1 ICON-W)
+        (icon! icon (+ x 6) (+ y 2) 1)
         (color! (if lit? C-BG C-TEXT-DIM))
         (text-mini! key (+ x (quotient (- w (text-width-mini key 1)) 2)) (+ y 16) 1)))
 
@@ -754,7 +802,7 @@
                   (let ((ty (+ y (exact (floor (/ (- h 14) 2))))))
                     ;; the tool's icon from the sheet, in the tool's color
                     (color! (if on? tone C-TEXT-DIM))
-                    (draw-rows (icon-rows (tool-name t)) (+ x 6) (+ ty 1) 1 ICON-W)
+                    (icon! (tool-name t) (+ x 6) (+ ty 1) 1)
                     (color! ink)
                     (text! (tool-label t) (+ x 22) ty 2)
                     (let* ((after (+ x 22 (text-width (tool-label t) 2) 4))
@@ -781,6 +829,31 @@
                       (color! (if on? C-BG C-LABEL-LIT))
                       (text! (tag-text (tool-tag t)) (+ bx 3) (+ by 2) 1)))))
               (loop (cdr ts) (+ i 1)))))))
+
+    ;; A string built from a number, kept until the number changes: a
+    ;; readout rebuilt every frame is a literal, a number->string and a
+    ;; string-append, each an allocation in the native codegen, and the
+    ;; HUD has five (2026-09-20). build is a procedure of the key.
+    (define (text-cache) (vector #f ""))
+
+    (define (cached-text c key build)
+      (unless (eqv? key (vector-ref c 0))
+        (vector-set! c 0 key)
+        (vector-set! c 1 (build key)))
+      (vector-ref c 1))
+
+    (define *tiles-text* (text-cache))
+    (define *seed-text* (text-cache))
+    (define *time-text* (text-cache))
+    (define *trace-text* (text-cache))
+    (define *link-text* (text-cache))
+    (define *crashed-text* (text-cache))
+    (define (tiles-text n) (string-append "TILES " (number->string n)))
+    (define (seed-text n) (string-append "SEED " (number->string n)))
+    (define (time-text n) (string-append "TIME " (clock-string n)))
+    (define (trace-text n) (string-append "TRACE " (number->string n)))
+    (define (link-text n) (string-append "LINK " (clock-string n)))
+    (define (crashed-text n) (string-append "CRASHED " (clock-string n)))
 
     ;; --- the bar (ruling D33: status only) --------------------------------------------
 
@@ -822,31 +895,33 @@
       (draw-meter-in (control-rect g layout 'mode) tr))
 
     ;; The meter in any rect (both tables' bars): the text at scale 2 in
-    ;; a box 16 or taller, scale 1 in the strip.
+    ;; a box 16 or taller, scale 1 in the strip. The texts are kept by
+    ;; the second they show (a clock string floors its seconds), the
+    ;; phase dispatch a cond (a case clause allocates in the native
+    ;; codegen).
     (define (draw-meter-in r tr)
       (let* ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
              (phase (trace-phase tr))
              (clean? (eq? (trace-mode tr) 'clean))
              (sc (if (>= h 16) 2 1))
-             (ty (+ y (exact (floor (/ (- h (* 7 sc)) 2))))))
+             (ty (+ y (exact (floor (/ (- h (* 7 sc)) 2)))))
+             (seconds (exact (floor (trace-value tr)))))
         (color! C-BG)
         (draw-filled-rect x y w h)
         (if (and clean? (not (eq? phase 'cleared)))
-            (let ((text (string-append "TIME " (trace-clock-string tr))))
+            (begin
               (color! C-TEXT)
-              (text! text (+ x 4) ty sc))
+              (text! (cached-text *time-text* seconds time-text) (+ x 4) ty sc))
             (let* ((frac (trace-fraction tr))
                    (fill (exact (floor (* (- w 2) frac))))
-                   (text (case phase
-                           ((trace) (string-append "TRACE "
-                                                   (number->string (exact (floor (trace-value tr))))))
-                           ((counter) (string-append "LINK " (trace-countdown-string tr)))
-                           ((severed) "SEVERED")
-                           (else (string-append "CRASHED " (trace-clock-string tr)))))
-                   (bar (case phase
-                          ((trace) (mix C-TRACE C-TRACE-HOT frac))
-                          ((counter) C-TRACE-HOT)
-                          (else C-TRACE))))
+                   (text (cond ((eq? phase 'trace) (cached-text *trace-text* seconds trace-text))
+                               ((eq? phase 'counter)
+                                (cached-text *link-text* (exact (floor (/ (trace-countdown tr) TICKS-PER-SECOND))) link-text))
+                               ((eq? phase 'severed) SEVERED-TEXT)
+                               (else (cached-text *crashed-text* seconds crashed-text))))
+                   (bar (cond ((eq? phase 'trace) (mix C-TRACE C-TRACE-HOT frac))
+                              ((eq? phase 'counter) C-TRACE-HOT)
+                              (else C-TRACE))))
               (color! C-TEXT-DIM)
               (draw-filled-rect x y w 1)
               (draw-filled-rect x (+ y h -1) w 1)
@@ -856,6 +931,8 @@
               (draw-filled-rect (+ x 1) (+ y 1) fill (- h 2))
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
               (text! text (+ x 4) ty sc)))))
+
+    (define SEVERED-TEXT "SEVERED")
 
     ;; A box with a label, the shape of every control.
     (define (draw-box r label fill edge ink)
@@ -975,7 +1052,7 @@
              (layout (session-hud s))
              (st (session-tools s))
              (tools (session-tools-list s))
-             (readout (string-append "TILES " (number->string (board-tile-count b))))
+             (readout (cached-text *tiles-text* (board-tile-count b) tiles-text))
              ;; the look's name under the readout: the readout is the tap
              ;; target that steps it (P3, the sheet switch)
              (look-label (look-label (look-ref (session-look s))))
@@ -999,9 +1076,9 @@
                 (else
                  (color! C-TEXT-DIM)
                  (if (eq? layout 'strip)
-                     (text! (string-append "SEED " (number->string (session-seed s))) (+ 100 (half vw)) (+ top 3) 1)
-                     (text-mini! (string-append "SEED " (number->string (session-seed s))) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
-        (when (memq (session-update s) '(waiting prompt))
+                     (text! (cached-text *seed-text* (session-seed s) seed-text) (+ 100 (half vw)) (+ top 3) 1)
+                     (text-mini! (cached-text *seed-text* (session-seed s) seed-text) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
+        (when (or (eq? (session-update s) 'waiting) (eq? (session-update s) 'prompt))
           (draw-update-mark g layout))
         (draw-keys-mark (control-rect g layout 'keys) (session-keys-shown s))
         ;; line 2: the keys line when asked for, else the phase line, else
@@ -1025,7 +1102,7 @@
                                                    (string-append " " TAG-UNDER-ICE))
                                                   (else (string-append " " TAG-CLEAN-RUN)))))
                             ((trace-severed? tr) "")
-                            ((null? (legal-matches b)) "NO MOVES LEFT - SHUFFLE")
+                            ((board-no-moves? b) "NO MOVES LEFT - SHUFFLE")
                             ((session-hint-armed s) "HINT: PRESS A FACE KEY")
                             (else "")))
                (toast (fx-toast x)))

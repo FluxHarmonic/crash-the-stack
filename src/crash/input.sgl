@@ -751,14 +751,23 @@
     ;; This table's tools for the frame (ruling D33): under SEVERED only
     ;; LOOK and NEXT; on a finished board UNDO, SHUFFLE and HINT are done.
     ;; MENU is not a tool (David, 2026-09-19): the bar's peer button next
-    ;; to the wrench, or Escape.
+    ;; to the wrench, or Escape. The two lists are built once each: the
+    ;; step and the HUD both ask every frame, and five tool structs are
+    ;; 1.2 KB in the native codegen (2026-09-20).
+    (define *tools-in-play* #f)
+    (define *tools-done* #f)
+
     (define (session-tools-list s)
-      (let ((play? (not (finished? s))))
-        (list (make-tool 'undo "UNDO" 'u #f #f play?)
-              (make-tool 'shuf "SHUFFLE" 's SHUFFLE-COST #f play?)
-              (make-tool 'hint "HINT" 'h HINT-COST #f play?)
-              (make-tool 'look "LOOK" 'l)
-              (make-tool 'next "NEXT" 'n))))
+      (if (finished? s)
+          (or *tools-done* (begin (set! *tools-done* (build-tools-list #f)) *tools-done*))
+          (or *tools-in-play* (begin (set! *tools-in-play* (build-tools-list #t)) *tools-in-play*))))
+
+    (define (build-tools-list play?)
+      (list (make-tool 'undo "UNDO" 'u #f #f play?)
+            (make-tool 'shuf "SHUFFLE" 's SHUFFLE-COST #f play?)
+            (make-tool 'hint "HINT" 'h HINT-COST #f play?)
+            (make-tool 'look "LOOK" 'l)
+            (make-tool 'next "NEXT" 'n)))
 
     (define (session-with-tools-touch s touch?)
       (session s tools: (tools-with-touch (session-tools s) touch?)))
@@ -780,7 +789,7 @@
       (let ((b (session-board s)))
         (cond ((session-hint-armed s) "HINT: PRESS A FACE KEY")
               ((board-cleared? b) "STACK CRASHED. NEXT DEALS ANOTHER.")
-              ((null? (legal-matches b)) "NO MOVES LEFT: SHUFFLE.")
+              ((board-no-moves? b) "NO MOVES LEFT: SHUFFLE.")
               ((board-selected b) "NOW ITS MATCH.")
               (else "TAP TWO MATCHING TILES."))))
 
@@ -795,7 +804,9 @@
                             (session-tools-list s)
                             (geometry-vw g)
                             (geometry-vh g)))
-             (s (session s tools: (car r)))
+             ;; the session is copied only when the stack changed (an idle
+             ;; frame is the common one)
+             (s (if (eq? (car r) (session-tools s)) s (session s tools: (car r))))
              (f (with-control f0 g s)))
         (cond (was-open
                ;; modal: the frame was the stack's, whatever it held
@@ -805,10 +816,9 @@
               ((step-commands s f) => (lambda (s) s))
               ((session-hint-armed s) (step-armed-hint s f))
               (else
-               (let ((s (step-pointer s f g)))
-                 (if (held? f 'ctrl)
-                     s
-                     (case (session-model s)
-                       ((hint) (step-hint s f))
-                       ((cursor) (step-cursor s f))
-                       (else s))))))))))
+               (let* ((s (step-pointer s f g))
+                      (model (session-model s)))
+                 (cond ((held? f 'ctrl) s)
+                       ((eq? model 'hint) (step-hint s f))
+                       ((eq? model 'cursor) (step-cursor s f))
+                       (else s)))))))))

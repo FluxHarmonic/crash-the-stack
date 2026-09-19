@@ -49,7 +49,7 @@
           tile-present? tile-face tile-locked? tile-lock-partner tile-lock-tick
           board-tile-count board-cleared? board-locked-slots unlocked-matches
           blocked-left? blocked-right? covered? playable?
-          playable-slots faces-match? legal-matches
+          playable-slots faces-match? legal-matches board-no-moves?
           DAEMON-FIRST daemon-face?
           board-select board-remove-pair board-undo
           board-lock-pair board-unlock-pair board-break-locks
@@ -177,12 +177,16 @@
     ;; Is any of these grid cells occupied? The cell lists come from the
     ;; layout's precomputed neighborhoods (crash stack layout), so each
     ;; question is a handful of vector-refs on the live occlusion grid.
+    ;; A procedure of its own, not a named let (the native codegen
+    ;; allocates a named let's closure at every entry; the draw asks
+    ;; blocked-right? of every tile every frame).
     (define (any-occupied? b cells)
-      (let ((occ (board-occ b)))
-        (let loop ((cells cells))
-          (cond ((null? cells) #f)
-                ((vector-ref occ (car cells)) #t)
-                (else (loop (cdr cells)))))))
+      (occupied-in? (board-occ b) cells))
+
+    (define (occupied-in? occ cells)
+      (cond ((null? cells) #f)
+            ((vector-ref occ (car cells)) #t)
+            (else (occupied-in? occ (cdr cells)))))
 
     (define (neighborhood-for b id)
       (layout-neighborhood (board-layout b) id))
@@ -232,6 +236,20 @@
       (filter (lambda (m)
                 (not (or (tile-locked? b (car m)) (tile-locked? b (cdr m)))))
               (legal-matches b)))
+
+    ;; No legal match on the board: the HUD's state line and the
+    ;; instruction ask every frame. A board is a value (a move makes a
+    ;; new one), so the answer is kept for the board object last asked
+    ;; about; legal-matches walked the playable slots and their
+    ;; neighborhoods twice a frame before (some 40 KB, 2026-09-20).
+    (define *no-moves-board* #f)
+    (define *no-moves* #f)
+
+    (define (board-no-moves? b)
+      (unless (eq? b *no-moves-board*)
+        (set! *no-moves* (null? (legal-matches b)))
+        (set! *no-moves-board* b))
+      *no-moves*)
 
     ;; Every pair (a . c), a < c, of playable tiles with the same face.
     (define (legal-matches b)

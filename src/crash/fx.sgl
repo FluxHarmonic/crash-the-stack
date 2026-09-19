@@ -295,7 +295,9 @@
               ((and sel0 (not sel1)) (without-kind x 'pulse))
               (else x))))
 
-    ;; The priced hint: a new ring blinks; a cleared ring stops.
+    ;; The priced hint: a new ring blinks; a cleared ring stops (the
+    ;; effects are rebuilt only while a blink is there to drop: no hint
+    ;; is the common frame).
     (define (observe-hint x before after)
       (cond ((and (session-hint after)
                   (not (eqv? (session-hint before) (session-hint after))))
@@ -303,8 +305,14 @@
                     (effect kind: 'blink
                             ids: (list (session-hint after))
                             tween: (life (* BLINKS BLINK-TICKS) 'linear))))
-            ((not (session-hint after)) (without-kind x 'blink))
+            ((and (not (session-hint after)) (has-kind? x 'blink)) (without-kind x 'blink))
             (else x)))
+
+    (define (has-kind? x kind)
+      (let loop ((es (fx-effects x)))
+        (and (pair? es)
+             (or (eq? (effect-kind (car es)) kind)
+                 (loop (cdr es))))))
 
     ;; Locks: a broken one (tiles stayed, locks went) swells both tiles; a
     ;; fresh one from the ICE shakes both, longer than a mismatch.
@@ -360,6 +368,13 @@
     ;; change. g is the geometry the tiles were drawn with (ghosts keep
     ;; their rects from it). A new deal resets the table: nothing to
     ;; animate but the clock.
+    ;;
+    ;; The board is a value: a step that touched it returns a new one, so
+    ;; the same board object means no tile went, came back, was selected
+    ;; or locked, and the three board observers are skipped. Reading them
+    ;; on an idle frame cost 38 KB of lists (iota over the slots three
+    ;; times, both face vectors as lists) at 60 frames a second, the
+    ;; sim's whole allocation (measured 2026-09-20).
     (define (fx-observe x before after g)
       (if (not (= (session-seed before) (session-seed after)))
           (fx x effects: '())
@@ -368,13 +383,15 @@
             (observe-phase
               (observe-message
                 (observe-refused
-                  (observe-locks
-                    (observe-hint
-                      (observe-selection
-                        (observe-tiles x b0 b1 g)
-                        b0 b1 g)
-                      before after)
-                    b0 b1 g)
+                  (if (eq? b0 b1)
+                      (observe-hint x before after)
+                      (observe-locks
+                        (observe-hint
+                          (observe-selection
+                            (observe-tiles x b0 b1 g)
+                            b0 b1 g)
+                          before after)
+                        b0 b1 g))
                   before after g)
                 before after)
               before after))))
@@ -389,57 +406,59 @@
     ;; How a present tile is drawn this frame: (dx dy sx sy face) where face
     ;; is #f to draw the board's own, or the face to show instead (a shuffle
     ;; flip before its midpoint). #f when nothing touches the tile.
+    ;;
+    ;; Called once per tile per frame, so its loop is a procedure of its
+    ;; own and its dispatch a cond: in the native codegen a named let
+    ;; allocates its closure at every entry and every case clause tested
+    ;; allocates its datum list (measured 2026-09-20: 64 and 96 bytes
+    ;; per tile, 144 tiles a frame), and a tile no effect names, the
+    ;; common case, must cost nothing.
     (define (fx-tile-view x id)
-      (let ((alpha (alpha-of x)))
-        (let loop ((es (fx-effects x))
-                   (dx 0.0)
-                   (dy 0.0)
-                   (sx 1.0)
-                   (sy 1.0)
-                   (face #f)
-                   (touched? #f))
-          (if (null? es)
-              (and touched? (list dx dy sx sy face))
-              (let ((e (car es)))
-                (if (not (memv id (effect-ids e)))
-                    (loop (cdr es) dx dy sx sy face touched?)
-                    (case (effect-kind e)
-                      ((pulse)
-                       ;; up to PULSE-SCALE at the midpoint, back to 1
-                       (let* ((p (progress e alpha))
-                              (bump (* (- PULSE-SCALE 1.0) (sin (* 3.14159265 p)))))
-                         (loop (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
-                      ((shake)
-                       (let* ((p (progress e alpha))
-                              (seconds (/ (* p (tween-ticks (effect-tween e))) TICKS-PER-SECOND))
-                              (offset (* (effect-data e) (sin (* TAU SHAKE-HZ seconds)))))
-                         (loop (cdr es) (+ dx offset) dy sx sy face #t)))
-                      ((shuffle)
-                       (let* ((total (+ SHUFFLE-TICKS SHUFFLE-STAGGER))
-                              (t (* (progress e alpha) total))
-                              (start (cdr (assv id (cdr (effect-data e)))))
-                              (local (/ (- t start) SHUFFLE-TICKS)))
-                         (cond ((< local 0.0)
-                                (loop (cdr es) dx dy sx sy
-                                      (vector-ref (car (effect-data e)) id) #t))
-                               ((>= local 1.0)
-                                (loop (cdr es) dx dy sx sy face touched?))
-                               (else
-                                (loop (cdr es) dx dy
-                                      (* sx (abs (cos (* 3.14159265 local))))
-                                      sy
-                                      (if (< local 0.5)
-                                          (vector-ref (car (effect-data e)) id)
-                                          face)
-                                      #t)))))
-                      ((settle)
-                       (let ((p (progress e alpha)))
-                         (loop (cdr es) dx dy (* sx p) (* sy p) face #t)))
-                      ((unlock)
-                       (let* ((p (progress e alpha))
-                              (bump (* (- UNLOCK-SCALE 1.0) (sin (* 3.14159265 p)))))
-                         (loop (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
-                      (else (loop (cdr es) dx dy sx sy face touched?)))))))))
+      (tile-view-loop id (alpha-of x) (fx-effects x) 0.0 0.0 1.0 1.0 #f #f))
+
+    (define (tile-view-loop id alpha es dx dy sx sy face touched?)
+      (if (null? es)
+          (and touched? (list dx dy sx sy face))
+          (let ((e (car es)))
+            (if (not (memv id (effect-ids e)))
+                (tile-view-loop id alpha (cdr es) dx dy sx sy face touched?)
+                (let ((kind (effect-kind e)))
+                  (cond ((eq? kind 'pulse)
+                         ;; up to PULSE-SCALE at the midpoint, back to 1
+                         (let* ((p (progress e alpha))
+                                (bump (* (- PULSE-SCALE 1.0) (sin (* 3.14159265 p)))))
+                           (tile-view-loop id alpha (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
+                        ((eq? kind 'shake)
+                         (let* ((p (progress e alpha))
+                                (seconds (/ (* p (tween-ticks (effect-tween e))) TICKS-PER-SECOND))
+                                (offset (* (effect-data e) (sin (* TAU SHAKE-HZ seconds)))))
+                           (tile-view-loop id alpha (cdr es) (+ dx offset) dy sx sy face #t)))
+                        ((eq? kind 'shuffle)
+                         (let* ((total (+ SHUFFLE-TICKS SHUFFLE-STAGGER))
+                                (t (* (progress e alpha) total))
+                                (start (cdr (assv id (cdr (effect-data e)))))
+                                (local (/ (- t start) SHUFFLE-TICKS)))
+                           (cond ((< local 0.0)
+                                  (tile-view-loop id alpha (cdr es) dx dy sx sy
+                                                  (vector-ref (car (effect-data e)) id) #t))
+                                 ((>= local 1.0)
+                                  (tile-view-loop id alpha (cdr es) dx dy sx sy face touched?))
+                                 (else
+                                  (tile-view-loop id alpha (cdr es) dx dy
+                                                  (* sx (abs (cos (* 3.14159265 local))))
+                                                  sy
+                                                  (if (< local 0.5)
+                                                      (vector-ref (car (effect-data e)) id)
+                                                      face)
+                                                  #t)))))
+                        ((eq? kind 'settle)
+                         (let ((p (progress e alpha)))
+                           (tile-view-loop id alpha (cdr es) dx dy (* sx p) (* sy p) face #t)))
+                        ((eq? kind 'unlock)
+                         (let* ((p (progress e alpha))
+                                (bump (* (- UNLOCK-SCALE 1.0) (sin (* 3.14159265 p)))))
+                           (tile-view-loop id alpha (cdr es) dx dy (* sx (+ 1.0 bump)) (* sy (+ 1.0 bump)) face #t)))
+                        (else (tile-view-loop id alpha (cdr es) dx dy sx sy face touched?))))))))
 
     ;; The match ghosts this frame: (face x y w h alpha) each, both tiles
     ;; rising and drifting toward their midpoint until MATCH-MEET, then gone.

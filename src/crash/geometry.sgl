@@ -26,7 +26,7 @@
           make-geometry make-canvas-geometry cell-rect
           TILE-RATIO LAYER-OFFSET HUD-HEIGHT
           CONTROL-NAMES CONTROL-H METER-W STRIP-H READOUT-W
-          slot-rect slot-extent slot-centre rect-contains? hit-slot
+          slot-rect slot-x slot-y slot-extent slot-centre rect-contains? hit-slot
           column-x row-y
           geometry-controls control-rect hit-control
           update-controls hit-update-control
@@ -147,6 +147,16 @@
               (geometry-tile-w g)
               (geometry-tile-h g))))
 
+    ;; The face's x and y alone, for the walks that fill a buffer a frame
+    ;; (slot-rect's list is 128 bytes a call in the native codegen).
+    (define (slot-x g id)
+      (let ((s (layout-slot (geometry-layout g) id)))
+        (+ (column-x g (slot-hx s)) (* (geometry-side g) (slot-layer s)))))
+
+    (define (slot-y g id)
+      (let ((s (layout-slot (geometry-layout g) id)))
+        (- (row-y g (slot-hy s)) (* (geometry-side g) (slot-layer s)))))
+
     (define (slot-centre g id)
       (let ((r (slot-rect g id)))
         (cons (+ (car r) (half (caddr r)))
@@ -182,7 +192,23 @@
     ;; readout comes before the meter (in the strip the two sit on one
     ;; row). The TILES readout is the look control: a tap on it steps the
     ;; look, the phone's stand-in for ctrl+t.
+    ;; The controls of a geometry and layout, five (name x y w h) lists,
+    ;; kept for the pair last asked about: the HUD asks for a control's
+    ;; rect several times a frame and a fresh list of lists is 960 bytes
+    ;; in the native codegen (2026-09-20). A geometry is a value (a
+    ;; resize makes a new one).
+    (define *controls-g* #f)
+    (define *controls-layout* #f)
+    (define *controls* '())
+
     (define (geometry-controls g layout)
+      (unless (and (eq? g *controls-g*) (eq? layout *controls-layout*))
+        (set! *controls* (build-controls g layout))
+        (set! *controls-g* g)
+        (set! *controls-layout* layout))
+      *controls*)
+
+    (define (build-controls g layout)
       (let* ((vw (geometry-vw g))
              (vh (geometry-vh g))
              (top (- vh (geometry-hud-h g)))
