@@ -1,0 +1,145 @@
+;;; (crash title draw) - Putting the title on screen.
+;;;
+;;; The model in (crash title) says what is shown at a tick; this draws
+;;; it with the block glyphs of (crash font): 8 px square cells, 80
+;;; across the 640 viewport, so the logo is crisp at any dpr on both
+;;; targets with no font file. The only module of the title that imports
+;;; graphics, so the menu can hold a title without reaching graphics
+;;; (test/test-imports.sgl holds the rules family to that).
+;;;
+;;; The shear is applied here, per row: each row's cells move right by
+;;; its stair times the tick's shear (see (crash title)), rounded to a
+;;; pixel. The backdrop (part B)
+;;; goes under everything: the dithered piece the shells load and hand
+;;; in, drawn over the whole viewport.
+
+(define-library (crash title draw)
+  (import (sigil math)
+          (sigil graphics)
+          (crash font)
+          (crash palette)
+          (crash title)
+          (crash title logo))
+
+  (export title-draw draw-title draw-menu-item
+          TITLE-CELL TITLE-X TITLE-Y TITLE-H
+          BACKDROP-W BACKDROP-H)
+
+  (begin
+    (define TITLE-CELL 8)                       ; px, square
+    (define TITLE-X 0)
+    (define TITLE-Y 8)
+    (define TITLE-H (* LOGO-H TITLE-CELL))      ; the logo's height in px
+
+    ;; The backdrop: 320x200 through scripts/art/dither, shipped scaled
+    ;; 2x by point so its dots are two texels wide under the sampler's
+    ;; linear filter (sigil-graphics offers no nearest sampling).
+    (define BACKDROP-W 640)
+    (define BACKDROP-H 400)
+
+    ;; The role colors, resolved once from (crash palette)'s table.
+    (define ROLE-COLORS
+      (list->vector
+       (map (lambda (name)
+              (let ((entry (assq (string->symbol name) PALETTE)))
+                (if entry (cdr entry) C-TEXT)))
+            (vector->list LOGO-ROLES))))
+
+    (define (role-color i) (vector-ref ROLE-COLORS i))
+
+    ;; Draw the title with the grid's top-left at (x0, y0), cells of cell px.
+    (define (title-draw t x0 y0 cell)
+      (let* ((live (title-live-glitches t))
+             (drawn (title-drawn-count t))
+             (tick (title-tick t))
+             (cursor-row (title-cursor-row t)))
+        (let rows ((y 0))
+          (when (< y LOGO-H)
+            (let* ((extent (title-row-extent y))
+                   (xa (car extent))
+                   (in-row (max 0 (min (cdr extent) (- drawn (title-row-start y)))))
+                   (xb (+ xa in-row))
+                   (dx (title-row-shift y live))
+                   (shear-px (exact (round (* cell (title-row-shear t y)))))
+                   (py (+ y0 (* y cell))))
+              (let cols ((x xa))
+                (when (< x xb)
+                  (let ((shown (title-shown-cell t x y live)))
+                    (when shown
+                      (let ((px (+ x0 (* (+ x dx) cell) shear-px)))
+                        (when (caddr shown)
+                          (color! (role-color (caddr shown)))
+                          (draw-filled-rect px py cell cell))
+                        (when (cadr shown)
+                          (color! (role-color (cadr shown)))
+                          (draw-block (car shown) px py cell)))))
+                  (cols (+ x 1))))
+              ;; the cursor: a block leading the draw, blinking, on the
+              ;; row being drawn
+              (when (and cursor-row (= cursor-row y) (cursor-on? tick))
+                (color! C-TEXT)
+                (draw-filled-rect (+ x0 (* (+ xb dx) cell) shear-px) py cell cell)))
+            (rows (+ y 1))))))
+
+
+    ;; --- the menu's items (ruling D39) ---------------------------------------------
+    ;;
+    ;; Plain text in the 5x7 font at scale 3, no box (David: "we can't
+    ;; really see the tower behind the menu"): the selected item in the
+    ;; logo's hero ramp (its glyph rows cyan over magenta), the others in
+    ;; C-LABEL-LIT, every one over a one-cell C-BG shadow for contrast on
+    ;; the backdrop, and a block cursor at the selected item's left,
+    ;; blinking with the reveal's cursor. Centered in the rect the menu
+    ;; keeps as the tap target.
+    (define ITEM-SCALE 3)
+    (define RAMP-ROWS 4)   ; glyph rows 0..3 in the top color, 4..6 in the bottom
+
+    (define (draw-menu-item label rect lit? frames)
+      (let* ((x (car rect)) (y (cadr rect)) (w (caddr rect)) (h (cadddr rect))
+             (tw (text-width label ITEM-SCALE))
+             (tx (+ x (quotient (- w tw) 2)))
+             (ty (+ y (quotient (- h (* GLYPH-H ITEM-SCALE)) 2))))
+        (color! C-BG)
+        (draw-text label (+ tx ITEM-SCALE) (+ ty ITEM-SCALE) ITEM-SCALE)
+        (if lit?
+            (begin
+              (color! C-SELECTED)
+              (draw-text-rows label tx ty ITEM-SCALE 0 RAMP-ROWS)
+              (color! C-HIGHLIGHT)
+              (draw-text-rows label tx ty ITEM-SCALE RAMP-ROWS GLYPH-H)
+              (when (cursor-on? frames)
+                (color! C-SELECTED)
+                (draw-filled-rect (- tx (* 3 ITEM-SCALE) (* GLYPH-W ITEM-SCALE)) ty
+                                  (* GLYPH-W ITEM-SCALE) (* GLYPH-H ITEM-SCALE))))
+            (begin
+              (color! C-LABEL-LIT)
+              (draw-text label tx ty ITEM-SCALE)))))
+
+    ;; Rows r0..r1 (exclusive) of every glyph of a string, in the current
+    ;; color: the two-tone split at text size.
+    (define (draw-text-rows text x y scale r0 r1)
+      (let ((advance (* scale (+ GLYPH-W 1))))
+        (let loop ((chars (string->list text)) (x x))
+          (unless (null? chars)
+            (let ((rows (glyph-rows-of (car chars))))
+              (when rows
+                (draw-rows (list-tail-take rows r0 r1) x (+ y (* r0 scale)) scale GLYPH-W)))
+            (loop (cdr chars) (+ x advance))))))
+
+    ;; rows r0..r1 of a list
+    (define (list-tail-take rows r0 r1)
+      (let loop ((rows rows) (i 0) (acc '()))
+        (cond ((or (null? rows) (= i r1)) (reverse acc))
+              ((< i r0) (loop (cdr rows) (+ i 1) acc))
+              (else (loop (cdr rows) (+ i 1) (cons (car rows) acc))))))
+
+    ;; The title screen's top: the backdrop, when the shell has it loaded,
+    ;; then the logo on its grid. t may be #f (a menu built without one).
+    (define (draw-title t vw vh . rest)
+      (let ((backdrop (and (pair? rest) (car rest))))
+        (when backdrop
+          (color! C-TEX-PLAIN)
+          (draw-texture-region backdrop 0 0 vw vh 0 0 BACKDROP-W BACKDROP-H))
+        (when t
+          (title-draw t TITLE-X TITLE-Y TITLE-CELL))))
+))

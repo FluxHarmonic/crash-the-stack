@@ -7,7 +7,9 @@
 ;;; seeds (every glitch window ends before it, the shown frame equals the
 ;;; settled grid); different seeds give different glitch sequences; a
 ;;; skip lands on the same settled frame; the cues fire once each; and
-;;; the menu skips its reveal on a tap or key without picking an entry.
+;;; the menu skips its reveal on a tap or key without picking an entry;
+;;; and the shear: upright through the reveal, the slam after the last
+;;; glitch, the slant's stair per row at settle.
 
 (import (sigil test)
         (sigil math)
@@ -19,6 +21,7 @@
         (crash input)
         (crash menu)
         (crash title)
+        (crash title draw)
         (crash title logo))
 
 (define VW 640)
@@ -177,3 +180,61 @@
            (r (menu-step m (frame '(space)) VW VH)))
       ;; a skip settles: the settle cue comes through as the match pings
       (assert-true (and (memq 'match (menu-cues m (car r))) #t)))))
+
+(test-group "the shear"
+  (test "upright through the reveal and the glitches, the slam after the last glitch, the slant at settle"
+    (let* ((t (title-new 13 BAUD #f))
+           (slam (title-slam-tick t)))
+      (assert-true (> slam 0))
+      (assert-equal (+ slam SHEAR-TICKS) (title-settle-tick t))
+      (let loop ((t t) (rising 0))
+        (cond ((title-settled? t)
+               (assert-equal (* 1.0 SHEAR-REST) (title-shear t))
+               (assert-true (> rising 0)))
+              (else
+               (let ((tick (title-tick t)) (s (title-shear t)))
+                 (when (< tick slam) (assert-equal 0.0 s))
+                 (loop (title-step t) (if (and (>= tick slam) (> s 0.0)) (+ rising 1) rising))))))))
+  (test "the stair: a letter line's rows 0-1 at two cells, 2-3 at one, 4-5 at none, a gap row none"
+    (let* ((t (title-new 13 BAUD #t))
+           (y0 (vector-ref LOGO-LETTERS 0)))
+      (assert-equal 2.0 (title-row-shear t y0))
+      (assert-equal 2.0 (title-row-shear t (+ y0 1)))
+      (assert-equal 1.0 (title-row-shear t (+ y0 2)))
+      (assert-equal 1.0 (title-row-shear t (+ y0 3)))
+      (assert-equal 0.0 (title-row-shear t (+ y0 4)))
+      (assert-equal 0.0 (title-row-shear t (+ y0 5)))
+      (assert-equal 0.0 (title-row-shear t (+ y0 6)))))
+  (test "a skip lands on the slant"
+    (assert-equal (* 1.0 SHEAR-REST) (title-shear (title-skip (title-new 13 BAUD #f))))))
+
+(test-group "the glitch levels"
+  (test "level 0 plans nothing; 1 a few; 2 (the default) five or more with a whole-row glitch first; 3 nine or more with two"
+    (let ((row-kind? (lambda (g) (memq (glitch-kind g) '(wrong-color shift)))))
+      (let loop ((seed 1))
+        (when (<= seed 30)
+          (assert-equal '() (title-plan (title-new seed BAUD #f 0)))
+          (let ((p1 (title-plan (title-new seed BAUD #f 1))))
+            (assert-true (and (>= (length p1) 2) (<= (length p1) 3))))
+          (let ((p2 (title-plan (title-new seed BAUD #f 2))))
+            (assert-true (and (>= (length p2) 5) (<= (length p2) 7)))
+            (assert-true (and (row-kind? (car p2)) #t)))
+          (let ((p3 (title-plan (title-new seed BAUD #f 3))))
+            (assert-true (and (>= (length p3) 9) (<= (length p3) 12)))
+            (assert-true (and (row-kind? (car p3)) (row-kind? (cadr p3)) #t)))
+          (loop (+ seed 1))))))
+  (test "the default level is 2 and the title records the level its plan was made at"
+    (assert-equal 2 DEFAULT-GLITCH)
+    (assert-equal (title-default-glitch) (title-level (title-new 4 BAUD #f)))
+    (assert-equal 3 (title-level (title-new 4 BAUD #f 3))))
+  (test "every level settles correct and still (twenty seeds each)"
+    (let level-loop ((level 0))
+      (when (<= level 3)
+        (let loop ((seed 1))
+          (when (<= seed 20)
+            (let* ((t (let run ((t (title-new seed BAUD #f level))) (if (title-settled? t) t (run (title-step t)))))
+                   (settled (title-new seed BAUD #t level)))
+              (assert-equal (title-frame-digest settled) (title-frame-digest t))
+              (for-each (lambda (g) (assert-true (<= (glitch-to g) (title-slam-tick t)))) (title-plan t)))
+            (loop (+ seed 1))))
+        (level-loop (+ level 1))))))

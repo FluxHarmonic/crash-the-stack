@@ -14,15 +14,15 @@ the 80x50 cell grid), the backdrop with generation as step one
    or three (CRASH / THE / STACK, 21 rows: the menu would move down or the
    logo scroll off). One line does not fit 80 columns at this letter size.
 3. **Dither**: `candidates-backdrop.png` (twelve: two raws x three
-   methods x two palette subsets). The game ships `backdrop-hero-o4x4-a`
-   today.
+   methods x two palette subsets). The game shipped `backdrop-hero-o4x4-a`
+   first; `backdrop-hero-o8x8-b` since the read.
 4. **Glitch level**: `reveal-seed7.gif` (sixteen frames of seed 7 at 1200
    baud, then the settled frame) and `reveal-strip.png`. The plan has
    three to five glitches a boot: a wrong character that corrects itself,
    a row in swapped colors that snaps, a row drawn shifted that settles,
    noise in a row's shadow, one letter inverted. More, fewer, longer?
-   `?seed=N` reproduces a boot, `?baud=N` sets the pace (2400 default:
-   240 cells a second, about three seconds for the 737 cells).
+   `?seed=N` reproduces a boot, `?baud=N` sets the pace (4800 default now:
+   480 cells a second, about 1.5 seconds for the 737 cells).
 
 ## The logo candidates (`logo-*.png`, specs in `assets/src/title/candidates/`)
 
@@ -61,3 +61,25 @@ only when the process opens on the menu; a tap or key skips it. The
 backdrop lands about two seconds after boot on the web (the shell holds
 every texture fetch until the service worker has activated), so the
 first frames of the reveal are over the copper bars.
+
+## After the first read (2026-09-19, the same day)
+
+Ruled and built: the hero ramp colors and the slant, the backdrop
+`backdrop-hero-o8x8-b`, default baud 4800, the glitch level up, and D39
+(the menu without boxes).
+
+- **The slant is live.** The logo is stored upright and sheared per row
+  when drawn (`title-shear`, `title-row-shear` in `(crash title)`): the
+  modem draws it upright, and when the last glitch resolves it slams into
+  the slant over 20 ticks with an out-back ease. Two more uses are a line
+  each if wanted: a slow idle sway on the menu, or the slant growing down
+  the logo as the cursor passes each row (Session Log S2).
+- **Glitch levels** `?glitch=0..3`, default 2: five to seven a boot with
+  beats of 0.4 to 0.8 s and the first always a whole-row one (a row in
+  swapped colors or shifted 1 to 3 cells); level 3 is nine to twelve with
+  two whole-row ones; level 1 the first cut's two or three short ones.
+  `reveal-seed7-level2.gif` shows seed 7 at level 2 and 2400 baud (half
+  the default pace, so the glitches can be seen frame by frame).
+- **D39.** `title-menu-d39.png`: the tower shows under the logo; the items
+  are plain text over a one-cell C-BG shadow, the selected one in the
+  ramp with a block cursor at its left blinking with the reveal's cursor.

@@ -859,6 +859,9 @@ let iceLock = null;
 // picked nothing).
 {
   const TITLE_SEED = 7, OTHER_SEED = 8, TITLE_BAUD = 9600;
+  // the shear: the settled logo's rows sit right by their stair times the shear
+  // the game reports (cells)
+  const stairOf = (r) => (r < 0 || r > 5) ? 0 : Math.floor((5 - r) / 2);
   const CELL = 8, TX = 0, TY = 8;
   let detail = "";
   const modulePath = path.join(path.dirname(new URL(import.meta.url).pathname), "src/crash/title/logo.sgl");
@@ -876,15 +879,18 @@ let iceLock = null;
     for (const [, role, hex] of pal.matchAll(/\((C-[A-Z0-9-]+) +"#([0-9A-Fa-f]{6})"/g)) hexes[role] = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
   } catch (e) { detail = detail || `cannot read the palette: ${e.message}`; }
   const rolesM = (() => { try { const s = fs.readFileSync(modulePath, "utf8").match(/\(define LOGO-ROLES\s+'#\(([^)]*)\)/); return s ? [...s[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : []; } catch { return []; } })();
+  // the letter lines, for the stair: every third number of LOGO-LETTERS is a line's top row
+  const lineTops = (() => { try { const s = fs.readFileSync(modulePath, "utf8").match(/\(define LOGO-LETTERS\s+'#\(([^)]*)\)/); const ns = s ? s[1].trim().split(/\s+/).map(Number) : []; return [...new Set(ns.filter((_, i) => i % 3 === 0))]; } catch { return []; } })();
+  const lineRowOf = (y) => { for (const t of lineTops) if (y >= t && y < t + 6) return y - t; return 6; };
   if (!detail && moduleRows.length === 0) detail = "no LOGO-ROWS parsed from the module";
   // ink(g, dx, dy): the same 4x4 dot patterns (crash font) draws
   const ink = (g, dx, dy) => g === "#" ? true : g === "3" ? !(dx % 2 === 1 && dy % 2 === 1) : g === "2" ? (dx + dy) % 2 === 0 : g === "1" ? (dx % 2 === 0 && dy % 2 === 0) : g === "^" ? dy < 2 : g === "v" ? dy >= 2 : g === "<" ? dx < 2 : g === ">" ? dx >= 2 : false;
   const bootTitle = async (seed) => {
     const from = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}` });
-    const head = await waitLine(/^crash: title seed (\d+) baud (\d+) settle (\d+) cells (\d+)$/, from, 20000);
+    const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
     if (!head) return { error: `no "crash: title seed" line within 20 s (seed ${seed})` };
-    const settled = await waitLine(/^crash: title settled (\d+) digest (\d+)$/, head.index, 30000);
+    const settled = await waitLine(/^crash: title settled (\d+) digest (\d+) shear (\d+)$/, head.index, 30000);
     if (!settled) return { error: `no "crash: title settled" line within 30 s (seed ${seed})` };
     const ticks = consoleLines.slice(head.index, settled.index).filter((l) => /^crash: title tick /.test(l));
     await sleep(200);
@@ -896,6 +902,7 @@ let iceLock = null;
     a = await bootTitle(TITLE_SEED);
     if (a.error) detail = a.error;
     else if (a.head[1] !== String(TITLE_SEED) || a.head[2] !== String(TITLE_BAUD)) detail = `the game took seed ${a.head[1]} baud ${a.head[2]}`;
+    else if (parseInt(a.settled[3], 10) < 1) detail = `the settled logo is upright (shear ${a.settled[3]}); the slant did not land`;
     else if (a.ticks.length < 10) detail = `only ${a.ticks.length} tick lines before settle`;
   }
   // the grid the game holds, against the module
@@ -922,6 +929,8 @@ let iceLock = null;
       const scale = Math.min(c.width / ${VW}, c.height / ${VH});
       const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
       const rows = ${JSON.stringify(moduleRows)}, roles = ${JSON.stringify(rolesM)}, hexes = ${JSON.stringify(hexes)};
+      const shear = ${parseInt(a.settled[3], 10)}, lineTops = ${JSON.stringify(lineTops)};
+      const lineRowOf = ${lineRowOf.toString()}, stairOf = ${stairOf.toString()};
       const ink = ${ink.toString()};
       let dots = 0, wrong = 0, sample = null;
       for (let y = 0; y < rows.length; y++) for (let x = 0; x < rows[y][0].length; x++) {
@@ -930,7 +939,8 @@ let iceLock = null;
         for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) {
           const role = ink(gl, dx, dy) ? fg : bg; if (role === "-") continue;
           const want = hexes[roles[role.charCodeAt(0) - 97]]; if (!want) continue;
-          const vx = ${TX} + x * ${CELL} + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
+          const stair = stairOf(lineRowOf(y));
+          const vx = ${TX} + (x + stair * shear) * ${CELL} + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
           const px = Math.floor(ox + vx * scale), py = Math.floor(oy + vy * scale);
           const i = (py * c.width + px) * 4; dots++;
           if (Math.abs(d[i] - want[0]) > 12 || Math.abs(d[i + 1] - want[1]) > 12 || Math.abs(d[i + 2] - want[2]) > 12) { wrong++; if (!sample) sample = [x, y, gl, dx, dy, [d[i], d[i + 1], d[i + 2]], want]; }

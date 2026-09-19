@@ -10,7 +10,10 @@
 //
 //   menu        the page without ?cards or ?stack opens on the menu:
 //               "crash: menu stack X Y cards X Y look X Y" (no CONTINUE on a
-//               fresh origin); a tap on LOOK -> "crash: look NAME" with the
+//               fresh origin) with the title reveal running (P3d: the first
+//               key or tap skips it and reaches no entry, so the arm skips
+//               and waits for "crash: title settled" before navigating);
+//               a tap on LOOK -> "crash: look NAME" with the
 //               menu kept (P3); a tap at CARDS' center -> "crash: menu chose cards"
 //               and the card table's boot line
 //   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
@@ -267,6 +270,13 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       await sleep(150);
     }
     let m0 = consoleLines.length;
+    // the title reveal runs on a menu boot (P3d): the first key skips it
+    // and reaches no entry, by design; so skip, wait for the settle, then
+    // navigate
+    await menuKey("ArrowUp");
+    const settledT = await waitLine(/^crash: title settled /, 0, 5000);
+    if (!settledT) fail("menu", "a key during the title reveal did not settle it");
+    m0 = consoleLines.length;
     await menuKey("ArrowDown"); await menuKey("Enter");
     const choseK = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
     const bootedK = choseK && await waitLine(/^crash: cards seed /, m0, 5000);
@@ -281,13 +291,17 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
       const menu2 = await waitLine(/^crash: menu (.+)$/, consoleLines.length, 20000);
       const parts2 = menu2 ? menu2.m[1].split(" ") : [];
+      let lookDetail0 = "";
       const entries2 = {};
       for (let i = 0; i + 2 < parts2.length; i += 3) entries2[parts2[i]] = [parts2[i + 1], parts2[i + 2]];
       await sleep(800);
+      // the reveal again (a fresh process): a key skips it before the taps
+      await menuKey("ArrowUp");
+      if (!(await waitLine(/^crash: title settled /, menu2 ? menu2.index : 0, 5000))) lookDetail0 = "a key during the second reveal did not settle it";
       m0 = consoleLines.length;
       // the LOOK entry (P3, the sheet switch) steps the look and keeps the
       // menu up: "crash: look NAME" with no table boot line
-      let lookDetail = "";
+      let lookDetail = lookDetail0;
       if (!entries2.look) lookDetail = "no LOOK entry on the menu";
       else {
         await tap(entries2.look[0], entries2.look[1]);
