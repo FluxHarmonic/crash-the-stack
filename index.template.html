@@ -160,6 +160,40 @@
     //          alone no longer counts). With ?trace the page says
     //          what it saw: "crash: page pointer coarse|fine hover
     //          none|hover".
+    // The page's own frame clock (P3c): every requestAnimationFrame
+    // callback is timed around, so the summary can say what the game's
+    // callback costs on the wall (the wasm tick plus the loader's bridge
+    // and the JS the frame runs through) against the interval the browser
+    // gave it; the rest of the interval is the browser's (compositing,
+    // the GPU, other tabs, a throttled rAF). David's phone at 9f897bc:
+    // 49 ms frames of which the wasm timers saw 17; this is the hole.
+    var pageFrames = { cb: [], gap: [], last: 0 };
+    (function () {
+      var raf = window.requestAnimationFrame;
+      window.requestAnimationFrame = function (cb) {
+        return raf.call(window, function (t) {
+          var t0 = performance.now();
+          if (pageFrames.last) { pageFrames.gap.push(t0 - pageFrames.last); if (pageFrames.gap.length > 3600) pageFrames.gap.shift(); }
+          pageFrames.last = t0;
+          var r = cb(t);
+          pageFrames.cb.push(performance.now() - t0); if (pageFrames.cb.length > 3600) pageFrames.cb.shift();
+          return r;
+        });
+      };
+    })();
+    window.crashPageStats = function () { return pageStats(); };
+    function pageStats() {
+      var line = function (name, xs) {
+        if (!xs.length) return name + " (no samples)";
+        var s = xs.slice().sort(function (a, b) { return a - b; });
+        var mean = xs.reduce(function (a, b) { return a + b; }, 0) / xs.length;
+        var pick = function (p) { return s[Math.min(s.length - 1, Math.floor(p * s.length))]; };
+        return name + " mean " + mean.toFixed(1) + " p50 " + pick(0.5).toFixed(1) + " p95 " + pick(0.95).toFixed(1) + " max " + s[s.length - 1].toFixed(1);
+      };
+      var over = pageFrames.cb.filter(function (c) { return c > 16.7; }).length;
+      return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length;
+    }
+
     // The stats summary (P3c): with ?ms a tap on the readout makes the
     // game print one "crash: clipboard TEXT" line (newlines as ~). This
     // hook copies it to the clipboard, or shows it in a selectable overlay
@@ -170,7 +204,8 @@
       console.log = function () {
         var first = arguments[0];
         if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
-          var text = first.slice("crash: clipboard ".length).split("~").join("\n");
+          var text = first.slice("crash: clipboard ".length).split("~").join("\n") + "\n" + pageStats();
+          log.call(console, "crash: page-stats " + pageStats().split("\n").join("~"));
           var show = function (why) {
             var old = document.getElementById("stats-overlay");
             if (old) old.remove();

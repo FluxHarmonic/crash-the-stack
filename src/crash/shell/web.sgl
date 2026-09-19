@@ -229,6 +229,16 @@
     (define *ms-sim* 0.0)
     (define *ms-draw* 0.0)
     (define *ms-flush* 0.0)
+    (define *tick-start* 0.0)
+    (define *tick-ms* 0.0)       ; the whole web-tick, wasm side
+    (define *boot-ms* 0.0)       ; boot-tick!
+    (define *count-ms* 0.0)      ; count-frame! (the stats bookkeeping, a gc-stats read)
+    (define *pump-ms* 0.0)       ; audio-pump!
+    (define *ms-tick* 0.0)
+    (define *ms-pump* 0.0)
+    (define *ms-other* 0.0)
+    (define *ms-boot* 0.0)
+    (define *ms-count* 0.0)
     ;; The sim's parts on the stack table (the tap hitch, David on 5f26a45),
     ;; and the worst frame of the window with its parts: what ran in it.
     (define *part-step* 0.0)     ; session-step (the input: a tap's hit test and pick)
@@ -241,7 +251,7 @@
 
     (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
     (define MS-EVERY 120)      ; two seconds at 60 fps: the worst-frame readout refreshes often enough to catch a tap
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN underruns FRAMES
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN tick MEAN pump MEAN other MEAN boot MEAN count MEAN underruns FRAMES
     ;;                                        (underruns: the audio sink's starved frames in the window: the music stalled)
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
@@ -249,15 +259,33 @@
     ;; One sample into (crash stats)'s ring per frame with ?ms: the frame's
     ;; wall time, the phases, the field's passes, the tap's parts, the GC's
     ;; pause and count in this frame (a gc-stats read per frame; ?ms only).
+    ;; The tick's time outside every timed part: the shell's glue, the
+    ;; input frame, the trace lines, the texture fetch bookkeeping.
+    (define (other-ms)
+      (max 0.0 (- *tick-ms* *sim-ms* *draw-ms* *flush-ms* *pump-ms* *boot-ms* *count-ms*)))
+
+    ;; gc-stats is read every GC-SAMPLE frames, not every frame: the read
+    ;; costs about 8 ms on the desktop wasm build (measured 2026-09-19 as
+    ;; the "count" part with ?ms on: 8.4 ms of a 26 ms tick), so a per-frame
+    ;; read was the largest thing the instrument added to what it measured.
+    ;; The sampled frame carries the pauses and collections of the frames
+    ;; since the last read; the window's totals are exact, the per-frame
+    ;; attribution is to the eighth frame.
+    (define GC-SAMPLE 8)
+    (define *gc-tick* 0)
+
     (define (sample-frame! ms)
-      (let* ((now (gc-snapshot))
+      (let* ((sampled? (= 0 (modulo *gc-tick* GC-SAMPLE)))
+             (now (if sampled? (gc-snapshot) (or *gc-frame* (list 0 0 0 0))))
              (was (or *gc-frame* now))
              (gpu (gpu-bg-ms)))
-        (set! *gc-frame* now)
+        (set! *gc-tick* (+ *gc-tick* 1))
+        (when sampled? (set! *gc-frame* now))
         (stats-push! (list ms *sim-ms* *draw-ms* (+ *advance-ms* (car gpu)) (cdr gpu)
                            *part-step* *part-save* *part-cues*
                            (/ (- (cadddr now) (cadddr was)) 1000000.0)
-                           (- (+ (car now) (cadr now)) (+ (car was) (cadr was)))))))
+                           (- (+ (car now) (cadr now)) (+ (car was) (cadr was)))
+                           *tick-ms* *pump-ms* (other-ms)))))
 
     ;; The summary's first line: the build, the mode, the doors in force.
     (define (stats-header)
@@ -293,6 +321,11 @@
         (set! *ms-sim* (+ *ms-sim* *sim-ms*))
         (set! *ms-draw* (+ *ms-draw* *draw-ms*))
         (set! *ms-flush* (+ *ms-flush* *flush-ms*))
+        (set! *ms-tick* (+ *ms-tick* *tick-ms*))
+        (set! *ms-pump* (+ *ms-pump* *pump-ms*))
+        (set! *ms-other* (+ *ms-other* (other-ms)))
+        (set! *ms-boot* (+ *ms-boot* *boot-ms*))
+        (set! *ms-count* (+ *ms-count* *count-ms*))
         (when (or (not *worst*) (> ms (car *worst*)))
           (set! *worst* (list ms *sim-ms* *draw-ms* *flush-ms* *part-step* *part-advance* *part-save* *part-cues* *part-fx*)))
         (when (= *ms-n* MS-EVERY)
@@ -304,8 +337,15 @@
                  "alloc" (- (caddr now) (caddr was))
                  "gcms" (tenth (/ (- (cadddr now) (cadddr was)) 1000000.0))
                  "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY))
+                 "tick" (tenth (/ *ms-tick* MS-EVERY)) "pump" (tenth (/ *ms-pump* MS-EVERY)) "other" (tenth (/ *ms-other* MS-EVERY))
+                 "boot" (tenth (/ *ms-boot* MS-EVERY)) "count" (tenth (/ *ms-count* MS-EVERY))
                  "underruns" (- (audio-underruns) *underruns-last*))
             (set! *underruns-last* (audio-underruns))
+            (set! *ms-boot* 0.0)
+            (set! *ms-count* 0.0)
+            (set! *ms-tick* 0.0)
+            (set! *ms-pump* 0.0)
+            (set! *ms-other* 0.0)
             ;;   crash: worst-frame MS sim S draw D flush F step A advance B save C cues D fx E
             (when *worst*
               (apply say "worst-frame" (exact (round (car *worst*)))
@@ -1161,23 +1201,39 @@
         (audio-ambient-play!)
         (say "ambient" "start")))
 
+    ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
+    ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
+    ;; bookkeeping, the audio pump, and OTHER = the tick minus every timed
+    ;; part, which is the shell's own glue. What lies outside the tick
+    ;; (the loader's bridge, the browser's rAF cadence and compositing)
+    ;; the page measures around the callback and appends to the summary.
     (define (web-tick dt)
+      (set! *tick-start* (now-ms))
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
       ;; the pump first: the ring is fed for the frame before the boot's steps and the
-      ;; draw can run long (it was last, after everything)
-      (audio-pump!)
-      (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
-      (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
-      (when *ms* (count-frame! dt))
+      ;; draw can run long (it was last, after everything); PUMP is both pumps' time
+      (let ((t0 (now-ms)))
+        (audio-pump!)
+        (set! *pump-ms* (- (now-ms) t0)))
+      (let ((t0 (now-ms)))
+        (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
+        (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
+        (set! *boot-ms* (- (now-ms) t0)))
+      (let ((t0 (now-ms)))
+        (when *ms* (count-frame! dt))
+        (set! *count-ms* (- (now-ms) t0)))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
       (set! *draw-ms* 0.0)
       (set! *flush-ms* 0.0)
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
-      (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
+      (let ((t0 (now-ms)))
+        (audio-pump!)   ; and again after the draw: a cue queued this frame goes out now
+        (set! *pump-ms* (+ *pump-ms* (- (now-ms) t0))))
+      (set! *tick-ms* (- (now-ms) *tick-start*)))
 
     (define (tick-screen f dt)
       (let ((click (input-frame-click f)))

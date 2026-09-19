@@ -140,12 +140,12 @@ function leakedVerifyChromes() {
 
 const udd = fs.mkdtempSync("/tmp/crash-verify-field-chrome-");
 const chrome = spawn("google-chrome", [
-  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`,
   PHONE ? "--window-size=390,844" : "--window-size=1000,760", "about:blank",
-], { stdio: "ignore", detached: true });
+], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) {

@@ -54,11 +54,11 @@ await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
 const udd = fs.mkdtempSync("/tmp/crash-shot-chrome-");
 const chrome = spawn("google-chrome", [
-  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`, "--window-size=844,390", "about:blank",
-], { stdio: "ignore", detached: true });
+], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { /* gone */ } }
 let exiting = false;

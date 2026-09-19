@@ -71,6 +71,12 @@
 //               is empty on this (loopback, so secure) origin
 //   console     zero error-level console entries and zero exceptions
 //
+// Chrome is launched with PULSE_SINK and PIPEWIRE_NODE naming the worker-null
+// sink (the leader's standing rule, 2026-09-19: an arm's headless Chrome
+// reached David's speakers); this arm needs the audio path, so it is not
+// muted, only routed. verify-field, verify-cards, measure-ms and shot-web
+// add --mute-audio as well.
+//
 // The page is always driven at a devicePixelRatio other than 1 (2 on the
 // desktop run, 3 with --phone), because at 1 the template's CSS-to-buffer
 // factor and its inverse coincide and a wrong factor cannot be seen.
@@ -217,7 +223,7 @@ const chrome = spawn("google-chrome", [
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`,
   PHONE ? "--window-size=390,844" : "--window-size=1000,760", "about:blank",
-], { stdio: "ignore", detached: true });
+], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // The one way out. chrome was spawned detached, so -chrome.pid is its
