@@ -98,3 +98,9 @@ Ruled and built: the hero ramp colors and the slant, the backdrop
   cursor blinks on `CONNECTING n/6`. Nothing pops in after the menu is
   live. `title-menu-d40.png` (web), `title-native-d40.png` (the release
   under Xvfb).
+- **D41, the items in the block alphabet** (`title-menu-d41.png`,
+  `title-connecting-d41.png`): 4 px cells, the selected item in the hero
+  ramp, the others flat yellow, a one-cell shadow, the block cursor. The
+  block letters read at item size on the phone viewport, so the 5x7
+  fallback was not needed. `?slant=N` (cells per row, default 0.25) and
+  `?glitch=0..3` (default 2) remain the doors.
