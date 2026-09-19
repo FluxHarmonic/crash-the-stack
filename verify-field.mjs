@@ -43,7 +43,8 @@
 //                   ((crash font)'s rectangles, the oracle): every row of the
 //                   canvas hashes identically, the frames are pixel-identical
 //                   (a wrong cell, a flipped bake, an off-by-one region or a
-//                   scale rounding shows as differing rows, and the count of
+//                   scale rounding shows as differing rows, the HUD band with its
+//                   time-moving readouts left out, and the count of
 //                   lit rows floors it against a blank frame)
 //   gl-log          no sokol refusal reached the console (a "sokol[level=0|1]"
 //                   line: a failed pass or resource prints at log level with
@@ -506,6 +507,11 @@ for (const rule of ["life", "reaction"]) {
     const tieCol = []; let tieCols = 0; for (let x = 0; x < c.width; x++) { tieCol[x] = tie((x + 0.5 - ox) / sx); if (tieCol[x]) tieCols++; }
     const rows = []; let lit = 0, tieRows = 0;
     for (let y = 0; y < c.height; y++) { let h = 2166136261, any = false;
+      // the HUD band (virtual y >= 352) is left out too: its readouts move with
+      // time (the trace meter), and two page loads land on different values
+      // under load (measured 2026-09-19: 40 rows at the cards meter); the HUD
+      // text draws through the same atlas path as the labels above it
+      if ((y + 0.5 - oy) / sy >= ${BOARD_H}) { rows.push(-1); tieRows++; continue; }
       if (tie((y + 0.5 - oy) / sy)) { rows.push(-1); tieRows++; continue; }
       for (let x = 0; x < c.width; x++) { const i = (y * c.width + x) * 4; if (d[i] + d[i + 1] + d[i + 2] > 0) any = true; if (tieCol[x]) continue; h = Math.imul(h ^ d[i], 16777619); h = Math.imul(h ^ d[i + 1], 16777619); h = Math.imul(h ^ d[i + 2], 16777619); }
       rows.push(h >>> 0); if (any) lit++; }
@@ -531,7 +537,7 @@ for (const rule of ["life", "reaction"]) {
     if (on.h - on.tieRows < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.h - on.tieRows} of ${on.h} rows compared`);
     else if (on.lit < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.lit} of ${on.h} rows lit on the atlas frame`);
     else if (differing.length) verdicts.push(`FAIL ${table}: ${differing.length} of ${on.h} canvas rows differ between the atlas and the rect path at seed 3: rows ${differing.slice(0, 8).join(" ")}${differing.length > 8 ? " ..." : ""}`);
-    else verdicts.push(`${table}: atlas == rectangles on ${on.h - on.tieRows} of ${on.h} rows (${on.lit} lit; ${on.tieRows} tie rows and ${on.tieCols} tie columns left out) of ${on.w}x${on.h}`);
+    else verdicts.push(`${table}: atlas == rectangles on ${on.h - on.tieRows} of ${on.h} rows (${on.lit} lit; ${on.tieRows} rows left out as ties or the HUD band, ${on.tieCols} tie columns) of ${on.w}x${on.h}`);
   }
   }
   if (verdicts.some((v) => v.startsWith("FAIL"))) fail("atlas", verdicts.join("; "));
