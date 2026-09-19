@@ -34,7 +34,8 @@
           (crash font)
           (crash glyphs)
           (crash hud)
-          (crash palette))
+          (crash palette)
+          (crash atlas))
 
   (export draw-deal PORTRAITS-PATH PORTRAIT-W PORTRAIT-H)
 
@@ -91,6 +92,17 @@
         ((12) "SYSOP")
         ((13) "ROOT")
         (else #f)))
+
+    ;; Text, class marks and glyphs through (crash atlas) (P3c), or (crash
+    ;; font)'s rects with ?atlas=off, the oracle; (crash render) does the same.
+    (define (text! text x y scale)
+      (if (atlas-on?) (atlas-text text x y scale) (draw-text text x y scale)))
+
+    (define (text-mini! text x y scale)
+      (if (atlas-on?) (atlas-text-mini text x y scale) (draw-text-mini text x y scale)))
+
+    (define (mark! suit x y scale)
+      (if (atlas-on?) (atlas-mark suit x y scale) (draw-rows (class-mark suit) x y scale MARK-W)))
 
     ;; --- background -----------------------------------------------------------
 
@@ -175,7 +187,7 @@
                         (rng rng))
               (if (< k BACK-COLUMNS)
                   (let ((rng (prng-next rng)))
-                    (draw-text-mini (vector-ref HEX-STRINGS (prng-index rng 16))
+                    (text-mini! (vector-ref HEX-STRINGS (prng-index rng 16))
                                     (+ x 10 (* k 14))
                                     py
                                     1)
@@ -209,19 +221,17 @@
             (let ((n (car ps))
                   (cx (col-x i)))
               (cond ((= n 1)
-                     (draw-rows (class-mark (card-suit c))
-                                cx
-                                (row-y (if (and (= columns 3) (= i 1) (= (car pattern) 3)) (/ 1.0 3) 0.5))
-                                PIP-SCALE
-                                MARK-W))
+                     (mark! (card-suit c)
+                            cx
+                            (row-y (if (and (= columns 3) (= i 1) (= (car pattern) 3)) (/ 1.0 3) 0.5))
+                            PIP-SCALE))
                     (else
                      (let pips ((k 0))
                        (when (< k n)
-                         (draw-rows (class-mark (card-suit c))
-                                    cx
-                                    (row-y (/ (+ 1 (* 2 k)) (* 2.0 n)))
-                                    PIP-SCALE
-                                    MARK-W)
+                         (mark! (card-suit c)
+                                cx
+                                (row-y (/ (+ 1 (* 2 k)) (* 2.0 n)))
+                                PIP-SCALE)
                          (pips (+ k 1)))))))
             (loop (cdr ps) (+ i 1))))))
 
@@ -236,7 +246,7 @@
                                  PORTRAIT-W PORTRAIT-H
                                  (* frame PORTRAIT-W) 0
                                  PORTRAIT-W PORTRAIT-H)
-            (draw-rows (class-mark (card-suit c)) (- cx 12) (- cy 12) 3 MARK-W))))
+            (mark! (card-suit c) (- cx 12) (- cy 12) 3))))
 
     ;; A face-up packet (bible section 4): the index band a fanned column
     ;; shows (the rank glyph at scale 2 and the 8x8 class mark beside it,
@@ -274,15 +284,15 @@
               (draw-filled-rect x (+ y 8) w 1)
               (color! (suit-color c)))
             (begin
-              (draw-text rank (+ x 4) (+ y 2) GLYPH-SCALE)
-              (draw-rows (class-mark (card-suit c)) mark-x (+ y 2) 1 MARK-W)
-              (draw-text-mini (subsystem-tag c) mark-x (+ y 12) 1)))
+              (text! rank (+ x 4) (+ y 2) GLYPH-SCALE)
+              (mark! (card-suit c) mark-x (+ y 2) 1)
+              (text-mini! (subsystem-tag c) mark-x (+ y 12) 1)))
         ;; the body, when the face is tall enough to hold one
         (when (>= body-h 24)
           (let ((cx (+ x (half w)))
                 (cy (+ body-y (half body-h))))
             (cond ((= (card-rank c) 1)
-                   (draw-rows (class-mark (card-suit c)) (- cx 12) (- cy 16) 3 MARK-W))
+                   (mark! (card-suit c) (- cx 12) (- cy 16) 3))
                   ((>= (card-rank c) 11)
                    (draw-court c cx (- cy 6)))
                   (else
@@ -290,7 +300,7 @@
             (let ((word (rank-word c)))
               (when word
                 (color! (suit-color c))
-                (draw-text word
+                (text! word
                            (- cx (half (text-width word 1)))
                            (+ body-y body-h -6)
                            1)))))
@@ -316,7 +326,7 @@
         (color! C-TRACE-HOT)
         (draw-filled-rect x y (exact (round (* w left))) ENCRYPTED-STRIP)
         (color! C-BG)
-        (draw-text-mini ENCRYPTED-LABEL
+        (text-mini! ENCRYPTED-LABEL
                         (+ x (half (- w (text-width-mini ENCRYPTED-LABEL 2))))
                         (+ y 3)
                         2)))
@@ -546,7 +556,7 @@
                 (color! C-HIGHLIGHT)
                 (draw-filled-rect (+ (car src-rect) (half (- (caddr src-rect) w))) (+ (cadr src-rect) 40) w 18)
                 (color! C-BG)
-                (draw-text label (+ (car src-rect) (half (- (caddr src-rect) w)) 3) (+ (cadr src-rect) 43) 2)))))))
+                (text! label (+ (car src-rect) (half (- (caddr src-rect) w)) 3) (+ (cadr src-rect) 43) 2)))))))
 
     (define (draw-tags d g)
       (let ((game (deal-game d))
@@ -564,7 +574,7 @@
                    (y (+ (cadr r) 2)))
               (draw-tag-box x y w 14)
               (color! C-LABEL-LIT)
-              (draw-text-mini label (+ x 2) (+ y 2) 2)))
+              (text-mini! label (+ x 2) (+ y 2) 2)))
           (append (list (cons '(stock) (symbol->string STOCK-KEY)))
                   (if (pair? (game-waste game))
                       (list (cons '(waste) (symbol->string WASTE-KEY)))
@@ -582,7 +592,7 @@
                                  (string=? typed (substring label 0 (string-length typed))))))
               (draw-tag-box x y w 14)
               (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-              (draw-text-mini label (+ x 2) (+ y 2) 2)))
+              (text-mini! label (+ x 2) (+ y 2) 2)))
           (deal-labels d))))
 
     ;; --- HUD ----------------------------------------------------------------------
@@ -662,15 +672,15 @@
         (draw-readout score-rect layout (score-text d) C-TEXT)
         ;; the scoring's name, the bankroll and the dump under the score
         (color! C-TEXT-DIM)
-        (draw-text-mini right (- (+ (car score-rect) (caddr score-rect)) (text-width-mini right 1))
+        (text-mini! right (- (+ (car score-rect) (caddr score-rect)) (text-width-mini right 1))
                         (if (eq? layout 'strip) (+ top 16) (+ top 24))
                         1)
         ;; beside the meter: the ICE countdown under the ICE
         (when (eq? (trace-phase tr) 'counter)
           (color! C-ICE)
           (if (eq? layout 'strip)
-              (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
-              (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ (car meter-rect) (caddr meter-rect) 8) (+ top 8) 1)))
+              (text! (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
+              (text! (string-append "ICE IN " (trace-ice-string tr)) (+ (car meter-rect) (caddr meter-rect) 8) (+ top 8) 1)))
         (draw-keys-mark (card-control-rect g layout 'keys) (deal-keys-shown d))
         (let ((line (and (not (string=? (deal-message d) MSG-STUCK)) (phase-line tr game))))
           (cond ((deal-keys-shown d)
@@ -681,7 +691,7 @@
                 (else (draw-line-2 vw top (deal-instruction d) C-TEXT-DIM))))
         (when (> (string-length (deal-typed d)) 0)
           (color! C-HIGHLIGHT)
-          (draw-text (string-append "> " (deal-typed d))
+          (text! (string-append "> " (deal-typed d))
                      (- (car score-rect) 12 (text-width (string-append "> " (deal-typed d)) 2))
                      (+ top 7)
                      2))

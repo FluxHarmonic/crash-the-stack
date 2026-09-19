@@ -35,6 +35,7 @@
           (crash bg)
           (crash gpu bg)
           (crash gpu copper)
+          (crash atlas)
           (crash menu)
           (crash hud)
           (crash glyphs tools))
@@ -171,11 +172,22 @@
     ;; A face's glyph with its top-left at (x, y): the look's sheet (P3), or
     ;; the face-key letter when the look says keys (or names a sheet that
     ;; is not in the tree). In the current color.
+    ;; Text and glyphs through (crash atlas) (one texture region each,
+    ;; P3c), or (crash font)'s rects with ?atlas=off, the oracle the arm
+    ;; holds the atlas pixel-identical to. The menu's text stays on the
+    ;; rect path (P3d owns draw-menu).
+    (define (text! text x y scale)
+      (if (atlas-on?) (atlas-text text x y scale) (draw-text text x y scale)))
+
+    (define (text-mini! text x y scale)
+      (if (atlas-on?) (atlas-text-mini text x y scale) (draw-text-mini text x y scale)))
+
     (define (draw-face-glyph sheet face x y scale)
-      (let ((rows (and (not (eq? sheet 'keys)) (sheet-glyph sheet face))))
-        (if rows
-            (draw-rows rows x y scale GLYPH-W)
-            (draw-text (string (string-ref FACE-KEYS face)) x y scale))))
+      (unless (and (atlas-on?) (not (eq? sheet 'keys)) (atlas-face sheet face x y scale))
+        (let ((rows (and (not (eq? sheet 'keys)) (sheet-glyph sheet face))))
+          (if rows
+              (draw-rows rows x y scale GLYPH-W)
+              (text! (string (string-ref FACE-KEYS face)) x y scale)))))
 
     ;; A scrambled face (the ICE's third counter-hack, P3): the glyph's
     ;; rows shear sideways by a cell or two, a different way every few
@@ -438,7 +450,7 @@
               (color! C-BG)
               (draw-filled-rect x y w 7)
               (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-              (draw-text-mini label (+ x 2) (+ y 1) 1)))
+              (text-mini! label (+ x 2) (+ y 1) 1)))
           (session-labels s))))
 
     ;; --- HUD ------------------------------------------------------------------
@@ -505,7 +517,7 @@
         (color! (if lit? C-BG C-TEXT))
         (draw-rows (icon-rows icon) (+ x 6) (+ y 2) 1 ICON-W)
         (color! (if lit? C-BG C-TEXT-DIM))
-        (draw-text-mini key (+ x (quotient (- w (text-width-mini key 1)) 2)) (+ y 16) 1)))
+        (text-mini! key (+ x (quotient (- w (text-width-mini key 1)) 2)) (+ y 16) 1)))
 
     ;; The corner button: the wrench (David, 2026-09-19), SPC beneath in
     ;; the mini font, lit while the stack is open or just after a choice,
@@ -576,17 +588,17 @@
                     (color! (if on? tone C-TEXT-DIM))
                     (draw-rows (icon-rows (tool-name t)) (+ x 6) (+ ty 1) 1 ICON-W)
                     (color! ink)
-                    (draw-text (tool-label t) (+ x 22) ty 2)
+                    (text! (tool-label t) (+ x 22) ty 2)
                     (let* ((after (+ x 22 (text-width (tool-label t) 2) 4))
                            (after (if (tool-price t)
                                       (let ((p (number->string (tool-price t))))
                                         (color! (if on? C-TRACE-HOT C-TEXT-DIM))
-                                        (draw-text-mini p after (+ ty 3) 1)
+                                        (text-mini! p after (+ ty 3) 1)
                                         (+ after (text-width-mini p 1) 4))
                                       after)))
                       (when (tool-bank t)
                         (color! (if on? C-LABEL-LIT C-TEXT-DIM))
-                        (draw-text-mini (string-append "X" (number->string (tool-bank t))) after (+ ty 3) 1)))
+                        (text-mini! (string-append "X" (number->string (tool-bank t))) after (+ ty 3) 1)))
                     ;; the tag box
                     (let ((bx (+ x w -15))
                           (by (+ y (exact (floor (/ (- h 12) 2))))))
@@ -599,7 +611,7 @@
                             (draw-filled-rect bx by 1 12)
                             (draw-filled-rect (+ bx 11) by 1 12)))
                       (color! (if on? C-BG C-LABEL-LIT))
-                      (draw-text (tag-text (tool-tag t)) (+ bx 3) (+ by 2) 1)))))
+                      (text! (tag-text (tool-tag t)) (+ bx 3) (+ by 2) 1)))))
               (loop (cdr ts) (+ i 1)))))))
 
     ;; --- the bar (ruling D33: status only) --------------------------------------------
@@ -620,8 +632,8 @@
       (let ((strip? (eq? layout 'strip)))
         (color! color)
         (if strip?
-            (draw-text text (- (+ (car r) (caddr r)) (text-width text 1)) (+ (cadr r) 2) 1)
-            (draw-text text (- (+ (car r) (caddr r)) (text-width text 2)) (+ (cadr r) 3) 2))))
+            (text! text (- (+ (car r) (caddr r)) (text-width text 1)) (+ (cadr r) 2) 1)
+            (text! text (- (+ (car r) (caddr r)) (text-width text 2)) (+ (cadr r) 3) 2))))
 
     ;; The second line: the keys line when shown, else the phase line in
     ;; its color, else the instruction; centered, clear of the button and
@@ -629,12 +641,12 @@
     (define (draw-line-2 vw top text color)
       (let ((x (max 34 (exact (floor (/ (- vw (text-width text 1)) 2))))))
         (color! color)
-        (draw-text text x (+ top 32) 1)))
+        (text! text x (+ top 32) 1)))
 
     ;; The ? mark at the bar's right end: the keys line's toggle, tappable.
     (define (draw-keys-mark r shown?)
       (color! (if shown? C-HIGHLIGHT C-TEXT-DIM))
-      (draw-text "?" (+ (car r) 4) (+ (cadr r) 3) 2))
+      (text! "?" (+ (car r) 4) (+ (cadr r) 3) 2))
 
     ;; The meter in the rect the layout gives it: zones a 200x16 box on
     ;; the first row, strip the band's top 12 px across the width.
@@ -654,7 +666,7 @@
         (if (and clean? (not (eq? phase 'cleared)))
             (let ((text (string-append "TIME " (trace-clock-string tr))))
               (color! C-TEXT)
-              (draw-text text (+ x 4) ty sc))
+              (text! text (+ x 4) ty sc))
             (let* ((frac (trace-fraction tr))
                    (fill (exact (floor (* (- w 2) frac))))
                    (text (case phase
@@ -675,7 +687,7 @@
               (color! bar)
               (draw-filled-rect (+ x 1) (+ y 1) fill (- h 2))
               (color! (if (eq? phase 'severed) C-HIGHLIGHT C-TEXT))
-              (draw-text text (+ x 4) ty sc)))))
+              (text! text (+ x 4) ty sc)))))
 
     ;; A box with a label, the shape of every control.
     (define (draw-box r label fill edge ink)
@@ -688,7 +700,7 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! ink)
-        (draw-text label
+        (text! label
                    (+ x (exact (floor (/ (- w (text-width label 2)) 2))))
                    (+ y (exact (floor (/ (- h 14) 2))))
                    2)))
@@ -706,7 +718,7 @@
         (color-alpha! C-BG 0.9)
         (draw-filled-rect (- (half vw) 150) (- top 74) 300 62)
         (color! C-SELECTED)
-        (draw-text title (- (half vw) (half tw)) (- top 68) 2)
+        (text! title (- (half vw) (half tw)) (- top 68) 2)
         (draw-box (cdr (assq 'apply (update-controls g 'zones))) "APPLY" C-BAR-C C-SELECTED C-TEXT)
         (draw-box (cdr (assq 'later (update-controls g 'zones))) "NOT NOW" C-BAR-C C-TEXT-DIM C-TEXT)))
 
@@ -726,7 +738,7 @@
         (color-alpha! C-BG a)
         (draw-filled-rect (- x 8) (- y 16) (+ w 16) 36)
         (color-alpha! C-SELECTED a)
-        (draw-text message x (- y 10) 3)))
+        (text! message x (- y 10) 3)))
 
     ;; A toast: slides in from the right edge to sit just above the HUD,
     ;; holds, then slides out to the right (David, 2026-09-17: not over the
@@ -784,7 +796,7 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! (mix ink C-FACE-EDGE flash))
-        (draw-text text (+ x 8) (+ y 5) 2)))
+        (text! text (+ x 8) (+ y 5) 2)))
 
     (define (draw-hud s g x)
       (let* ((b (session-board s))
@@ -805,7 +817,7 @@
         (draw-meter g layout tr)
         (draw-readout look-rect layout readout C-TEXT)
         (color! C-TEXT-DIM)
-        (draw-text-mini look-label (- (+ (car look-rect) (caddr look-rect)) (text-width-mini look-label 1))
+        (text-mini! look-label (- (+ (car look-rect) (caddr look-rect)) (text-width-mini look-label 1))
                         (if (eq? layout 'strip) (+ top 16) (+ top 24))
                         1)
         ;; beside the meter: the ICE countdown under the ICE (bible
@@ -814,13 +826,13 @@
           (cond ((eq? (trace-phase tr) 'counter)
                  (color! C-ICE)
                  (if (eq? layout 'strip)
-                     (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
-                     (draw-text (string-append "ICE IN " (trace-ice-string tr)) (+ (car m) (caddr m) 8) (+ top 8) 1)))
+                     (text! (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
+                     (text! (string-append "ICE IN " (trace-ice-string tr)) (+ (car m) (caddr m) 8) (+ top 8) 1)))
                 (else
                  (color! C-TEXT-DIM)
                  (if (eq? layout 'strip)
-                     (draw-text (string-append "SEED " (number->string (session-seed s))) (+ 100 (half vw)) (+ top 3) 1)
-                     (draw-text-mini (string-append "SEED " (number->string (session-seed s))) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
+                     (text! (string-append "SEED " (number->string (session-seed s))) (+ 100 (half vw)) (+ top 3) 1)
+                     (text-mini! (string-append "SEED " (number->string (session-seed s))) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
         (when (memq (session-update s) '(waiting prompt))
           (draw-update-mark g layout))
         (draw-keys-mark (control-rect g layout 'keys) (session-keys-shown s))
@@ -833,7 +845,7 @@
                 (else (draw-line-2 vw top (session-instruction s) C-TEXT-DIM))))
         (when (> (string-length (session-typed s)) 0)
           (color! C-HIGHLIGHT)
-          (draw-text (string-append "> " (session-typed s))
+          (text! (string-append "> " (session-typed s))
                      (- (car look-rect) 12 (text-width (string-append "> " (session-typed s)) 2))
                      (+ top 7)
                      2))
@@ -924,7 +936,7 @@
         (let* ((title "LINK SEVERED")
                (tw (text-width title 3)))
           (color-alpha! C-TRACE-HOT p)
-          (draw-text title (exact (floor (/ (- vw tw) 2))) (- (half top) 40) 3))
+          (text! title (exact (floor (/ (- vw tw) 2))) (- (half top) 40) 3))
         (for-each (lambda (choice)
                     (let* ((label (car choice))
                            (cx (cdr choice))
@@ -940,7 +952,7 @@
                       (draw-filled-rect bx by 1 h)
                       (draw-filled-rect (+ bx w -1) by 1 h)
                       (color-alpha! C-TEXT p)
-                      (draw-text label
+                      (text! label
                                  (- cx (half (text-width label 2)))
                                  (+ by 13)
                                  2)))
@@ -1011,8 +1023,8 @@
       (let ((text (string-append "MS " (number->string (exact (round ms)))))
             (line2 (string-append "STEP " (tenths step) " PRES " (tenths present))))
         (color! C-LABEL-LIT)
-        (draw-text text (- 640 8 (text-width text 2)) 6 2)
-        (draw-text line2 (- 640 8 (text-width line2 1)) 22 1)))
+        (text! text (- 640 8 (text-width text 2)) 6 2)
+        (text! line2 (- 640 8 (text-width line2 1)) 22 1)))
 
     (define (tenths x)
       (let* ((t (exact (round (* 10 x))))
@@ -1094,7 +1106,7 @@
         (color! C-TEXT-DIM)
         (draw-filled-rect 0 top vw 1)
         (color! C-TEXT)
-        (draw-text (string-append "EDIT  TILES " (number->string (editor-count e))
+        (text! (string-append "EDIT  TILES " (number->string (editor-count e))
                                   "  LAYER " (number->string cl)
                                   "  AT " (number->string (cadr c)) "," (number->string (caddr c))
                                   "  ABOVE " (case dim ((full) "FULL") ((dim) "DIM") (else "HIDDEN"))
@@ -1102,7 +1114,7 @@
                                   "  ICE " (number->string (editor-sever-at e)))
                    8 (+ top 7) 2)
         (color! C-TEXT-DIM)
-        (draw-text "ARROWS/HJKL MOVE  SHIFT HALF  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM  1/2 TRACE  3/4 ICE  ^S SAVE  ^P PLAY  ESC QUIT"
+        (text! "ARROWS/HJKL MOVE  SHIFT HALF  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM  1/2 TRACE  3/4 ICE  ^S SAVE  ^P PLAY  ESC QUIT"
                    8 (+ top 32) 1)
         (unless (string=? (editor-message e) "")
           (draw-message g (editor-message e) top 1.0 0.0))))

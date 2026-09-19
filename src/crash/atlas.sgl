@@ -1,0 +1,174 @@
+;;; (crash atlas) - The glyphs baked once, drawn as texture regions.
+;;;
+;;; The floor of a frame on the phone (P3c, measured at the phone
+;;; viewport with the field off: draw 16.8 ms of which tiles 10.0, HUD
+;;; 3.2, hint labels 3.0) is (crash font)'s cell walk: every glyph of
+;;; every tile is read cell by cell each frame (35 string-ref and char=?
+;;; per 5x7 glyph, 144 tiles) and queued as one rectangle per run (some
+;;; 1,500 native calls a frame), the labels and the HUD text the same
+;;; way. font.sgl's header names the fix: bake the set into one texture
+;;; once and draw one region per glyph. Offscreen targets work on the
+;;; web since sigil-graphics 0.11.3, so the bake is a render target, not
+;;; a build-time PNG.
+;;;
+;;; One 'nearest target holds every glyph the tables draw at scale 1, in
+;;; white, on a PITCH x PITCH grid: the 5x7 font by character code (rows
+;;; 0-3), the 3x5 mini font by code (rows 4-7), then every face sheet of
+;;; (crash glyphs), 36 faces each. Baked in one pass on first use (a
+;;; pass clears its target on entry, so everything goes in at once) with
+;;; (crash font)'s own draw-rows, so a cell is exactly what the rect path
+;;; draws. A glyph is then one draw-texture-region, tinted by the current
+;;; color (sgp multiplies the white texel by it, as it does the rect
+;;; path's white texture: the same bytes), at dest w = scale * cell, and
+;;; the target's nearest sampling lands each texel on the device pixels
+;;; the rect path covers (a device pixel center c is inside a rect iff
+;;; floor(c / scale) is; the sampler picks texel floor(c / scale) too).
+;;; The browser arm holds the two paths pixel-identical (?atlas=off is
+;;; the rect path, the oracle); the rect path stays as the fallback.
+;;;
+;;; Orientation: the target's memory is bottom-up, and draw-texture-region
+;;; takes the source rect as texture rows from that bottom, so a cell
+;;; baked with its top at pass row y is read as (sy = H - y, sh = -h),
+;;; the flip draw-render-target does.
+
+(define-library (crash atlas)
+  (import (sigil math)
+          (sigil list)
+          (sigil graphics)
+          (crash font)
+          (crash glyphs))
+
+  (export atlas-text atlas-text-mini atlas-face atlas-mark atlas-on? atlas-set! atlas-ready? atlas-ensure!
+          PITCH COLUMNS)
+
+  (begin
+    (define PITCH 8)
+    (define COLUMNS 32)                    ; cells per row: 256 px wide
+    (define CODES 128)                     ; character codes baked per font
+    (define FONT-ROW 0)                    ; the 5x7 font: rows 0-3
+    (define MINI-ROW 4)                    ; the 3x5 mini font: rows 4-7
+    (define SHEET-ROW 8)                   ; the face sheets from row 8, two rows each
+    (define ROWS-PER-SHEET 2)
+    (define MARKS 4)                       ; the card table's class marks, 8x8, one row after the sheets
+
+    (define *on* #t)
+    (define *rt* #f)
+    (define *tex* #f)
+    (define *height* 0)
+    (define *mark-row* 0)
+    (define *font-baked* (make-vector CODES #f))   ; which codes have a cell (no alist walk per character per frame)
+    (define *mini-baked* (make-vector CODES #f))
+
+    (define (atlas-on?) *on*)
+    (define (atlas-set! on?) (set! *on* on?))
+    (define (atlas-ready?) (and *rt* #t))
+
+    ;; (col . row) of a cell: a font glyph by code, a sheet's face.
+    (define (font-cell code) (cons (modulo code COLUMNS) (+ FONT-ROW (quotient code COLUMNS))))
+    (define (mini-cell code) (cons (modulo code COLUMNS) (+ MINI-ROW (quotient code COLUMNS))))
+    (define (sheet-index name)
+      (let loop ((sheets SHEETS) (i 0))
+        (cond ((null? sheets) #f)
+              ((eq? (car (car sheets)) name) i)
+              (else (loop (cdr sheets) (+ i 1))))))
+    (define (face-cell index face)
+      (cons (modulo face COLUMNS) (+ SHEET-ROW (* index ROWS-PER-SHEET) (quotient face COLUMNS))))
+
+    ;; --- the bake -----------------------------------------------------------------
+
+    (define (bake-rows! rows cell width)
+      (draw-rows rows (* PITCH (car cell)) (* PITCH (cdr cell)) 1 width))
+
+    (define (atlas-ensure!)
+      (unless *rt*
+        (let* ((mark-row (+ SHEET-ROW (* ROWS-PER-SHEET (length SHEETS))))
+               (rows (+ mark-row 1))
+               (h (* PITCH rows)))
+          (set! *height* h)
+          (set! *rt* (make-render-target (* PITCH COLUMNS) h 'nearest))
+          (with-render-target *rt*
+            (set-blend-mode 'none)
+            (set-color 1.0 1.0 1.0 1.0)
+            (for-each (lambda (entry)
+                        (let ((code (char->integer (car entry))))
+                          (when (< code CODES)
+                            (vector-set! *font-baked* code #t)
+                            (bake-rows! (cdr entry) (font-cell code) GLYPH-W))))
+                      GLYPHS)
+            (for-each (lambda (entry)
+                        (let ((code (char->integer (car entry))))
+                          (when (< code CODES)
+                            (vector-set! *mini-baked* code #t)
+                            (bake-rows! (cdr entry) (mini-cell code) MINI-W))))
+                      MINI-GLYPHS)
+            (let sheets ((entries SHEETS) (i 0))
+              (unless (null? entries)
+                (let faces ((face 0))
+                  (when (< face FACE-COUNT)
+                    (let ((rows (sheet-glyph (car (car entries)) face)))
+                      (when rows (bake-rows! rows (face-cell i face) GLYPH-W)))
+                    (faces (+ face 1))))
+                (sheets (cdr entries) (+ i 1))))
+            (let marks ((suit 0))
+              (when (< suit MARKS)
+                (bake-rows! (class-mark suit) (cons suit mark-row) MARK-W)
+                (marks (+ suit 1)))))
+          (set! *mark-row* mark-row)
+          (set-blend-mode 'normal)
+          (set! *tex* (render-target->texture *rt*)))))
+
+    ;; --- drawing ---------------------------------------------------------------------
+
+    ;; The cell's w x h at (x, y), scale px per texel, in the current color.
+    (define (draw-cell! cell x y w h scale)
+      (draw-texture-region *tex*
+                           (inexact x)
+                           (inexact y)
+                           (inexact (* scale w))
+                           (inexact (* scale h))
+                           (inexact (* PITCH (car cell)))
+                           (inexact (- *height* (* PITCH (cdr cell))))
+                           (inexact w)
+                           (inexact (- h))))
+
+    ;; (crash font)'s draw-text: the 5x7 set, advance GLYPH-W + 1 cells.
+    (define (atlas-text text x y scale)
+      (atlas-ensure!)
+      (let ((advance (* scale (+ GLYPH-W 1)))
+            (n (string-length text)))
+        (let loop ((i 0) (x x))
+          (when (< i n)
+            (let ((code (char->integer (char-downcase (string-ref text i)))))
+              (when (and (< code CODES) (vector-ref *font-baked* code))
+                (draw-cell! (font-cell code) x y GLYPH-W GLYPH-H scale)))
+            (loop (+ i 1) (+ x advance))))))
+
+    ;; (crash font)'s draw-text-mini: the 3x5 set, advance MINI-W + 1.
+    (define (atlas-text-mini text x y scale)
+      (atlas-ensure!)
+      (let ((advance (* scale (+ MINI-W 1)))
+            (n (string-length text)))
+        (let loop ((i 0) (x x))
+          (when (< i n)
+            (let* ((c (char-downcase (string-ref text i)))
+                   (code (char->integer c)))
+              (when (and (< code CODES) (vector-ref *mini-baked* code))
+                (draw-cell! (mini-cell code) x y MINI-W MINI-H scale)))
+            (loop (+ i 1) (+ x advance))))))
+
+    ;; A class mark (the card table's MEM/PWR/TX/DSK, 8x8) at (x, y).
+    (define (atlas-mark suit x y scale)
+      (atlas-ensure!)
+      (draw-cell! (cons suit *mark-row*) x y MARK-W MARK-H scale))
+
+    ;; A face of a sheet at (x, y), scale px per cell: #t when drawn, #f
+    ;; when the sheet or the face has no glyph (the caller falls back).
+    (define (atlas-face sheet face x y scale)
+      (atlas-ensure!)
+      (let ((index (sheet-index sheet)))
+        (and index
+             (< face FACE-COUNT)
+             (sheet-glyph sheet face)
+             (begin
+               (draw-cell! (face-cell index face) x y GLYPH-W GLYPH-H scale)
+               #t))))))

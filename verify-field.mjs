@@ -38,6 +38,13 @@
 //                   be one of the two steady-state mixes of the two (within
 //                   4 per channel) and never a pure one: the previous frame
 //                   lingers under the new at PHOSPHOR = 0.12
+//   atlas           the stack and the card table at seed 3 with the field off, drawn from the
+//                   glyph atlas (the default) and again with ?atlas=off
+//                   ((crash font)'s rectangles, the oracle): every row of the
+//                   canvas hashes identically, the frames are pixel-identical
+//                   (a wrong cell, a flipped bake, an off-by-one region or a
+//                   scale rounding shows as differing rows, and the count of
+//                   lit rows floors it against a blank frame)
 //   gl-log          no sokol refusal reached the console (a "sokol[level=0|1]"
 //                   line: a failed pass or resource prints at log level with
 //                   no message on the web build)
@@ -85,7 +92,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["field-life", "field-reaction", "copper", "phosphor", "gl-log", "console"];
+const planned = ["field-life", "field-reaction", "copper", "phosphor", "atlas", "gl-log", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -428,6 +435,62 @@ for (const rule of ["life", "reaction"]) {
     else if (off.length) fail("phosphor", `${off.length} of 6 reads are not a steady-state mix at PHOSPHOR ${p} (want ${hex(mixA.map(Math.round))} or ${hex(mixB.map(Math.round))} within 4): ${reads.map(hex).join(" ")}`);
     else pass("phosphor", `6 reads all a mix of the two probe colors at ${p} (${[...seen].join(" ")}), never pure`);
   }
+}
+
+// ---- atlas -----------------------------------------------------------------------------
+{
+  // FNV-1a per canvas row over the RGB bytes, plus how many rows hold
+  // anything but the letterbox black. Rows and columns whose device
+  // pixel center sits within TIE of a virtual pixel edge are left out:
+  // there the rasterizer's coverage rule (the rect path) and nearest
+  // sampling with float32 texture coordinates (the atlas) may pick
+  // either side, one device row apart. Measured 2026-09-19: at dpr 2
+  // (scale 3.125, a binary fraction) every differing pixel of 1332 lay
+  // exactly on such an edge (y = 4 mod 8); at dpr 3 (487/400, not
+  // representable) rows within 0.03 of an edge flipped too. A wrong
+  // cell, a flipped bake or an off-by-one region differs on the rows
+  // that remain, which are nine in ten.
+  const rowHashes = () => evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+    const c = document.getElementById("stage");
+    const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+    const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const vpw = Math.floor(${VW} * scale), vph = Math.floor(${VH} * scale);
+    const ox = Math.floor((c.width - vpw) / 2), oy = Math.floor((c.height - vph) / 2);
+    const sx = vpw / ${VW}, sy = vph / ${VH};
+    const TIE = 0.05;
+    const tie = (v) => Math.abs(v - Math.round(v)) < TIE;
+    const tieCol = []; let tieCols = 0; for (let x = 0; x < c.width; x++) { tieCol[x] = tie((x + 0.5 - ox) / sx); if (tieCol[x]) tieCols++; }
+    const rows = []; let lit = 0, tieRows = 0;
+    for (let y = 0; y < c.height; y++) { let h = 2166136261, any = false;
+      if (tie((y + 0.5 - oy) / sy)) { rows.push(-1); tieRows++; continue; }
+      for (let x = 0; x < c.width; x++) { const i = (y * c.width + x) * 4; if (d[i] + d[i + 1] + d[i + 2] > 0) any = true; if (tieCol[x]) continue; h = Math.imul(h ^ d[i], 16777619); h = Math.imul(h ^ d[i + 1], 16777619); h = Math.imul(h ^ d[i + 2], 16777619); }
+      rows.push(h >>> 0); if (any) lit++; }
+    resolve({ rows, lit, tieRows, tieCols, w: c.width, h: c.height });
+  }))`);
+  async function readTable(table, query) {
+    mark = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${table}&fresh&seed=3&bg=off${query}` });
+    const boot = await waitLine(table === "stack" ? /^crash: seed 3 tiles 144 pair / : /^crash: cards seed 3 moves 0 /, mark, 20000);
+    if (!boot) return null;
+    await sleep(1200);
+    return rowHashes();
+  }
+  const verdicts = [];
+  for (const table of ["stack", "cards"]) {
+  const on = await readTable(table, "");
+  const off = on && await readTable(table, "&atlas=off");
+  if (!on || !off) { fail("atlas", `the ${table} page did not boot within 20 s`); timedOut("atlas"); }
+  else {
+    const differing = []; on.rows.forEach((h, y) => { if (h >= 0 && h !== off.rows[y]) differing.push(y); });
+    if (on.lit < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.lit} of ${on.h} rows lit on the atlas frame`);
+    else if (differing.length) verdicts.push(`FAIL ${table}: ${differing.length} of ${on.h} canvas rows differ between the atlas and the rect path at seed 3: rows ${differing.slice(0, 8).join(" ")}${differing.length > 8 ? " ..." : ""}`);
+    else verdicts.push(`${table}: atlas == rectangles on ${on.h - on.tieRows} of ${on.h} rows (${on.lit} lit; ${on.tieRows} tie rows and ${on.tieCols} tie columns left out) of ${on.w}x${on.h}`);
+  }
+  }
+  if (verdicts.some((v) => v.startsWith("FAIL"))) fail("atlas", verdicts.join("; "));
+  else pass("atlas", verdicts.join("; "));
 }
 
 // ---- gl-log, console -------------------------------------------------------------------------
