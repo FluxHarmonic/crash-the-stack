@@ -129,6 +129,7 @@
           (crash gpu phosphor)
           (crash atlas)
           (sigil gc)
+          (crash stats)
           (crash sfx)
           (crash audio)
           (crash shell))
@@ -172,6 +173,12 @@
     (define *bg-hold* #f)    ; ?bghold=N: the field stops after N steps (the field leg's door)
     (define *bg-stride* #f)  ; ?bgstride=N: ticks between field steps (STRIDE by default; David's comparison door)
     (define *bg-rsteps* #f)  ; ?rsteps=N: Gray-Scott iterations per field step (REACT-STEPS by default)
+    (define *dpr* "?")       ; the page's effective device pixel ratio, for the stats header
+    (define *gc-frame* #f)   ; the GC snapshot at the last frame (the ring's per-frame pause and count)
+    ;; The readout's tap target (the three lines at the top right, (crash
+    ;; render) draw-frame-ms): a tap here copies the stats, selects nothing.
+    (define STATS-X 340)
+    (define STATS-BOTTOM 44)
     (define *bg-only* #f)    ; ?bgonly: draw the background alone, no table over it (the field leg reads every cell)
     (define *bg-said* #f)    ; the hold's line was said
     (define *copper* 'roll)  ; ?copper=always|off|bitmap; ?raster=N: the raster at a fixed roll N, split (the scanline leg)
@@ -229,11 +236,47 @@
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
     ;;                                        collections and bytes allocated in the window
+    ;; One sample into (crash stats)'s ring per frame with ?ms: the frame's
+    ;; wall time, the phases, the field's passes, the tap's parts, the GC's
+    ;; pause and count in this frame (a gc-stats read per frame; ?ms only).
+    (define (sample-frame! ms)
+      (let* ((now (gc-snapshot))
+             (was (or *gc-frame* now))
+             (gpu (gpu-bg-ms)))
+        (set! *gc-frame* now)
+        (stats-push! (list ms *sim-ms* *draw-ms* (+ *advance-ms* (car gpu)) (cdr gpu)
+                           *part-step* *part-save* *part-cues*
+                           (/ (- (cadddr now) (cadddr was)) 1000000.0)
+                           (- (+ (car now) (cadr now)) (+ (car was) (cadr was)))))))
+
+    ;; The summary's first line: the build, the mode, the doors in force.
+    (define (stats-header)
+      (string-append "crash-the-stack " (or *version* "unversioned")
+                     " bg " (if *bg* (string-append (symbol->string (bg-mode *bg*)) (if (bg-gpu? *bg*) "" "-cpu")) "off")
+                     " dpr " *dpr*
+                     " stride " (number->string (if *bg* (bg-stride *bg*) 0))
+                     " rsteps " (number->string (if *bg* (bg-react-steps *bg*) 0))
+                     " adepth " (number->string (audio-depth))
+                     " atlas " (if (atlas-on?) "on" "off")
+                     " copper " (if (number? *copper*) (number->string *copper*) (symbol->string *copper*))
+                     " phosphor " (symbol->string *phosphor*)))
+
+    ;; The ring as text, to the page for the clipboard (a console line the
+    ;; page's hook reads, newlines as ~, printed whether or not ?trace is
+    ;; on), and a trace line saying how many samples went:
+    ;;   crash: clipboard TEXT
+    ;;   crash: stats copied N
+    (define (copy-stats!)
+      (let ((text (stats-summary (stats-header))))
+        (println "~a" (string-append "crash: clipboard " (string-replace text "\n" "~")))
+        (say "stats" "copied" (stats-count))))
+
     (define (count-frame! dt)
       (let ((ms (* 1000.0 dt)))
         (set! *ms-sum* (+ *ms-sum* ms))
         (set! *ms-max* (max *ms-max* ms))
         (set! *ms-n* (+ *ms-n* 1))
+        (sample-frame! ms)
         (let ((gpu (gpu-bg-ms)))
           (set! *ms-step* (+ *ms-step* *advance-ms* (car gpu)))
           (set! *ms-present* (+ *ms-present* (cdr gpu))))
@@ -415,12 +458,16 @@
           (let ((x (string->number (car parts)))
                 (y (string->number (cadr parts))))
             (when (and x y)
-              (set! *click* (frame->virtual (gles3-canvas-width)
-                                            (gles3-canvas-height)
-                                            VW
-                                            VH
-                                            x
-                                            y)))))))
+              (let ((p (frame->virtual (gles3-canvas-width)
+                                       (gles3-canvas-height)
+                                       VW
+                                       VH
+                                       x
+                                       y)))
+                ;; a tap on the readout copies the stats and reaches no tile
+                (if (and *ms* p (>= (car p) STATS-X) (<= (cdr p) STATS-BOTTOM))
+                    (copy-stats!)
+                    (set! *click* p))))))))
 
     ;; --- textures, fetched by JS, decoded here once they land -------------
 
@@ -1141,6 +1188,7 @@
             ((string=? type "demo") (param! (lambda () (set! *demo* (and (string=? payload "cleared") 'cleared)))))
             ((string=? type "atlas") (param! (lambda () (atlas-set! (not (string=? payload "off"))))))
             ((string=? type "adepth") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n)) (audio-set-depth! n))))))
+            ((string=? type "dpr") (param! (lambda () (set! *dpr* payload))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)

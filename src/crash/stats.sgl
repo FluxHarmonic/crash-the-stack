@@ -1,0 +1,103 @@
+;;; (crash stats) - The last minute of frames, and a summary David can paste.
+;;;
+;;; With ?ms (--log-keys natively) every frame pushes one sample into a
+;;; ring of RING frames (a minute at 60 fps): the frame's wall time, the
+;;; sim and draw phases, the field's step and present passes, the tap
+;;; (session-step), the save, the cues, and the GC's pause time and
+;;; collections in the frame. A tap on the readout (alt+m natively)
+;;; renders the ring as text: one header line (the build, the mode, the
+;;; doors in force, how many samples over how many seconds), then per
+;;; part mean / p50 / p95 / max, the GC's count and total, the frames
+;;; over 33 ms and over 50 ms. The web page copies it to the clipboard
+;;; (David, 2026-09-19: "impossible for me to type them down
+;;; accurately"); natively it goes to stdout.
+;;;
+;;; Pure data: a vector of samples and the arithmetic. No platform.
+
+(define-library (crash stats)
+  (import (sigil math)
+          (sigil list))
+
+  (export stats-reset! stats-push! stats-count stats-summary
+          RING PARTS)
+
+  (begin
+    (define RING 3600)
+    ;; the sample's fields, in order
+    (define PARTS (list "frame" "sim" "draw" "step" "pres" "tap" "save" "cue" "gcms" "gcn"))
+    (define FIELDS 10)
+
+    (define *ring* (make-vector (* RING FIELDS) 0.0))
+    (define *n* 0)          ; samples held, up to RING
+    (define *head* 0)       ; the next slot to write
+
+    (define (stats-reset!)
+      (set! *n* 0)
+      (set! *head* 0))
+
+    (define (stats-count) *n*)
+
+    ;; One frame's ten numbers (a list in PARTS order).
+    (define (stats-push! sample)
+      (let ((base (* *head* FIELDS)))
+        (let loop ((i 0) (s sample))
+          (when (and (< i FIELDS) (pair? s))
+            (vector-set! *ring* (+ base i) (inexact (car s)))
+            (loop (+ i 1) (cdr s))))
+        (set! *head* (modulo (+ *head* 1) RING))
+        (set! *n* (min RING (+ *n* 1)))))
+
+    ;; The values of field i over the samples held, oldest first.
+    (define (column i)
+      (let ((first (modulo (- *head* *n*) RING)))
+        (let loop ((k 0) (acc '()))
+          (if (= k *n*)
+              (reverse acc)
+              (loop (+ k 1)
+                    (cons (vector-ref *ring* (+ (* (modulo (+ first k) RING) FIELDS) i)) acc))))))
+
+    (define (tenth x) (/ (round (* 10.0 x)) 10.0))
+
+    (define (percentile sorted p)
+      (let ((n (length sorted)))
+        (if (= n 0)
+            0.0
+            (list-ref sorted (min (- n 1) (exact (floor (* p n))))))))
+
+    (define (sum xs) (fold + 0.0 xs))
+
+    ;; "name mean p50 p95 max" for a column.
+    (define (part-line name xs)
+      (let ((sorted (list-sort < xs))
+            (n (max 1 (length xs))))
+        (string-append name
+                       " mean " (number->string (tenth (/ (sum xs) n)))
+                       " p50 " (number->string (tenth (percentile sorted 0.5)))
+                       " p95 " (number->string (tenth (percentile sorted 0.95)))
+                       " max " (number->string (tenth (if (null? xs) 0.0 (apply max xs)))))))
+
+    ;; The summary, lines joined by newlines. header: the caller's first
+    ;; line (build, mode, doors).
+    (define (stats-summary header)
+      (let* ((frames (column 0))
+             (seconds (tenth (/ (sum frames) 1000.0)))
+             (over-33 (length (filter (lambda (f) (> f 33.0)) frames)))
+             (over-50 (length (filter (lambda (f) (> f 50.0)) frames)))
+             (gcms (column 8))
+             (gcn (column 9)))
+        (string-append
+         header " samples " (number->string *n*) " over " (number->string seconds) " s\n"
+         (part-line "frame" frames) "\n"
+         (part-line "sim" (column 1)) "\n"
+         (part-line "draw" (column 2)) "\n"
+         (part-line "step" (column 3)) "\n"
+         (part-line "pres" (column 4)) "\n"
+         (part-line "tap" (column 5)) "\n"
+         (part-line "save" (column 6)) "\n"
+         (part-line "cue" (column 7)) "\n"
+         "gc pauses " (number->string (exact (round (sum gcn))))
+         " total " (number->string (tenth (sum gcms))) " ms"
+         " max " (number->string (tenth (if (null? gcms) 0.0 (apply max gcms)))) " ms\n"
+         "frames over 33 ms " (number->string over-33)
+         " over 50 ms " (number->string over-50)
+         " of " (number->string *n*))))))

@@ -22,6 +22,7 @@
 ;;;                   [--demo cleared]    the cleared sequence on demand on the table that opens
 ;;;                   [--atlas off]       text and glyphs as rectangles (the oracle), not the baked atlas
 ;;;                   [--audio-depth N]   frames kept ahead of the output (6144: the cue latency and the stall headroom)
+;;;                   with --log-keys, alt+m prints the last minute's frame stats to stdout
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
 ;;;
 ;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
@@ -75,6 +76,7 @@
           (crash gpu bg)
           (crash gpu phosphor)
           (crash atlas)
+          (crash stats)
           (crash sfx)
           (crash audio)
           (crash shell))
@@ -187,8 +189,23 @@
 
     (define (tenth x) (/ (round (* 10.0 x)) 10.0))
 
+    ;; With --log-keys every frame goes into (crash stats)'s ring (the GC
+    ;; pause is not sampled natively: the frame parts are), and alt+m
+    ;; prints the last minute's summary to stdout (the web shell's tap
+    ;; on the readout, which copies it to the clipboard).
+    (define (print-stats! bg)
+      (display (stats-summary
+                (string-append "crash-the-stack NATIVE"
+                               " bg " (if bg (string-append (symbol->string (bg-mode bg)) (if (bg-gpu? bg) "" "-cpu")) "off")
+                               " stride " (number->string (if bg (bg-stride bg) 0))
+                               " rsteps " (number->string (if bg (bg-react-steps bg) 0))
+                               " adepth " (number->string (audio-depth))
+                               " atlas " (if (atlas-on?) "on" "off"))))
+      (newline))
+
     (define (count-frame!)
       (let ((gpu (gpu-bg-ms)))
+        (stats-push! (list *frame-ms* 0.0 0.0 (+ *advance-ms* (car gpu)) (cdr gpu) 0.0 0.0 0.0 0.0 0.0))
         (set! *ms-sum* (+ *ms-sum* *frame-ms*))
         (set! *ms-max* (max *ms-max* *frame-ms*))
         (set! *ms-step* (+ *ms-step* *advance-ms* (car gpu)))
@@ -228,6 +245,7 @@
              (phosphor-reset!)
              (draw)))
       (when log-keys?
+        (when (and (key-down? 'alt) (key-pressed? 'm)) (print-stats! bg))
         (count-frame!)
         (let ((gpu (gpu-bg-ms)))
           (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) "")))

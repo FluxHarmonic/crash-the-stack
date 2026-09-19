@@ -513,6 +513,7 @@ for (const rule of ["life", "reaction"]) {
     const differing = []; on.rows.forEach((h, y) => { if (h >= 0 && h !== off.rows[y]) differing.push(y); });
     if (on.h - on.tieRows < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.h - on.tieRows} of ${on.h} rows compared`);
     else if (on.lit < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.lit} of ${on.h} rows lit on the atlas frame`);
+    else if (differing.length) verdicts.push(`FAIL ${table}: ${differing.length} of ${on.h} canvas rows differ between the atlas and the rect path at seed 3: rows ${differing.slice(0, 8).join(" ")}${differing.length > 8 ? " ..." : ""}`);
     else verdicts.push(`${table}: atlas == rectangles on ${on.h - on.tieRows} of ${on.h} rows (${on.lit} lit; ${on.tieRows} tie rows and ${on.tieCols} tie columns left out) of ${on.w}x${on.h}`);
   }
   }

@@ -111,6 +111,9 @@
     //          winning a board.
     //   atlas=off: text and glyphs drawn as rectangles ((crash font)), not
     //          from the baked atlas: the oracle of the atlas leg.
+    //   ms: also keeps the last minute of frame samples; a tap on the readout
+    //          (top right) copies the summary to the clipboard, or shows it
+    //          in a selectable overlay when the clipboard is refused.
     //   adepth=N: frames the audio keeps ahead of the output (6144: the
     //          cue latency and the stall a frame may take; 3072 was P3's).
     //   ms: the frame's wall time in the corner (MS n), David's own
@@ -124,6 +127,35 @@
     //          alone no longer counts). With ?trace the page says
     //          what it saw: "crash: page pointer coarse|fine hover
     //          none|hover".
+    // The stats summary (P3c): with ?ms a tap on the readout makes the
+    // game print one "crash: clipboard TEXT" line (newlines as ~). This
+    // hook copies it to the clipboard, or shows it in a selectable overlay
+    // when the clipboard is refused (a page that is not focused, an
+    // http origin on some browsers); the console keeps the line either way.
+    (function () {
+      var log = console.log;
+      console.log = function () {
+        var first = arguments[0];
+        if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
+          var text = first.slice("crash: clipboard ".length).split("~").join("\n");
+          var show = function (why) {
+            var old = document.getElementById("stats-overlay");
+            if (old) old.remove();
+            var box = document.createElement("div"); box.id = "stats-overlay";
+            box.style.cssText = "position:fixed;left:8px;top:8px;right:8px;max-height:80%;overflow:auto;background:#0d0a1a;color:#cce6ff;border:1px solid #4df2d9;padding:8px;font:12px monospace;z-index:20;white-space:pre-wrap;user-select:text;-webkit-user-select:text";
+            var close = document.createElement("button"); close.textContent = "close"; close.style.cssText = "float:right;margin-left:8px";
+            close.addEventListener("click", function () { box.remove(); });
+            box.appendChild(close); box.appendChild(document.createTextNode(why + text));
+            document.body.appendChild(box);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { show("copied to the clipboard\n\n"); }, function () { show("clipboard refused; select and copy\n\n"); });
+          } else show("no clipboard here; select and copy\n\n");
+        }
+        return log.apply(console, arguments);
+      };
+    })();
+
     var updates = { app: null, ready: function () {} };
     withApp(function (app) {
       var params = new URLSearchParams(location.search);
@@ -152,6 +184,7 @@
       if (params.has("hud")) app.dispatch("hud", params.get("hud"));
       app.dispatch("version", "__VERSION__");
       if (params.has("ms")) app.dispatch("ms", "on");
+      app.dispatch("dpr", String(window.crashDpr.effective));
       if (coarse) app.dispatch("touch", "on");
       updates.app = app;
       updates.ready(app);
