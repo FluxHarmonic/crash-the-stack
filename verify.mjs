@@ -903,17 +903,37 @@ let iceLock = null;
   if (!detail && moduleRows.length === 0) detail = "no LOGO-ROWS parsed from the module";
   // ink(g, dx, dy): the same 4x4 dot patterns (crash font) draws
   const ink = (g, dx, dy) => g === "#" ? true : g === "3" ? !(dx % 2 === 1 && dy % 2 === 1) : g === "2" ? (dx + dy) % 2 === 0 : g === "1" ? (dx % 2 === 0 && dy % 2 === 0) : g === "^" ? dy < 2 : g === "v" ? dy >= 2 : g === "<" ? dx < 2 : g === ">" ? dx >= 2 : false;
-  const bootTitle = async (seed) => {
+  // the gate (ruling D42): a menu boot opens on the boot screen and the
+  // reveal waits for a tap; the first boot also checks that nothing sounds
+  // before the tap and that the dial and the first beep sound after it
+  const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+  const openGate = async (from, listen) => {
+    const gate = await waitLine(/^crash: title gate (.+)$/, from, 20000);
+    if (!gate) return { error: "no \"crash: title gate\" line within 20 s" };
+    let before = 0;
+    if (listen) { await sleep(400); for (let i = 0; i < 6; i++) { before = Math.max(before, await evalJS(rms)); await sleep(50); } }
+    const m0 = consoleLines.length;
+    await tap(320, 200);
+    const connect = await waitLine(/^crash: title connect$/, m0, 3000);
+    if (!connect) return { error: "a tap on the gate did not connect" };
+    let peak = 0;
+    if (listen) { for (let i = 0; i < 20; i++) { peak = Math.max(peak, await evalJS(rms)); await sleep(50); } }
+    return { gate: gate.m[1], before, peak };
+  };
+  const bootTitle = async (seed, listen) => {
     const from = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}` });
+    const opened = await openGate(from, listen);
+    if (opened.error) return opened;
     const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
     if (!head) return { error: `no "crash: title seed" line within 20 s (seed ${seed})` };
     const settled = await waitLine(/^crash: title settled (\d+) digest (\d+) shear (\d+)$/, head.index, 30000);
     if (!settled) return { error: `no "crash: title settled" line within 30 s (seed ${seed})` };
-    const ticks = consoleLines.slice(head.index, settled.index).filter((l) => /^crash: title tick /.test(l));
+    // the frame's ms on each tick line is the box's, not the seed's: dropped before the compare
+    const ticks = consoleLines.slice(head.index, settled.index).filter((l) => /^crash: title tick /.test(l)).map((l) => l.replace(/ ms \d+$/, ""));
     await sleep(200);
     const rows = consoleLines.slice(settled.index).filter((l) => /^crash: title row /.test(l)).map((l) => l.slice("crash: title row ".length));
-    return { head: head.m, settled: settled.m, ticks, rows };
+    return { head: head.m, settled: settled.m, ticks, rows, gate: opened.gate, before: opened.before, peak: opened.peak, from };
   };
   // the backdrop held off for this leg (the texture step gives it up after its
   // tries): the dots with no bg then show the bars, never a backdrop pixel
@@ -922,11 +942,22 @@ let iceLock = null;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   let a = null;
   if (!detail) {
-    a = await bootTitle(TITLE_SEED);
+    a = await bootTitle(TITLE_SEED, true);
     if (a.error) detail = a.error;
     else if (a.head[1] !== String(TITLE_SEED) || a.head[2] !== String(TITLE_BAUD)) detail = `the game took seed ${a.head[1]} baud ${a.head[2]}`;
     else if (parseInt(a.settled[3], 10) < 1) detail = `the settled logo is upright (slant ${a.settled[3]}/1000); the slant did not land`;
+    else if (a.before > 0.005) detail = `sound before the gate's tap: RMS ${a.before.toFixed(4)}`;
+    else if (!(a.peak > 0.02)) detail = `no sound after the gate's tap: RMS peaked ${a.peak.toFixed(4)} (the dial and the first beeps)`;
     else if (a.ticks.length < 10) detail = `only ${a.ticks.length} tick lines before settle`;
+  }
+  // the reveal's frames: the game's own max/mean over the reveal; a stall
+  // inside it (a decode, a bake, a precache) shows as a max far over the
+  // mean (David, phone: "extremely glitchy at startup ... with the beeps")
+  let reveal = null;
+  if (!detail) {
+    reveal = await waitLine(/^crash: title reveal frames (\d+) max (\d+) over33 (\d+) mean (\d+)$/, 0, 3000);
+    if (!reveal) detail = "no \"crash: title reveal frames\" line at settle";
+    else if (parseInt(reveal.m[2], 10) > 5 * Math.max(8, parseInt(reveal.m[4], 10))) detail = `a stall inside the reveal: max frame ${reveal.m[2]} ms against a mean of ${reveal.m[4]} (${reveal.m[3]} of ${reveal.m[1]} frames over 33 ms)`;
   }
   // the grid the game holds, against the module
   if (!detail) {
@@ -989,7 +1020,7 @@ let iceLock = null;
   // atlas on while the logo and the footer drew, and no leg read them)
   let itemsLit = -1;
   if (!detail) {
-    const bootDone = await waitLine(/^crash: boot done /, 0, 15000);
+    const bootDone = await waitLine(/^crash: boot done /, a.from, 25000);   // this boot's, not an earlier leg's
     if (!bootDone) detail = "no \"crash: boot done\" within 15 s of the title boot";
     else {
       await sleep(400);
@@ -1048,6 +1079,7 @@ let iceLock = null;
     for (let i = 0; i < 2 && !detail; i++) {
       const from = consoleLines.length;
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}` });
+      const gated = await openGate(from, false); if (gated.error) { detail = gated.error; break; }
       const head = await waitLine(/^crash: title seed (\d+) baud /, from, 20000);
       if (!head) detail = "no title line on a boot without ?seed";
       else seedsSeen.push(head.m[1]);
@@ -1060,7 +1092,8 @@ let iceLock = null;
   if (!detail) {
     const from = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600` });
-    const head = await waitLine(/^crash: title seed /, from, 20000);
+    const gated2 = await openGate(from, false);
+    const head = gated2.error ? null : await waitLine(/^crash: title seed /, from, 20000);
     if (!head) detail = "no title line on the slow boot";
     else {
       await sleep(300);
@@ -1078,7 +1111,7 @@ let iceLock = null;
   }
   delete slowPaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot; reveal ${reveal.m[1]} frames mean ${reveal.m[4]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33`);
 }
 
 // ---- 9c. preload: nothing pops in after the menu is live (ruling D40) ---------
@@ -1099,6 +1132,9 @@ let iceLock = null;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
+  // the gate first (D42): the reveal, and so the boot's cover, starts on the tap
+  const gateP = await waitLine(/^crash: title gate /, from, 20000);
+  if (gateP) { await tap(320, 200); await waitLine(/^crash: title connect$/, gateP.index, 3000); }
   const menuLine = await waitLine(/^crash: menu .*\bstack (-?[\d.]+) (-?[\d.]+)/, from, 20000);
   const settled = await waitLine(/^crash: title settled /, from, 30000);
   if (!menuLine) detail = "no menu line on the boot";
@@ -1117,8 +1153,8 @@ let iceLock = null;
   }
   let done = null;
   if (!detail) {
-    done = await waitLine(/^crash: boot done (\d+)$/, tapAt, BOOT_SLOW + 10000);
-    if (!done) detail = `no "crash: boot done" within ${BOOT_SLOW + 10000} ms`;
+    done = await waitLine(/^crash: boot done (\d+)$/, tapAt, BOOT_SLOW + 20000);   // the steps after the backdrop wait for settle now (D42/the yielding boot), and a lost ambient fetch retries at 1.5 s + the delay
+    if (!done) detail = `no "crash: boot done" within ${BOOT_SLOW + 20000} ms`;
     else {
       const steps = consoleLines.slice(from, done.index).filter((l) => /^crash: boot step /.test(l));
       if (steps.length !== parseInt(done.m[1], 10)) detail = `boot done says ${done.m[1]} steps, ${steps.length} step lines seen`;

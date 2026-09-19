@@ -29,6 +29,7 @@
           (crash synth))
 
   (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
+          audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-set-depth! audio-depth
           audio-voices audio-ambient-frames
@@ -81,9 +82,16 @@
     (define (audio-voices) *voices*)
     (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
 
-    ;; Open the context and the stream, render the bank at the context's
-    ;; rate. #t when sound is possible, #f when it is not (no device, no
+    ;; Open the context and the stream, render the cues the title needs
+    ;; first (FIRST-CUES: the reveal's beeps and the gate's dial, short
+    ;; ones); the rest of the bank one cue per call to audio-render-next!
+    ;; (a boot step, P3d): rendering all nine at once took the second
+    ;; frame of a boot to 983 ms on the web (measured 2026-09-19, under
+    ;; the reveal's first cells: David's "extremely glitchy at startup").
+    ;; #t when sound is possible, #f when it is not (no device, no
     ;; bridge): the game is then silent and nothing else changes.
+    (define FIRST-CUES '(modem select match dial))
+
     (define (audio-open!)
       (guard (e (#t (set! *stream* #f) #f))
         (let ((ctx (audio-context-open)))
@@ -92,8 +100,22 @@
             (set! *rate* (audio-context-sample-rate ctx))
             (set! *stream* (open-audio-stream channels: 2 buffer-frames: BUFFER-FRAMES))
             (set! *out* (make-bytevector (* 8 PUSH-MAX) 0))
-            (set! *bank* (map (lambda (name) (cons name (render-cue name *rate*))) CUES)))
+            (set! *bank* (map (lambda (name) (cons name (render-cue name *rate*))) FIRST-CUES)))
           (audio-open?))))
+
+    ;; Render one more cue of the bank; #t once every cue is rendered.
+    (define (audio-render-next!)
+      (if (not *ctx*)
+          #t
+          (let ((missing (filter (lambda (name) (not (assq name *bank*))) CUES)))
+            (if (null? missing)
+                #t
+                (begin
+                  (set! *bank* (cons (cons (car missing) (render-cue (car missing) *rate*)) *bank*))
+                  (null? (cdr missing)))))))
+
+    (define (audio-bank-complete?)
+      (or (not *ctx*) (every (lambda (name) (assq name *bank*)) CUES)))
 
     ;; From a user gesture (the web's autoplay policy; a no-op natively).
     (define (audio-resume!)
@@ -102,7 +124,12 @@
           (audio-context-resume *ctx*))))
 
     ;; Start a cue now (queued into the next pump).
+    ;; A cue not yet in the bank (a ?stack boot's first frames, while the
+    ;; boot step is still rendering) is rendered on the spot: one stall of
+    ;; its own length, once.
     (define (audio-cue! name)
+      (when (and *ctx* (memq name CUES) (not (assq name *bank*)))
+        (set! *bank* (cons (cons name (render-cue name *rate*)) *bank*)))
       (let ((entry (assq name *bank*)))
         (when (and entry (not *muted*))
           (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))

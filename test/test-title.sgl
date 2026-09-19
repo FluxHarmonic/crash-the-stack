@@ -332,3 +332,41 @@
 (test-group "the two BLOCK-CODES lists agree (the font draws what the title plans)"
   (test "identical"
     (assert-equal BLOCK-CODES FONT-BLOCK-CODES)))
+
+(test-group "the gate (ruling D42)"
+  (test "with a gate line set, a fresh title is gated and does not tick; a settled one is not gated"
+    (title-gate! "TAP TO CONNECT")
+    (let ((t (title-new 5 BAUD #f)))
+      (assert-true (title-gated? t))
+      (assert-equal "TAP TO CONNECT" (title-gate-line t))
+      (assert-equal 0 (title-tick (title-step (title-step t))))
+      (assert-equal 2 (title-gate-frames (title-step (title-step t))))
+      (assert-true (title-running? t))
+      (assert-false (title-gated? (title-new 5 BAUD #t))))
+    (title-gate! #f)
+    (assert-false (title-gated? (title-new 5 BAUD #f))))
+  (test "the ungate: the dial cue once, then the reveal ticks and the modem beep comes with the first cells"
+    (title-gate! "TAP TO CONNECT")
+    (let* ((t (title-new 5 BAUD #f))
+           (open (title-ungate t)))
+      (assert-false (title-gated? open))
+      (assert-equal '(dial) (title-cues t open))
+      (assert-equal '() (title-cues open open))
+      (let ((next (title-step open)))
+        (assert-equal 1 (title-tick next))
+        (assert-true (and (memq 'modem (title-cues open next)) #t))))
+    (title-gate! #f))
+  (test "the menu: the first tap or key opens the gate and picks nothing; the next skips the reveal"
+    (title-gate! "TAP TO CONNECT")
+    (let* ((m (menu-new '(stack cards) 'stack 9))
+           (c (let ((rect (menu-entry-rect 1 VW VH))) (cons (+ (car rect) 10) (+ (cadr rect) 10))))
+           (r1 (menu-step m (click-frame c) VW VH)))
+      (assert-true (title-gated? (menu-title m)))
+      (assert-false (cdr r1))
+      (assert-false (title-gated? (menu-title (car r1))))
+      (assert-true (title-running? (menu-title (car r1))))
+      (assert-true (and (memq 'dial (menu-cues m (car r1))) #t))
+      (let ((r2 (menu-step (car r1) (frame '(return)) VW VH)))
+        (assert-false (cdr r2))
+        (assert-true (title-settled? (menu-title (car r2))))))
+    (title-gate! #f)))

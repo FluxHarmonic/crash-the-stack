@@ -46,7 +46,7 @@
   (export title title? title-new title-seed title-tick title-baud title-done
           title-settle-tick title-slam-tick title-plan
           title-step title-skip title-running? title-settled?
-          title-cues
+          title-cues title-gate! title-gated? title-ungate title-gate-line title-gate-frames
           title-cell title-drawn-count title-frame-digest
           title-live-glitches title-shown-cell title-row-shift title-row-extent title-row-start
           title-cursor-row title-shear title-row-shear cursor-on?
@@ -311,6 +311,17 @@
                            (cons (glitch kind: kind row: ly col: lx from: from to: to param: li)
                                  acc))))))))))
 
+    ;; The gate (ruling D42): on the web, audio cannot play before a gesture,
+    ;; so the process opens on a boot screen (black, the cursor, a line) and
+    ;; the reveal waits for a tap or a key, which the shell forwards as the
+    ;; gesture that resumes the context; the dial cue fires on the way in.
+    ;; The line is a module setting the web shell makes at boot; natively
+    ;; none is set and the reveal starts at once.
+    (define *gate-line* #f)
+    (define (title-gate! line) (set! *gate-line* line))
+    (define (title-gated? t) (title-gated t))
+    (define (title-ungate t) (if (title-gated t) (title t gated: #f) t))
+
     ;; --- the state ----------------------------------------------------------------
 
     (define-struct title
@@ -322,7 +333,10 @@
       (settle-tick default: 0)     ; the tick everything is correct and still from
       (level default: DEFAULT-GLITCH) ; the glitch level the plan was made at
       (slant default: DEFAULT-SLANT)  ; cells per row at rest
-      (plan default: '()))         ; the glitches, from the seed
+      (plan default: '())          ; the glitches, from the seed
+      (gated default: #f)          ; the gate (D42): the boot screen before the reveal, until a gesture
+      (gate-line default: #f)      ; its line (TAP TO CONNECT / PRESS ANY KEY TO CONNECT)
+      (gate-frames default: 0))    ; frames spent at the gate, for its cursor's blink
 
     ;; A title for this boot. settled?: #t opens it already settled (the
     ;; menu after a table; the reveal is once per boot). An optional glitch
@@ -342,19 +356,22 @@
                slant: *slant*
                slam-tick: slam
                settle-tick: settle
-               plan: plan)))
+               plan: plan
+               gated: (and (not settled?) *gate-line* #t)
+               gate-line: *gate-line*)))
 
     (define (title-running? t) (not (title-done t)))
     (define (title-settled? t) (title-done t))
 
     ;; One tick. Done once the settle tick is reached; the tick stops there.
     (define (title-step t)
-      (if (title-done t)
-          t
+      (cond ((title-done t) t)
+            ((title-gated t) (title t gate-frames: (+ 1 (title-gate-frames t))))
+            (else
           (let ((tick (+ 1 (title-tick t))))
             (if (>= tick (title-settle-tick t))
                 (title t tick: (title-settle-tick t) done: #t)
-                (title t tick: tick)))))
+                (title t tick: tick))))))
 
     (define (title-skip t)
       (if (title-done t) t (title t tick: (title-settle-tick t) done: #t)))
@@ -475,7 +492,8 @@
                         (iota LOGO-H)))))
 
     (define (title-cues before after)
-      (append (if (> (rows-begun after) (rows-begun before)) (list 'modem) '())
+      (append (if (and (title-gated before) (not (title-gated after))) (list 'dial) '())
+              (if (> (rows-begun after) (rows-begun before)) (list 'modem) '())
               (if (any (lambda (g)
                          (and (> (glitch-from g) (title-tick before))
                               (<= (glitch-from g) (title-tick after))))
