@@ -983,6 +983,31 @@ let iceLock = null;
     else if (pix.negTotal < 500) detail = `only ${pix.negTotal} no-bg dots sampled`;
     else if (pix.wrong > 0) detail = `${pix.wrong} of ${pix.dots} dots off: first at cell ${pix.sample[0]},${pix.sample[1]} glyph ${pix.sample[2]} dot ${pix.sample[3]},${pix.sample[4]} read ${pix.sample[5]} ${pix.sample[7]} ${pix.sample[6]}`;
   }
+  // the items (D41) are on screen once the boot is done: the flat items are
+  // C-LABEL-LIT, so the entry band (virtual y 168..356) must hold hundreds of
+  // that color's pixels (on the merge onto P3c the items vanished with the
+  // atlas on while the logo and the footer drew, and no leg read them)
+  let itemsLit = -1;
+  if (!detail) {
+    const bootDone = await waitLine(/^crash: boot done /, 0, 15000);
+    if (!bootDone) detail = "no \"crash: boot done\" within 15 s of the title boot";
+    else {
+      await sleep(400);
+      const want = hexes["C-LABEL-LIT"];
+      itemsLit = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+        const c = document.getElementById("stage");
+        const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+        const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+        const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+        const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+        const y0 = Math.floor(oy + 168 * scale), y1 = Math.floor(oy + 356 * scale);
+        const d = g.getImageData(0, y0, c.width, y1 - y0).data;
+        let n = 0; for (let i = 0; i < d.length; i += 8) if (Math.abs(d[i] - ${want[0]}) <= 12 && Math.abs(d[i + 1] - ${want[1]}) <= 12 && Math.abs(d[i + 2] - ${want[2]}) <= 12) n++;
+        resolve(n);
+      }))`);
+      if (itemsLit < 200) detail = `the menu's items are not on screen after the boot: ${itemsLit} C-LABEL-LIT pixels in the entry band (every other pixel sampled)`;
+    }
+  }
   // still: the settled canvas does not change over 300 ms (two reads of the
   // logo band, every 4th pixel, compared; the tick-line check alone was
   // tautological, the game prints none after settle: the review)
@@ -1053,7 +1078,7 @@ let iceLock = null;
   }
   delete slowPaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot`);
 }
 
 // ---- 9c. preload: nothing pops in after the menu is live (ruling D40) ---------
