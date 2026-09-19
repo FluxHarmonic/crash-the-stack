@@ -10,12 +10,14 @@
 
 (define-library (crash font)
   (import (sigil graphics)
+          (sigil math)
           (crash stack prng))
 
   (export GLYPH-W GLYPH-H GLYPHS MINI-GLYPHS
           draw-text text-width draw-rows draw-rows-sheared glyph-rows-of
           draw-suit
-          MINI-W MINI-H draw-text-mini text-width-mini)
+          MINI-W MINI-H draw-text-mini text-width-mini
+          BLOCK-CODES block-ink? draw-block)
 
   (begin
     (define GLYPH-W 5)
@@ -232,4 +234,56 @@
     (define (text-width-mini text scale)
       (let ((n (string-length text)))
         (if (= n 0) 0 (- (* n scale (+ MINI-W 1)) scale))))
+
+    ;; --- the block characters, for the title (P3d) ---------------------------------
+    ;;
+    ;; The scene's eight: █ ▓ ▒ ░ ▀ ▄ ▌ ▐, named by the ASCII codes
+    ;; scripts/art/ansi writes into a logo module (# 3 2 1 ^ v < >), drawn
+    ;; as rectangles on a square cell of any size so the logo is crisp at
+    ;; any dpr with no font file. ▓ ▒ ░ are DOT PATTERNS at 75, 50 and 25
+    ;; percent on a 4x4 dot grid (a dot is a quarter of the cell: 2 px on
+    ;; the 8 px title cell, one Amiga low-res pixel), never an alpha: the
+    ;; bible's rule that ▓▒░ are patterns, not gradients. The caller paints
+    ;; the cell's background first when the glyph has one; this draws the
+    ;; ink only, in the current color. Budget: with 1 px dots a 1000-cell
+    ;; logo runs to ~14,500 rects against sokol_gp's 10,922 a frame; with
+    ;; quarter-cell dots it is under 4,000 (measured on the P3d grid).
+
+    (define BLOCK-CODES (list #\# #\3 #\2 #\1 #\^ #\v #\< #\>))
+
+    ;; Is dot (dx, dy) of the 4x4 dot grid ink for this glyph code?
+    (define (block-ink? code dx dy)
+      (case code
+        ((#\#) #t)
+        ((#\3) (not (and (odd? dx) (odd? dy))))
+        ((#\2) (even? (+ dx dy)))
+        ((#\1) (and (even? dx) (even? dy)))
+        ((#\^) (< dy 2))
+        ((#\v) (>= dy 2))
+        ((#\<) (< dx 2))
+        ((#\>) (>= dx 2))
+        (else #f)))
+
+    ;; Draw the block glyph for code with its top-left at (x, y) on a cell
+    ;; of cell px, in the current color: each dot row as its runs of ink.
+    (define (draw-block code x y cell)
+      (let ((dot (quotient cell 4)))
+        (if (char=? code #\#)
+            (draw-filled-rect x y cell cell)
+            (let rows ((dy 0))
+              (when (< dy 4)
+                (let ((ry (+ y (* dy dot))))
+                  (let dots ((dx 0) (run-start #f))
+                    (cond ((= dx 4)
+                           (when run-start
+                             (draw-filled-rect (+ x (* run-start dot)) ry
+                                               (* (- dx run-start) dot) dot)))
+                          ((block-ink? code dx dy)
+                           (dots (+ dx 1) (or run-start dx)))
+                          (else
+                           (when run-start
+                             (draw-filled-rect (+ x (* run-start dot)) ry
+                                               (* (- dx run-start) dot) dot))
+                           (dots (+ dx 1) #f)))))
+                (rows (+ dy 1)))))))
 ))

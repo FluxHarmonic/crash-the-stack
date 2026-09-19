@@ -1,0 +1,280 @@
+#!/bin/sh
+# The ANSI logo from a block alphabet: a cell grid (glyph, fg role, bg
+# role per cell) as a Sigil data module the game draws with its own
+# rect-drawn block glyphs, and the same grid as a PNG for the manifest and
+# the color-count gate. No image generation anywhere on this path (ruling
+# D38): the alphabet is text drawn by hand, the layout is arithmetic.
+#
+#   scripts/art/ansi SPEC                   assets/src/title/NAME.spec
+#                                           -> src/crash/title/NAME.sgl, assets/title/NAME.png
+#   scripts/art/ansi SPEC --png-only OUT    only the PNG, at OUT (a candidate for docs/)
+#   scripts/art/ansi SPEC --out-dir DIR     both, under DIR (the gate rebuilds and compares)
+#
+# The spec, one setting a line (# comments):
+#   alphabet NAME          assets/src/title/NAME.txt (see blocky.txt for the format)
+#   line TEXT              a line of the logo; uppercase letters and spaces
+#   width N                grid columns (80 on the 640-wide viewport at 8 px cells)
+#   align left|center
+#   gap N                  blank rows between lines (default 1)
+#   rows T T T T T T       one token per body row, top down: A or B (a solid
+#                          block in that color) or 3 2 1 (▓ ▒ ░: color A over
+#                          color B at 75, 50, 25 percent). So "A A 3 2 1 B" is
+#                          the ramp down from A to B, "B 1 2 3 A A" the ramp
+#                          up, "A A A B B B" the two-tone split.
+#   color-a ROLE           palette roles from assets/palette.sgl
+#   color-b ROLE
+#   shadow DX DY           the drop shadow's offset in cells (0 0: none)
+#   shadow-color ROLE
+#   shadow-glyph 3|2|1     the shadow's block: ▓ ▒ ░ (default 2)
+#
+# Deterministic: the same spec and alphabet give the same grid, the same
+# module text and a byte-identical PNG (no timestamps). The module's grid
+# is three strings a row: glyphs as ASCII codes (space, # ▓=3 ▒=2 ░=1 ▀=^
+# ▄=v ▌=< ▐=>), then the fg and bg roles as one letter each into the
+# module's role table (- for none: the backdrop shows through). The PNG
+# draws ▓▒░ as 2x2-px dot patterns on 8x8 cells, the way (crash font)
+# does: never a blend (the bible: no gradients; ▓▒░ are patterns).
+set -eu
+cd "$(dirname "$0")/../.." || exit 1
+spec="${1:?spec}"; shift
+png_only=""; out_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --png-only) png_only="${2:?out.png}"; shift 2 ;;
+    --out-dir) out_dir="${2:?dir}"; shift 2 ;;
+    *) echo "ansi: unknown argument $1"; exit 2 ;;
+  esac
+done
+[ -f "$spec" ] || { echo "ansi: no $spec"; exit 1; }
+name="$(basename "$spec" .spec)"
+mod="src/crash/title/$name.sgl"
+png="assets/title/$name.png"
+[ -n "$png_only" ] && png="$png_only"
+[ -n "$out_dir" ] && { mod="$out_dir/$name.sgl"; png="$out_dir/$name.png"; }
+NAME="$(echo "$name" | tr 'a-z-' 'A-Z_')"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+# 1. the grid. Read the spec, then the alphabet it names, in a UTF-8
+#    locale so the block characters are one cell each; write one line per
+#    grid row: GLYPHS|FG|BG in the module's ASCII codes, plus a header line
+#    with the roles.
+alphabet="$(sed -n 's/^alphabet  *//p' "$spec" | head -1)"
+[ -n "$alphabet" ] || { echo "ansi: $spec names no alphabet"; exit 1; }
+alpha="assets/src/title/$alphabet.txt"
+[ -f "$alpha" ] || { echo "ansi: no $alpha"; exit 1; }
+LC_ALL=en_US.utf8 awk -v spec="$spec" '
+  function die(msg) { print "ansi: " msg > "/dev/stderr"; exit 1 }
+  function code(ch) {
+    if (ch == " ") return " "
+    if (ch == "█") return "#"
+    if (ch == "▀") return "^"
+    if (ch == "▄") return "v"
+    if (ch == "▌") return "<"
+    if (ch == "▐") return ">"
+    die("alphabet: not a block character: [" ch "] at line " NR)
+  }
+  # the spec first (FNR == NR while reading the first file)
+  FNR == NR {
+    if ($0 ~ /^#/ || $0 ~ /^[ \t]*$/) next
+    key = $1
+    if (key == "alphabet") { next }
+    else if (key == "line") { sub(/^line */, ""); lines[++nlines] = $0 }
+    else if (key == "width") width = $2 + 0
+    else if (key == "align") align = $2
+    else if (key == "gap") gap = $2 + 0
+    else if (key == "rows") { if (NF != 7) die("rows wants six tokens"); for (i = 2; i <= 7; i++) rows[i - 2] = $i }
+    else if (key == "color-a") ca = $2
+    else if (key == "color-b") cb = $2
+    else if (key == "shadow") { sdx = $2 + 0; sdy = $3 + 0 }
+    else if (key == "shadow-color") cs = $2
+    else if (key == "shadow-glyph") sg = $2
+    else die("spec: unknown setting " key " at line " FNR)
+    next
+  }
+  # the alphabet: "= X" then six rows of up to 7 cells
+  /^#/ { next }
+  /^= [A-Z]$/ { cur = substr($0, 3); nrows[cur] = 0; have[cur] = 1; next }
+  /^[ \t]*$/ { next }
+  {
+    if (cur == "") die("alphabet: rows before the first = X")
+    if (length($0) > 7) die("alphabet: " cur " row " nrows[cur] + 1 " is " length($0) " cells, max 7")
+    line = $0; while (length(line) < 7) line = line " "
+    r = nrows[cur]++
+    if (r >= 6) die("alphabet: " cur " has more than six rows")
+    for (c = 0; c < 7; c++) glyph[cur, r, c] = code(substr(line, c + 1, 1))
+  }
+  END {
+    for (k in have) if (nrows[k] != 6) die("alphabet: " k " has " nrows[k] " rows, want 6")
+    if (nlines == 0) die("spec: no line")
+    if (width == 0) die("spec: no width")
+    if (ca == "" || cb == "") die("spec: color-a and color-b are required")
+    if (rows[0] == "") die("spec: no rows")
+    for (i = 0; i < 6; i++) if (rows[i] !~ /^[AB123]$/) die("spec: rows token " rows[i] " is not A, B, 3, 2 or 1")
+    if (gap == "") gap = 1
+    if (sg == "") sg = "2"
+    if ((sdx != 0 || sdy != 0) && cs == "") die("spec: a shadow needs shadow-color")
+    if (align == "") align = "center"
+    # roles: a = color-a, b = color-b, c = shadow (when there is one)
+    roles = ca " " cb; if (cs != "") roles = roles " " cs
+    # lay each line out: letters 7 wide, 1 between, a space is 3 blank cells
+    H = 0
+    for (l = 1; l <= nlines; l++) {
+      text = lines[l]
+      w = 0
+      for (i = 1; i <= length(text); i++) {
+        ch = substr(text, i, 1)
+        if (ch == " ") adv = 3
+        else { if (!(ch in have)) die("spec: no glyph for [" ch "] in the alphabet"); adv = 7 }
+        w += adv + (i < length(text) ? 1 : 0)
+      }
+      if (w + sdx > width) die("spec: line " l " (" text ") is " w " cells plus the shadow, over " width)
+      lw[l] = w
+      x0[l] = (align == "center") ? int((width - w - sdx) / 2) : 0
+      y0[l] = H
+      H += 6 + (l < nlines ? gap : 0)
+    }
+    H += (sdy > 0 ? sdy : 0)
+    W = width
+    for (y = 0; y < H; y++) for (x = 0; x < W; x++) { g[y, x] = " "; f[y, x] = "-"; b[y, x] = "-" }
+    # the letters, styled row by row
+    for (l = 1; l <= nlines; l++) {
+      text = lines[l]; x = x0[l]
+      for (i = 1; i <= length(text); i++) {
+        ch = substr(text, i, 1)
+        if (ch == " ") { x += 4; continue }
+        letters = letters (letters == "" ? "" : " ") y0[l] " " x
+        for (r = 0; r < 6; r++) {
+          tok = rows[r]
+          for (c = 0; c < 7; c++) {
+            gl = glyph[ch, r, c]
+            if (gl == " ") continue
+            yy = y0[l] + r; xx = x + c
+            if (gl == "#") {
+              if (tok == "A") { g[yy, xx] = "#"; f[yy, xx] = "a"; b[yy, xx] = "-" }
+              else if (tok == "B") { g[yy, xx] = "#"; f[yy, xx] = "b"; b[yy, xx] = "-" }
+              else { g[yy, xx] = tok; f[yy, xx] = "a"; b[yy, xx] = "b" }
+            } else {
+              # a half block takes the row'\''s ink: A over a density of 2 or more, else B
+              g[yy, xx] = gl; b[yy, xx] = "-"
+              f[yy, xx] = (tok == "A" || tok == "3" || tok == "2") ? "a" : "b"
+            }
+          }
+        }
+        x += 8
+      }
+    }
+    # the drop shadow: every lit cell casts one, where nothing is drawn
+    if (sdx != 0 || sdy != 0) {
+      for (y = 0; y < H; y++) for (x = 0; x < W; x++) {
+        if (g[y, x] == " ") continue
+        if (f[y, x] == "c") continue
+        yy = y + sdy; xx = x + sdx
+        if (yy < 0 || yy >= H || xx < 0 || xx >= W) continue
+        if (g[yy, xx] == " ") { g[yy, xx] = sg; f[yy, xx] = "c"; b[yy, xx] = "-"; shadowed[yy, xx] = 1 }
+      }
+    }
+    # a shadow cell cast onto another shadow cell was marked c above and
+    # skipped by the f == c test, so the shadow is one cell deep
+    print "roles " roles
+    print "size " W " " H
+    print "letters " letters
+    for (y = 0; y < H; y++) {
+      gs = ""; fs = ""; bs = ""
+      for (x = 0; x < W; x++) { gs = gs g[y, x]; fs = fs f[y, x]; bs = bs b[y, x] }
+      print gs "|" fs "|" bs
+    }
+  }' "$spec" "$alpha" > "$tmp/grid.txt"
+roles="$(sed -n 's/^roles //p' "$tmp/grid.txt")"
+W="$(sed -n 's/^size \([0-9]*\) .*/\1/p' "$tmp/grid.txt")"
+H="$(sed -n 's/^size [0-9]* \([0-9]*\)/\1/p' "$tmp/grid.txt")"
+letters="$(sed -n 's/^letters //p' "$tmp/grid.txt")"
+sed '1,3d' "$tmp/grid.txt" > "$tmp/rows.txt"
+[ "$(wc -l < "$tmp/rows.txt")" -eq "$H" ] || { echo "ansi: grid has $(wc -l < "$tmp/rows.txt") rows, header says $H"; exit 1; }
+
+# 2. the data module
+if [ -z "$png_only" ]; then
+  mkdir -p "$(dirname "$mod")"
+  {
+    echo ";;; (crash title $name) - the $NAME grid, GENERATED by scripts/art/ansi"
+    echo ";;; from $spec and assets/src/title/$alphabet.txt; edit those, not this file."
+    echo ";;; ${W}x${H} cells; a row is three strings: glyph codes (space, # full,"
+    echo ";;; 3 2 1 for the ▓ ▒ ░ dither, ^ v < > for the top, bottom, left, right"
+    echo ";;; half), then the fg and bg roles as a letter into $NAME-ROLES"
+    echo ";;; (- for none). Drawn by (crash title) with the block glyphs of (crash font)."
+    echo ""
+    echo "(define-library (crash title $name)"
+    echo "  (export $NAME-W $NAME-H $NAME-ROLES $NAME-ROWS $NAME-LETTERS)"
+    echo ""
+    echo "  (begin"
+    echo "    (define $NAME-W $W)"
+    echo "    (define $NAME-H $H)"
+    echo "    ;; each letter's box as row col, a 6x7 box per pair, in reading order"
+    echo "    (define $NAME-LETTERS"
+    echo "      '#($letters))"
+    echo "    ;; role names as strings (a quoted symbol list came out of the web"
+    echo "    ;; build's module load corrupted once, 2026-09-19; strings did not)"
+    printf "    (define $NAME-ROLES\n      '#("
+    echo "$roles" | awk '{ for (i = 1; i <= NF; i++) printf "%s\"%s\"", (i > 1 ? " " : ""), $i }'
+    echo "))"
+    echo ""
+    printf "    (define $NAME-ROWS\n      '#("
+    awk -F'|' '{ printf "%s(\"%s\" \"%s\" \"%s\")", (NR > 1 ? "\n         " : ""), $1, $2, $3 }' "$tmp/rows.txt"
+    echo "))))"
+  } > "$mod"
+fi
+
+# 3. the PNG: 8 px cells, the dither as 2x2 dots, on C-BG where nothing
+#    is drawn; the same patterns (crash font) draws.
+hex_of() { awk -v role="$1" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl; }
+hexes=""
+for r in $roles; do
+  h="$(hex_of "$r")"
+  [ -n "$h" ] || { echo "ansi: unknown palette role $r"; exit 1; }
+  hexes="$hexes $h"
+done
+BG="$(hex_of C-BG)"
+mkdir -p "$(dirname "$png")"
+LC_ALL=C awk -v hexes="$hexes" -v bg="$BG" -v W="$W" -v H="$H" '
+  function hex2(h, i) { return (index("0123456789ABCDEF", substr(h, i, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, i + 1, 1)) - 1 }
+  function rgb(h) { return sprintf("%c%c%c", hex2(h, 2), hex2(h, 4), hex2(h, 6)) }
+  # is the dot (dx, dy) of a 4x4 dot grid ink for glyph code gl?
+  function ink(gl, dx, dy) {
+    if (gl == "#") return 1
+    if (gl == "3") return !(dx % 2 == 1 && dy % 2 == 1)
+    if (gl == "2") return (dx + dy) % 2 == 0
+    if (gl == "1") return (dx % 2 == 0 && dy % 2 == 0)
+    if (gl == "^") return dy < 2
+    if (gl == "v") return dy >= 2
+    if (gl == "<") return dx < 2
+    if (gl == ">") return dx >= 2
+    return 0
+  }
+  BEGIN { n = split(hexes, hx, " "); for (i = 1; i <= n; i++) role[substr("abc", i, 1)] = hx[i]; CELL = 8; DOT = 2 }
+  { split($0, parts, "|"); G[NR - 1] = parts[1]; F[NR - 1] = parts[2]; B[NR - 1] = parts[3] }
+  END {
+    printf "P6\n%d %d\n255\n", W * CELL, H * CELL
+    for (py = 0; py < H * CELL; py++) {
+      y = int(py / CELL); dy = int((py % CELL) / DOT)
+      for (px = 0; px < W * CELL; px++) {
+        x = int(px / CELL); dx = int((px % CELL) / DOT)
+        gl = substr(G[y], x + 1, 1); fg = substr(F[y], x + 1, 1); bgc = substr(B[y], x + 1, 1)
+        c = bg
+        if (bgc != "-") c = role[bgc]
+        if (gl != " " && ink(gl, dx, dy)) c = role[fg]
+        printf "%s", rgb(c)
+      }
+    }
+  }' "$tmp/rows.txt" > "$tmp/out.ppm"
+convert "$tmp/out.ppm" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$png"
+# the color-count gate: every color a palette color of the roles used, plus the ground
+colors="$(convert "$png" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u)"
+for c in $colors; do
+  case " $hexes $BG " in *" $c "*) ;; *) echo "ansi: REFUSED $png: $c is not a color of $roles or C-BG"; exit 1 ;; esac
+done
+n="$(printf '%s\n' "$colors" | wc -l)"
+if [ -z "$png_only" ]; then
+  echo "ansi: $mod ${W}x${H} cells; $png $(identify -format '%wx%h' "$png") colors $n ($(echo $colors))"
+else
+  echo "ansi: $png $(identify -format '%wx%h' "$png") colors $n ($(echo $colors))"
+fi

@@ -1,0 +1,179 @@
+;;; P3d - the title: the ANSI logo grid and its reveal.
+;;;
+;;; The grid module is what scripts/art/ansi wrote from the alphabet and
+;;; the spec, so this holds the module to the text (rebuilt in a temp
+;;; dir and compared) and the reveal to its promises: a pure function of
+;;; (seed, tick); fully correct and still at the settle tick for fifty
+;;; seeds (every glitch window ends before it, the shown frame equals the
+;;; settled grid); different seeds give different glitch sequences; a
+;;; skip lands on the same settled frame; the cues fire once each; and
+;;; the menu skips its reveal on a tap or key without picking an entry.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (sigil process)
+        (sigil fs)
+        (sigil string)
+        (sigil time)
+        (crash input)
+        (crash menu)
+        (crash title)
+        (crash title logo))
+
+(define VW 640)
+(define VH 400)
+(define BAUD 2400)
+
+(define (frame pressed) (make-input-frame pressed '() #f))
+(define (click-frame xy) (make-input-frame '() '() xy))
+
+;; The digest of the frame after n steps from a fresh title.
+(define (stepped seed n)
+  (let loop ((t (title-new seed BAUD #f)) (i 0))
+    (if (= i n) t (loop (title-step t) (+ i 1)))))
+
+(define (run-to-settle seed)
+  (let loop ((t (title-new seed BAUD #f)) (digests '()) (n 0))
+    (if (title-settled? t)
+        (cons t (reverse digests))
+        (if (> n 100000)
+            (error "the reveal never settled" seed)
+            (loop (title-step t) (cons (title-frame-digest t) digests) (+ n 1))))))
+
+(test-group "the grid module"
+  (test "the module is what the script writes from the text (a stale module is red)"
+    ;; the script into a scratch dir, then the module and the PNG compared
+    ;; byte for byte with the tree's (the script is deterministic)
+    (let* ((dir (string-append "/tmp/crash-title-gate-" (number->string (exact (floor (current-second))))))
+           (log (process-output->string "scripts/art/ansi" "assets/src/title/logo.spec" "--out-dir" dir)))
+      (assert-true (string-contains? log "80x14 cells"))
+      (assert-equal (read-file-string (string-append dir "/logo.sgl")) (read-file-string "src/crash/title/logo.sgl"))
+      (assert-equal (read-file-bytes (string-append dir "/logo.png")) (read-file-bytes "assets/title/logo.png"))
+      (process-run "rm" "-rf" dir)))
+  (test "the grid's shape holds"
+    (assert-true (logo-check))
+    (assert-equal LOGO-H (vector-length LOGO-ROWS))
+    (assert-true (> LOGO-W 0))
+    (assert-true (every (lambda (r) (= (string-length (car r)) LOGO-W)) (vector->list LOGO-ROWS))))
+  (test "every letter box is inside the grid"
+    (let loop ((i 0))
+      (when (< i (vector-length LOGO-LETTERS))
+        (let ((y (vector-ref LOGO-LETTERS i)) (x (vector-ref LOGO-LETTERS (+ i 1))))
+          (assert-true (and (>= y 0) (<= (+ y 6) LOGO-H)))
+          (assert-true (and (>= x 0) (<= (+ x 7) LOGO-W))))
+        (loop (+ i 2)))))
+  (test "the logo fits above the entries at the title's cell size"
+    (assert-true (<= (+ TITLE-Y TITLE-H) ENTRIES-Y))
+    (assert-equal 640 (* LOGO-W TITLE-CELL))))
+
+(test-group "the reveal"
+  (test "a fresh title is running from tick 0 with nothing drawn; every tick draws more until all"
+    (let ((t (title-new 7 BAUD #f)))
+      (assert-true (title-running? t))
+      (assert-equal 0 (title-tick t))
+      (assert-equal 0 (title-drawn-count t))
+      (let ((later (stepped 7 30)))
+        (assert-true (> (title-drawn-count later) 0))
+        (assert-true (< (title-drawn-count later) (title-drawn-count (title-skip later)))))))
+  (test "fifty seeds: settled means every cell shown as the grid has it, the tick stopped, no glitch live"
+    (let loop ((seed 1))
+      (when (<= seed 50)
+        (let* ((r (run-to-settle seed))
+               (t (car r))
+               (settled (title-new seed BAUD #t)))
+          (assert-true (title-settled? t))
+          (assert-equal (title-settle-tick t) (title-tick t))
+          ;; the frame at settle is the plain grid: same digest as a title
+          ;; opened settled, and the same as after a skip from tick 0
+          (assert-equal (title-frame-digest settled) (title-frame-digest t))
+          (assert-equal (title-frame-digest settled) (title-frame-digest (title-skip (title-new seed BAUD #f))))
+          ;; and it stays still: another step changes nothing
+          (assert-equal (title-frame-digest t) (title-frame-digest (title-step t)))
+          ;; every glitch's window ends by the settle tick
+          (for-each (lambda (g)
+                      (assert-true (<= (glitch-to g) (title-settle-tick t)))
+                      (assert-true (< (glitch-from g) (glitch-to g))))
+                    (title-plan t))
+          (assert-true (>= (length (title-plan t)) 3)))
+        (loop (+ seed 1)))))
+  (test "the same seed gives the same digest sequence; a different seed does not"
+    (let ((a (cdr (run-to-settle 11)))
+          (b (cdr (run-to-settle 11)))
+          (c (cdr (run-to-settle 12))))
+      (assert-equal a b)
+      (assert-false (equal? a c))
+      ;; and the glitch plans differ too, kinds or places
+      (assert-false (equal? (map (lambda (g) (list (glitch-kind g) (glitch-row g) (glitch-col g) (glitch-from g)))
+                                 (title-plan (car (run-to-settle 11))))
+                            (map (lambda (g) (list (glitch-kind g) (glitch-row g) (glitch-col g) (glitch-from g)))
+                                 (title-plan (car (run-to-settle 12))))))))
+  (test "a glitch shows: inside its window the frame differs from the honest reveal at some tick"
+    ;; the honest reveal: the same title with an empty plan; walked tick
+    ;; by tick over the first glitch's window
+    (let* ((t (title-new 3 BAUD #f))
+           (g (car (title-plan t))))
+      (let loop ((shown t)
+                 (honest (title t plan: '()))
+                 (differs 0))
+        (if (>= (title-tick shown) (glitch-to g))
+            (assert-true (> differs 0))
+            (loop (title-step shown)
+                  (title-step honest)
+                  (if (and (>= (title-tick shown) (glitch-from g))
+                           (not (= (title-frame-digest shown) (title-frame-digest honest))))
+                      (+ differs 1)
+                      differs))))))
+  (test "the pace: 2400 baud is 240 cells a second, 9600 four times as many"
+    (let ((slow (let loop ((t (title-new 5 2400 #f)) (i 0)) (if (= i 60) t (loop (title-step t) (+ i 1)))))
+          (fast (let loop ((t (title-new 5 9600 #f)) (i 0)) (if (= i 60) t (loop (title-step t) (+ i 1))))))
+      (assert-equal 240 (title-drawn-count slow))
+      (assert-equal (min 960 (title-drawn-count (title-skip fast))) (title-drawn-count fast))))
+  (test "the cues: modem once per lit row, a glitch per plan entry, settle once"
+    (let loop ((t (title-new 21 BAUD #f)) (modem 0) (glitch 0) (settle 0))
+      (if (title-settled? t)
+          (begin
+            (assert-equal (length (filter (lambda (y) (let ((g (car (vector-ref LOGO-ROWS y))))
+                                                       (any (lambda (c) (not (char=? c #\space))) (string->list g))))
+                                          (iota LOGO-H)))
+                          modem)
+            ;; several glitches may come on in one tick, so at most one cue per tick
+            (assert-true (<= glitch (length (title-plan t))))
+            (assert-true (>= glitch 1))
+            (assert-equal 1 settle))
+          (let* ((after (title-step t))
+                 (cues (title-cues t after)))
+            (loop after
+                  (+ modem (length (filter (lambda (c) (eq? c 'modem)) cues)))
+                  (+ glitch (length (filter (lambda (c) (eq? c 'glitch)) cues)))
+                  (+ settle (length (filter (lambda (c) (eq? c 'settle)) cues)))))))))
+
+(test-group "the menu and the reveal"
+  (test "a menu opened with a seed runs the reveal; without one it opens settled"
+    (assert-true (title-running? (menu-title (menu-new '(stack cards) 'stack 9))))
+    (assert-true (title-settled? (menu-title (menu-new '(stack cards) 'stack))))
+    (assert-true (title-settled? (menu-title (menu-new '(stack cards))))))
+  (test "while the reveal runs a key skips it and picks nothing; a tap on an entry skips and picks nothing"
+    (let* ((m (menu-new '(stack cards) 'stack 9))
+           (r (menu-step m (frame '(return)) VW VH)))
+      (assert-false (cdr r))
+      (assert-true (title-settled? (menu-title (car r))))
+      (assert-equal 0 (menu-highlight (car r))))
+    (let* ((m (menu-new '(stack cards) 'stack 9))
+           (c (let ((rect (menu-entry-rect 1 VW VH)))
+                (cons (+ (car rect) 10) (+ (cadr rect) 10))))
+           (r (menu-step m (click-frame c) VW VH)))
+      (assert-false (cdr r))
+      (assert-true (title-settled? (menu-title (car r))))
+      ;; the next frame's tap does pick
+      (assert-equal 'cards (cdr (menu-step (car r) (click-frame c) VW VH)))))
+  (test "an idle frame ticks the reveal and reaches the entries only once settled"
+    (let* ((m (menu-new '(stack cards) 'stack 9))
+           (r (menu-step m (frame '()) VW VH)))
+      (assert-equal 1 (title-tick (menu-title (car r))))
+      (assert-false (cdr r))))
+  (test "the menu's cues carry the title's, named for the bank"
+    (let* ((m (menu-new '(stack cards) 'stack 9))
+           (r (menu-step m (frame '(space)) VW VH)))
+      ;; a skip settles: the settle cue comes through as the match pings
+      (assert-true (and (memq 'match (menu-cues m (car r))) #t)))))

@@ -9,17 +9,25 @@
 ;;; Plain primitives look; P4 restyles it into the DOOM/Quake-style menu
 ;;; (ruling D14) without changing this shape. Nothing here reads a
 ;;; platform.
+;;;
+;;; The title (P3d, ruling D38) lives here too: the menu carries a
+;;; (crash title) state, steps it once per frame, and while its reveal
+;;; runs any tap or key skips the reveal instead of reaching the entries.
+;;; The reveal plays once per boot: the shell hands the first menu a seed
+;;; (?seed=N on the web, the clock otherwise) and every later menu none,
+;;; which opens it settled.
 
 (define-library (crash menu)
   (import (sigil struct)
           (sigil math)
           (crash input)
           (crash look)
-          (crash hud))
+          (crash hud)
+          (crash title))
 
   (export menu menu? menu-new menu-entries menu-highlight menu-look menu-with-look
-          menu-hud menu-with-hud
-          menu-step menu-entry-rect menu-hit
+          menu-hud menu-with-hud menu-title menu-with-title
+          menu-step menu-entry-rect menu-hit menu-cues
           menu-label MENU-ENTRIES MENU-TITLE
           ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y)
 
@@ -45,16 +53,20 @@
             (list 'hud "HUD")
             (list 'update "UPDATE")))
 
+    ;; The entries sit under the logo (TITLE-Y + TITLE-H is 120 on the
+    ;; 14-row grid): six of them at 28 + 6 reach y 334, above the footer.
     (define ENTRY-W 220)
-    (define ENTRY-H 30)
-    (define ENTRY-GAP 8)
-    (define ENTRIES-Y 126)
+    (define ENTRY-H 28)
+    (define ENTRY-GAP 6)
+    (define ENTRIES-Y 136)
 
     (define-struct menu
       (entries default: '())     ; the ids shown, in order
       (highlight default: 0)     ; index into entries
       (look default: DEFAULT-LOOK)   ; the look in force, shown on the LOOK entry
-      (hud default: DEFAULT-LAYOUT)) ; the bar's layout in force, shown on the HUD entry
+      (hud default: DEFAULT-LAYOUT)  ; the bar's layout in force, shown on the HUD entry
+      (title default: #f))       ; the title's reveal state, (crash title)
+
 
     (define (menu-with-look m name)
       (menu m look: name))
@@ -62,22 +74,28 @@
     (define (menu-with-hud m name)
       (menu m hud: name))
 
+    (define (menu-with-title m t)
+      (menu m title: t))
+
     (define (menu-label id)
       (let ((entry (assq id MENU-ENTRIES)))
         (if entry (cadr entry) "?")))
 
     ;; The menu over the ids that are shown (unknown ids dropped, the
     ;; canonical order kept), highlighting the first of them, or the id
-    ;; asked for when it is shown.
+    ;; asked for when it is shown. seed: a number opens the title with its
+    ;; reveal running from that seed; none (or #f) opens it settled.
     (define (menu-new shown . rest)
       (let* ((ids (filter (lambda (e) (memq (car e) shown)) MENU-ENTRIES))
              (ids (map car ids))
              (want (and (pair? rest) (car rest)))
+             (seed (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
              (at (let loop ((ids ids) (i 0))
                    (cond ((null? ids) 0)
                          ((eq? (car ids) want) i)
-                         (else (loop (cdr ids) (+ i 1)))))))
-        (menu entries: ids highlight: at)))
+                         (else (loop (cdr ids) (+ i 1))))))
+             (t (title-new (or seed 1) (title-default-baud) (not seed))))
+        (menu entries: ids highlight: at title: t)))
 
     ;; (x y w h) of the index-th entry, centered on the viewport.
     (define (menu-entry-rect index vw vh)
@@ -109,16 +127,35 @@
       (let ((ids (menu-entries m)))
         (and (pair? ids) (list-ref ids (menu-highlight m)))))
 
-    ;; One frame: (cons menu choice), choice the chosen id or #f. Up/down
-    ;; (or k/j) move, Enter or Space pick the highlight, a tap on an entry
-    ;; picks it at once.
+    ;; One frame: (cons menu choice), choice the chosen id or #f. The
+    ;; title ticks first; while its reveal runs, a tap or any key skips it
+    ;; and the frame ends there (a tap meant to skip must not start a
+    ;; game). Then up/down (or k/j) move, Enter or Space pick the
+    ;; highlight, a tap on an entry picks it at once.
     (define (menu-step m f vw vh)
-      (let ((click (input-frame-click f)))
-        (cond ((and click (menu-hit m vw vh (car click) (cdr click)))
+      (let* ((t (menu-title m))
+             (running? (and t (title-running? t)))
+             (t (and t (title-step t)))
+             (m (menu m title: t))
+             (click (input-frame-click f)))
+        (cond ((and running? (or click (pair? (input-frame-pressed f))))
+               (cons (menu m title: (title-skip t)) #f))
+              (running? (cons m #f))
+              ((and click (menu-hit m vw vh (car click) (cdr click)))
                => (lambda (i)
                     (let ((m (menu m highlight: i)))
                       (cons m (highlighted m)))))
               ((or (pressed? f 'up) (pressed? f 'k)) (cons (move m -1) #f))
               ((or (pressed? f 'down) (pressed? f 'j)) (cons (move m 1) #f))
               ((or (pressed? f 'return) (pressed? f 'space)) (cons m (highlighted m)))
-              (else (cons m #f)))))))
+              (else (cons m #f)))))
+
+    ;; The title's cues between two menu frames (a line began, a glitch
+    ;; came on, the reveal settled) as the bank's cue names, for the shell
+    ;; to play: modem for a line, the select blip for a glitch, the match
+    ;; pings for the settle.
+    (define (menu-cues before after)
+      (if (and (menu-title before) (menu-title after))
+          (map (lambda (c) (case c ((glitch) 'select) ((settle) 'match) (else c)))
+               (title-cues (menu-title before) (menu-title after)))
+          '()))))

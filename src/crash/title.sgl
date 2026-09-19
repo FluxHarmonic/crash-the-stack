@@ -1,0 +1,470 @@
+;;; (crash title) - The title: the ANSI logo and its modem-speed reveal.
+;;;
+;;; The logo is a cell grid built by scripts/art/ansi from a hand-drawn
+;;; block alphabet (ruling D38: no image generation on this path), read
+;;; here from the data module (crash title logo) and drawn with the block
+;;; glyphs of (crash font): 8 px square cells, 80 across the 640 viewport,
+;;; so it is crisp at any dpr on both targets with no font file.
+;;;
+;;; The reveal: the grid draws cell by cell, row by row, at a rate that
+;;; reads as a 2400-baud terminal (baud / 10 cells a second; 4 a tick at
+;;; 60), a cursor block leading the draw, and with GLITCHES planned from
+;;; the boot's seed so every boot differs and any boot can be reproduced
+;;; (?seed=N on the web): a wrong character that corrects itself a beat
+;;; later, a row drawn in the wrong colors that snaps right, a row that
+;;; draws shifted and settles, ▓░ noise in a row's shadow, one letter with
+;;; its colors inverted. Every glitch has a tick it ends at, so the logo
+;;; is fully correct and still at SETTLE, every seed; a tap or a key skips
+;;; straight there. Everything is a pure function of (seed, tick): the
+;;; same seed shows the same frame at the same tick on both targets, which
+;;; is what the arm asserts.
+;;;
+;;; Time is the caller's frame count: (crash menu) steps this once per
+;;; menu frame (one tick), so the pace assumes 60 frames a second; ?baud=
+;;; is the knob if a display runs faster.
+;;;
+;;; No platform, no clock: the menu holds one of these in its struct and
+;;; (crash render) calls title-draw.
+
+(define-library (crash title)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (sigil graphics)
+          (crash stack prng)
+          (crash font)
+          (crash palette)
+          (crash title logo))
+
+  (export title title? title-new title-seed title-tick title-baud title-done
+          title-settle-tick title-plan
+          title-step title-skip title-running? title-settled?
+          title-draw draw-title title-cues
+          title-cell title-drawn-count title-frame-digest
+          glitch glitch? glitch-kind glitch-row glitch-col glitch-from glitch-to glitch-param
+          DEFAULT-BAUD title-baud! title-default-baud
+          TITLE-CELL TITLE-X TITLE-Y TITLE-H
+          logo-check)
+
+  (begin
+    ;; --- the grid ------------------------------------------------------------
+
+    (define TITLE-CELL 8)                       ; px, square
+    (define TITLE-X 0)
+    (define TITLE-Y 8)
+    (define TITLE-H (* LOGO-H TITLE-CELL))      ; the logo's height in px
+
+    ;; A row's three strings.
+    (define (row-glyphs y) (car (vector-ref LOGO-ROWS y)))
+    (define (row-fg y) (cadr (vector-ref LOGO-ROWS y)))
+    (define (row-bg y) (caddr (vector-ref LOGO-ROWS y)))
+
+    ;; The settled cell at (x, y): (glyph fg bg) with fg and bg as role
+    ;; indexes or #f, or #f for an empty cell.
+    (define (title-cell x y)
+      (let ((g (string-ref (row-glyphs y) x)))
+        (and (not (char=? g #\space))
+             (list g
+                   (role-index (string-ref (row-fg y) x))
+                   (role-index (string-ref (row-bg y) x))))))
+
+    ;; a role letter (a b c ...) to its index, - to #f
+    (define (role-index ch)
+      (and (not (char=? ch #\-))
+           (- (char->integer ch) (char->integer #\a))))
+
+    ;; The role colors, resolved once from (crash palette)'s table.
+    (define ROLE-COLORS
+      (list->vector
+       (map (lambda (name)
+              (let ((entry (assq (string->symbol name) PALETTE)))
+                (if entry (cdr entry) C-TEXT)))
+            (vector->list LOGO-ROLES))))
+
+    (define (role-color i) (vector-ref ROLE-COLORS i))
+
+    ;; The shadow's role: the last role when the spec had a shadow (three
+    ;; roles), else none. A shadow cell is one whose fg is that role.
+    (define SHADOW-ROLE (and (= (vector-length LOGO-ROLES) 3) 2))
+
+    (define (shadow-cell? cell)
+      (and cell SHADOW-ROLE (eqv? (cadr cell) SHADOW-ROLE)))
+
+    ;; --- the draw order -----------------------------------------------------
+    ;;
+    ;; Cells are drawn row by row, each row from its first lit cell to its
+    ;; last (the modem does not send the blanks after a line); a blank row
+    ;; costs nothing. ROW-START is the index of each row's first cell in
+    ;; that order, ROW-X0 and ROW-LEN its extent.
+
+    (define (row-extent y)
+      (let ((g (row-glyphs y)))
+        (let loop ((x 0) (x0 #f) (x1 #f))
+          (cond ((= x LOGO-W) (if x0 (cons x0 (+ 1 (- x1 x0))) (cons 0 0)))
+                ((char=? (string-ref g x) #\space) (loop (+ x 1) x0 x1))
+                (else (loop (+ x 1) (or x0 x) x))))))
+
+    (define ROW-EXTENTS
+      (list->vector (map row-extent (iota LOGO-H))))
+
+    (define (row-x0 y) (car (vector-ref ROW-EXTENTS y)))
+    (define (row-len y) (cdr (vector-ref ROW-EXTENTS y)))
+
+    (define ROW-START
+      (let loop ((y 0) (at 0) (acc '()))
+        (if (= y LOGO-H)
+            (list->vector (reverse acc))
+            (loop (+ y 1) (+ at (row-len y)) (cons at acc)))))
+
+    (define (row-start y) (vector-ref ROW-START y))
+    (define (row-end y) (+ (row-start y) (row-len y)))   ; one past the last
+
+    (define TOTAL-CELLS (row-end (- LOGO-H 1)))
+
+    ;; --- the clock ------------------------------------------------------------
+
+    (define DEFAULT-BAUD 2400)
+    (define TICKS-PER-SECOND 60)
+    ;; The baud in force for new titles (?baud=N on the web); a module
+    ;; setting, since the page's parameter lands before any menu exists.
+    (define *default-baud* DEFAULT-BAUD)
+    (define (title-baud! n) (set! *default-baud* n))
+    (define (title-default-baud) *default-baud*)
+
+    ;; Cells drawn by tick t: baud / 10 characters a second.
+    (define (drawn-at t baud)
+      (min TOTAL-CELLS (quotient (* t baud) (* 10 TICKS-PER-SECOND))))
+
+    ;; The first tick at which cell i (in draw order) is on screen.
+    (define (cell-tick i baud)
+      (let ((need (* (+ i 1) 10 TICKS-PER-SECOND)))
+        (quotient (+ need baud -1) baud)))
+
+    (define (reveal-end-tick baud) (cell-tick (- TOTAL-CELLS 1) baud))
+
+    ;; --- the glitches -------------------------------------------------------------
+    ;;
+    ;; kind: wrong-char | wrong-color | shift | noise | invert
+    ;; row, col: the cell or row or letter (invert: the letter's index) it
+    ;; touches; from, to: the ticks it is visible in, [from, to);
+    ;; param: the wrong glyph code, the shift, or #f.
+    (define-struct glitch
+      (kind default: 'noise)
+      (row default: 0)
+      (col default: 0)
+      (from default: 0)
+      (to default: 0)
+      (param default: #f))
+
+    (define KINDS (list 'wrong-char 'wrong-color 'shift 'noise 'invert))
+    (define GLITCHES-LEAST 3)
+    (define GLITCHES-SPREAD 3)   ; 3..5 a boot
+
+    ;; Rows with letter cells (a shadow-only row is not glitched).
+    (define LETTER-ROWS
+      (filter (lambda (y)
+                (let ((g (row-glyphs y)) (f (row-fg y)))
+                  (let loop ((x 0))
+                    (cond ((= x LOGO-W) #f)
+                          ((and (not (char=? (string-ref g x) #\space))
+                                (not (and SHADOW-ROLE
+                                          (eqv? (role-index (string-ref f x)) SHADOW-ROLE))))
+                           #t)
+                          (else (loop (+ x 1)))))))
+              (iota LOGO-H)))
+
+    (define LETTER-COUNT (quotient (vector-length LOGO-LETTERS) 2))
+    (define (letter-row i) (vector-ref LOGO-LETTERS (* 2 i)))
+    (define (letter-col i) (vector-ref LOGO-LETTERS (+ 1 (* 2 i))))
+
+    ;; A letter cell of row y (not blank, not shadow), for wrong-char.
+    (define (letter-cols y)
+      (filter (lambda (x)
+                (let ((c (title-cell x y)))
+                  (and c (not (shadow-cell? c)))))
+              (iota LOGO-W)))
+
+    ;; The plan for a seed: GLITCHES-LEAST..+SPREAD glitches, each with its
+    ;; window in ticks at this baud. Threads the MINSTD state by hand, one
+    ;; draw per choice, so the plan is a function of (seed, baud).
+    (define (make-plan seed baud)
+      (let* ((s (prng-next (prng-seed seed)))
+             (n (+ GLITCHES-LEAST (prng-index s GLITCHES-SPREAD))))
+        (let loop ((k 0) (s s) (acc '()))
+          (if (= k n)
+              (reverse acc)
+              (let* ((s (prng-next s))
+                     (kind (list-ref KINDS (prng-index s (length KINDS))))
+                     (s (prng-next s))
+                     (y (list-ref LETTER-ROWS (prng-index s (length LETTER-ROWS))))
+                     (s (prng-next s))
+                     (beat (+ 12 (prng-index s 18)))          ; 0.2 .. 0.5 s
+                     (row-from (cell-tick (row-start y) baud))
+                     (row-to (+ (cell-tick (- (row-end y) 1) baud) beat)))
+                (case kind
+                  ((wrong-char)
+                   (let* ((cols (letter-cols y))
+                          (s (prng-next s))
+                          (x (list-ref cols (prng-index s (length cols))))
+                          (s (prng-next s))
+                          (code (list-ref BLOCK-CODES (prng-index s (length BLOCK-CODES))))
+                          (own (car (title-cell x y)))
+                          ;; a wrong character is a different one
+                          (code (if (char=? code own) (if (char=? own #\#) #\2 #\#) code))
+                          (i (+ (row-start y) (- x (row-x0 y))))
+                          (from (cell-tick i baud)))
+                     (loop (+ k 1) s
+                           (cons (glitch kind: kind row: y col: x from: from to: (+ from beat) param: code)
+                                 acc))))
+                  ((wrong-color)
+                   (loop (+ k 1) s
+                         (cons (glitch kind: kind row: y from: row-from to: row-to) acc)))
+                  ((shift)
+                   (let* ((s (prng-next s))
+                          (dx (+ 1 (prng-index s 2))))
+                     (loop (+ k 1) s
+                           (cons (glitch kind: kind row: y from: row-from to: row-to param: dx)
+                                 acc))))
+                  ((noise)
+                   ;; the row's shadow is the row below: while it draws and a beat
+                   (let* ((sy (min (- LOGO-H 1) (+ y 1)))
+                          (from (cell-tick (row-start sy) baud))
+                          (to (+ (cell-tick (- (row-end sy) 1) baud) beat)))
+                     (loop (+ k 1) s
+                           (cons (glitch kind: kind row: y from: from to: to) acc))))
+                  (else
+                   ;; invert: a letter, from its first cell to its line's end
+                   (let* ((s (prng-next s))
+                          (li (prng-index s LETTER-COUNT))
+                          (ly (letter-row li))
+                          (lx (letter-col li))
+                          (first (let find ((r 0))
+                                   (cond ((= r 6) (row-start ly))
+                                         ((title-cell lx (+ ly r))
+                                          (+ (row-start (+ ly r)) (- lx (row-x0 (+ ly r)))))
+                                         (else (find (+ r 1))))))
+                          (last-row (+ ly 5))
+                          (from (cell-tick first baud))
+                          (to (+ (cell-tick (- (row-end last-row) 1) baud) beat)))
+                     (loop (+ k 1) s
+                           (cons (glitch kind: kind row: ly col: lx from: from to: to param: li)
+                                 acc))))))))))
+
+    ;; --- the state ----------------------------------------------------------------
+
+    (define-struct title
+      (seed default: 1)
+      (baud default: DEFAULT-BAUD)
+      (tick default: 0)
+      (done default: #f)           ; settled: by time or by a skip
+      (settle-tick default: 0)     ; the tick everything is correct from
+      (plan default: '()))         ; the glitches, from the seed
+
+    ;; A title for this boot. settled?: #t opens it already settled (the
+    ;; menu after a table; the reveal is once per boot).
+    (define (title-new seed baud settled?)
+      (let* ((plan (make-plan seed baud))
+             (settle (fold (lambda (m g) (max m (glitch-to g)))
+                           (+ 1 (reveal-end-tick baud))
+                           plan)))
+        (title seed: seed
+               baud: baud
+               tick: (if settled? settle 0)
+               done: settled?
+               settle-tick: settle
+               plan: plan)))
+
+    (define (title-running? t) (not (title-done t)))
+    (define (title-settled? t) (title-done t))
+
+    ;; One tick. Done once the settle tick is reached; the tick stops there.
+    (define (title-step t)
+      (if (title-done t)
+          t
+          (let ((tick (+ 1 (title-tick t))))
+            (if (>= tick (title-settle-tick t))
+                (title t tick: (title-settle-tick t) done: #t)
+                (title t tick: tick)))))
+
+    (define (title-skip t)
+      (if (title-done t) t (title t tick: (title-settle-tick t) done: #t)))
+
+    (define (title-drawn-count t)
+      (if (title-done t) TOTAL-CELLS (drawn-at (title-tick t) (title-baud t))))
+
+    ;; --- the frame: what is shown at this tick ---------------------------------
+
+    (define (active? g tick)
+      (and (>= tick (glitch-from g)) (< tick (glitch-to g))))
+
+    ;; The glitches live at this tick.
+    (define (live-glitches t)
+      (if (title-done t)
+          '()
+          (filter (lambda (g) (active? g (title-tick t))) (title-plan t))))
+
+    ;; a MINSTD draw folded from the tick and the cell, for the noise
+    (define (flicker tick x y n)
+      (prng-index (prng-next (prng-seed (+ 1 (* 7919 (quotient tick 3)) (* 131 x) y))) n))
+
+    ;; The shown cell at (x, y): (glyph fg-color-or-#f bg-color-or-#f), or
+    ;; #f. shown? is whether the cursor has passed it; the live glitches
+    ;; then override the settled cell. dx: the row's shift, applied by the
+    ;; caller to the draw position.
+    (define (shown-cell t x y live)
+      (let ((cell (title-cell x y)))
+        (and cell
+             (let* ((tick (title-tick t))
+                    (g (car cell))
+                    (fg (cadr cell))
+                    (bg (caddr cell))
+                    (shadow? (shadow-cell? cell)))
+               (let loop ((gs live) (g g) (fg fg) (bg bg))
+                 (if (null? gs)
+                     (list g (and fg (role-color fg)) (and bg (role-color bg)))
+                     (let ((gl (car gs)))
+                       (case (glitch-kind gl)
+                         ((wrong-char)
+                          (if (and (= (glitch-row gl) y) (= (glitch-col gl) x))
+                              (loop (cdr gs) (glitch-param gl) fg bg)
+                              (loop (cdr gs) g fg bg)))
+                         ((wrong-color)
+                          (if (and (= (glitch-row gl) y) (not shadow?))
+                              (loop (cdr gs) g (swap fg) (swap bg))
+                              (loop (cdr gs) g fg bg)))
+                         ((noise)
+                          ;; the row's shadow is the row below, one cell right
+                          (if (and (= (glitch-row gl) (- y 1)) shadow?)
+                              (loop (cdr gs)
+                                    (list-ref (list #\1 #\2 #\3) (flicker tick x y 3))
+                                    fg bg)
+                              (loop (cdr gs) g fg bg)))
+                         ((invert)
+                          (if (and (not shadow?)
+                                   (>= y (glitch-row gl)) (< y (+ (glitch-row gl) 6))
+                                   (>= x (glitch-col gl)) (< x (+ (glitch-col gl) 7)))
+                              (loop (cdr gs) g (swap fg) (swap bg))
+                              (loop (cdr gs) g fg bg)))
+                         (else (loop (cdr gs) g fg bg))))))))))
+
+    ;; the two letter roles trade places; the shadow and none stay
+    (define (swap role)
+      (cond ((eqv? role 0) 1)
+            ((eqv? role 1) 0)
+            (else role)))
+
+    ;; The row's shift in cells at this tick.
+    (define (row-shift y live)
+      (let loop ((gs live))
+        (cond ((null? gs) 0)
+              ((and (eq? (glitch-kind (car gs)) 'shift) (= (glitch-row (car gs)) y))
+               (glitch-param (car gs)))
+              (else (loop (cdr gs))))))
+
+    ;; Draw the title with the grid's top-left at (x0, y0), cells of cell px.
+    (define (title-draw t x0 y0 cell)
+      (let* ((live (live-glitches t))
+             (drawn (title-drawn-count t))
+             (tick (title-tick t)))
+        (let rows ((y 0))
+          (when (< y LOGO-H)
+            (let* ((start (row-start y))
+                   (in-row (max 0 (min (row-len y) (- drawn start))))
+                   (xa (row-x0 y))
+                   (xb (+ xa in-row))
+                   (dx (row-shift y live))
+                   (py (+ y0 (* y cell))))
+              (let cols ((x xa))
+                (when (< x xb)
+                  (let ((shown (shown-cell t x y live))
+                        (px (+ x0 (* (+ x dx) cell))))
+                    (when shown
+                      (when (caddr shown)
+                        (color! (caddr shown))
+                        (draw-filled-rect px py cell cell))
+                      (when (cadr shown)
+                        (color! (cadr shown))
+                        (draw-block (car shown) px py cell))))
+                  (cols (+ x 1))))
+              ;; the cursor: a block leading the draw, blinking, on the
+              ;; row being drawn
+              (when (and (not (title-done t))
+                         (>= drawn start)
+                         (< drawn (row-end y))
+                         (< (modulo tick 8) 6))
+                (color! C-TEXT)
+                (draw-filled-rect (+ x0 (* (+ xb dx) cell)) py cell cell)))
+            (rows (+ y 1))))))
+
+
+    ;; The title screen's top: the logo on its grid (the backdrop, P3d part
+    ;; B, goes under it here). t may be #f (a menu built without one).
+    (define (draw-title t vw vh)
+      (when t
+        (title-draw t TITLE-X TITLE-Y TITLE-CELL)))
+
+    ;; --- the cues -----------------------------------------------------------------
+    ;;
+    ;; modem: a new row began drawing; glitch: a glitch came on; settle:
+    ;; the reveal settled. Read off two states, the way (crash sfx) does.
+    (define (rows-begun t)
+      (let ((drawn (title-drawn-count t)))
+        (length (filter (lambda (y) (and (> (row-len y) 0) (> drawn (row-start y))))
+                        (iota LOGO-H)))))
+
+    (define (title-cues before after)
+      (append (if (> (rows-begun after) (rows-begun before)) (list 'modem) '())
+              (if (any (lambda (g)
+                         (and (> (glitch-from g) (title-tick before))
+                              (<= (glitch-from g) (title-tick after))))
+                       (title-plan after))
+                  (list 'glitch)
+                  '())
+              (if (and (title-done after) (not (title-done before))) (list 'settle) '())))
+
+    ;; --- for the arm ----------------------------------------------------------------
+
+    ;; A digest of the shown frame: the shown cells' glyph codes and role
+    ;; indexes and the row shifts folded into one integer, so two boots
+    ;; with one seed can be compared tick by tick without pixels.
+    (define (title-frame-digest t)
+      (let ((live (live-glitches t))
+            (drawn (title-drawn-count t)))
+        (let rows ((y 0) (h 7))
+          (if (= y LOGO-H)
+              h
+              (let* ((start (row-start y))
+                     (in-row (max 0 (min (row-len y) (- drawn start))))
+                     (xa (row-x0 y)))
+                (let cols ((x xa) (h (modulo (+ (* h 31) (row-shift y live)) 1000000007)))
+                  (if (>= x (+ xa in-row))
+                      (rows (+ y 1) h)
+                      (let* ((shown (shown-cell t x y live))
+                             (v (if shown
+                                    (+ (char->integer (car shown))
+                                       (* 256 (if (cadr shown) (+ 1 (color-index (cadr shown))) 0))
+                                       (* 4096 (if (caddr shown) (+ 1 (color-index (caddr shown))) 0)))
+                                    0)))
+                        (cols (+ x 1) (modulo (+ (* h 31) v) 1000000007))))))))))
+
+    (define (color-index c)
+      (let loop ((i 0))
+        (cond ((= i (vector-length ROLE-COLORS)) 0)
+              ((eq? (vector-ref ROLE-COLORS i) c) i)
+              (else (loop (+ i 1))))))
+
+    ;; The data module's shape, for the boot's literal check.
+    (define (logo-check)
+      (and (integer? LOGO-W) (integer? LOGO-H)
+           (vector? LOGO-ROWS)
+           (= (vector-length LOGO-ROWS) LOGO-H)
+           (every (lambda (r)
+                    (and (list? r) (= (length r) 3)
+                         (every (lambda (s) (and (string? s) (= (string-length s) LOGO-W))) r)))
+                  (vector->list LOGO-ROWS))
+           (vector? LOGO-ROLES)
+           (every string? (vector->list LOGO-ROLES))
+           (vector? LOGO-LETTERS)
+           (even? (vector-length LOGO-LETTERS))
+           (every integer? (vector->list LOGO-LETTERS))))
+))
