@@ -117,11 +117,11 @@ async function evalJS(expr) {
   return r.result.value;
 }
 
-const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (\d+))?$/;
+const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (\d+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?$/;
 const rows = [];
 for (const q of QUERIES) {
   const mark = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&ms&stack&fresh&${q}` });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&ms&fresh&${/^menu/.test(q) ? q.replace(/^menu&?/, "") : "stack&" + q}` });
   const t0 = Date.now();
   let lines = [];
   while (Date.now() - t0 < 180000) {
@@ -135,13 +135,13 @@ for (const q of QUERIES) {
   if (lines.length < WINDOWS + 1) { rows.push({ q, buffer, note: `only ${lines.length} windows in 180 s`, errors }); continue; }
   const kept = lines.slice(1, WINDOWS + 1);
   const mean = (i) => (kept.reduce((a, m) => a + parseFloat(m[i]), 0) / kept.length);
-  rows.push({ q, buffer, ms: mean(1), max: Math.max(...kept.map((m) => parseFloat(m[2]))), step: mean(3), present: mean(4), gc: kept.map((m) => m[5] ? `${m[5]}/${m[6]}/${(parseInt(m[7], 10) / 1048576).toFixed(1)}MB` : "-").join(" "), windows: kept.map((m) => `${m[1]}/${m[2]}/${m[3]}/${m[4]}`).join(" "), errors, gl });
+  rows.push({ q, buffer, ms: mean(1), max: Math.max(...kept.map((m) => parseFloat(m[2]))), step: mean(3), present: mean(4), gc: kept.map((m) => m[5] ? `${m[5]}/${m[6]}/${(parseInt(m[7], 10) / 1048576).toFixed(1)}MB` : "-").join(" "), phases: kept[0][8] ? `sim ${mean(8).toFixed(1)} draw ${mean(9).toFixed(1)} flush ${mean(10).toFixed(1)}` : "", windows: kept.map((m) => `${m[1]}/${m[2]}/${m[3]}/${m[4]}`).join(" "), errors, gl });
 }
 console.log(`viewport ${PHONE ? "phone 390x844 dpr 3" : "desktop 1000x760 dpr 2"}; ${WINDOWS} windows of 300 frames after the first; SwiftShader`);
 console.log("config                     buffer      MS    MAX   STEP  PRESENT  windows (ms/max/step/present)");
 for (const r of rows) {
   if (r.note) { console.log(`${r.q.padEnd(26)} ${r.buffer.padEnd(11)} ${r.note}${r.errors ? ` (${r.errors} error lines)` : ""}`); continue; }
   console.log(`${r.q.padEnd(26)} ${r.buffer.padEnd(11)} ${r.ms.toFixed(1).padStart(5)} ${String(r.max).padStart(5)} ${r.step.toFixed(1).padStart(6)} ${r.present.toFixed(1).padStart(8)}  ${r.windows}${r.errors ? ` (${r.errors} error lines)` : ""}`);
-  if (r.gl) console.log(`${"".padEnd(26)} gl calls/frame ${r.gl.perFrame.toFixed(0)} over ${r.gl.frames} frames: ${r.gl.top}; gc minor/major/alloc per window: ${r.gc}`);
+  if (r.gl) console.log(`${"".padEnd(26)} gl calls/frame ${r.gl.perFrame.toFixed(0)} over ${r.gl.frames} frames: ${r.gl.top}; gc minor/major/alloc per window: ${r.gc}; ${r.phases}`);
 }
 shutdown(0);

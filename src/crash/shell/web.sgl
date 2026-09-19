@@ -102,6 +102,7 @@
   (import (sigil struct)
           (sigil math)
           (sigil string)
+          (sigil time)
           (sigil graphics)
           (sigil graphics image)
           (sigil browser gles3)
@@ -189,8 +190,23 @@
     (define *ms-step* 0.0)   ; and the field's costs over the window: the step (bg-advance + the GPU passes) and the present
     (define *ms-present* 0.0)
     (define *gc-last* #f)     ; (minor major bytes) at the window's start
+    ;; The frame's phases, wasm-side wall time from the jiffy clock (the
+    ;; floor's anatomy, P3c): sim from the tick's start to present! (the
+    ;; table's step, the effects, the saves, the trace lines), draw from
+    ;; frame-begin! to end-frame (the field's passes, every draw call
+    ;; queued into sokol_gp), flush the end-frame (sgp's flush: the GL
+    ;; calls through the bridge and the commit). The menu has sim only.
+    (define *tick-t0* 0.0)
+    (define *sim-ms* 0.0)
+    (define *draw-ms* 0.0)
+    (define *flush-ms* 0.0)
+    (define *ms-sim* 0.0)
+    (define *ms-draw* 0.0)
+    (define *ms-flush* 0.0)
+
+    (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
     (define MS-EVERY 300)
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES sim MEAN draw MEAN flush MEAN
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
     ;;                                        collections and bytes allocated in the window
@@ -202,13 +218,20 @@
         (let ((gpu (gpu-bg-ms)))
           (set! *ms-step* (+ *ms-step* *advance-ms* (car gpu)))
           (set! *ms-present* (+ *ms-present* (cdr gpu))))
+        (set! *ms-sim* (+ *ms-sim* *sim-ms*))
+        (set! *ms-draw* (+ *ms-draw* *draw-ms*))
+        (set! *ms-flush* (+ *ms-flush* *flush-ms*))
         (when (= *ms-n* MS-EVERY)
           (let* ((now (gc-snapshot))
                  (was (or *gc-last* now)))
             (say "frame-ms" (exact (round (/ *ms-sum* MS-EVERY))) (exact (round *ms-max*))
                  "step" (tenth (/ *ms-step* MS-EVERY)) "present" (tenth (/ *ms-present* MS-EVERY))
                  "gc" (- (car now) (car was)) (- (cadr now) (cadr was))
-                 "alloc" (- (caddr now) (caddr was)))
+                 "alloc" (- (caddr now) (caddr was))
+                 "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY)))
+            (set! *ms-sim* 0.0)
+            (set! *ms-draw* 0.0)
+            (set! *ms-flush* 0.0)
             (set! *gc-last* now))
           (set! *ms-step* 0.0)
           (set! *ms-present* 0.0)
@@ -801,6 +824,10 @@
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
       (when *ms* (count-frame! dt))
+      (set! *tick-t0* (now-ms))
+      (set! *sim-ms* 0.0)
+      (set! *draw-ms* 0.0)
+      (set! *flush-ms* 0.0)
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
       (audio-pump!))
@@ -958,19 +985,23 @@
     ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
-      (frame-begin!)
-      (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
-      (cond ((eq? *phosphor* 'probe)
-             (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
-            ((and cascading? (eq? *phosphor* 'on))
-             (phosphor-frame! VW VH PHOSPHOR draw))
-            (else
-             (phosphor-reset!)
-             (draw)))
-      (when *ms*
-        (let ((gpu (gpu-bg-ms)))
-          (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
-      (end-frame)
+      (set! *sim-ms* (- (now-ms) *tick-t0*))
+      (let ((t1 (now-ms)))
+        (frame-begin!)
+        (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
+        (cond ((eq? *phosphor* 'probe)
+               (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
+              ((and cascading? (eq? *phosphor* 'on))
+               (phosphor-frame! VW VH PHOSPHOR draw))
+              (else
+               (phosphor-reset!)
+               (draw)))
+        (when *ms*
+          (let ((gpu (gpu-bg-ms)))
+            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
+        (set! *draw-ms* (- (now-ms) t1))
+        (end-frame)
+        (set! *flush-ms* (- (now-ms) t1 *draw-ms*)))
       (set! *frame-n* (+ *frame-n* 1))
       (say-held!))
 
