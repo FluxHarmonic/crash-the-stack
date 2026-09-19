@@ -76,6 +76,69 @@
         (assert-equal '() (cadr r2))
         (assert-true (< (car r2) 10))))))
 
+;; The cached pump (P3c) against mix-into, the reference: a synthetic s16
+;; ambient (a ramp, 300 frames at 22050 -> 600 cache frames at the
+;; module's default 44100) mixed with a cue over chunks that cross the
+;; loop's end, sample for sample within float32 rounding; then the
+;; voice leaves in both.
+(test-group "audio: the cached pump matches mix-into"
+  (let* ((amb (let ((bv (make-bytevector 600 0)))
+                (let loop ((i 0))
+                  (when (< i 300)
+                    (let ((v (- (* i 200) 30000)))
+                      (let ((u (if (< v 0) (+ v 65536) v)))
+                        (bytevector-u8-set! bv (* 2 i) (modulo u 256))
+                        (bytevector-u8-set! bv (+ 1 (* 2 i)) (quotient u 256))))
+                    (loop (+ i 1))))
+                bv))
+         (cue (render-cue 'select 44100))
+         (n 256)
+         (chunks 5)                               ; 1280 frames: past the 600-frame loop twice
+         (ref (make-bytevector (* 8 n) 0))
+         (got (make-bytevector (* 8 n) 0))
+         (worst 0.0))
+    (audio-cache-reset!)
+    (audio-set-ambient! amb 22050)
+    (let loop ((k 0) (pos 0.0) (ref-voices (list (cons cue 0))) (voices (list (cons cue 0))))
+      (when (< k chunks)
+        (let* ((r (mix-into ref n amb 300 pos 0.5 ref-voices AMBIENT-GAIN))
+               (left (mix-cached-into got n #t voices)))
+          (let cmp ((i 0))
+            (when (< i (* 2 n))
+              (let ((d (abs (- (bytevector-ieee-single-ref ref (* 4 i) 'little)
+                               (bytevector-ieee-single-ref got (* 4 i) 'little)))))
+                (when (> d worst) (set! worst d)))
+              (cmp (+ i 1))))
+          (loop (+ k 1) (car r) (cadr r) left))))
+    ;; read now, in the group body: a test runs after every group body
+    ;; has run, and the sink group below resets the cache when it opens
+    (let ((rendered (audio-cache-rendered)))
+      (test "the cache rendered the whole loop once and no more"
+        (assert-equal 600 rendered)))
+    (test (string-append "five chunks across the loop: worst sample difference " (number->string worst) " (under 1e-5)")
+      (assert-true (< worst 1e-5)))
+    (test "a chunk longer than the loop (1300 frames over 600) matches too"
+      (audio-cache-reset!)
+      (let ((ref (make-bytevector (* 8 1300) 0))
+            (got (make-bytevector (* 8 1300) 0)))
+        (mix-into ref 1300 amb 300 0.0 0.5 '() AMBIENT-GAIN)
+        (mix-cached-into got 1300 #t '())
+        (let cmp ((i 0) (worst 0.0))
+          (if (= i 2600)
+              (assert-true (< worst 1e-5))
+              (cmp (+ i 1)
+                   (max worst (abs (- (bytevector-ieee-single-ref ref (* 4 i) 'little)
+                                      (bytevector-ieee-single-ref got (* 4 i) 'little)))))))))
+    (test "silence without an ambient, the voice still plays and leaves"
+      (audio-set-ambient! #f 22050)
+      (let ((out (make-bytevector (* 8 512) 0)))
+        (let ((left (mix-cached-into out 512 #f '())))
+          (assert-equal 0.0 (rms out 512 8))
+          (assert-equal '() left))
+        (let ((left (mix-cached-into out 512 #f (list (cons cue 0)))))
+          (assert-true (> (rms out 512 8) 0.01))
+          (assert-equal 512 (cdr (car left))))))))
+
 (define lay (turtle-layout))
 (define geom (make-geometry lay 640 400))
 (define (frame pressed . rest) (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))

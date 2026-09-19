@@ -33,6 +33,7 @@
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-set-depth! audio-depth
           audio-voices audio-ambient-frames audio-ambient-play! audio-ambient-playing? audio-underruns
+          mix-cached-into audio-cache-reset! audio-cache-rendered
           audio-state
           mix-into
           AMBIENT-GAIN CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
@@ -82,12 +83,15 @@
     (define (audio-set-muted! m) (set! *muted* m))
     (define (audio-voices) *voices*)
     (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
-    ;; Start the loop from its top; it is held (preloaded, silent) until then.
-    (define (audio-ambient-play!) (set! *ambient-pos* 0.0) (set! *ambient-on* #t))
+    ;; Start the loop from its top; it is held (preloaded, silent) until
+    ;; then. The cache plays from its top too.
+    (define (audio-ambient-play!) (set! *ambient-pos* 0.0) (set! *cache-pos* 0) (set! *ambient-on* #t))
     (define (audio-ambient-playing?) (and *ambient-on* *ambient* #t))
     ;; The sink's cumulative starved frames (the output ran dry): the
     ;; measure of a stall the pump did not ride out.
     (define (audio-underruns) (if *stream* (audio-stream-underruns *stream*) 0))
+    (define (audio-cache-rendered) *rendered*)
+    (define (audio-cache-reset!) (cache-reset!))
 
     ;; Open the context and the stream, render the cues the title needs
     ;; first (FIRST-CUES: the reveal's beeps and the gate's dial, short
@@ -105,6 +109,7 @@
           (set! *ctx* ctx)
           (when ctx
             (set! *rate* (audio-context-sample-rate ctx))
+            (cache-reset!)   ; the ambient cache is at the context's rate
             (set! *stream* (open-audio-stream channels: 2 buffer-frames: BUFFER-FRAMES))
             (set! *out* (make-bytevector (* 8 PUSH-MAX) 0))
             (set! *bank* (map (lambda (name) (cons name (render-cue name *rate*))) FIRST-CUES)))
@@ -142,7 +147,109 @@
           (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
 
     ;; The ambient loop: s16le mono PCM at rate, looping; #f clears it.
+    ;; --- the ambient cache (P3c) ------------------------------------------------
+    ;;
+    ;; David's phone summary at 7604742: the pump cost 9 ms a frame. mix-into
+    ;; resampled the s16 ambient and summed the voices sample by sample in
+    ;; Sigil, ~800 audio frames per game frame at 48 kHz, two native
+    ;; writes each. The ambient is now rendered ONCE into a stereo f32
+    ;; cache at the context's rate with its gain applied, lazily, just
+    ;; ahead of the play cursor (the first loop through the ambient costs
+    ;; what a frame cost before, spread the same way; every loop after is
+    ;; free), and a pump is one or two bytevector-copy! calls plus, while a
+    ;; cue plays, one Sigil pass over the chunk adding the voice. The
+    ;; voices advance once per chunk, not per audio frame (mix-into consed
+    ;; a voice list per audio frame). mix-into stays as the reference the
+    ;; gate holds the cached path to, sample for sample.
+    (define ZERO (make-bytevector (* 8 PUSH-MAX) 0))   ; silence, copied when there is no ambient
+    (define *cache* #f)            ; stereo f32 at *rate*, gain applied, or #f
+    (define *cache-frames* 0)      ; its length in frames
+    (define *rendered* 0)          ; frames rendered so far, from 0
+    (define *cache-pos* 0)         ; the play cursor, a frame index
+
+    (define (cache-reset!)
+      (set! *cache* #f)
+      (set! *cache-frames* 0)
+      (set! *rendered* 0)
+      (set! *cache-pos* 0))
+
+    ;; Render cache frames [*rendered*, upto): the same interpolation
+    ;; mix-into does (frame i of the cache is ambient position i * ratio).
+    (define (render-cache! upto)
+      (let ((frames (bytes->frames *ambient*))
+            (ratio (/ (* 1.0 *ambient-rate*) *rate*)))
+        (let loop ((i *rendered*))
+          (when (< i upto)
+            (let* ((pos (* i ratio))
+                   (k (exact (floor pos)))
+                   (frac (- pos k))
+                   (a (bytes-ref *ambient* (modulo k frames)))
+                   (b (bytes-ref *ambient* (modulo (+ k 1) frames)))
+                   (v (* AMBIENT-GAIN (+ a (* frac (- b a))))))
+              (bytevector-ieee-single-set! *cache* (* 8 i) v 'little)
+              (bytevector-ieee-single-set! *cache* (+ 4 (* 8 i)) v 'little))
+            (loop (+ i 1))))
+        (set! *rendered* (max *rendered* upto))))
+
+    ;; The cache ready for [*cache-pos*, *cache-pos* + n): allocated on
+    ;; first use, rendered up to what the chunk reads (the wrap-around
+    ;; part is rendered already: rendering runs from 0 in play order).
+    (define (ensure-cache! n)
+      (unless *cache*
+        (set! *cache-frames* (max 1 (exact (floor (/ (* (bytes->frames *ambient*) *rate*) (* 1.0 *ambient-rate*))))))
+        (set! *cache* (make-bytevector (* 8 *cache-frames*) 0))
+        (set! *rendered* 0)
+        (set! *cache-pos* 0))
+      (render-cache! (min *cache-frames* (+ *cache-pos* n))))
+
+    ;; n frames of the ambient from the cursor into out, the cursor
+    ;; advanced: one copy per pass over the loop's end, however many
+    ;; (an ambient shorter than a pump, the test's 300-frame ramp against
+    ;; a 3,576-frame device pump, wraps several times; the first cut copied
+    ;; twice and read past the cache, which the bytecode runner let
+    ;; through and the native one refused, 2026-09-20).
+    (define (copy-ambient! out n)
+      (copy-frames! out 0 n))
+
+    (define (copy-frames! out at n)
+      (when (> n 0)
+        (let ((take (min n (- *cache-frames* *cache-pos*))))
+          (bytevector-copy! out (* 8 at) *cache* (* 8 *cache-pos*) (* 8 (+ *cache-pos* take)))
+          (set! *cache-pos* (modulo (+ *cache-pos* take) *cache-frames*))
+          (copy-frames! out (+ at take) (- n take)))))
+
+    ;; The voices over n frames of out (added, clamped), each advanced by
+    ;; n; finished ones leave. Answers the voices left.
+    (define (add-voices! out n voices)
+      (let loop ((vs voices) (kept '()))
+        (if (null? vs)
+            kept
+            (let* ((cue (car (car vs)))
+                   (at (cdr (car vs)))
+                   (len (cue-frames cue))
+                   (take (min n (- len at))))
+              (let add ((i 0))
+                (when (< i take)
+                  (let* ((o (* 8 i))
+                         (v (max -1.0 (min 1.0 (+ (bytevector-ieee-single-ref out o 'little)
+                                                   (* CUE-GAIN (cue-ref cue (+ at i))))))))
+                    (bytevector-ieee-single-set! out o v 'little)
+                    (bytevector-ieee-single-set! out (+ o 4) v 'little))
+                  (add (+ i 1))))
+              (loop (cdr vs)
+                    (if (>= (+ at n) len) kept (cons (cons cue (+ at n)) kept)))))))
+
+    ;; The cached mix of n frames into out: the ambient (or silence) then
+    ;; the voices. Answers the voices left. Pure over the cache state, so
+    ;; the gate can hold it against mix-into.
+    (define (mix-cached-into out n ambient? voices)
+      (if ambient?
+          (begin (ensure-cache! n) (copy-ambient! out n))
+          (bytevector-copy! out 0 ZERO 0 (* 8 n)))
+      (if (null? voices) voices (add-voices! out n voices)))
+
     (define (audio-set-ambient! bytes rate)
+      (cache-reset!)
       (set! *ambient* bytes)
       (set! *ambient-rate* rate)
       (set! *ambient-pos* 0.0))
@@ -196,12 +303,6 @@
                         (- *target-depth* (audio-stream-depth *stream*)))))
             (if (<= n 0)
                 0
-                (let* ((ambient (and (not *muted*) *ambient-on* *ambient*))
-                       (frames (if ambient (bytes->frames ambient) 0))
-                       (r (mix-into *out* n ambient frames *ambient-pos*
-                                    (/ (* 1.0 *ambient-rate*) *rate*)
-                                    *voices*
-                                    AMBIENT-GAIN)))
-                  (set! *ambient-pos* (car r))
-                  (set! *voices* (cadr r))
+                (begin
+                  (set! *voices* (mix-cached-into *out* n (and (not *muted*) *ambient-on* *ambient* #t) *voices*))
                   (push-audio-samples *stream* *out* n))))))))
