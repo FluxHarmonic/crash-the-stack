@@ -34,13 +34,14 @@
           (crash glyphs)
           (crash bg)
           (crash menu)
-          (crash hud))
+          (crash hud)
+          (crash glyphs tools))
 
   (export frame-begin!
           draw-session draw-editor draw-frame-ms draw-menu
           draw-bg-in
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
-          draw-tool-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
+          draw-tool-button draw-menu-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
           draw-keys-mark phase-color)
 
   (begin
@@ -86,16 +87,18 @@
             (shift (modulo (exact (floor roll)) 36)))
         (color! C-BG)
         (draw-filled-rect 0 0 vw vh)
-        ;; copper bars: three tones stepping through the board area
-        (let loop ((y (- shift 36)) (i 0))
-          (when (< y (- vh (geometry-hud-h g)))
-            (color! (case (modulo i 3)
-                       ((0) C-BAR-A)
-                       ((1) C-BAR-B)
-                       (else C-BAR-C)))
-            (draw-filled-rect 0 y vw 6)
-            (loop (+ y 12) (+ i 1))))
-        (when bg (draw-bg-in bg (- vh (geometry-hud-h g))))))
+        (if bg
+            (draw-bg-in bg (- vh (geometry-hud-h g)))
+            ;; no field (bg off): copper bars, three tones stepping through
+            ;; the board area
+            (let loop ((y (- shift 36)) (i 0))
+              (when (< y (- vh (geometry-hud-h g)))
+                (color! (case (modulo i 3)
+                           ((0) C-BAR-A)
+                           ((1) C-BAR-B)
+                           (else C-BAR-C)))
+                (draw-filled-rect 0 y vw 6)
+                (loop (+ y 12) (+ i 1)))))))
 
     ;; The living background's field over the board area (the same field
     ;; on the card table): one rectangle per run of half cells on a row,
@@ -103,25 +106,32 @@
     ;; three hue families of the palette (David, 2026-09-18: colorful, low
     ;; saturation, so the tiles pop): ground, the two purples, the violet
     ;; seal, the teal wire, the slate static, the middle purple.
+    ;; The ring of RAMP tones (the dither neighbors each with the next and
+    ;; the last with the first): three dark hue families plus the moss
+    ;; accent David asked for (2026-09-19).
     (define (ramp-color tone)
       (case tone
         ((0) C-BG)
         ((1) C-BAR-A)
         ((2) C-BAR-C)
         ((3) C-ARCHIVE)
-        ((4) C-WIRE-DARK)
-        ((5) C-STATIC-B)
+        ((4) C-MOSS)
+        ((5) C-WIRE-DARK)
+        ((6) C-STATIC-B)
         (else C-BAR-B)))
 
+    ;; The runs come grouped by tone, so the color is set once per group.
     (define (draw-bg-in bg top)
-      (for-each (lambda (run)
-                  (when (< (caddr run) top)
-                    (color! (ramp-color (car run)))
-                    (draw-filled-rect (cadr run)
-                                      (caddr run)
-                                      (cadddr run)
-                                      (min (list-ref run 4) (- top (caddr run))))))
-                (bg-runs bg)))
+      (let loop ((runs (bg-runs bg)) (tone -1))
+        (unless (null? runs)
+          (let ((run (car runs)))
+            (unless (= (car run) tone) (color! (ramp-color (car run))))
+            (when (< (caddr run) top)
+              (draw-filled-rect (cadr run)
+                                (caddr run)
+                                (cadddr run)
+                                (min (list-ref run 4) (- top (caddr run)))))
+            (loop (cdr runs) (car run))))))
 
     ;; --- tiles ----------------------------------------------------------------
 
@@ -443,16 +453,18 @@
 
     ;; --- the tool stack (ruling D33) ------------------------------------------------
 
-    ;; The corner button: three stacked bars, SPC beneath in the mini font,
-    ;; lit while the stack is open or just after a choice, a badge at the
-    ;; top right when a tool is banked or disabled.
-    (define (draw-tool-button vh st badge?)
-      (let* ((r (tool-button-rect vh))
-             (x (car r))
-             (y (cadr r))
-             (w (caddr r))
-             (h (cadddr r))
-             (lit? (or (tools-open? st) (> (tools-flash st) 0))))
+    ;; An icon from the tools sheet ((crash glyphs tools)), 12x12 rows.
+    (define (icon-rows name)
+      (let ((entry (assq name ICONS)))
+        (if entry (cdr entry) (cdr (car ICONS)))))
+
+    ;; A 24x24 bar button: the icon at scale 1 over a mini key name, lit
+    ;; or not.
+    (define (draw-bar-button r icon key lit?)
+      (let ((x (car r))
+            (y (cadr r))
+            (w (caddr r))
+            (h (cadddr r)))
         (color! (if lit? C-SELECTED C-BAR-C))
         (draw-filled-rect x y w h)
         (color! (if lit? C-HIGHLIGHT C-TEXT-DIM))
@@ -461,15 +473,23 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! (if lit? C-BG C-TEXT))
-        (let bars ((k 0))
-          (when (< k 3)
-            (draw-filled-rect (+ x 5) (+ y 3 (* k 4)) (- w 10) 2)
-            (bars (+ k 1))))
+        (draw-rows (icon-rows icon) (+ x 6) (+ y 2) 1 ICON-W)
         (color! (if lit? C-BG C-TEXT-DIM))
-        (draw-text-mini "SPC" (+ x 6) (+ y 16) 1)
+        (draw-text-mini key (+ x (quotient (- w (text-width-mini key 1)) 2)) (+ y 16) 1)))
+
+    ;; The corner button: the wrench (David, 2026-09-19), SPC beneath in
+    ;; the mini font, lit while the stack is open or just after a choice,
+    ;; a badge at the top right when a tool is banked or disabled.
+    (define (draw-tool-button vh st badge?)
+      (let ((r (tool-button-rect vh)))
+        (draw-bar-button r 'wrench "SPC" (or (tools-open? st) (> (tools-flash st) 0)))
         (when badge?
           (color! C-LABEL-LIT)
-          (draw-filled-rect (+ x w -7) (+ y 1) 6 6))))
+          (draw-filled-rect (+ (car r) (caddr r) -7) (+ (cadr r) 1) 6 6))))
+
+    ;; The menu's peer button beside the wrench: the door, ESC beneath.
+    (define (draw-menu-button r)
+      (draw-bar-button r 'menu "ESC" #f))
 
     ;; A tag key's letter, upper case (the font has no lower case).
     (define (tag-text key)
@@ -522,11 +542,9 @@
                 (draw-filled-rect (+ x w -1) y 1 h)
                 (when (>= p 1.0)
                   (let ((ty (+ y (exact (floor (/ (- h 14) 2))))))
-                    ;; the icon: a 12x12 block in the tool's color
+                    ;; the tool's icon from the sheet, in the tool's color
                     (color! (if on? tone C-TEXT-DIM))
-                    (draw-filled-rect (+ x 6) (+ ty 1) 12 12)
-                    (color! C-BG)
-                    (draw-filled-rect (+ x 9) (+ ty 4) 6 6)
+                    (draw-rows (icon-rows (tool-name t)) (+ x 6) (+ ty 1) 1 ICON-W)
                     (color! ink)
                     (draw-text (tool-label t) (+ x 22) ty 2)
                     (let* ((after (+ x 22 (text-width (tool-label t) 2) 4))
@@ -563,7 +581,8 @@
       (draw-filled-rect 0 top vw (- vh top))
       (color! C-BAR-C)
       (draw-filled-rect 0 top vw 1)
-      (draw-tool-button vh st badge?))
+      (draw-tool-button vh st badge?)
+      (draw-menu-button (list 32 (- vh 28) 24 24)))
 
     ;; A readout at the right of the first row (zones) or inside the strip
     ;; (strip), right-aligned in its rect.

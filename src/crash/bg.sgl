@@ -11,7 +11,11 @@
 ;;; cells over the board area; every cell holds a value in [0, 1) and
 ;;; the renderer maps it onto a ramp of RAMP palette tones with a 2x2
 ;;; ordered dither between neighboring tones (four levels per step, so
-;;; the surface reads as continuous at 8 px). Two rules, both candidates:
+;;; the surface reads as continuous at 8 px). The rules are a table,
+;;; RULES, one entry per rule (its name, how it seeds a field, how it
+;;; steps one), so a new rule is one entry and a name in the switch;
+;;; David, 2026-09-19: "the current pattern is very close to what I had
+;;; in mind", keep both selectable and leave room for more. Two so far:
 ;;;
 ;;;   life      the voter model with mutation: every tick RATE cells
 ;;;             (chosen by the stream) copy one random neighbor's value, or
@@ -35,7 +39,23 @@
 ;;; is the same on both targets (the determinism leg holds two runs of
 ;;; one seed to one trajectory). Drawing is (crash render)'s: bg-runs
 ;;; answers rectangles quantized to the half-cell grid, run-merged along
-;;; each row. Rules family: no platform, no drawing.
+;;; each row and grouped by tone. Rules family: no platform, no drawing.
+;;;
+;;; The phone's budget (David, 2026-09-19: "it's killing the CPU on the
+;;; phone", the music choppy and the tweens stuttering). Measured in
+;;; bytecode on the desktop, per frame: the life step 0.10 ms (0.24
+;;; under the ICE), the reaction step 4.4 ms (10.2 under the ICE), and
+;;; paid by both every frame before this: 2.6 ms to build the run list
+;;; and about 1900 rectangles drawn. So the field steps once every
+;;; STRIDE ticks (the rule's work scaled so the motion is the same), the
+;;; runs are built at that step and held in the struct until the next,
+;;; and the runs come grouped by tone so the renderer sets a color RAMP
+;;; times a frame instead of 1900. The reaction's steps under the ICE
+;;; are capped (REACT-STEPS-MAX). The shader path was weighed and
+;;; declined with a number: sigil-graphics caps a shader at 16 scalar or
+;;; vec4 uniforms with no arrays and no texture upload, so an 880-cell
+;;; field cannot reach the GPU; only a procedural field could, and that
+;;; is not this pattern.
 
 (define-library (crash bg)
   (import (sigil struct)
@@ -45,7 +65,7 @@
 
   (export bg bg? bg-new bg-tick bg-field bg-rng bg-ticks bg-mode bg-agitation bg-burst
           bg-with-phase bg-with-burst bg-step bg-runs bg-canonical bg-dominant bg-mean bg-flow
-          CELL GRID-W GRID-H RAMP MODES
+          CELL GRID-W GRID-H RAMP MODES RULES STRIDE
           DOMINANT-CAP
           AGITATION-TRACE AGITATION-ICE AGITATION-BURST AGITATION-SEVERED
           BURST-TICKS)
@@ -56,13 +76,14 @@
     (define CELL 16)             ; px per cell; the dither works in half cells
     (define GRID-W 40)           ; cells across at 640 wide
     (define GRID-H 22)           ; cells down over the 352 px board area
-    (define RAMP 7)              ; palette tones in the ramp (crash render maps them)
-    (define MODES '(life reaction))
+    (define RAMP 8)              ; palette tones in the ramp (crash render maps them)
+    (define STRIDE 3)            ; ticks between steps of the field (the phone's budget)
     (define DOMINANT-CAP 0.9)    ; no tone may hold more of the half cells than this: a flat field is dead
     (define LIFE-RATE 60)        ; cells visited per tick at agitation 1
     (define LIFE-MUTATE 12)      ; one visit in this many mutates instead of copying
     (define LIFE-DRIFT 0.06)     ; a mutation moves the value this far at most, on the ring
-    (define REACT-STEPS 2)       ; Gray-Scott steps per tick at agitation 1
+    (define REACT-STEPS 2)       ; Gray-Scott steps per field step at agitation 1
+    (define REACT-STEPS-MAX 4)   ; and never more than this under the ICE
     (define REACT-FEED 0.046)    ; the regime measured 2026-09-19: fronts cover 25..50 % and keep moving
     (define REACT-KILL 0.063)
     (define REACT-DA 1.0)
@@ -93,7 +114,8 @@
       (ticks default: 0)
       (agitation default: AGITATION-TRACE)
       (burst default: 0)
-      (severed default: #f))
+      (severed default: #f)
+      (runs-held default: '()))     ; the rectangles of the field as last stepped, grouped by tone
 
     ;; The share of half cells in the most common tone, from the runs.
     (define (bg-dominant b)
@@ -127,25 +149,33 @@
       (let ((rng (prng-next rng)))
         (cons (/ (prng-index rng 1000000) 1000000.0) rng)))
 
-    ;; A field seeded by the stream: life starts from smooth-ish noise
-    ;; (each cell a draw, then two smoothing passes); reaction from a full
-    ;; first substance with REACT-SPOTS spots of the second.
+    ;; A field seeded by the stream, through the rule's own seeder: life
+    ;; starts from smooth-ish noise (each cell a draw, then two smoothing
+    ;; passes); reaction from a full first substance with REACT-SPOTS
+    ;; spots of the second. The runs are built once here and then at
+    ;; every step.
     (define (bg-new seed . rest)
       (let* ((mode (if (and (pair? rest) (memq (car rest) MODES)) (car rest) 'life))
-             (field (make-vector CELLS 0.0))
-             (sub (make-vector CELLS 1.0))
-             (rng (prng-seed seed)))
-        (if (eq? mode 'life)
-            (let loop ((i 0) (rng rng))
-              (if (= i CELLS)
-                  (bg mode: mode field: (smooth (smooth field)) sub: sub rng: rng)
-                  (let ((u (draw-unit rng)))
-                    (vector-set! field i (car u))
-                    (loop (+ i 1) (cdr u)))))
-            ;; REACT-SPOTS 3x3 spots of the second substance in a full
-            ;; first: the fronts grow out of them from the first tick (a
-            ;; dozen left the field blank for its first seconds; smoothed
-            ;; noise is too thin to take and dies)
+             (b ((rule-seed (rule-ref mode)) mode (prng-seed seed))))
+        (bg b runs-held: (build-runs b))))
+
+    (define (seed-life mode rng)
+      (let ((field (make-vector CELLS 0.0))
+            (sub (make-vector CELLS 1.0)))
+        (let loop ((i 0) (rng rng))
+          (if (= i CELLS)
+              (bg mode: mode field: (smooth (smooth field)) sub: sub rng: rng)
+              (let ((u (draw-unit rng)))
+                (vector-set! field i (car u))
+                (loop (+ i 1) (cdr u)))))))
+
+    ;; REACT-SPOTS 3x3 spots of the second substance in a full first: the
+    ;; fronts grow out of them from the first tick (a dozen left the field
+    ;; blank for its first seconds; smoothed noise is too thin to take and
+    ;; dies)
+    (define (seed-reaction mode rng)
+      (let ((field (make-vector CELLS 0.0))
+            (sub (make-vector CELLS 1.0)))
             (let loop ((k 0) (rng rng))
               (if (= k REACT-SPOTS)
                   (bg mode: mode field: field sub: sub rng: rng)
@@ -163,7 +193,7 @@
                               (vector-set! sub (+ x (* y GRID-W)) REACT-SEED))
                             (col (+ dx 1))))
                         (spot (+ dy 1))))
-                    (loop (+ k 1) (cdr u2))))))))
+                    (loop (+ k 1) (cdr u2)))))))
 
     (define (at field x y)
       (vector-ref field (+ (modulo x GRID-W) (* (modulo y GRID-H) GRID-W))))
@@ -307,22 +337,55 @@
             (loop (+ i 1))))
         out))
 
+    ;; One field step of the life rule: STRIDE ticks' worth of visits.
+    (define (step-life b agit)
+      (let ((r (life-step (bg-field b) (bg-rng b) (exact (floor (* agit LIFE-RATE STRIDE))))))
+        (bg b field: (car r) rng: (cdr r))))
+
+    ;; One field step of the reaction: the feed, then REACT-STEPS Gray-
+    ;; Scott steps scaled by the agitation and capped.
+    (define (step-reaction b agit)
+      (let ((fed (react-feed (bg-field b) (bg-rng b) (bg-ticks b)))
+            (steps (min REACT-STEPS-MAX (max 1 (exact (floor (* agit REACT-STEPS)))))))
+        (let loop ((k 0) (a (bg-sub b)) (bb (car fed)))
+          ;; the reaction keeps b at its own scale in field; the renderer's
+          ;; scale is react-field's
+          (if (= k steps)
+              (bg b field: bb sub: a rng: (cdr fed))
+              (let ((r (react-step a bb)))
+                (loop (+ k 1) (car r) (cdr r)))))))
+
+    ;; --- the rule table ---------------------------------------------------------------
+
+    ;; (name seed step): seed builds the field from a mode and the
+    ;; stream, step advances one field step at an agitation. Built with
+    ;; list, not quoted (the web build's literal hazard, see (crash menu)).
+    (define RULES
+      (list (list 'life seed-life step-life)
+            (list 'reaction seed-reaction step-reaction)))
+
+    (define MODES (map car RULES))
+
+    (define (rule-ref mode)
+      (let ((entry (assq mode RULES)))
+        (if entry (cdr entry) (cdr (car RULES)))))
+
+    (define (rule-seed rule) (car rule))
+    (define (rule-step rule) (cadr rule))
+
+    ;; One tick of the clock: the burst counts down every tick; the field
+    ;; steps (and its runs are rebuilt) once every STRIDE ticks, collapsing
+    ;; instead once severed.
     (define (bg-step b)
-      (let ((agit (if (> (bg-burst b) 0) AGITATION-BURST (bg-agitation b))))
-        (cond ((bg-severed b)
-               (bg b field: (collapse (bg-field b)) ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1))))
-              ((eq? (bg-mode b) 'life)
-               (let ((r (life-step (bg-field b) (bg-rng b) (exact (floor (* agit LIFE-RATE))))))
-                 (bg b field: (car r) rng: (cdr r) ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1)))))
-              (else
-               (let ((fed (react-feed (bg-field b) (bg-rng b) (bg-ticks b))))
-                 (let loop ((k 0) (a (bg-sub b)) (bb (car fed)))
-                   ;; the reaction keeps b at its own scale in field; the
-                   ;; renderer's scale is react-field's
-                   (if (= k (max 1 (exact (floor (* agit REACT-STEPS)))))
-                       (bg b field: bb sub: a rng: (cdr fed) ticks: (+ 1 (bg-ticks b)) burst: (max 0 (- (bg-burst b) 1)))
-                       (let ((r (react-step a bb)))
-                         (loop (+ k 1) (car r) (cdr r))))))))))
+      (let* ((agit (if (> (bg-burst b) 0) AGITATION-BURST (bg-agitation b)))
+             (ticks (+ 1 (bg-ticks b)))
+             (b (bg b ticks: ticks burst: (max 0 (- (bg-burst b) 1)))))
+        (if (not (= 0 (modulo ticks STRIDE)))
+            b
+            (let ((stepped (if (bg-severed b)
+                               (bg b field: (collapse (bg-field b)))
+                               ((rule-step (rule-ref (bg-mode b))) b agit))))
+              (bg stepped runs-held: (build-runs stepped))))))
 
     (define (bg-tick b n)
       (if (<= n 0) b (bg-tick (bg-step b) (- n 1))))
@@ -346,9 +409,13 @@
               ((< frac 0.75) (list up base base up))
               (else (list up up base up)))))
 
-    ;; The rectangles to fill this frame, (tone x y w h) in px on the half
-    ;; -cell grid, same-tone runs merged along each half-cell row.
-    (define (bg-runs b)
+    ;; The rectangles of the field as last stepped, (tone x y w h) in px
+    ;; on the half-cell grid, same-tone runs merged along each half-cell
+    ;; row and the list grouped by tone (ascending), so the renderer sets
+    ;; one color per group.
+    (define (bg-runs b) (bg-runs-held b))
+
+    (define (build-runs b)
       (let* ((field (shown b))
              (half (quotient CELL 2))
              (tones (make-vector (* 2 GRID-W 2 GRID-H) 0)))
@@ -366,18 +433,26 @@
               (vector-set! tones (+ col0 (* (+ row0 1) w2)) (caddr d))
               (vector-set! tones (+ col0 1 (* (+ row0 1) w2)) (cadddr d)))
             (loop (+ i 1))))
-        ;; runs
-        (let rows ((r 0) (acc '()))
-          (if (= r (* 2 GRID-H))
-              (reverse acc)
-              (let ((w2 (* 2 GRID-W)))
-                (let run ((c 0) (start 0) (tone (vector-ref tones (* r w2))) (acc acc))
-                  (cond ((= c w2)
-                         (rows (+ r 1) (cons (list tone (* half start) (* half r) (* half (- c start)) half) acc)))
-                        ((= (vector-ref tones (+ c (* r w2))) tone) (run (+ c 1) start tone acc))
-                        (else
-                         (run (+ c 1) c (vector-ref tones (+ c (* r w2)))
-                              (cons (list tone (* half start) (* half r) (* half (- c start)) half) acc))))))))))
+        ;; runs, one accumulator per tone, newest first, joined in tone order
+        (let ((groups (make-vector RAMP '()))
+              (w2 (* 2 GRID-W)))
+          (define (keep! tone start r c)
+            (vector-set! groups tone
+                         (cons (list tone (* half start) (* half r) (* half (- c start)) half)
+                               (vector-ref groups tone))))
+          (let rows ((r 0))
+            (when (< r (* 2 GRID-H))
+              (let run ((c 0) (start 0) (tone (vector-ref tones (* r w2))))
+                (cond ((= c w2) (keep! tone start r c))
+                      ((= (vector-ref tones (+ c (* r w2))) tone) (run (+ c 1) start tone))
+                      (else
+                       (keep! tone start r c)
+                       (run (+ c 1) c (vector-ref tones (+ c (* r w2)))))))
+              (rows (+ r 1))))
+          (let join ((t (- RAMP 1)) (acc '()))
+            (if (< t 0)
+                acc
+                (join (- t 1) (append (reverse (vector-ref groups t)) acc)))))))
 
     ;; A plain datum of the field, for the determinism leg.
     (define (bg-canonical b)

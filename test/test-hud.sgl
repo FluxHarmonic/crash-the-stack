@@ -38,7 +38,7 @@
         (make-tool 'shuf "SHUFFLE" 's 60)
         (make-tool 'hint "HINT" 'h 30)
         (make-tool 'next "NEXT" 'n)
-        (make-tool 'menu "MENU" 'm #f #f #f)))
+        (make-tool 'jam "JAM" 'j #f #f #f)))
 
 (define (frame keys . rest)
   (cons keys (and (pair? rest) (car rest))))
@@ -121,7 +121,7 @@
                     (frame '() (cons 10 (- VH 20)))
                     (frame '() (cons 400 200)))))
   (test "a disabled tool refuses: the stack stays open, the entry becomes the highlight"
-    (let ((r (tools-step (open-stack) (frame '(m)) LIST VW VH)))
+    (let ((r (tools-step (open-stack) (frame '(j)) LIST VW VH)))
       (assert-true (tools-open? (car r)))
       (assert-equal #f (cdr r))
       (assert-equal 4 (tools-highlight (car r)))))
@@ -154,11 +154,11 @@
   (session-step s (make-input-frame keys '() (and (pair? rest) (car rest))) (geom)))
 
 (test-group "hud: the stack table's tools"
-  (test "the list is the note's: UNDO U, SHUFFLE S (60), HINT H (30), LOOK L, NEXT N, MENU M"
+  (test "the list is the note's less MENU (David, 2026-09-19): UNDO U, SHUFFLE S (60), HINT H (30), LOOK L, NEXT N"
     (let ((tools (session-tools-list (stack-session))))
-      (assert-equal '(undo shuf hint look next menu) (map tool-name tools))
-      (assert-equal '(u s h l n m) (map tool-tag tools))
-      (assert-equal (list #f 60 30 #f #f #f) (map tool-price tools))))
+      (assert-equal '(undo shuf hint look next) (map tool-name tools))
+      (assert-equal '(u s h l n) (map tool-tag tools))
+      (assert-equal (list #f 60 30 #f #f) (map tool-price tools))))
   (test "Space opens the stack; a tag letter then never reaches a tile"
     (let* ((s0 (stack-session))
            (s1 (step s0 '(space))))
@@ -188,10 +188,21 @@
   (test "L is LOOK: the look steps"
     (let ((s (stack-session)))
       (assert-false (eq? (session-look s) (session-look (step (step s '(space)) '(l)))))))
-  (test "M is MENU: the session carries the request for the shell, which clears it"
-    (let ((s (step (step (stack-session) '(space)) '(m))))
+  (test "Escape is MENU (David, 2026-09-19): the session carries the request for the shell, which clears it; M is nothing"
+    (let ((s (step (stack-session) '(escape))))
       (assert-equal 'menu (session-request s))
-      (assert-equal #f (session-request (session-clear-request s)))))
+      (assert-equal #f (session-request (session-clear-request s))))
+    (assert-equal #f (session-request (step (step (stack-session) '(space)) '(m))))
+    (assert-true (tools-open? (session-tools (step (step (stack-session) '(space)) '(m))))))
+  (test "the bar's MENU button beside the wrench asks for the menu too"
+    (let* ((r (control-rect (geom) 'zones 'menu))
+           (s (step (stack-session) '() (cons (+ (car r) 12) (+ (cadr r) 12)))))
+      (assert-equal (list 32 (- VH 28) 24 24) r)
+      (assert-equal 'menu (session-request s))))
+  (test "Escape with the stack open closes it and asks for nothing"
+    (let ((s (step (step (stack-session) '(space)) '(escape))))
+      (assert-false (tools-open? (session-tools s)))
+      (assert-equal #f (session-request s))))
   (test "Tab toggles the tags now; shift+Tab switches the model"
     (let* ((s0 (stack-session))
            (s1 (step s0 '(tab))))
@@ -206,11 +217,11 @@
     (assert-equal 1 (session-hints (session-step (session-step (stack-session) (make-input-frame '(h) '(ctrl) #f) (geom))
                                                  (make-input-frame '(h) '(ctrl) #f)
                                                  (geom)))))
-  (test "under SEVERED every tool but LOOK, NEXT and MENU is disabled"
+  (test "under SEVERED every tool but LOOK and NEXT is disabled"
     (let* ((s (session-advance (session-advance (stack-session) (* 60 (+ 1 SEVER-AT))) (* 60 (+ 1 SEVER-AT))))
            (tools (session-tools-list s)))
       (assert-true (trace-severed? (session-trace s)))
-      (assert-equal '(#f #f #f #t #t #t) (map tool-enabled tools))
+      (assert-equal '(#f #f #f #t #t) (map tool-enabled tools))
       (let ((s2 (step (step s '(space)) '(h))))
         (assert-true (tools-open? (session-tools s2)))
         (assert-equal 0 (session-hints s2)))))
@@ -241,8 +252,8 @@
                              (open (step s '(space)))
                              (after (step open '() (cons (+ (car r) 4) (+ (cadr r) (- (cadddr r) 2))))))
                         (assert-false (tools-open? (session-tools after)))
-                        (when (eq? (tool-name (list-ref tools i)) 'menu)
-                          (assert-equal 'menu (session-request after))))
+                        (when (eq? (tool-name (list-ref tools i)) 'next)
+                          (assert-equal 2 (session-seed after))))
                       (loop (+ i 1))))
                   (let* ((m (control-rect (geom) layout 'mode))
                          (open (step s '(space)))
@@ -262,12 +273,12 @@
   (deal-step d (make-input-frame keys '() (and (pair? rest) (car rest))) (cgeom)))
 
 (test-group "hud: the card table's tools"
-  (test "the list is the note's: PULL P, ROLLBACK R, PROBE O, SCRAMBLE C, NEXT N, MENU M"
+  (test "the list is the note's less MENU: PULL P, ROLLBACK R, PROBE O, SCRAMBLE C, NEXT N"
     (let ((tools (deal-tools-list (card-deal))))
-      (assert-equal '(draw undo probe scram next menu) (map tool-name tools))
-      (assert-equal '(p r o c n m) (map tool-tag tools))))
+      (assert-equal '(draw undo probe scram next) (map tool-name tools))
+      (assert-equal '(p r o c n) (map tool-tag tools))))
   (test "in clean mode SCRAMBLE and PROBE are absent, not disabled"
-    (assert-equal '(draw undo next menu) (map tool-name (deal-tools-list (deal-with-mode (card-deal) 'clean)))))
+    (assert-equal '(draw undo next) (map tool-name (deal-tools-list (deal-with-mode (card-deal) 'clean)))))
   (test "Space opens; a pile key then never picks a pile"
     (let* ((d1 (cstep (card-deal) '(space)))
            (d2 (cstep d1 '(a))))
@@ -282,7 +293,9 @@
            (moved (deal-restore 1 (game-move (deal-game d) (car (car moves)) (cdr (car moves))) #t (deal-trace d))))
       (assert-equal (game-moves (deal-game d))
                     (game-moves (deal-game (cstep (cstep moved '(space)) '(r)))))))
-  (test "M is MENU: the request for the shell"
-    (assert-equal 'menu (deal-request (cstep (cstep (card-deal) '(space)) '(m)))))
+  (test "Escape and the bar's MENU button are the menu on this table too"
+    (assert-equal 'menu (deal-request (cstep (card-deal) '(escape))))
+    (let ((r (card-control-rect (cgeom) 'zones 'menu)))
+      (assert-equal 'menu (deal-request (cstep (card-deal) '() (cons (+ (car r) 12) (+ (cadr r) 12)))))))
   (test "? toggles the keys line on this table too"
     (assert-true (deal-keys-shown (cstep (card-deal) '(?))))))

@@ -102,7 +102,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "look", "assets", "hud", "traced", "reload", "audio", "update", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -518,6 +518,43 @@ else fail("keys-match", keysDetail);
   }
   if (detail) fail("tools", detail);
   else pass("tools", "Space opens, a tile tag is refused while open, H fires HINT and closes, a tap outside closes");
+}
+
+// ---- 6a2. menu: Escape and the bar's MENU button open the menu (David 2026-09-19) --
+// Escape on the board prints the menu's boot line; Enter on CONTINUE comes
+// back to the same board (its boot line says tiles 142, the matched pair
+// gone); then the button beside the wrench ("crash: control menu X Y")
+// does the same by tap.
+{
+  let detail = "";
+  const back = async (how) => {
+    const m0 = consoleLines.length;
+    await press("Enter");
+    const chose = await waitLine(/^crash: menu chose continue$/, m0, 3000);
+    const again = await waitLine(BOOT_ANY, m0, 5000);
+    if (!chose) return `${how}: Enter on the menu did not choose CONTINUE`;
+    if (!again) return `${how}: no boot line after CONTINUE`;
+    await sleep(300);
+    return "";
+  };
+  mark = consoleLines.length;
+  await press("Escape");
+  const menu = await waitLine(/^crash: menu (continue) /, mark, 3000);
+  if (!menu) detail = "Escape did not open the menu (no \"crash: menu continue ...\" line)";
+  else detail = await back("Escape");
+  if (!detail && !EXPECT_NO_SELECTION) {
+    const btn = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    if (!btn) detail = "no \"crash: control menu\" boot line";
+    else {
+      mark = consoleLines.length;
+      await tap(btn.m[1], btn.m[2]);
+      const menu2 = await waitLine(/^crash: menu (continue) /, mark, 3000);
+      if (!menu2) detail = "the MENU button opened no menu";
+      else detail = await back("the MENU button");
+    }
+  }
+  if (detail) fail("menu", detail);
+  else pass("menu", "Escape opens the menu and CONTINUE returns; the MENU button beside the wrench does the same");
 }
 
 // ---- 6b. look: the TILES counter steps the look (P3) ----------------------

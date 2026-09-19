@@ -43,8 +43,9 @@
 ;;; return deselects, backspace or ctrl+z undoes (backspace erases a
 ;;; typed tag letter first), ctrl+s shuffles, ctrl+n deals the next seed,
 ;;; ctrl+t steps the look, ctrl+h asks for a hint, ? shows and hides the
-;;; keys line. Commands take ctrl because in hint mode every letter is a
-;;; tag key. (Escape is the shell's: it quits.)
+;;; keys line, Escape (or the bar's MENU button beside the wrench) asks
+;;; for the menu. Commands take ctrl because in hint mode every letter is
+;;; a tag key.
 ;;;
 ;;; The same commands are the tool stack (ruling D33, (crash hud)):
 ;;; Space or a tap on the corner button opens it, a tool's tag letter or
@@ -54,8 +55,8 @@
 ;;; and a ctrl chord on a desktop are one code path. The HINT tool cannot
 ;;; wait for a face key (a phone has none), so it gives GNOME's hint
 ;;; instead: a legal pair, the selected tile's partner when one is
-;;; selected. The keyboard gets the same by pressing ctrl+h twice. MENU
-;;; is the shell's: the session carries it as a request the shell reads
+;;; selected. The keyboard gets the same by pressing ctrl+h twice. The
+;;; menu is the shell's: the session carries the request the shell reads
 ;;; after the step and clears.
 
 (define-library (crash input)
@@ -649,6 +650,10 @@
                (session s labels-shown: (not (session-labels-shown s)) typed: ""))
               ((pressed? f '?)
                (session s keys-shown: (not (session-keys-shown s))))
+              ;; Escape (or the bar's MENU button, which sends it): the
+              ;; menu, as a request the shell answers
+              ((pressed? f 'escape)
+               (session s request: 'menu))
               ;; the cursor model: Return picks the ringed tile (Space did,
               ;; until the tool stack took Space)
               ((and (pressed? f 'return)
@@ -697,6 +702,7 @@
         ((mode) (make-input-frame '(trace-mode) '() #f))
         ((look) (make-input-frame '(t) '(ctrl) #f))
         ((keys) (make-input-frame '(?) '() #f))
+        ((menu) (make-input-frame '(escape) '() #f))
         (else #f)))
 
     ;; A click on a control replaces the frame with that control's command
@@ -710,15 +716,16 @@
     ;; --- the tool stack --------------------------------------------------------
 
     ;; This table's tools for the frame (ruling D33): under SEVERED only
-    ;; NEXT and MENU; on a finished board UNDO, SHUFFLE and HINT are done.
+    ;; LOOK and NEXT; on a finished board UNDO, SHUFFLE and HINT are done.
+    ;; MENU is not a tool (David, 2026-09-19): the bar's peer button next
+    ;; to the wrench, or Escape.
     (define (session-tools-list s)
       (let ((play? (not (finished? s))))
         (list (make-tool 'undo "UNDO" 'u #f #f play?)
               (make-tool 'shuf "SHUFFLE" 's SHUFFLE-COST #f play?)
               (make-tool 'hint "HINT" 'h HINT-COST #f play?)
               (make-tool 'look "LOOK" 'l)
-              (make-tool 'next "NEXT" 'n)
-              (make-tool 'menu "MENU" 'm))))
+              (make-tool 'next "NEXT" 'n))))
 
     (define (session-with-tools-touch s touch?)
       (session s tools: (tools-with-touch (session-tools s) touch?)))
@@ -729,12 +736,10 @@
     (define (session-clear-request s)
       (session s request: #f))
 
-    ;; A chosen tool fires as its command; MENU is left for the shell.
+    ;; A chosen tool fires as its command.
     (define (fire-tool s name g)
-      (if (eq? name 'menu)
-          (session s request: 'menu)
-          (let ((f (control-command name)))
-            (or (and f (step-commands s f)) s))))
+      (let ((f (control-command name)))
+        (or (and f (step-commands s f)) s)))
 
     ;; The instruction line: what the bar says under the readouts when the
     ;; keys line is hidden (D33: a new player's first minute depends on it).
