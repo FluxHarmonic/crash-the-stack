@@ -96,8 +96,14 @@
     (assert-equal 'undo (cdr (tools-step (open-stack) (frame '(|1|)) LIST VW VH)))
     (assert-equal 'next (cdr (tools-step (open-stack) (frame '(|4|)) LIST VW VH)))
     (assert-equal #f (cdr (tools-step (open-stack) (frame '(|9|)) LIST VW VH))))
-  (test "open, arrows move the highlight and Return chooses it"
+  (test "open, nothing is highlighted: Return alone fires nothing (a finger expecting deselect must not undo)"
+    (let ((r (tools-step (open-stack) (frame '(return)) LIST VW VH)))
+      (assert-equal #f (tools-highlight (open-stack)))
+      (assert-equal #f (cdr r))
+      (assert-true (tools-open? (car r)))))
+  (test "open, arrows move the highlight (down from nothing is the first, up the last) and Return chooses it"
     (let* ((st (car (tools-step (open-stack) (frame '(down)) LIST VW VH)))
+           (st (car (tools-step st (frame '(down)) LIST VW VH)))
            (st (car (tools-step st (frame '(down)) LIST VW VH))))
       (assert-equal 2 (tools-highlight st))
       (assert-equal 'hint (cdr (tools-step st (frame '(return)) LIST VW VH)))
@@ -200,18 +206,50 @@
     (assert-equal 1 (session-hints (session-step (session-step (stack-session) (make-input-frame '(h) '(ctrl) #f) (geom))
                                                  (make-input-frame '(h) '(ctrl) #f)
                                                  (geom)))))
-  (test "under SEVERED every tool but NEXT and MENU is disabled"
+  (test "under SEVERED every tool but LOOK, NEXT and MENU is disabled"
     (let* ((s (session-advance (session-advance (stack-session) (* 60 (+ 1 SEVER-AT))) (* 60 (+ 1 SEVER-AT))))
            (tools (session-tools-list s)))
       (assert-true (trace-severed? (session-trace s)))
-      (assert-equal '(#f #f #f #f #t #t) (map tool-enabled tools))
+      (assert-equal '(#f #f #f #t #t #t) (map tool-enabled tools))
       (let ((s2 (step (step s '(space)) '(h))))
         (assert-true (tools-open? (session-tools s2)))
         (assert-equal 0 (session-hints s2)))))
   (test "the layout setting: default zones, stepping, a save round-trip is the shell's (store)"
     (let ((s (stack-session)))
       (assert-equal 'zones (session-hud s))
-      (assert-equal 'strip (session-hud (session-with-hud s 'strip))))))
+      (assert-equal 'strip (session-hud (session-with-hud s 'strip)))))
+  ;; the S8 review: in the strip the meter spanned the width and shadowed
+  ;; the readout, and the bar's rewrite of a tap ran before the stack saw
+  ;; it, so a tap on the bar with the stack open fired nothing and closed
+  ;; nothing
+  (test "strip layout: a tap on the readout steps the look, not the meter face"
+    (let* ((s (session-with-hud (stack-session) 'strip))
+           (r (control-rect (geom) 'strip 'look))
+           (center (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (cadddr r) 2)))))
+      (assert-equal 'look (hit-control (geom) 'strip (car center) (cdr center)))
+      (let ((after (step s '() center)))
+        (assert-false (eq? (session-look s) (session-look after)))
+        (assert-equal (trace-mode (session-trace s)) (trace-mode (session-trace after))))))
+  (test "both layouts: with the stack open a tap on every entry fires it, and a tap on the bar closes the stack"
+    (for-each (lambda (layout)
+                (let* ((s (session-with-hud (stack-session) layout))
+                       (tools (session-tools-list s))
+                       (n (length tools)))
+                  (let loop ((i 0))
+                    (when (< i n)
+                      (let* ((r (tool-entry-rect VH i n #f))
+                             (open (step s '(space)))
+                             (after (step open '() (cons (+ (car r) 4) (+ (cadr r) (- (cadddr r) 2))))))
+                        (assert-false (tools-open? (session-tools after)))
+                        (when (eq? (tool-name (list-ref tools i)) 'menu)
+                          (assert-equal 'menu (session-request after))))
+                      (loop (+ i 1))))
+                  (let* ((m (control-rect (geom) layout 'mode))
+                         (open (step s '(space)))
+                         (after (step open '() (cons (+ (car m) 10) (+ (cadr m) 3)))))
+                    (assert-false (tools-open? (session-tools after)))
+                    (assert-equal (trace-mode (session-trace s)) (trace-mode (session-trace after))))))
+              HUD-LAYOUTS)))
 
 ;; --- the card table -------------------------------------------------------------
 

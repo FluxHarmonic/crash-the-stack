@@ -584,7 +584,9 @@ else fail("keys-match", keysDetail);
     const meterStrip = await waitLine(/^crash: control mode (-?[\d.]+) (-?[\d.]+)$/, mark, 5000);
     if (!strip || strip.m[1] !== "strip") detail = `?hud=strip booted ${strip ? strip.m[0] : "no layout line"}`;
     else if (!meterZones || !meterStrip) detail = "no \"crash: control mode\" line on one of the boots";
-    else if (!(parseFloat(meterStrip.m[2]) < parseFloat(meterZones.m[2]) && parseFloat(meterStrip.m[1]) === 320)) detail = `the meter did not move to the strip: zones (${meterZones.m[1]},${meterZones.m[2]}) strip (${meterStrip.m[1]},${meterStrip.m[2]})`;
+    // the strip's meter runs from the left edge to the readout, so its
+    // centre sits left of the zones meter's and higher
+    else if (!(parseFloat(meterStrip.m[2]) < parseFloat(meterZones.m[2]) && parseFloat(meterStrip.m[1]) < parseFloat(meterZones.m[1]))) detail = `the meter did not move to the strip: zones (${meterZones.m[1]},${meterZones.m[2]}) strip (${meterStrip.m[1]},${meterStrip.m[2]})`;
     else {
       await sleep(800);
       mark = consoleLines.length;
