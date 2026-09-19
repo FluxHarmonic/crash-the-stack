@@ -347,8 +347,13 @@
                                        ((cards) (stage-deal a))
                                        (else #f))
                                      #t))))
-                     ;; a menu rebuilt mid-reveal keeps the reveal (P3d)
-                     (if (stage-menu a) (menu-with-title m (menu-title (stage-menu a))) m))))
+                     ;; a menu rebuilt mid-reveal keeps the reveal (P3d); a fresh one
+                     ;; starts on the publisher card (D43), whose strip loads here at
+                     ;; once (no gate on native: the card opens the process)
+                     (cond ((stage-menu a) (menu-with-title m (menu-title (stage-menu a))))
+                           ((not (menu-title m)) m)
+                           ((texture-path CARD-PATH) (menu-with-title m (title-card-ready! (menu-title m))))
+                           (else (menu-with-title m (title-skip-card (menu-title m))))))))
 
     ;; A menu choice: CONTINUE resumes the active table; STACK and DEFRAG
     ;; start a new game of theirs; LOOK steps the look (P3) and stays on
@@ -434,7 +439,7 @@
     (define *reveal-over* #f)   ; the title's reveal has settled (or there was none); the loop keeps it
     (define (boot-steps!)
       (boot-reset!)
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH)))
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH CARD-PATH)))
                      (if (null? names)
                          (reverse acc)
                          (let ((p (look-texture (look-ref (car names)))))
@@ -443,7 +448,7 @@
                     ;; the backdrop first (under the reveal); the rest once the reveal is
                     ;; over, so their loads do not stutter it (as on the web)
                     (boot-add-step! (string->symbol path)
-                                    (lambda () (and (or (equal? path BACKDROP-PATH) *reveal-over*)
+                                    (lambda () (and (or (equal? path CARD-PATH) (equal? path BACKDROP-PATH) *reveal-over*)
                                                     (begin (texture-path path) #t)))))
                   paths))
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
@@ -460,6 +465,7 @@
         (set-letterbox-color 0.0 0.0 0.0)
         (open-audio! mute?)
         (boot-steps!)   ; D40: what the menu waits for
+        (title-card! #t)   ; the publisher card (D43) opens the process; no gate on native
         (let* ((lay (turtle-layout))
                (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
@@ -478,6 +484,9 @@
                    (f (poll-frame))
                    (_ (set! *reveal-over* (let ((m (stage-menu a))) (or (not m) (not (menu-title m)) (title-settled? (menu-title m))))))
                    (_ (boot-run!))   ; the boot's steps, one frame at a time, whatever the screen (D40)
+                   ;; the ambient starts the frame the menu is ready (the reveal settled, the
+                   ;; boot done), never under the reveal (David, 2026-09-20)
+                   (_ (when (and (not (audio-ambient-playing?)) *reveal-over* (boot-done?)) (audio-ambient-play!)))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
                    ;; Escape on the menu quits
@@ -520,7 +529,7 @@
                         (and log-keys? (not (eq? (stage-screen a) 'menu)))
                         (lambda ()
                           (case (stage-screen a)
-                            ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH)))   ; the title's backdrop (P3d)
+                            ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
                             ((stack)
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (geometry-hud-h geom)) 0.0 (stage-background a) *copper*)

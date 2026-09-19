@@ -123,6 +123,7 @@
           (crash cards fx)
           (crash menu)
           (crash title)
+          (crash title card)
           (crash title logo)
           (crash look)
           (crash hud)
@@ -212,6 +213,7 @@
     (define *ms-step* 0.0)   ; and the field's costs over the window: the step (bg-advance + the GPU passes) and the present
     (define *ms-present* 0.0)
     (define *gc-last* #f)     ; (minor major bytes) at the window's start
+    (define *underruns-last* 0) ; the sink's starved frames at the window's start
     ;; The frame's phases, wasm-side wall time from the jiffy clock (the
     ;; floor's anatomy, P3c): sim from the tick's start to present! (the
     ;; table's step, the effects, the saves, the trace lines), draw from
@@ -237,7 +239,8 @@
 
     (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
     (define MS-EVERY 120)      ; two seconds at 60 fps: the worst-frame readout refreshes often enough to catch a tap
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN underruns FRAMES
+    ;;                                        (underruns: the audio sink's starved frames in the window: the music stalled)
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
     ;;                                        collections and bytes allocated in the window
@@ -298,7 +301,9 @@
                  "gc" (- (car now) (car was)) (- (cadr now) (cadr was))
                  "alloc" (- (caddr now) (caddr was))
                  "gcms" (tenth (/ (- (cadddr now) (cadddr was)) 1000000.0))
-                 "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY)))
+                 "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY))
+                 "underruns" (- (audio-underruns) *underruns-last*))
+            (set! *underruns-last* (audio-underruns))
             ;;   crash: worst-frame MS sim S draw D flush F step A advance B save C cues D fx E
             (when *worst*
               (apply say "worst-frame" (exact (round (car *worst*)))
@@ -942,8 +947,9 @@
 
     (define (boot-steps!)
       (boot-reset!)
-      ;; the backdrop first (it belongs under the reveal), then the rest
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH)))
+      ;; the card strip first (D43: it shows before the reveal), the backdrop
+      ;; (it belongs under the reveal), then the rest
+      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH CARD-PATH)))
                      (if (null? names)
                          (reverse acc)
                          (let ((p (look-texture (look-ref (car names)))))
@@ -955,7 +961,7 @@
                                       ;; fetch in flight and advances its retry clock; a second
                                       ;; call with the real dt ran that clock at twice wall time
                                       ;; and gave textures up after 1 s instead of 2 (the review)
-                                      (and (or (equal? path BACKDROP-PATH) (reveal-over?))
+                                      (and (or (equal? path CARD-PATH) (equal? path BACKDROP-PATH) (reveal-over?))
                                            (begin (ensure-texture! 0.0 path)
                                                   (and (assoc path *textures*) #t))))))
                   paths))
@@ -979,6 +985,8 @@
     ;; roles, bg roles; the arm holds them to the data module).
     ;;   crash: title gate LINE               the boot screen is up, waiting for a tap or a key (D42)
     ;;   crash: title connect                 the gate opened
+    ;;   crash: title card tick C frame F ms M    the publisher card (D43): its tick and the strip frame shown
+    ;;   crash: title card done C              the card is over; C is the last tick shown (CARD-TICKS - 1 when it ran out, less when a tap skipped it)
     ;;   crash: title seed N baud B glitch L settle T cells C
     ;;   crash: title tick T digest D ms M      (M: the frame's wall time)
     ;;   crash: title settled T digest D shear S   (S: the slant in thousandths of a cell per row)
@@ -996,7 +1004,11 @@
             (say "title" "gate" (title-gate-line t1)))
           (when (and (title-gated? t0) (not (title-gated? t1)))
             (say "title" "connect"))
-          (when (and (title-running? t0) (not (title-gated? t0)) (= (title-tick t0) 0))
+          (when (and (title-in-card? t1) (not (= (title-card-tick t0) (title-card-tick t1))))
+            (say "title" "card" "tick" (title-card-tick t1) "frame" (title-card-frame t1 CARD-FRAMES) "ms" (exact (round *frame-ms*))))
+          (when (and (title-in-card? t0) (not (title-in-card? t1)))
+            (say "title" "card" "done" (title-card-tick t0)))   ; the last tick shown: CARD-TICKS - 1 when it ran out, less when skipped
+          (when (and (title-running? t0) (not (title-gated? t0)) (not (title-in-card? t0)) (= (title-tick t0) 0))
             (say "title" "seed" (title-seed t1) "baud" (title-baud t1) "glitch" (title-level t1)
                  "settle" (title-settle-tick t1) "cells" (title-drawn-count (title-skip t1))))
           (when (and (title-running? t1) (not (title-gated? t1)))
@@ -1015,33 +1027,82 @@
                   (say "title" "row" y (car row) (cadr row) (caddr row)))
                 (loop (+ y 1))))))))
 
+    ;; The menu frame's parts under ?ms (the return's slowdown, David
+    ;; 2026-09-20): wall ms and bytes allocated in the step, the draw and
+    ;; the end of frame, summed over MS-EVERY menu frames.
+    ;;   crash: menu-ms step S draw D end E bytes step A draw B end C gc N
+    (define *menu-ms* (vector 0.0 0.0 0.0 0 0 0 0 0))
+    (define (menu-part! i t0 b0 c0)
+      (let ((now (gc-snapshot)))
+        (vector-set! *menu-ms* i (+ (vector-ref *menu-ms* i) (- (now-ms) t0)))
+        (vector-set! *menu-ms* (+ i 3) (+ (vector-ref *menu-ms* (+ i 3)) (- (caddr now) b0)))
+        (vector-set! *menu-ms* 6 (+ (vector-ref *menu-ms* 6) (- (car now) c0)))))
+    (define (menu-ms-window!)
+      (vector-set! *menu-ms* 7 (+ 1 (vector-ref *menu-ms* 7)))
+      (when (= (vector-ref *menu-ms* 7) MS-EVERY)
+        (say "menu-ms" "step" (tenth (/ (vector-ref *menu-ms* 0) MS-EVERY)) "draw" (tenth (/ (vector-ref *menu-ms* 1) MS-EVERY)) "end" (tenth (/ (vector-ref *menu-ms* 2) MS-EVERY))
+             "bytes" "step" (quotient (vector-ref *menu-ms* 3) MS-EVERY) "draw" (quotient (vector-ref *menu-ms* 4) MS-EVERY) "end" (quotient (vector-ref *menu-ms* 5) MS-EVERY)
+             "gc" (vector-ref *menu-ms* 6))
+        (set! *menu-ms* (vector 0.0 0.0 0.0 0 0 0 0 0))))
+
     ;; A choice opens its table and draws it this same frame (with an
     ;; empty input frame), so no frame goes undrawn.
     (define (menu-tick f dt)
       (when (and *trace* (not *announced*))
         (say-menu *menu*)
         (set! *announced* #t))
-      (let ((r (menu-step *menu* f VW VH)))
+      ;; the publisher card (D43) waits for its strip: ready when the fetch
+      ;; landed, skipped when it was given up (a black card is no card)
+      (let ((t (menu-title *menu*)))
+        (when (and t (title-in-card? t) (not (title-card-ready t)) (assoc CARD-PATH *textures*))
+          (set! *menu* (menu-with-title *menu* (if (texture-for-path CARD-PATH)
+                                                   (title-card-ready! t)
+                                                   (title-skip-card t))))))
+      (let* ((s0 (and *ms* (gc-snapshot)))
+             (t0 (now-ms))
+             (r (menu-step *menu* f VW VH)))
         (play-cues! (menu-cues *menu* (car r)))   ; the title reveal's cues (P3d)
         (when *trace* (say-title *menu* (car r)))
         (set! *menu* (car r))
         (when (cdr r)
           (say "menu" "chose" (cdr r))
           (choose! (cdr r)))
+        (when s0 (menu-part! 0 t0 (caddr s0) (car s0)))
         (if (eq? *screen* 'menu)
-            (begin
+            (let ((s1 (and *ms* (gc-snapshot)))
+                  (t1 (now-ms)))
               (frame-begin!)
               (when (reveal-over?) (atlas-ensure!))   ; P3c's atlas, baked inside this frame once the reveal is over (the boot's atlas step waits on it)
-              (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH))   ; the title's backdrop (P3d)
-              (end-frame)
-              (ensure-texture! dt BACKDROP-PATH))
+              (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH) (texture-for-path CARD-PATH))   ; the title's backdrop and card strip (P3d)
+              (when s1 (menu-part! 1 t1 (caddr s1) (car s1)))
+              (let ((s2 (and *ms* (gc-snapshot)))
+                    (t2 (now-ms)))
+                (end-frame)
+                (ensure-texture! dt (if (assoc CARD-PATH *textures*) BACKDROP-PATH CARD-PATH))
+                (when s2 (menu-part! 2 t2 (caddr s2) (car s2)) (menu-ms-window!))))
             (tick-screen (make-input-frame '() '() #f) dt))))
+
+    ;; The ambient's start (David on 410e39e, 2026-09-20): preloaded behind
+    ;; the gate as before, silent under the card, the reveal and its beeps,
+    ;; started from its top the frame the menu is ready (the slant settled,
+    ;; the boot's steps done: the items are in) or, on a table boot, the
+    ;; frame the boot is done. A later startup tune slots in here.
+    ;;   crash: ambient start                 the loop began
+    (define *ambient-started* #f)
+    (define (ambient-tick!)
+      (when (and (not *ambient-started*) *booted* (boot-done?)
+                 (let ((t (and *menu* (menu-title *menu*))))
+                   (or (not t) (title-settled? t))))
+        (set! *ambient-started* #t)
+        (audio-ambient-play!)
+        (say "ambient" "start")))
 
     (define (web-tick dt)
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
       (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
+      (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
       (when *ms* (count-frame! dt))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
@@ -1250,6 +1311,7 @@
       (boot-steps!)   ; D40: what the menu waits for
       ;; the gate (D42): the reveal waits for a tap or a key, the gesture that lets audio play
       (title-gate! (if *touch* "TAP TO CONNECT" "PRESS ANY KEY TO CONNECT"))
+      (title-card! #t)   ; the publisher card (D43) between the gate and the reveal
       (say "audio" (if *audio-ready* "open" "closed"))
       ;; the quoted literals' shapes (see (crash shell)): one line the arm asserts
       (let ((bad (literal-check)))
