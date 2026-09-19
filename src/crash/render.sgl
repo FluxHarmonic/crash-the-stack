@@ -415,6 +415,50 @@
             ((lock-weak? b id now) 'weak)
             (else 'strong)))
 
+    ;; The frame's tile buffers (draw-tiles): TILE-FIELDS values per present
+    ;; tile in draw order, each tile's layer, the tiles' indexes sorted by
+    ;; layer with each layer's start and count. Grown on demand to the
+    ;; layout's slot count and layer count, never per frame.
+    (define TILE-FIELDS 7)
+    (define *tile-fields* (make-vector 0 0))
+    (define *tile-layer* (make-vector 0 0))
+    (define *tile-order* (make-vector 0 0))
+    (define *layer-start* (make-vector 0 0))
+    (define *layer-count* (make-vector 0 0))
+
+    (define (ensure-tile-buffers! slots layers)
+      (when (< (vector-length *tile-layer*) slots)
+        (set! *tile-fields* (make-vector (* slots TILE-FIELDS) 0))
+        (set! *tile-layer* (make-vector slots 0))
+        (set! *tile-order* (make-vector slots 0)))
+      (when (< (vector-length *layer-start*) layers)
+        (set! *layer-start* (make-vector layers 0))
+        (set! *layer-count* (make-vector layers 0))))
+
+    ;; Counting sort of the first n tiles by layer into *tile-order*.
+    (define (sort-tiles-by-layer! n layers)
+      (let clear ((l 0))
+        (when (< l layers) (vector-set! *layer-count* l 0) (clear (+ l 1))))
+      (let count ((i 0))
+        (when (< i n)
+          (let ((l (vector-ref *tile-layer* i)))
+            (vector-set! *layer-count* l (+ 1 (vector-ref *layer-count* l))))
+          (count (+ i 1))))
+      (let starts ((l 0) (at 0))
+        (when (< l layers)
+          (vector-set! *layer-start* l at)
+          (starts (+ l 1) (+ at (vector-ref *layer-count* l)))))
+      ;; fill in draw order, each layer's cursor from its start
+      (let clear ((l 0))
+        (when (< l layers) (vector-set! *layer-count* l 0) (clear (+ l 1))))
+      (let place ((i 0))
+        (when (< i n)
+          (let* ((l (vector-ref *tile-layer* i))
+                 (k (+ (vector-ref *layer-start* l) (vector-ref *layer-count* l))))
+            (vector-set! *tile-order* k i)
+            (vector-set! *layer-count* l (+ 1 (vector-ref *layer-count* l))))
+          (place (+ i 1)))))
+
     (define (draw-tiles s g tex x)
       (let* ((b (session-board s))
              (lay (board-layout b))
@@ -430,35 +474,49 @@
                              (tile-present? b (session-highlight s))
                              (session-highlight s)))
              ;; every present tile once: (id face x y w h selected?) per
-             ;; tile, bucketed by layer in draw order, so the four passes
-             ;; a layer takes walk a list instead of re-reading the layout
-             ;; and the effects (20 walks of the draw order a frame before
-             ;; this, P3c: the walk was most of the stack's draw time)
-             (layers (let ((buckets (make-vector (layout-layer-count lay) '())))
-                       (for-each
-                         (lambda (id)
-                           (when (tile-present? b id)
-                             (let* ((layer (slot-layer (layout-slot lay id)))
-                                    (view (fx-tile-view x id))
-                                    (r (viewed-rect (slot-rect g id) view))
-                                    (face (or (and view (list-ref view 4))
-                                              (tile-face b id))))
-                               (vector-set! buckets layer
-                                            (cons (vector id face (car r) (cadr r) (caddr r) (cadddr r) (eqv? selected id))
-                                                  (vector-ref buckets layer))))))
-                         (geometry-draw-order g))
-                       (let fix ((i 0))
-                         (when (< i (vector-length buckets))
-                           (vector-set! buckets i (reverse (vector-ref buckets i)))
-                           (fix (+ i 1))))
-                       buckets))
+             ;; tile into the module's buffers (no allocation a frame: the
+             ;; first cut of this consed a vector per tile and raised the
+             ;; GC's minor collections 18 -> 26 per 300 frames), then a
+             ;; counting sort by layer, so the four passes a layer takes
+             ;; walk an index range instead of re-reading the layout and
+             ;; the effects (20 walks of the draw order a frame before)
+             (n (let ((slots (length (geometry-draw-order g))))
+                  (ensure-tile-buffers! slots (layout-layer-count lay))
+                  (let fill ((ids (geometry-draw-order g)) (n 0))
+                    (cond ((null? ids) n)
+                          ((tile-present? b (car ids))
+                           (let* ((id (car ids))
+                                  (view (fx-tile-view x id))
+                                  (r (viewed-rect (slot-rect g id) view))
+                                  (face (or (and view (list-ref view 4))
+                                            (tile-face b id)))
+                                  (o (* n TILE-FIELDS)))
+                             (vector-set! *tile-fields* o id)
+                             (vector-set! *tile-fields* (+ o 1) face)
+                             (vector-set! *tile-fields* (+ o 2) (car r))
+                             (vector-set! *tile-fields* (+ o 3) (cadr r))
+                             (vector-set! *tile-fields* (+ o 4) (caddr r))
+                             (vector-set! *tile-fields* (+ o 5) (cadddr r))
+                             (vector-set! *tile-fields* (+ o 6) (eqv? selected id))
+                             (vector-set! *tile-layer* n (slot-layer (layout-slot lay id)))
+                             (fill (cdr ids) (+ n 1))))
+                          (else (fill (cdr ids) n))))))
              (each-on-layer
-               (lambda (layer proc)
-                 (for-each
-                   (lambda (t)
-                     (proc (vector-ref t 0) (vector-ref t 1) (vector-ref t 2) (vector-ref t 3)
-                           (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)))
-                   (vector-ref layers layer)))))
+               (begin
+                 (sort-tiles-by-layer! n (layout-layer-count lay))
+                 (lambda (layer proc)
+                   (let ((end (+ (vector-ref *layer-start* layer) (vector-ref *layer-count* layer))))
+                     (let walk ((k (vector-ref *layer-start* layer)))
+                       (when (< k end)
+                         (let ((o (* (vector-ref *tile-order* k) TILE-FIELDS)))
+                           (proc (vector-ref *tile-fields* o)
+                                 (vector-ref *tile-fields* (+ o 1))
+                                 (vector-ref *tile-fields* (+ o 2))
+                                 (vector-ref *tile-fields* (+ o 3))
+                                 (vector-ref *tile-fields* (+ o 4))
+                                 (vector-ref *tile-fields* (+ o 5))
+                                 (vector-ref *tile-fields* (+ o 6))))
+                         (walk (+ k 1)))))))))
         (let loop ((layer 0))
           (when (< layer (layout-layer-count lay))
             (each-on-layer layer
