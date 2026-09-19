@@ -170,7 +170,6 @@
     (define *clock* #f)      ; the page's clock at boot (ms): the title reveal's seed when ?seed is not given (P3d)
     (define *sw-ready* #f)   ; the page said its service worker is active (or there is none): fetches are safe (P3d, D40)
     (define *ambient-ready* #f) ; the ambient landed, or the page gave it up: the boot's audio step (D40)
-    (define *frame-dt* 0.0)  ; this frame's wall dt, for the boot's texture steps
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
@@ -930,7 +929,11 @@
         (for-each (lambda (path)
                     (boot-add-step! (string->symbol path)
                                     (lambda ()
-                                      (ensure-texture! *frame-dt* path)
+                                      ;; dt 0: the screen's own ensure-texture! call services the
+                                      ;; fetch in flight and advances its retry clock; a second
+                                      ;; call with the real dt ran that clock at twice wall time
+                                      ;; and gave textures up after 1 s instead of 2 (the review)
+                                      (ensure-texture! 0.0 path)
                                       (and (assoc path *textures*) #t))))
                   paths))
       ;; P3c's glyph atlas (its present! call stays as the fallback)
@@ -938,9 +941,11 @@
       (boot-add-step! 'audio (lambda () (or (not *audio-ready*) *ambient-ready*))))
 
     (define (boot-tick! dt)
-      (set! *frame-dt* dt)
+      ;;   crash: boot timeout                  the deadline forced the rest
       (unless (boot-done?)
-        (for-each (lambda (name) (say "boot" "step" name "done")) (boot-run!))
+        (let ((was-out (boot-timed-out?)))
+          (for-each (lambda (name) (say "boot" "step" name "done")) (boot-run!))
+          (when (and (boot-timed-out?) (not was-out)) (say "boot" "timeout")))
         (when (boot-done?) (say "boot" "done" (cdr (boot-progress))))))
 
     ;; The title reveal's trace (P3d), for the arm: its seed and settle
@@ -1277,7 +1282,7 @@
             ;; ?glitch=N: the title reveal's glitch level, 0..3 (P3d)
             ((string=? type "glitch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (title-glitch! n))))))
             ;; ?slant=N: the logo's slant at rest, cells per row, 0 upright (P3d)
-            ((string=? type "slant") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n)) (title-slant! (* 1.0 n)))))))
+            ((string=? type "slant") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (< -1e9 n 1e9)) (title-slant! (* 1.0 n)))))))
             ;; the page's clock at boot: the title reveal's seed when none is asked for
             ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n))))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
