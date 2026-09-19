@@ -55,6 +55,12 @@
 //               launch window has passed); on the next launch the game must
 //               be told "prompt", a tap on its APPLY box must answer "apply",
 //               and the page must then reload onto the new version
+//   title       (P3d) a fresh boot on the menu with ?seed=7&baud=9600: the game's
+//               grid at settle equals the data module the pipeline wrote, every
+//               dot of every cell on the settled canvas reads as the block
+//               patterns say, the settled frame is still, the same seed gives
+//               the same tick digests and another seed does not, and a tap
+//               during the reveal skips it without choosing an entry
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -102,7 +108,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -838,6 +844,143 @@ let iceLock = null;
     swVersionOverride = null;
     if (detail) fail("update", detail);
   }
+}
+
+// ---- 9b. title: the ANSI logo's reveal settles correct and reproduces (P3d) --
+// A fresh boot on the menu with a fixed seed and a fast baud (the pace is
+// a per-tick count, so the arm's run is short): the game says the grid
+// row by row at settle, held here to the data module the pipeline wrote
+// (src/crash/title/logo.sgl, parsed from the source next to this file);
+// the settled canvas is read at every dot of every cell and held to the
+// block patterns of (crash font); a second boot with the same seed gives
+// the same tick digests, a third with another seed does not (the
+// positive control for "reproduces"); the settled frame is still for
+// 200 ms; and a tap during a reveal skips it (no boot line: the tap
+// picked nothing).
+{
+  const TITLE_SEED = 7, OTHER_SEED = 8, TITLE_BAUD = 9600;
+  const CELL = 8, TX = 0, TY = 8;
+  let detail = "";
+  const modulePath = path.join(path.dirname(new URL(import.meta.url).pathname), "src/crash/title/logo.sgl");
+  const moduleRows = [];
+  try {
+    const src = fs.readFileSync(modulePath, "utf8");
+    // every ("glyphs" "fg" "bg") triple after the LOGO-ROWS define (nothing follows it)
+    const at = src.indexOf("(define LOGO-ROWS");
+    const re = /\("([^"]*)" "([^"]*)" "([^"]*)"\)/g; let r;
+    while ((r = re.exec(at >= 0 ? src.slice(at) : ""))) moduleRows.push([r[1], r[2], r[3]]);
+  } catch (e) { detail = `cannot read ${modulePath}: ${e.message}`; }
+  const hexes = {}; // role name -> [r, g, b], from assets/palette.sgl
+  try {
+    const pal = fs.readFileSync(path.join(path.dirname(modulePath), "../../../assets/palette.sgl"), "utf8");
+    for (const [, role, hex] of pal.matchAll(/\((C-[A-Z0-9-]+) +"#([0-9A-Fa-f]{6})"/g)) hexes[role] = [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)];
+  } catch (e) { detail = detail || `cannot read the palette: ${e.message}`; }
+  const rolesM = (() => { try { const s = fs.readFileSync(modulePath, "utf8").match(/\(define LOGO-ROLES\s+'#\(([^)]*)\)/); return s ? [...s[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : []; } catch { return []; } })();
+  if (!detail && moduleRows.length === 0) detail = "no LOGO-ROWS parsed from the module";
+  // ink(g, dx, dy): the same 4x4 dot patterns (crash font) draws
+  const ink = (g, dx, dy) => g === "#" ? true : g === "3" ? !(dx % 2 === 1 && dy % 2 === 1) : g === "2" ? (dx + dy) % 2 === 0 : g === "1" ? (dx % 2 === 0 && dy % 2 === 0) : g === "^" ? dy < 2 : g === "v" ? dy >= 2 : g === "<" ? dx < 2 : g === ">" ? dx >= 2 : false;
+  const bootTitle = async (seed) => {
+    const from = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}` });
+    const head = await waitLine(/^crash: title seed (\d+) baud (\d+) settle (\d+) cells (\d+)$/, from, 20000);
+    if (!head) return { error: `no "crash: title seed" line within 20 s (seed ${seed})` };
+    const settled = await waitLine(/^crash: title settled (\d+) digest (\d+)$/, head.index, 30000);
+    if (!settled) return { error: `no "crash: title settled" line within 30 s (seed ${seed})` };
+    const ticks = consoleLines.slice(head.index, settled.index).filter((l) => /^crash: title tick /.test(l));
+    await sleep(200);
+    const rows = consoleLines.slice(settled.index).filter((l) => /^crash: title row /.test(l)).map((l) => l.slice("crash: title row ".length));
+    return { head: head.m, settled: settled.m, ticks, rows };
+  };
+  let a = null;
+  if (!detail) {
+    a = await bootTitle(TITLE_SEED);
+    if (a.error) detail = a.error;
+    else if (a.head[1] !== String(TITLE_SEED) || a.head[2] !== String(TITLE_BAUD)) detail = `the game took seed ${a.head[1]} baud ${a.head[2]}`;
+    else if (a.ticks.length < 10) detail = `only ${a.ticks.length} tick lines before settle`;
+  }
+  // the grid the game holds, against the module
+  if (!detail) {
+    const W = moduleRows[0][0].length;
+    const bad = [];
+    if (a.rows.length !== moduleRows.length) bad.push(`rows ${a.rows.length} vs module ${moduleRows.length}`);
+    for (let y = 0; y < Math.min(a.rows.length, moduleRows.length); y++) {
+      const line = a.rows[y]; const sp = line.indexOf(" ");
+      const yy = parseInt(line.slice(0, sp), 10); const rest = line.slice(sp + 1);
+      const g = rest.slice(0, W), f = rest.slice(W + 1, 2 * W + 1), b = rest.slice(2 * W + 2, 3 * W + 2);
+      if (yy !== y || g !== moduleRows[y][0] || f !== moduleRows[y][1] || b !== moduleRows[y][2]) bad.push(`row ${y}`);
+    }
+    if (bad.length) detail = `the game's grid differs from src/crash/title/logo.sgl: ${bad.slice(0, 4).join(", ")}`;
+  }
+  // the settled pixels: every dot of every cell, in the same animation frame the game draws
+  let pix = null;
+  if (!detail) {
+    pix = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+      const c = document.getElementById("stage");
+      const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+      const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+      const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+      const rows = ${JSON.stringify(moduleRows)}, roles = ${JSON.stringify(rolesM)}, hexes = ${JSON.stringify(hexes)};
+      const ink = ${ink.toString()};
+      let dots = 0, wrong = 0, sample = null;
+      for (let y = 0; y < rows.length; y++) for (let x = 0; x < rows[y][0].length; x++) {
+        const gl = rows[y][0][x]; if (gl === " ") continue;
+        const fg = rows[y][1][x], bg = rows[y][2][x];
+        for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) {
+          const role = ink(gl, dx, dy) ? fg : bg; if (role === "-") continue;
+          const want = hexes[roles[role.charCodeAt(0) - 97]]; if (!want) continue;
+          const vx = ${TX} + x * ${CELL} + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
+          const px = Math.floor(ox + vx * scale), py = Math.floor(oy + vy * scale);
+          const i = (py * c.width + px) * 4; dots++;
+          if (Math.abs(d[i] - want[0]) > 12 || Math.abs(d[i + 1] - want[1]) > 12 || Math.abs(d[i + 2] - want[2]) > 12) { wrong++; if (!sample) sample = [x, y, gl, dx, dy, [d[i], d[i + 1], d[i + 2]], want]; }
+        }
+      }
+      resolve({ dots, wrong, sample, w: c.width, h: c.height });
+    }))`);
+    if (pix.dots < 1000) detail = `only ${pix.dots} dots sampled`;
+    else if (pix.wrong > 0) detail = `${pix.wrong} of ${pix.dots} dots off: first at cell ${pix.sample[0]},${pix.sample[1]} glyph ${pix.sample[2]} dot ${pix.sample[3]},${pix.sample[4]} read ${pix.sample[5]} want ${pix.sample[6]}`;
+  }
+  // still: the settled digest does not change
+  if (!detail) {
+    const from = consoleLines.length; await sleep(300);
+    if (consoleLines.slice(from).some((l) => /^crash: title tick /.test(l))) detail = "tick lines after settle: the title is not still";
+  }
+  // reproduces: the same seed, the same digests; another seed, different ones
+  let b = null, c = null;
+  if (!detail) {
+    b = await bootTitle(TITLE_SEED);
+    if (b.error) detail = b.error;
+    else if (JSON.stringify(a.ticks) !== JSON.stringify(b.ticks) || a.settled[2] !== b.settled[2]) detail = `seed ${TITLE_SEED} twice: ${a.ticks.length} vs ${b.ticks.length} tick lines, first difference at ${a.ticks.findIndex((l, i) => l !== b.ticks[i])}`;
+  }
+  if (!detail) {
+    c = await bootTitle(OTHER_SEED);
+    if (c.error) detail = c.error;
+    else if (JSON.stringify(a.ticks) === JSON.stringify(c.ticks)) detail = `seeds ${TITLE_SEED} and ${OTHER_SEED} gave the same tick digests`;
+    else if (a.settled[2] !== c.settled[2]) detail = `seeds ${TITLE_SEED} and ${OTHER_SEED} settle on different frames (${a.settled[2]} vs ${c.settled[2]})`;
+  }
+  // a tap during the reveal skips it and picks nothing
+  if (!detail) {
+    const from = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600` });
+    const head = await waitLine(/^crash: title seed /, from, 20000);
+    if (!head) detail = "no title line on the slow boot";
+    else {
+      await sleep(300);
+      // the menu's boot line names each entry's center; the tap lands on the first
+      const ml = await waitLine(/^crash: menu (\w+) (-?[\d.]+) (-?[\d.]+)/, from, 3000);
+      const r = ml ? { x: parseFloat(ml.m[2]), y: parseFloat(ml.m[3]) } : null;
+      const entry = r || {};
+      await tap(entry.x || 320, entry.y || 150);
+      const settled = await waitLine(/^crash: title settled (\d+) digest/, head.index, 3000);
+      const chose = await waitLine(/^crash: menu chose /, head.index, 500);
+      if (!settled) detail = "a tap during the reveal did not settle it";
+      else if (parseInt(settled.m[1], 10) < 60) detail = `the tap settled at tick ${settled.m[1]}, too early to have been a skip`;
+      else if (chose) detail = `the skipping tap also chose: ${chose.m[0]}`;
+    }
+  }
+  if (detail) fail("title", detail);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, a tap skips`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------
