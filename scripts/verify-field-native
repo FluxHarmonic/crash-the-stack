@@ -1,0 +1,160 @@
+#!/bin/sh
+# The native arm for the GPU field (P3c): the release binary on a private
+# Xvfb, the field held at N steps and drawn alone, captured from the X
+# server for the GPU path and the CPU path (the oracle), the two frames
+# compared pixel for pixel over the board area. The window opens at
+# exactly 2x the virtual size, so the letterbox scale is the integer 2
+# and the two paths must rasterize identically.
+#
+#   scripts/verify-field-native [--display :97] [--steps 12] [--shot DIR]
+#                               [--expect-steps N]
+#
+# Sub-arms, PASS / FAIL <name>: <detail>, any FAIL exits 1, a wait that
+# runs out prints TIMED-OUT and exits 2:
+#
+#   shaders     the GPU page reached its hold: the five field shaders
+#               compiled on desktop GL (#version 410) and the passes ran
+#   life        the GPU and CPU captures of the life field at step N are
+#               identical over the board area (compare -metric AE -fuzz 1% = 0)
+#   reaction    the same for the reaction (AE under REACTION-MAX pixels:
+#               float32 against double between 16-bit quantizations)
+#   gl-log      no [sg][error] line on either run's stderr (sigil-app's
+#               slog prints sokol refusals there natively)
+#
+# --expect-steps N holds the CPU run at N instead of --steps: the
+# assertion-layer control, life must go red.
+#
+# Runs under guix shell for Xvfb, xdotool and imagemagick; the game
+# through scripts/dev. Every process is stopped by attributed PID (exe
+# = the release binary, cwd = this checkout), never by pattern. Waits
+# are on the game's own "crash: bg held N" line in its log, an artifact.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+ROOT="$(pwd)"
+BIN="$ROOT/build/release/bin/crash-the-stack"
+DISPLAY_N=":97"
+STEPS=12
+EXPECT=""
+SHOT=""
+REACTION_MAX=64
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --display) DISPLAY_N="$2"; shift 2 ;;
+    --steps) STEPS="$2"; shift 2 ;;
+    --expect-steps) EXPECT="$2"; shift 2 ;;
+    --shot) SHOT="$2"; shift 2 ;;
+    *) echo "verify-field-native: unknown argument $1"; exit 2 ;;
+  esac
+done
+[ -n "$EXPECT" ] || EXPECT="$STEPS"
+[ -x "$BIN" ] || { echo "SETUP-FAILED: $BIN missing; build --config release first"; exit 2; }
+WORK="$(mktemp -d /tmp/crash-field-native-XXXXXX)"
+export DISPLAY="$DISPLAY_N"
+export XDG_DATA_HOME="$WORK/xdg"
+mkdir -p "$XDG_DATA_HOME"
+failed=0
+pass() { echo "PASS $1: $2"; }
+fail() { echo "FAIL $1: $2"; failed=$((failed + 1)); }
+
+# The Xvfb: this arm's own, started here unless one already answers on
+# the display, stopped at the end only if started here.
+started_x=""
+if ! [ -S "/tmp/.X11-unix/X${DISPLAY_N#:}" ]; then
+  guix shell xorg-server -- Xvfb "$DISPLAY_N" -screen 0 1400x900x24 +extension GLX -nolisten tcp > "$WORK/xvfb.log" 2>&1 &
+  started_x=1
+  for i in 1 2 3 4 5 6 7 8 9 10; do [ -S "/tmp/.X11-unix/X${DISPLAY_N#:}" ] && break; sleep 0.5; done
+  [ -S "/tmp/.X11-unix/X${DISPLAY_N#:}" ] || { echo "SETUP-FAILED: Xvfb $DISPLAY_N did not come up"; exit 2; }
+fi
+
+# Stop every release binary whose cwd is this checkout (ours), by PID.
+stop_game() {
+  for p in /proc/[0-9]*; do
+    pid=${p#/proc/}
+    [ "$pid" = "$$" ] && continue
+    [ "$pid" = "$PPID" ] && continue
+    exe=$(readlink "$p/exe" 2>/dev/null) || continue
+    [ "${exe% (deleted)}" = "$BIN" ] || continue
+    cwd=$(readlink "$p/cwd" 2>/dev/null)
+    [ "$cwd" = "$ROOT" ] || continue
+    kill "$pid" 2>/dev/null
+  done
+}
+stop_x() {
+  [ -n "$started_x" ] || return 0
+  for p in /proc/[0-9]*; do
+    pid=${p#/proc/}
+    exe=$(readlink "$p/exe" 2>/dev/null) || continue
+    case "$exe" in */bin/Xvfb) ;; *) continue ;; esac
+    tr '\0' ' ' < "$p/cmdline" | grep -q -- "Xvfb $DISPLAY_N " || continue
+    kill "$pid" 2>/dev/null
+  done
+}
+trap 'stop_game; stop_x' EXIT
+
+# capture NAME RULE STEPS: run the game held at STEPS on RULE, drawn
+# alone on the card table, capture the window into $WORK/NAME.png once
+# the held line is in its log; the log is $WORK/NAME.log.
+capture() {
+  name="$1"; rule="$2"; steps="$3"
+  log="$WORK/$name.log"
+  scripts/dev "$BIN" --cards --fresh --mute --bg "$rule" --bg-hold "$steps" --bg-only > "$log" 2>&1 &
+  i=0
+  while ! grep -q "^crash: bg held $steps\$" "$log" 2>/dev/null; do
+    i=$((i + 1))
+    if [ "$i" -gt 120 ]; then
+      echo "TIMED-OUT $name: no \"crash: bg held $steps\" in 60 s; log tail:"; tail -5 "$log"
+      stop_game; return 1
+    fi
+    sleep 0.5
+  done
+  sleep 1
+  xid=$(guix shell xdotool -- xdotool search --name "Crash The Stack" 2>/dev/null | head -1)
+  [ -n "$xid" ] || { echo "SETUP-FAILED $name: held but no window"; stop_game; return 1; }
+  guix shell imagemagick -- import -window "$xid" "$WORK/$name.png"
+  stop_game
+  sleep 0.5
+  [ -n "$SHOT" ] && { mkdir -p "$SHOT"; cp "$WORK/$name.png" "$SHOT/native-$name.png"; }
+  return 0
+}
+
+# The board area at 2x: 1280 x 704 from the top-left of the 1280x800
+# window. -fuzz 1% (2.55 of 255): llvmpipe writes the CPU path's vertex
+# color times the white texel truncated (0.09 * 255 = 22.95 -> 22) and
+# the shader's palette uniform rounded (-> 23), one apart on every
+# channel; measured 2026-09-19, every board pixel differed by one.
+board_ae() {
+  guix shell imagemagick -- sh -c "
+    convert '$1' -crop 1280x704+0+0 +repage '$WORK/a.png' &&
+    convert '$2' -crop 1280x704+0+0 +repage '$WORK/b.png' &&
+    compare -metric AE -fuzz 1% '$WORK/a.png' '$WORK/b.png' null: 2>&1"
+}
+
+if capture life-gpu life "$STEPS"; then
+  pass shaders "the GPU field reached step $STEPS on desktop GL ($(grep -c 'crash: bg held' "$WORK/life-gpu.log") held line)"
+else
+  fail shaders "the GPU field never reached its hold (the shaders or the passes failed natively)"
+  exit 2
+fi
+capture life-cpu life-cpu "$EXPECT" || exit 2
+ae=$(board_ae "$WORK/life-gpu.png" "$WORK/life-cpu.png")
+case "$ae" in
+  0) pass life "GPU and CPU life fields identical over 1280x704 at step $STEPS (AE 0)" ;;
+  *) fail life "$ae pixels differ between the GPU and CPU life fields at step $STEPS (want 0)" ;;
+esac
+if capture reaction-gpu reaction "$STEPS" && capture reaction-cpu reaction-cpu "$EXPECT"; then
+  ae=$(board_ae "$WORK/reaction-gpu.png" "$WORK/reaction-cpu.png")
+  if [ "$ae" -le "$REACTION_MAX" ] 2>/dev/null; then
+    pass reaction "GPU and CPU reaction fields within $REACTION_MAX pixels over 1280x704 at step $STEPS (AE $ae)"
+  else
+    fail reaction "$ae pixels differ between the GPU and CPU reaction fields at step $STEPS (allow $REACTION_MAX)"
+  fi
+else
+  fail reaction "a reaction run did not reach its hold"
+fi
+if grep -l '\[sg\]\[error\]' "$WORK"/*.log > /dev/null 2>&1; then
+  fail gl-log "sokol errors on stderr: $(grep -h '\[sg\]\[error\]' "$WORK"/*.log | head -2)"
+else
+  pass gl-log "no [sg][error] line over $(ls "$WORK"/*.log | wc -l) runs"
+fi
+echo "$((4 - failed)) passed, $failed failed of 4 (native, $DISPLAY_N); frames in $WORK"
+[ "$failed" -eq 0 ]
