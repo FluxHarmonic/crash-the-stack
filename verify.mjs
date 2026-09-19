@@ -59,7 +59,8 @@
 //               grid at settle equals the data module the pipeline wrote, every
 //               dot of every cell on the settled canvas reads as the block
 //               patterns say, the settled frame is still, the same seed gives
-//               the same tick digests and another seed does not, and a tap
+//               the same tick digests and another seed does not, two boots
+//               without ?seed take different seeds from the page's clock, and a tap
 //               during the reveal skips it without choosing an entry
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
@@ -969,6 +970,22 @@ let iceLock = null;
     else if (JSON.stringify(a.ticks) === JSON.stringify(c.ticks)) detail = `seeds ${TITLE_SEED} and ${OTHER_SEED} gave the same tick digests`;
     else if (a.settled[2] !== c.settled[2]) detail = `seeds ${TITLE_SEED} and ${OTHER_SEED} settle on different frames (${a.settled[2]} vs ${c.settled[2]})`;
   }
+  // varies each boot: two boots with no ?seed take different seeds from the
+  // page's clock, and neither is the guard's fallback 1 (measured 2026-09-19:
+  // current-second is not available on the web and every boot was seed 1)
+  if (!detail) {
+    const seedsSeen = [];
+    for (let i = 0; i < 2 && !detail; i++) {
+      const from = consoleLines.length;
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}` });
+      const head = await waitLine(/^crash: title seed (\d+) baud /, from, 20000);
+      if (!head) detail = "no title line on a boot without ?seed";
+      else seedsSeen.push(head.m[1]);
+      await sleep(1100);
+    }
+    if (!detail && seedsSeen.some((s) => s === "1")) detail = `a boot without ?seed took seed 1, the fallback: no per-boot variation (seeds ${seedsSeen.join(", ")})`;
+    else if (!detail && seedsSeen[0] === seedsSeen[1]) detail = `two boots without ?seed took the same seed ${seedsSeen[0]}`;
+  }
   // a tap during the reveal skips it and picks nothing
   if (!detail) {
     const from = consoleLines.length;
@@ -990,7 +1007,7 @@ let iceLock = null;
     }
   }
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, a tap skips`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------
