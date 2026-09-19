@@ -32,7 +32,7 @@
           audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-set-depth! audio-depth
-          audio-voices audio-ambient-frames
+          audio-voices audio-ambient-frames audio-ambient-play! audio-ambient-playing? audio-underruns
           audio-state
           mix-into
           AMBIENT-GAIN CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
@@ -61,6 +61,7 @@
     (define *ambient* #f)          ; s16le mono bytevector, or #f
     (define *ambient-rate* 22050)
     (define *ambient-pos* 0.0)     ; frame position in the ambient, fractional
+    (define *ambient-on* #f)       ; the loop is playing: from the menu live on (David, 2026-09-20: nothing under the reveal)
     (define *muted* #f)
     (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
 
@@ -81,6 +82,12 @@
     (define (audio-set-muted! m) (set! *muted* m))
     (define (audio-voices) *voices*)
     (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
+    ;; Start the loop from its top; it is held (preloaded, silent) until then.
+    (define (audio-ambient-play!) (set! *ambient-pos* 0.0) (set! *ambient-on* #t))
+    (define (audio-ambient-playing?) (and *ambient-on* *ambient* #t))
+    ;; The sink's cumulative starved frames (the output ran dry): the
+    ;; measure of a stall the pump did not ride out.
+    (define (audio-underruns) (if *stream* (audio-stream-underruns *stream*) 0))
 
     ;; Open the context and the stream, render the cues the title needs
     ;; first (FIRST-CUES: the reveal's beeps and the gate's dial, short
@@ -90,7 +97,7 @@
     ;; the reveal's first cells: David's "extremely glitchy at startup").
     ;; #t when sound is possible, #f when it is not (no device, no
     ;; bridge): the game is then silent and nothing else changes.
-    (define FIRST-CUES '(modem select match dial))
+    (define FIRST-CUES '(modem select match dial card))
 
     (define (audio-open!)
       (guard (e (#t (set! *stream* #f) #f))
@@ -189,7 +196,7 @@
                         (- *target-depth* (audio-stream-depth *stream*)))))
             (if (<= n 0)
                 0
-                (let* ((ambient (and (not *muted*) *ambient*))
+                (let* ((ambient (and (not *muted*) *ambient-on* *ambient*))
                        (frames (if ambient (bytes->frames ambient) 0))
                        (r (mix-into *out* n ambient frames *ambient-pos*
                                     (/ (* 1.0 *ambient-rate*) *rate*)

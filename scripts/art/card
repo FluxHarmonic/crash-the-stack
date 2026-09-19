@@ -1,0 +1,130 @@
+#!/bin/sh
+# The publisher card (ruling D43): the Flux Harmonic mark as a 320x200
+# pixel card, with its dither fade baked as a strip, and a data module
+# the arm holds the drawn card to.
+#
+#   scripts/art/card                        assets/refs/card/flux-harmonic.png
+#                                           -> assets/title/card-fade.png (4 frames of 640x400),
+#                                              src/crash/title/card.sgl
+#   scripts/art/card --out-dir DIR          both under DIR (the gate rebuilds and compares)
+#
+# The process, all area-averaged (never a nearest pick: the mark is brush
+# lettering and a ring, not pixel art):
+#   1. the mark box-downscaled to CARD_W wide on transparent;
+#   2. its pixels split by saturation into the lettering (white, gray) and
+#      the ring (orange): the ring is the saturated part;
+#   3. the lettering's coverage x luminance dithered to 1 bit against
+#      C-BG / C-FACE-EDGE by scripts/art/dither (Bayer 4x4: solid strokes
+#      stay solid, only the edge grays pick up the pattern);
+#   4. the ring's coverage the same way, and its two oranges snapped to
+#      C-ICE (the lighter) and C-HOT (the darker) at RING_SPLIT;
+#   5. a dark radial (C-BAR-B at the center to C-BAR-A at the edges),
+#      Bayer-dithered against those two by scripts/art/dither, behind;
+#   6. the fade: frames 1..3 show the card's pixels where the Bayer 8x8
+#      index is under 16, 32, 48 of 64 (a threshold sweep, palette-honest,
+#      no alpha), frame 4 the whole card; each frame scaled 2x by point
+#      (the sampler is linear, see the backdrop) into one strip;
+#   7. the color gate: every color one of the five roles.
+# The module: the frame geometry and CARD-SAMPLES, sampled (x y role)
+# triples of the resolved frame the arm reads off the canvas.
+set -eu
+export LC_ALL=C
+cd "$(dirname "$0")/../.." || exit 1
+out_dir=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out-dir) out_dir="${2:?dir}"; shift 2 ;;
+    *) echo "card: unknown argument $1"; exit 2 ;;
+  esac
+done
+raw="assets/refs/card/flux-harmonic.png"
+[ -f "$raw" ] || { echo "card: no $raw"; exit 1; }
+png="${out_dir:-assets/title}/card-fade.png"
+mod="${out_dir:-src/crash/title}/card.sgl"
+CARD_W=240; CANVAS_W=320; CANVAS_H=200; FRAMES=4; RING_SPLIT=62
+hex_of() { awk -v role="$1" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl; }
+BG="$(hex_of C-BG)"; WHITE="$(hex_of C-FACE-EDGE)"; HOT="$(hex_of C-HOT)"; ICE="$(hex_of C-ICE)"; BARA="$(hex_of C-BAR-A)"; BARB="$(hex_of C-BAR-B)"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+NOTAG="+set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt"
+# 1, 2: the mark at CARD_W, split
+convert "$raw" -filter box -resize "${CARD_W}x" "$tmp/small.png"
+w="$(identify -format '%w' "$tmp/small.png")"; h="$(identify -format '%h' "$tmp/small.png")"
+x0=$(( (CANVAS_W - w) / 2 )); y0=$(( (CANVAS_H - h) / 2 ))
+convert "$tmp/small.png" -alpha extract "$tmp/cov.png"
+convert "$tmp/small.png" -alpha off -colorspace HSL -channel G -separate +channel -threshold 30% "$tmp/ringmask.png"
+convert "$tmp/cov.png" "$tmp/ringmask.png" -compose multiply -composite "$tmp/ringcov.png"
+convert "$tmp/cov.png" \( "$tmp/ringmask.png" -negate \) -compose multiply -composite "$tmp/lettercov.png"
+convert "$tmp/small.png" -alpha off -colorspace gray "$tmp/lum.png"
+convert "$tmp/lettercov.png" "$tmp/lum.png" -compose multiply -composite "$tmp/letter.png"
+# 3, 4: to 1 bit against the ground and the white (the dither stage; the
+#       Bayer lands on the edge grays only), the ring's coverage the same
+scripts/art/dither "$tmp/letter.png" "$tmp/letter1.png" "${w}x${h}" C-BG,C-FACE-EDGE --method o4x4 > /dev/null
+scripts/art/dither "$tmp/ringcov.png" "$tmp/ring1.png" "${w}x${h}" C-BG,C-FACE-EDGE --method o4x4 > /dev/null
+convert "$tmp/lum.png" -threshold "${RING_SPLIT}%" "$tmp/ringtone.png"
+# the ring in its two tones: white in ring1 -> ICE where the tone is light, HOT where dark
+convert -size "${w}x${h}" "xc:$ICE" "$tmp/ringtone.png" -alpha off -compose copy_opacity -composite "$tmp/icepart.png"
+convert -size "${w}x${h}" "xc:$HOT" "$tmp/icepart.png" -composite "$tmp/ringcolor.png"
+# 5: the ground
+convert -size "${CANVAS_W}x${CANVAS_H}" "radial-gradient:${BARB}-${BARA}" "$tmp/radial.png"
+scripts/art/dither "$tmp/radial.png" "$tmp/bg.png" "${CANVAS_W}x${CANVAS_H}" C-BAR-A,C-BAR-B --method o4x4 > /dev/null
+# the card's pixels as a layer with a mask: ring under lettering
+convert -size "${CANVAS_W}x${CANVAS_H}" xc:none \
+  \( "$tmp/ringcolor.png" \( "$tmp/ring1.png" -threshold 50% \) -alpha off -compose copy_opacity -composite \) -geometry "+${x0}+${y0}" -compose over -composite \
+  \( -size "${w}x${h}" "xc:$WHITE" \( "$tmp/letter1.png" -threshold 50% \) -alpha off -compose copy_opacity -composite \) -geometry "+${x0}+${y0}" -compose over -composite \
+  "$tmp/card.png"
+# 6: the fade frames through a Bayer 8x8 threshold sweep
+awk 'BEGIN {
+  split("0 32 8 40 2 34 10 42 48 16 56 24 50 18 58 26 12 44 4 36 14 46 6 38 60 28 52 20 62 30 54 22 3 35 11 43 1 33 9 41 51 19 59 27 49 17 57 25 15 47 7 39 13 45 5 37 63 31 55 23 61 29 53 21", b8, " ")
+  printf "P5\n8 8\n255\n"; for (i = 1; i <= 64; i++) printf "%c", b8[i] * 4 }' > "$tmp/bayer.pgm"
+convert "$tmp/bayer.pgm" -write mpr:tile +delete -size "${CANVAS_W}x${CANVAS_H}" tile:mpr:tile "$tmp/bayer.png"
+frames=""
+k=1
+while [ "$k" -le "$FRAMES" ]; do
+  if [ "$k" -lt "$FRAMES" ]; then
+
+    convert "$tmp/bayer.png" -threshold "$(( k * 25 ))%" -negate "$tmp/mask$k.png"
+    convert "$tmp/card.png" "$tmp/mask$k.png" -compose dst_in -composite "$tmp/cardk.png"
+  else
+    cp "$tmp/card.png" "$tmp/cardk.png"
+  fi
+  convert "$tmp/bg.png" "$tmp/cardk.png" -compose over -composite -filter point -resize 200% -type TrueColor $NOTAG "PNG24:$tmp/frame$k.png"
+  frames="$frames $tmp/frame$k.png"
+  k=$((k + 1))
+done
+mkdir -p "$(dirname "$png")" "$(dirname "$mod")"
+# shellcheck disable=SC2086
+convert $frames +append -type TrueColor $NOTAG "PNG24:$png"
+# 7: the gate
+colors="$(convert "$png" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u)"
+for c in $colors; do
+  case " $BG $WHITE $HOT $ICE $BARA $BARB " in *" $c "*) ;; *) echo "card: REFUSED $png: $c is not one of the card's roles"; exit 1 ;; esac
+done
+n="$(printf '%s\n' "$colors" | wc -l)"
+# the module: geometry and samples of the resolved frame (frame 4 at 1x)
+convert "$tmp/bg.png" "$tmp/card.png" -compose over -composite -type TrueColor $NOTAG "PNG24:$tmp/resolved.png"
+{
+  echo ";;; (crash title card) - the publisher card's geometry and samples, GENERATED by scripts/art/card"
+  echo ";;; from $raw; rerun the script, do not edit. CARD-SAMPLES: a list of (x y role) triples of"
+  echo ";;; the resolved frame at 1x (roles into CARD-ROLES), the arm reads them off the canvas"
+  echo ";;; (a list: the reader caps a vector literal at 1024 elements)."
+  echo ""
+  echo "(define-library (crash title card)"
+  echo "  (export CARD-FRAMES CARD-FRAME-W CARD-FRAME-H CARD-BOX CARD-ROLES CARD-SAMPLES)"
+  echo ""
+  echo "  (begin"
+  echo "    (define CARD-FRAMES $FRAMES)"
+  echo "    (define CARD-FRAME-W $(( CANVAS_W * 2 )))"
+  echo "    (define CARD-FRAME-H $(( CANVAS_H * 2 )))"
+  echo "    ;; the mark's box on the 320x200 canvas: x y w h"
+  echo "    (define CARD-BOX '#($x0 $y0 $w $h))"
+  echo "    (define CARD-ROLES '#(\"C-BG\" \"C-FACE-EDGE\" \"C-HOT\" \"C-ICE\" \"C-BAR-A\" \"C-BAR-B\"))"
+  printf "    (define CARD-SAMPLES\n      '("
+  convert "$tmp/resolved.png" -depth 8 txt:- | awk -v bg="$BG" -v white="$WHITE" -v hot="$HOT" -v ice="$ICE" -v bara="$BARA" -v barb="$BARB" '
+    NR > 1 { split($1, xy, /[,:]/); x = xy[1]; y = xy[2]; c = $3
+      if ((x % 14) == 3 && (y % 10) == 2) {
+        r = (c == bg) ? 0 : (c == white) ? 1 : (c == hot) ? 2 : (c == ice) ? 3 : (c == bara) ? 4 : (c == barb) ? 5 : -1
+        if (r >= 0) { printf "%s(%d %d %d)", (n > 0 ? "\n        " : ""), x, y, r; n++ } } }'
+  echo "))))"
+} > "$mod"
+echo "card: $png $(identify -format '%wx%h' "$png") colors $n ($(echo $colors)); $mod $(grep -o "([0-9]* [0-9]* [0-9]*)" "$mod" | wc -l) samples; box ${w}x${h} at $x0,$y0"
