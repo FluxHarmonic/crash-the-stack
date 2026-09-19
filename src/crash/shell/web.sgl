@@ -126,6 +126,7 @@
           (crash bg)
           (crash gpu bg)
           (crash gpu phosphor)
+          (sigil gc)
           (crash sfx)
           (crash audio)
           (crash shell))
@@ -167,10 +168,14 @@
     (define *bg* #f)         ; the living background, (crash bg), stepped by whichever table is up
     (define *bg-mode* 'life) ; ?bg=reaction: the other rule; ?bg=life-cpu: the CPU field; ?bg=off: none
     (define *bg-hold* #f)    ; ?bghold=N: the field stops after N steps (the field leg's door)
+    (define *bg-stride* #f)  ; ?bgstride=N: ticks between field steps (STRIDE by default; David's comparison door)
+    (define *bg-rsteps* #f)  ; ?rsteps=N: Gray-Scott iterations per field step (REACT-STEPS by default)
     (define *bg-only* #f)    ; ?bgonly: draw the background alone, no table over it (the field leg reads every cell)
     (define *bg-said* #f)    ; the hold's line was said
     (define *copper* 'roll)  ; ?copper=always|off|bitmap; ?raster=N: the raster at a fixed roll N, split (the scanline leg)
     (define *phosphor* 'on)  ; ?phosphor=off|probe
+    (define *demo* #f)       ; ?demo=cleared: the cleared sequence on demand, once, on whichever table opens (David's door)
+    (define *demo-armed* #f) ; the stack's near-cleared board is in; the next tick finishes it
     (define *frame-n* 0)     ; frames presented (the probe alternates on it)
     (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
     (define *frame-ms* 0.0)   ; the frame's wall dt, ms
@@ -181,18 +186,44 @@
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
     (define *ms-n* 0)
+    (define *ms-step* 0.0)   ; and the field's costs over the window: the step (bg-advance + the GPU passes) and the present
+    (define *ms-present* 0.0)
+    (define *gc-last* #f)     ; (minor major bytes) at the window's start
     (define MS-EVERY 300)
-    ;;   crash: frame-ms MEAN MAX             over the last MS-EVERY frames (?ms with ?trace)
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES
+    ;;                                        over the last MS-EVERY frames (?ms with
+    ;;                                        ?trace), ms to a tenth; the GC's
+    ;;                                        collections and bytes allocated in the window
     (define (count-frame! dt)
       (let ((ms (* 1000.0 dt)))
         (set! *ms-sum* (+ *ms-sum* ms))
         (set! *ms-max* (max *ms-max* ms))
         (set! *ms-n* (+ *ms-n* 1))
+        (let ((gpu (gpu-bg-ms)))
+          (set! *ms-step* (+ *ms-step* *advance-ms* (car gpu)))
+          (set! *ms-present* (+ *ms-present* (cdr gpu))))
         (when (= *ms-n* MS-EVERY)
-          (say "frame-ms" (exact (round (/ *ms-sum* MS-EVERY))) (exact (round *ms-max*)))
+          (let* ((now (gc-snapshot))
+                 (was (or *gc-last* now)))
+            (say "frame-ms" (exact (round (/ *ms-sum* MS-EVERY))) (exact (round *ms-max*))
+                 "step" (tenth (/ *ms-step* MS-EVERY)) "present" (tenth (/ *ms-present* MS-EVERY))
+                 "gc" (- (car now) (car was)) (- (cadr now) (cadr was))
+                 "alloc" (- (caddr now) (caddr was)))
+            (set! *gc-last* now))
+          (set! *ms-step* 0.0)
+          (set! *ms-present* 0.0)
           (set! *ms-sum* 0.0)
           (set! *ms-max* 0.0)
           (set! *ms-n* 0))))
+
+    (define (tenth x) (/ (round (* 10.0 x)) 10.0))
+
+    ;; (minor major bytes-allocated) from (sigil gc); a runtime without
+    ;; the stat answers zeros, so a window's delta reads 0.
+    (define (gc-snapshot)
+      (let* ((stats (guard (e (#t '())) (gc-stats)))
+             (get (lambda (key) (let ((p (assq key stats))) (if p (cdr p) 0)))))
+        (list (get 'minor-collections) (get 'major-collections) (get 'bytes-allocated))))
 
     ;; --- keys ----------------------------------------------------------------
 
@@ -689,7 +720,9 @@
              (x (fx-frame *fx* dt))
              (after (save-after-frame!
                       before
-                      (session-advance (session-step before f *geom*)
+                      (session-advance (if *demo-armed*
+                                           (begin (set! *demo-armed* #f) (session-demo-finish before))
+                                           (session-step before f *geom*))
                                        (clock-steps (fx-clock x)))))
              (x (fx-observe x before after *geom*)))
         (set! *session* after)
@@ -831,6 +864,11 @@
                           ((cdr booted) (session-next (car booted)))
                           (else (car booted)))))
             (set! *session* (session-with-tools-touch (if *touch* (session s labels-shown: #f) s) *touch*))
+            (when (eq? *demo* 'cleared)
+              (set! *session* (session-demo-near-cleared *session*))
+              (set! *demo-armed* #t)
+              (set! *demo* #f)
+              (say "demo" "cleared" "stack"))
             (set! *restored* (and resume? (cdr booted)))
             (set! *fx* (fx-new))))))
 
@@ -839,7 +877,12 @@
       (set! *announced* #f)
       (unless *card-geom* (set! *card-geom* (make-card-geometry VW VH)))
       (unless (and resume? *deal*)
-        (let* ((booted (boot-deal *seed* *fresh*))
+        (let* ((booted (if (eq? *demo* 'cleared)
+                           (let ((won (demo-won-deal)))
+                             (set! *demo* #f)
+                             (say "demo" "cleared" (if won "cards" "FAILED: the won deal did not parse"))
+                             (if won (cons won #f) (boot-deal *seed* *fresh*)))
+                           (boot-deal *seed* *fresh*)))
                (d (cond (resume? (car booted))
                         (*deal* (deal-next *deal*))
                         ((cdr booted) (deal-next (car booted)))
@@ -916,6 +959,7 @@
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
       (frame-begin!)
+      (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
       (cond ((eq? *phosphor* 'probe)
              (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
             ((and cascading? (eq? *phosphor* 'on))
@@ -934,6 +978,10 @@
       (set! *session* #f)
       (set! *deal* #f)
       (set! *bg* (bg-choose *bg-mode* 1 *bg-hold*))
+      (when (and *bg* (or *bg-stride* *bg-rsteps*))
+        (set! *bg* (bg *bg*
+                       stride: (or *bg-stride* (bg-stride *bg*))
+                       react-steps: (or *bg-rsteps* (bg-react-steps *bg*)))))
       (set! *bg-said* #f)
       (when *bg* (say "bg" (if (bg-gpu? *bg*) "gpu" "cpu") (bg-mode *bg*)))
       (set! *booted* #t)
@@ -996,10 +1044,13 @@
             ;; ?bg=life|reaction|life-cpu|reaction-cpu|off (a name outside the rule table is off)
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)))))
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
+            ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
+            ((string=? type "rsteps") (param! (lambda () (set! *bg-rsteps* (let ((n (string->number payload))) (and n (>= n 1) n))))))
             ((string=? type "bgonly") (param! (lambda () (set! *bg-only* (string=? payload "on")))))
             ((string=? type "copper") (param! (lambda () (set! *copper* (copper-choice (string->symbol payload))))))
             ((string=? type "raster") (param! (lambda () (set! *copper* (or (string->number payload) *copper*)))))
             ((string=? type "phosphor") (param! (lambda () (set! *phosphor* (phosphor-choice (string->symbol payload))))))
+            ((string=? type "demo") (param! (lambda () (set! *demo* (and (string=? payload "cleared") 'cleared)))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)

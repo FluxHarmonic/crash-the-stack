@@ -34,7 +34,7 @@
 ;;; y - 1. The view shader gets texUV with v = 1 at the top.
 ;;;
 ;;; Schedule: the (crash bg) struct the shell steps (gpu?: #t) carries
-;;; the step count, agitation, burst, hold and severed flag; gpu-bg-draw!
+;;; the step count, agitation, burst, hold and severed flag; gpu-bg-prepare!
 ;;; runs the passes that bring the targets to that count (normally one
 ;;; step every STRIDE ticks) and presents. A gap over CATCH-UP steps
 ;;; (a table opened after a long menu) is skipped rather than replayed:
@@ -55,7 +55,7 @@
           (crash palette)
           (crash gpu glsl))
 
-  (export gpu-bg-draw! gpu-bg-ms gpu-bg-steps gpu-bg-ready? gpu-bg-reset!
+  (export gpu-bg-prepare! gpu-bg-blit! gpu-bg-prepared? gpu-bg-ms gpu-bg-steps gpu-bg-ready? gpu-bg-reset!
           RAMP-COLORS CATCH-UP)
 
   (begin
@@ -287,6 +287,7 @@
     (define *reaction* #f)
     (define *collapse* #f)
     (define *view* #f)
+    (define *shown* #f)          ; the dithered field at half-cell resolution, the frame's blit source
     (define *seeded* #f)         ; (seed . mode) the targets hold, or #f
     (define *done* 0)            ; field steps the targets have taken
     (define *step-ms* 0.0)       ; the last frame's costs (CPU side)
@@ -306,6 +307,7 @@
       (unless *a*
         (set! *a* (make-render-target GRID-W GRID-H 'nearest))
         (set! *b* (make-render-target GRID-W GRID-H 'nearest))
+        (set! *shown* (make-render-target (* 2 GRID-W) (* 2 GRID-H) 'nearest))
         (set! *cur* *a*)
         (set! *next* *b*)
         (set! *life* (load-shader VERT-SOURCE LIFE-SOURCE 'none))
@@ -381,12 +383,12 @@
                (pass! *collapse*))
               ((eq? (bg-mode b) 'life)
                (set-shader-uniform *life* 'u_key (list (inexact (quotient key 65536)) (inexact (modulo key 65536))))
-               (set-shader-uniform *life* 'u_visit (inexact (bg-visit-permille (bg-agit b))))
+               (set-shader-uniform *life* 'u_visit (inexact (bg-visit-permille (bg-agit b) (bg-stride b))))
                (pass! *life*))
               (else
                (let ((rain (bg-rain key))
                      (kill (bg-kill key step))
-                     (iterations (min REACT-STEPS-MAX (max 1 (exact (floor (* (bg-agit b) REACT-STEPS)))))))
+                     (iterations (bg-iterations b)))
                  (set-shader-uniform *feed* 'u_rain
                                      (map (lambda (c) (list (inexact (car c)) (inexact (cdr c)))) rain))
                  (set-shader-uniform *feed* 'u_kill
@@ -414,17 +416,47 @@
 
     ;; --- the frame ------------------------------------------------------------------------
 
-    ;; Sync the field to b and draw it in the rect (x y w h), virtual px.
-    ;; Both times are the CPU's, issuing; see the header.
-    (define (gpu-bg-draw! b x y w h)
+    ;; The frame's field, in two calls. gpu-bg-prepare! runs every pass
+    ;; the frame needs (the steps that bring the targets to b's count,
+    ;; then the view pass) and must run BEFORE any other render-target
+    ;; pass of the frame is open: sokol forbids a pass inside a pass, and
+    ;; the phosphor frame (cascade) draws the whole table inside one. The
+    ;; shells call it right after frame-begin!. gpu-bg-blit! then draws
+    ;; the prepared field in the rect (x y w h), virtual px, from inside
+    ;; whatever pass the table is drawn in; a blit with nothing prepared
+    ;; (a caller outside the shells) prepares first.
+    ;;
+    ;; The present is two draws: the view shader runs once per HALF CELL
+    ;; into *shown* (80x44 fragments: each fragment is one half cell, so
+    ;; its dither quadrant is exact), and *shown* is blitted over the
+    ;; board with nearest sampling through sgp's own textured-quad
+    ;; pipeline, the cheapest full-screen draw there is. Before this the
+    ;; view shader ran per screen pixel (a dpr-3 phone: 2.6 million
+    ;; texture fetches and palette lookups a frame); the blit's nearest
+    ;; upscale lands every half cell on the same device pixels. Both
+    ;; times are the CPU's, issuing; see the header.
+    (define *prepared* #f)
+
+    (define (gpu-bg-prepared?) *prepared*)
+
+    (define (gpu-bg-prepare! b)
       (ensure-resources!)
       (let ((t0 (now-ms)))
         (sync! b)
         (let ((t1 (now-ms)))
           (set-shader-uniform *view* 'u_rule (if (eq? (bg-mode b) 'life) 0.0 1.0))
-          (set-color 1.0 1.0 1.0 1.0)
-          (with-shader *view*
-            (draw-render-target *cur* (inexact x) (inexact y) (inexact w) (inexact h)))
+          (with-render-target *shown*
+            (with-shader *view*
+              (draw-render-target *cur* 0.0 0.0 (inexact (* 2 GRID-W)) (inexact (* 2 GRID-H)))))
           (set-blend-mode 'normal)
+          (set! *prepared* #t)
           (set! *step-ms* (- t1 t0))
-          (set! *present-ms* (- (now-ms) t1)))))))
+          (set! *present-ms* (- (now-ms) t1)))))
+
+    (define (gpu-bg-blit! b x y w h)
+      (unless *prepared* (gpu-bg-prepare! b))
+      (let ((t0 (now-ms)))
+        (set-color 1.0 1.0 1.0 1.0)
+        (draw-render-target *shown* (inexact x) (inexact y) (inexact w) (inexact h))
+        (set! *prepared* #f)
+        (set! *present-ms* (+ *present-ms* (- (now-ms) t0)))))))

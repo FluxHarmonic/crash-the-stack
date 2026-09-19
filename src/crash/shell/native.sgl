@@ -18,6 +18,8 @@
 ;;;                   [--phosphor on|off|probe]  persistence on the cascade
 ;;;                   [--bg-hold N]       the field stops after N steps and says "crash: bg held N"
 ;;;                   [--bg-only]         the background alone, no table drawn over it
+;;;                   [--bg-stride N] [--react-steps N]  the field's step rate and the reaction's iterations per step
+;;;                   [--demo cleared]    the cleared sequence on demand on the table that opens
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
 ;;;
 ;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
@@ -156,15 +158,54 @@
     (define *copper* 'roll)     ; --copper / --raster, see the header
     (define *phosphor* 'on)     ; --phosphor
     (define *bg-only* #f)       ; --bg-only
+    (define *bg-stride* #f)     ; --bg-stride N
+    (define *bg-rsteps* #f)     ; --react-steps N
+    (define *demo* #f)          ; --demo cleared: the cleared sequence on demand (the web shell's ?demo=)
+    (define *demo-armed* #f)
     (define *bg-said* #f)       ; the hold's line was said
+    ;; With --log-keys, a line every MS-EVERY frames on stdout (the web
+    ;; shell's, for the desktop numbers beside the phone's):
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN
+    (define MS-EVERY 300)
+    (define *ms-sum* 0.0)
+    (define *ms-max* 0.0)
+    (define *ms-n* 0)
+    (define *ms-step* 0.0)
+    (define *ms-present* 0.0)
+
+    (define (tenth x) (/ (round (* 10.0 x)) 10.0))
+
+    (define (count-frame!)
+      (let ((gpu (gpu-bg-ms)))
+        (set! *ms-sum* (+ *ms-sum* *frame-ms*))
+        (set! *ms-max* (max *ms-max* *frame-ms*))
+        (set! *ms-step* (+ *ms-step* *advance-ms* (car gpu)))
+        (set! *ms-present* (+ *ms-present* (cdr gpu)))
+        (set! *ms-n* (+ *ms-n* 1))
+        (when (= *ms-n* MS-EVERY)
+          (display "crash: frame-ms ")
+          (display (exact (round (/ *ms-sum* MS-EVERY))))
+          (display " ")
+          (display (exact (round *ms-max*)))
+          (display " step ")
+          (display (tenth (/ *ms-step* MS-EVERY)))
+          (display " present ")
+          (display (tenth (/ *ms-present* MS-EVERY)))
+          (newline)
+          (set! *ms-sum* 0.0)
+          (set! *ms-max* 0.0)
+          (set! *ms-step* 0.0)
+          (set! *ms-present* 0.0)
+          (set! *ms-n* 0))))
 
     ;; One presented frame, as the web shell's present!: draw (a thunk)
     ;; to the swap chain, or through the phosphor targets while the
     ;; cascade runs (ruling D36.2) or the probe is on; the readout under
     ;; --log-keys; a held field's line once its frame is out:
     ;;   crash: bg held N
-    (define (present! cascading? log-keys? draw)
+    (define (present! bg cascading? log-keys? draw)
       (frame-begin!)
+      (when (and bg (bg-gpu? bg)) (gpu-bg-prepare! bg))
       (cond ((eq? *phosphor* 'probe)
              (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
             ((and cascading? (eq? *phosphor* 'on))
@@ -173,6 +214,7 @@
              (phosphor-reset!)
              (draw)))
       (when log-keys?
+        (count-frame!)
         (let ((gpu (gpu-bg-ms)))
           (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu))))
       (end-frame)
@@ -231,13 +273,27 @@
                             (set-stored-look! 'test-tile)
                             (session-with-look s 'test-tile))
                           s)))))
-        (stage a screen: 'stack session: s fx: (if (eq? s held) (stage-fx a) (fx-new)))))
+        (let ((s (if (and (eq? *demo* 'cleared) (not (eq? s held)))
+                     (begin
+                       (set! *demo* #f)
+                       (set! *demo-armed* #t)
+                       (display "crash: demo cleared stack") (newline)
+                       (session-demo-near-cleared s))
+                     s)))
+          (stage a screen: 'stack session: s fx: (if (eq? s held) (stage-fx a) (fx-new))))))
 
     (define (open-cards a seed fresh? resume?)
       (let* ((held (stage-deal a))
              (d (cond ((and resume? held) held)
                       (else
-                       (let ((booted (boot-deal seed fresh?)))
+                       (let ((booted (if (eq? *demo* 'cleared)
+                                         (let ((won (demo-won-deal)))
+                                           (set! *demo* #f)
+                                           (display "crash: demo cleared ")
+                                           (display (if won "cards" "FAILED: the won deal did not parse"))
+                                           (newline)
+                                           (if won (cons won #f) (boot-deal seed fresh?)))
+                                         (boot-deal seed fresh?))))
                          (cond (resume? (car booted))
                                (held (deal-next held))
                                ((cdr booted) (deal-next (car booted)))
@@ -287,7 +343,9 @@
              (x (fx-frame (stage-fx a) dt))
              (after (save-after-frame!
                       s
-                      (session-advance (session-step s f geom)
+                      (session-advance (if *demo-armed*
+                                           (begin (set! *demo-armed* #f) (session-demo-finish s))
+                                           (session-step s f geom))
                                        (clock-steps (fx-clock x)))))
              (x (fx-observe x s after geom)))
         (set! *frame-ms* (* 1000.0 dt))
@@ -343,7 +401,10 @@
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? texture-first? model))))
-          (let loop ((a (let ((fresh (stage bg: (bg-choose bg-mode 1 bg-hold))))
+          (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose bg-mode 1 bg-hold)))
+                                                 (and b (bg b
+                                                           stride: (or *bg-stride* (bg-stride b))
+                                                           react-steps: (or *bg-rsteps* (bg-react-steps b))))))))
                           (if cards?
                               (open-cards (open-menu fresh) seed fresh? #t)
                               (open-menu fresh)))))
@@ -380,7 +441,8 @@
                                (if (deal-request d)
                                    (open-menu (stage a deal: (deal-clear-request d)))
                                    a)))))))
-              (present! (case (stage-screen a)
+              (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
+                        (case (stage-screen a)
                           ((stack) (and (fx-cleared (stage-fx a)) #t))
                           ((cards) (card-fx-cascading? (stage-card-fx a)))
                           (else #f))
@@ -546,6 +608,9 @@
                              (copper-choice (string->symbol (arg-value args "--copper" "roll"))))))
         (set! *phosphor* (phosphor-choice (string->symbol (arg-value args "--phosphor" "on"))))
         (set! *bg-only* (and (member "--bg-only" args) #t))
+        (set! *bg-stride* (let ((n (arg-value args "--bg-stride" #f))) (and n (string->number n))))
+        (set! *bg-rsteps* (let ((n (arg-value args "--react-steps" #f))) (and n (string->number n))))
+        (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") 'cleared))
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))

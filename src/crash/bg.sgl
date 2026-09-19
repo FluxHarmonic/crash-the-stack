@@ -80,7 +80,7 @@
           (sigil math)
           (crash stack prng))
 
-  (export bg bg? bg-new bg-tick bg-field bg-sub bg-seed bg-ticks bg-steps bg-mode bg-gpu? bg-hold
+  (export bg bg? bg-new bg-tick bg-field bg-sub bg-seed bg-ticks bg-steps bg-mode bg-gpu? bg-hold bg-stride bg-react-steps bg-iterations
           bg-agitation bg-burst bg-severed
           bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean bg-flow
           bg-held? bg-agit bg-visit-permille bg-step-key bg-rain bg-kill bg-shown-value
@@ -177,6 +177,8 @@
       (ticks default: 0)
       (steps default: 0)
       (hold default: #f)
+      (stride default: STRIDE)         ; ticks between field steps (the tunable behind ?bgstride=)
+      (react-steps default: REACT-STEPS) ; Gray-Scott iterations per field step at agitation 1 (?rsteps=)
       (agitation default: AGITATION-TRACE)
       (burst default: 0)
       (severed default: #f)
@@ -304,6 +306,11 @@
     (define (bg-with-hold b steps)
       (bg b hold: steps))
 
+    ;; Gray-Scott iterations this step: the struct's rate scaled by the
+    ;; agitation, at least one, capped (the GPU runs the same count).
+    (define (bg-iterations b)
+      (min REACT-STEPS-MAX (max 1 (exact (floor (* (bg-agit b) (bg-react-steps b)))))))
+
     (define (bg-held? b)
       (and (bg-hold b) (>= (bg-steps b) (bg-hold b))))
 
@@ -325,8 +332,8 @@
     ;; Per mille of the cells visited at an agitation: the expected count
     ;; of the old random visits (agit * LIFE-RATE * STRIDE) over the cells,
     ;; capped at every cell.
-    (define (bg-visit-permille agit)
-      (min 1000 (exact (floor (/ (* agit LIFE-RATE STRIDE 1000) CELLS)))))
+    (define (bg-visit-permille agit stride)
+      (min 1000 (exact (floor (/ (* agit LIFE-RATE stride 1000) CELLS)))))
 
     ;; The reaction's rain for a step: REACT-RAIN (x . y) cells from the key.
     (define (bg-rain key)
@@ -442,13 +449,13 @@
 
     ;; One field step of the life rule.
     (define (step-life b key)
-      (bg b field: (life-step (bg-field b) key (bg-visit-permille (bg-agit b)))))
+      (bg b field: (life-step (bg-field b) key (bg-visit-permille (bg-agit b) (bg-stride b)))))
 
     ;; One field step of the reaction: the feed, then REACT-STEPS Gray-
     ;; Scott iterations scaled by the agitation and capped.
     (define (step-reaction b key)
       (let ((fed (react-feed (bg-field b) (bg-rain key) (bg-kill key (bg-steps b))))
-            (steps (min REACT-STEPS-MAX (max 1 (exact (floor (* (bg-agit b) REACT-STEPS)))))))
+            (steps (bg-iterations b)))
         (let loop ((k 0) (a (bg-sub b)) (bb fed))
           (if (= k steps)
               (bg b field: bb sub: a)
@@ -490,7 +497,7 @@
     (define (bg-step b)
       (let* ((ticks (+ 1 (bg-ticks b)))
              (b0 (bg b ticks: ticks burst: (max 0 (- (bg-burst b) 1)))))
-        (cond ((not (= 0 (modulo ticks STRIDE))) b0)
+        (cond ((not (= 0 (modulo ticks (bg-stride b0)))) b0)
               ((bg-held? b0) b0)
               ((bg-gpu? b0) (bg b0 steps: (+ 1 (bg-steps b0))))
               (else
