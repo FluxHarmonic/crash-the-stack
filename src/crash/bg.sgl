@@ -54,9 +54,10 @@
 ;;; state is stored as the GPU stores it: life as an 8-bit integer per
 ;;; cell (the ring), reaction as two quantities quantized to 1/65535
 ;;; after every iteration (the 16-bit packing of the RGBA8 target; 8 bits
-;;; freeze Gray-Scott). The hash is lowbias32 on 32-bit words, written
-;;; with the multiply split into 16-bit halves so no intermediate passes
-;;; 2^49 (the native builds' integer range is not the bytecode's).
+;;; freeze Gray-Scott). The hash is lowbias32's shape on 31-bit words
+;;; with 22-bit multipliers, so no value passes 2^31 and no product
+;;; 2^53: the wasm build's small integers are 32-bit signed, and its
+;;; doubles are where a product lives.
 ;;;
 ;;; Everything is a pure function of the seed, and the arithmetic is the
 ;;; same on both targets (the determinism leg holds two runs of one seed
@@ -84,7 +85,7 @@
           bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean bg-flow
           bg-held? bg-agit bg-visit-permille bg-step-key bg-rain bg-kill bg-shown-value
           bg-cell-tones
-          hash32 mul32 add32
+          hash31 mul31 add31
           CELL GRID-W GRID-H CELLS RAMP MODES RULES STRIDE
           DOMINANT-CAP
           LIFE-MUTATE LIFE-DRIFT-MAX LIFE-COLLAPSE
@@ -129,28 +130,32 @@
     (define RING 256)            ; the life rule's values
     (define Q16 65535.0)         ; the reaction's quantum: 1/65535
 
-    ;; --- 32-bit words ---------------------------------------------------------------
+    ;; --- 31-bit words ---------------------------------------------------------------
 
-    (define TWO32 4294967296)
-    (define TWO16 65536)
+    ;; The hash works on words under 2^31 and every product stays under
+    ;; 2^53: the wasm build's small integers are 32-bit signed (measured
+    ;; 2026-09-19: a modulo 2^32 residue of 3040987859 came back as
+    ;; -1253979437), so a 32-bit word would wrap negative there and the
+    ;; CPU field on the phone would leave the oracle. The GPU masks the
+    ;; same way (& 0x7fffffff after each multiply).
 
-    (define (add32 a b) (modulo (+ a b) TWO32))
+    (define TWO31 2147483648)
 
-    ;; (a * b) mod 2^32 through 16-bit halves of a: every product under 2^49.
-    (define (mul32 a b)
-      (let ((lo (modulo a TWO16))
-            (hi (quotient a TWO16)))
-        (modulo (+ (* lo b) (* (modulo (* hi b) TWO16) TWO16)) TWO32)))
+    (define (add31 a b) (modulo (+ a b) TWO31))
+
+    ;; (a * b) mod 2^31 for a < 2^31 and b < 2^22: the product is exact.
+    (define (mul31 a b) (modulo (* a b) TWO31))
 
     (define (xorshr x n) (bitwise-xor x (arithmetic-shift x (- n))))
 
-    ;; lowbias32 (Chris Wellons): a bijection on 32-bit words that mixes
-    ;; consecutive inputs apart. The same three rounds in GLSL, on uint.
-    (define (hash32 x)
+    ;; lowbias32's shape (xorshift, multiply, three rounds) on 31-bit
+    ;; words with 22-bit odd multipliers: not a bijection, well mixed
+    ;; enough for a field. The same three rounds in GLSL, on uint.
+    (define (hash31 x)
       (let* ((x (xorshr x 16))
-             (x (mul32 x 2146121005))    ; 0x7feb352d
+             (x (mul31 x 2921079))    ; 0x2c9277
              (x (xorshr x 15))
-             (x (mul32 x 2221713035))    ; 0x846ca68b
+             (x (mul31 x 3837701))    ; 0x3a8f05
              (x (xorshr x 16)))
         x))
 
@@ -311,11 +316,11 @@
     ;; The key of field step T from the seed: every random choice of the
     ;; step hashes from it, on the CPU and in the shader alike.
     (define (bg-step-key seed steps)
-      (hash32 (add32 (hash32 (modulo seed TWO32)) (mul32 (modulo steps TWO32) 2654435769))))
+      (hash31 (add31 (hash31 (modulo seed TWO31)) (mul31 (modulo steps TWO31) 2047323))))   ; 0x1f3d5b
 
     ;; A cell's hash for the step: key + its row-major index, mixed.
     (define (cell-hash key x y)
-      (hash32 (add32 key (+ x (* y 64)))))
+      (hash31 (add31 key (+ x (* y 64)))))
 
     ;; Per mille of the cells visited at an agitation: the expected count
     ;; of the old random visits (agit * LIFE-RATE * STRIDE) over the cells,
@@ -328,13 +333,13 @@
       (let loop ((k 0) (acc '()))
         (if (= k REACT-RAIN)
             (reverse acc)
-            (let ((h (hash32 (add32 key (+ 100000 k)))))
+            (let ((h (hash31 (add31 key (+ 100000 k)))))
               (loop (+ k 1) (cons (cons (modulo h GRID-W) (modulo (arithmetic-shift h -8) GRID-H)) acc))))))
 
     ;; The center of the patch cleared at a step, or #f on the steps between.
     (define (bg-kill key steps)
       (and (= 0 (modulo steps REACT-KILL-EVERY))
-           (let ((h (hash32 (add32 key 200000))))
+           (let ((h (hash31 (add31 key 200000))))
              (cons (modulo h GRID-W) (modulo (arithmetic-shift h -8) GRID-H)))))
 
     ;; --- one step: life ------------------------------------------------------------------
