@@ -563,8 +563,16 @@ for (const l of consoleLines) if (/^(Error: |Scheme error)/.test(l)) consoleErro
     for (const e of raced) consoleErrors.splice(consoleErrors.indexOf(e), 1);
   }
 }
-if (consoleErrors.length) { fail("console", `${consoleErrors.length} error(s): ${JSON.stringify(consoleErrors.slice(0, 5))}`); dump(); }
-else pass("console", `${consoleLines.length} console lines, 0 errors`);
+// A texture fetch cut by the arm's next navigation (the boot's texture steps
+// start their fetches at once on a table boot, P3d/D40, and this arm boots a
+// dozen pages) is logged by the gles3 bridge as "image fetch failed:
+// TypeError: Failed to fetch"; counted and shown, not failed (verify.mjs
+// classifies the same line).
+const ABORTED = /image fetch failed: TypeError: Failed to fetch|Failed to load resource: net::ERR_FAILED/;
+const abortedFetches = consoleErrors.filter((l) => ABORTED.test(l));
+const realErrors = consoleErrors.filter((l) => !ABORTED.test(l));
+if (realErrors.length) { fail("console", `${realErrors.length} error(s): ${JSON.stringify(realErrors.slice(0, 5))}`); dump(); }
+else pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) cut by a navigation` : ""}`);
 
 const failed = results.filter((r) => r[1] === "FAIL").length;
 console.log(`${results.length - failed} passed, ${failed} failed of ${results.length}${PHONE ? " (phone)" : " (desktop)"}`);
