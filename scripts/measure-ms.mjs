@@ -117,7 +117,7 @@ async function evalJS(expr) {
   return r.result.value;
 }
 
-const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (\d+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?$/;
+const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (-?\d+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?$/;
 const rows = [];
 for (const q of QUERIES) {
   const mark = consoleLines.length;
