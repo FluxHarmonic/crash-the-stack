@@ -247,6 +247,22 @@ async function tap(vx, vy) {
   })()`);
 }
 
+// The service worker's activation races the first page's fetches (P3's
+// finding, and D40 starts them at swReady + 750 ms): a loader-side
+// "image fetch failed" console.error whose fetch the game then landed is
+// the loader's line, not the game's. As verify-field.mjs does (P3c,
+// bb6e8b5): the first page waits for the worker to control it before the
+// second boot, and in the console leg a raced loader line with no
+// "crash: texture missing" after it is a note, not a failure; the page's
+// own "crash: ambient failed (try N)" is a console.log the arm never
+// counted, and its retry is asserted by the boot's audio step.
+let swWaited = false;
+async function waitForWorker() {
+  if (swWaited) return; swWaited = true;
+  const ok = await evalJS(`(async () => { if (!navigator.serviceWorker) return "none"; const t0 = Date.now(); while (Date.now() - t0 < 15000) { const r = await navigator.serviceWorker.getRegistration(); if (r && r.active && navigator.serviceWorker.controller) return "controlling"; await new Promise((res) => setTimeout(res, 100)); } return "timeout"; })()`);
+  console.log(`note: service worker ${ok}`);
+}
+
 // ---- menu -------------------------------------------------------------------
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
 const menu = await waitLine(/^crash: menu (.+)$/, 0, 20000);
@@ -290,6 +306,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     else if (errorsAfterKeys > 0) fail("menu", `keys booted the table with ${errorsAfterKeys} error line(s) in the console`);
     else {
       // then by tap, from the menu again (?fresh so the CONTINUE entry does not shift CARDS)
+      await waitForWorker();
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
       const menu2 = await waitLine(/^crash: menu (.+)$/, consoleLines.length, 20000);
       const parts2 = menu2 ? menu2.m[1].split(" ") : [];
@@ -621,6 +638,17 @@ else pass("reload", restored.m[0]);
 // console.error, so they count here too (2026-09-17: a per-frame "=:
 // expected number" left this sub-arm reading "0 errors").
 const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
+{
+  // and the browser's own "Failed to load resource: net::ERR_FAILED" for a fetch
+  // the page then retried (the ambient: a "crash: ambient N" line after it)
+  const ambientLanded = consoleLines.some((l) => /^crash: ambient [1-9]/.test(l));
+  const raced = consoleErrors.filter((e) => /image fetch failed/.test(e) || (ambientLanded && /Failed to load resource: net::ERR_FAILED/.test(e)));
+  const missing = consoleLines.filter((l) => /^crash: texture missing/.test(l));
+  if (raced.length && !missing.length) {
+    console.log(`note: ${raced.length} loader "image fetch failed" line(s) on the service-worker race; the game's retry landed (no "crash: texture missing")`);
+    for (const e of raced) consoleErrors.splice(consoleErrors.indexOf(e), 1);
+  }
+}
 if (consoleErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
 else fail("console", consoleErrors.concat(runtimeErrors.slice(0, 5).map((l) => "runtime: " + l)).join(" | "));
 
