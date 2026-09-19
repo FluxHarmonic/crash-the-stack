@@ -104,3 +104,41 @@ Ruled and built: the hero ramp colors and the slant, the backdrop
   block letters read at item size on the phone viewport, so the 5x7
   fallback was not needed. `?slant=N` (cells per row, default 0.25) and
   `?glitch=0..3` (default 2) remain the doors.
+
+## The third read (2026-09-20)
+
+- **D42, the gate**: a menu boot opens on a black screen with `TAP TO
+  CONNECT` (`PRESS ANY KEY TO CONNECT` without a touch screen) and the
+  block cursor blinking at the modem cadence; the first tap or key opens
+  it, and that gesture is what lets the browser play sound: the dial cue
+  comes with it. Nothing sounds before it (the arm reads the analyser's
+  RMS on both sides of the tap). Native has no gate: the process opens on
+  the card and the reveal at once (my call: the window is already the
+  gesture, and a keypress before every launch would be a chore).
+- **D43, the publisher card** (`title-card.png`, `title-card-fade.gif`):
+  the Flux Harmonic mark between the gate and the reveal, two seconds
+  (20 ticks of dither fade in, 80 of hold, 20 out; a tap or key skips
+  it), one low cue when it resolves. `scripts/art/card` makes it from the
+  mark's raw (`assets/refs/card/flux-harmonic.png`, David's own, 2021):
+  area-downscaled to 240 px on a 320x200 canvas, the lettering to 1 bit
+  against C-BG / C-FACE-EDGE with Bayer 4x4 on the edge grays only, the
+  ring's two oranges snapped to C-ICE / C-HOT, a Bayer radial of C-BAR-B
+  to C-BAR-A behind; the fade is a Bayer 8x8 threshold sweep baked as a
+  four-frame strip (`assets/title/card-fade.png`, five colors), so every
+  frame is palette-honest. `src/crash/title/card.sgl` carries 460 sampled
+  pixels of the resolved frame; the arm reads them off the canvas.
+- **D44, the line**: `(C) 2026 DAVID WILSON - FLUX HARMONIC` in the 5x7
+  at scale 1, centered above the footer, with the items once the menu is
+  live; now C-LABEL-LIT over the one-cell static-dark shadow the items
+  cast (the plain copper line was lost in the backdrop's orange band).
+- **The ambient**: preloaded behind the gate as before, but silent under
+  the card, the reveal and its beeps; it starts from its top the frame
+  the menu is ready (the slant settled, the boot's steps done). A later
+  startup tune slots in at the same point (`ambient-tick!` in the web
+  shell, the same line in the native loop).
+- **The boot yields**: the cue bank renders in slices (the reveal's cues
+  at open, one more per frame), the atlas bakes inside a frame after the
+  reveal, and the page holds the ambient's chunks and the worker's
+  registration until the reveal is over. The reveal's own frame stats
+  (`crash: title reveal frames N max M over33 K mean A`) are bounded in
+  the arm.

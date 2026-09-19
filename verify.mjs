@@ -234,7 +234,7 @@ process.on("SIGTERM", () => shutdown(143));
 process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 420000;   // P3d added three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
+const WHOLE_RUN_MS = 480000;   // P3d added three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -751,9 +751,12 @@ let iceLock = null;
     // the ambient loop lands a few seconds after the boot (the page fetches
     // it late, on purpose) and must be playing under the cue
     const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 20000) : null;
+    // and it starts once the screen is ready (the menu live, or a table up with the boot done): the start line
+    const started = ambient ? await waitLine(/^crash: ambient start$/, ambient.index, 10000) : null;
     if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
     else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
     else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
+    else if (!started) detail = "the ambient landed but never started (no \"crash: ambient start\" line within 10 s: the boot is not done, or the start is not wired)";
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
@@ -901,13 +904,75 @@ let iceLock = null;
   const lineTops = (() => { try { const s = fs.readFileSync(modulePath, "utf8").match(/\(define LOGO-LETTERS\s+'#\(([^)]*)\)/); const ns = s ? s[1].trim().split(/\s+/).map(Number) : []; return [...new Set(ns.filter((_, i) => i % 3 === 0))]; } catch { return []; } })();
   const lineRowOf = (y) => { for (const t of lineTops) if (y >= t && y < t + 6) return y - t; return 6; };
   if (!detail && moduleRows.length === 0) detail = "no LOGO-ROWS parsed from the module";
+  // the publisher card's module (D43): its frame count, roles and the
+  // resolved frame's samples; the card's length from (crash title)
+  const cardPath = path.join(path.dirname(modulePath), "card.sgl");
+  let cardSamples = [], cardRoles = [], cardFrames = 0, cardTicks = 0;
+  try {
+    const src = fs.readFileSync(cardPath, "utf8");
+    cardFrames = parseInt((src.match(/\(define CARD-FRAMES (\d+)\)/) || [])[1] || "0", 10);
+    const rs = src.match(/\(define CARD-ROLES\s+'#\(([^)]*)\)/); cardRoles = rs ? [...rs[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+    const at = src.indexOf("(define CARD-SAMPLES");
+    for (const [, x, y, r] of (at >= 0 ? src.slice(at) : "").matchAll(/\((\d+) (\d+) (\d+)\)/g)) cardSamples.push([+x, +y, +r]);
+    const title = fs.readFileSync(path.join(path.dirname(modulePath), "../title.sgl"), "utf8");
+    cardTicks = ["CARD-IN", "CARD-HOLD", "CARD-OUT"].reduce((s, k) => s + parseInt((title.match(new RegExp(`\\(define ${k} (\\d+)\\)`)) || [])[1] || "0", 10), 0);
+  } catch (e) { detail = detail || `cannot read the card module: ${e.message}`; }
+  if (!detail && (cardSamples.length < 300 || cardFrames < 2 || cardTicks < 60 || cardRoles.length !== 6)) detail = `the card module is short: ${cardSamples.length} samples, ${cardFrames} frames, ${cardRoles.length} roles, ${cardTicks} ticks`;
   // ink(g, dx, dy): the same 4x4 dot patterns (crash font) draws
   const ink = (g, dx, dy) => g === "#" ? true : g === "3" ? !(dx % 2 === 1 && dy % 2 === 1) : g === "2" ? (dx + dy) % 2 === 0 : g === "1" ? (dx % 2 === 0 && dy % 2 === 0) : g === "^" ? dy < 2 : g === "v" ? dy >= 2 : g === "<" ? dx < 2 : g === ">" ? dx >= 2 : false;
   // the gate (ruling D42): a menu boot opens on the boot screen and the
   // reveal waits for a tap; the first boot also checks that nothing sounds
   // before the tap and that the dial and the first beep sound after it
   const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
-  const openGate = async (from, listen) => {
+  // the publisher card (ruling D43) between the gate and the reveal: on a
+  // "read" the arm waits for the card's first resolved tick, reads the
+  // canvas at CARD-SAMPLES (src/crash/title/card.sgl: the resolved frame's
+  // pixels at 1x, roles into CARD-ROLES) and then lets the card run out
+  // (its "done" tick is the full length); on a "skip" it taps the card
+  // away as soon as the strip is up (the "done" tick is short of the
+  // full length); "none" leaves it alone (a tap in the skip leg lands
+  // during the card first)
+  const readCard = async (m0, mode) => {
+    if (mode === "none") return {};
+    const first = await waitLine(/^crash: title card tick (\d+) frame (\d+) ms (\d+)$/, m0, 6000);
+    if (!first) return { error: "no \"crash: title card tick\" line within 6 s of the connect (the card's strip never came, or the card did not start)" };
+    if (mode === "skip") {
+      const t0 = consoleLines.length;
+      await tap(320, 200);
+      const done = await waitLine(/^crash: title card done (\d+)$/, t0, 5000);
+      if (!done) return { error: "a tap during the card did not end it" };
+      if (parseInt(done.m[1], 10) >= cardTicks - 1) return { error: `the tap ended the card at tick ${done.m[1]}, its full length: not a skip` };
+      return { cardSkippedAt: parseInt(done.m[1], 10) };
+    }
+    const hold = await waitLine(new RegExp(`^crash: title card tick (\\d+) frame ${cardFrames} ms (\\d+)$`), first.index, 15000);   // a loaded box runs the card at 100 ms a tick
+    if (!hold) return { error: `the card never reached its resolved frame ${cardFrames}` };
+    // the read lands inside the hold (CARD-HOLD ticks from the resolve): the
+    // whole frame is the strip's last frame, sampled at every module sample
+    const card = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+      const c = document.getElementById("stage");
+      const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+      const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+      const d = g.getImageData(0, 0, c.width, c.height).data;
+      const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+      const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+      const samples = ${JSON.stringify(cardSamples)}, wants = ${JSON.stringify(cardRoles.map((r) => hexes[r] || null))};
+      let n = 0, wrong = 0, sample = null; const byRole = {};
+      for (const [x, y, r] of samples) {
+        const want = wants[r]; if (!want) continue;
+        // the 320x200 sample is a 2x2 block on the 640x400 virtual grid; its center
+        const px = Math.floor(ox + (2 * x + 1) * scale), py = Math.floor(oy + (2 * y + 1) * scale);
+        const i = (py * c.width + px) * 4; n++; byRole[r] = (byRole[r] || 0) + 1;
+        const near = Math.abs(d[i] - want[0]) <= 12 && Math.abs(d[i + 1] - want[1]) <= 12 && Math.abs(d[i + 2] - want[2]) <= 12;
+        if (!near) { wrong++; if (!sample) sample = [x, y, r, [d[i], d[i + 1], d[i + 2]], want]; }
+      }
+      resolve({ n, wrong, sample, byRole });
+    }))`);
+    const done = await waitLine(/^crash: title card done (\d+)$/, hold.index, 30000);
+    if (!done) return { error: "the card never ended (no \"crash: title card done\" line within 4 s of its resolve)" };
+    if (parseInt(done.m[1], 10) !== cardTicks - 1) return { error: `the card ended at tick ${done.m[1]}, not its full length ${cardTicks} (nothing tapped it)` };
+    return { card, cardDone: parseInt(done.m[1], 10), cardFirst: parseInt(first.m[1], 10) };
+  };
+  const openGate = async (from, listen, cardMode) => {
     const gate = await waitLine(/^crash: title gate (.+)$/, from, 20000);
     if (!gate) return { error: "no \"crash: title gate\" line within 20 s" };
     let before = 0;
@@ -918,12 +983,14 @@ let iceLock = null;
     if (!connect) return { error: "a tap on the gate did not connect" };
     let peak = 0;
     if (listen) { for (let i = 0; i < 20; i++) { peak = Math.max(peak, await evalJS(rms)); await sleep(50); } }
-    return { gate: gate.m[1], before, peak };
+    const card = await readCard(m0, cardMode || "skip");
+    if (card.error) return card;
+    return { gate: gate.m[1], before, peak, ...card };
   };
   const bootTitle = async (seed, listen) => {
     const from = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}` });
-    const opened = await openGate(from, listen);
+    const opened = await openGate(from, listen, listen ? "read" : "skip");   // the first boot reads the card, the others tap it away
     if (opened.error) return opened;
     const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
     if (!head) return { error: `no "crash: title seed" line within 20 s (seed ${seed})` };
@@ -933,7 +1000,7 @@ let iceLock = null;
     const ticks = consoleLines.slice(head.index, settled.index).filter((l) => /^crash: title tick /.test(l)).map((l) => l.replace(/ ms \d+$/, ""));
     await sleep(200);
     const rows = consoleLines.slice(settled.index).filter((l) => /^crash: title row /.test(l)).map((l) => l.slice("crash: title row ".length));
-    return { head: head.m, settled: settled.m, ticks, rows, gate: opened.gate, before: opened.before, peak: opened.peak, from };
+    return { head: head.m, settled: settled.m, ticks, rows, gate: opened.gate, before: opened.before, peak: opened.peak, card: opened.card, cardDone: opened.cardDone, cardSkippedAt: opened.cardSkippedAt, from };
   };
   // the backdrop held off for this leg (the texture step gives it up after its
   // tries): the dots with no bg then show the bars, never a backdrop pixel
@@ -949,6 +1016,10 @@ let iceLock = null;
     else if (a.before > 0.005) detail = `sound before the gate's tap: RMS ${a.before.toFixed(4)}`;
     else if (!(a.peak > 0.02)) detail = `no sound after the gate's tap: RMS peaked ${a.peak.toFixed(4)} (the dial and the first beeps)`;
     else if (a.ticks.length < 10) detail = `only ${a.ticks.length} tick lines before settle`;
+    else if (!a.card) detail = "the first boot read no card";
+    else if (a.card.n < 300) detail = `only ${a.card.n} card samples read`;
+    else if (!(a.card.byRole[1] > 20 && (a.card.byRole[2] || 0) + (a.card.byRole[3] || 0) >= 4)) detail = `the card's samples miss the mark: ${JSON.stringify(a.card.byRole)} by role (1 the lettering, 2/3 the ring)`;
+    else if (a.card.wrong > 0) detail = `${a.card.wrong} of ${a.card.n} card samples off the module's resolved frame: first at ${a.card.sample[0]},${a.card.sample[1]} role ${cardRoles[a.card.sample[2]]} read ${a.card.sample[3]} want ${a.card.sample[4]}`;
   }
   // the reveal's frames: the game's own max/mean over the reveal; a stall
   // inside it (a decode, a bake, a precache) shows as a max far over the
@@ -1037,6 +1108,16 @@ let iceLock = null;
         resolve(n);
       }))`);
       if (itemsLit < 200) detail = `the menu's items are not on screen after the boot: ${itemsLit} C-LABEL-LIT pixels in the entry band (every other pixel sampled)`;
+      // the ambient (David, 2026-09-20): silent under the card and the reveal,
+      // started once the menu is ready: its start line follows the boot's done
+      // line and never precedes the settle
+      else {
+        const start = await waitLine(/^crash: ambient start$/, a.from, 5000);
+        const settledAt = consoleLines.findIndex((l, i) => i >= a.from && /^crash: title settled /.test(l));
+        if (!start) detail = "no \"crash: ambient start\" line within 5 s of the boot's done line: the loop never began";
+        else if (start.index < settledAt) detail = "the ambient started before the reveal settled";
+        else if (start.index < bootDone.index) detail = "the ambient started before the boot was done (the items were not in)";
+      }
     }
   }
   // still: the settled canvas does not change over 300 ms (two reads of the
@@ -1063,6 +1144,7 @@ let iceLock = null;
   if (!detail) {
     b = await bootTitle(TITLE_SEED);
     if (b.error) detail = b.error;
+    else if (!(b.cardSkippedAt >= 0)) detail = "the second boot did not skip the card";
     else if (JSON.stringify(a.ticks) !== JSON.stringify(b.ticks) || a.settled[2] !== b.settled[2]) detail = `seed ${TITLE_SEED} twice: ${a.ticks.length} vs ${b.ticks.length} tick lines, first difference at ${a.ticks.findIndex((l, i) => l !== b.ticks[i])}`;
   }
   if (!detail) {
@@ -1111,7 +1193,7 @@ let iceLock = null;
   }
   delete slowPaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot; reveal ${reveal.m[1]} frames mean ${reveal.m[4]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[4]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33`);
 }
 
 // ---- 9c. preload: nothing pops in after the menu is live (ruling D40) ---------
@@ -1136,7 +1218,7 @@ let iceLock = null;
   const gateP = await waitLine(/^crash: title gate /, from, 20000);
   if (gateP) { await tap(320, 200); await waitLine(/^crash: title connect$/, gateP.index, 3000); }
   const menuLine = await waitLine(/^crash: menu .*\bstack (-?[\d.]+) (-?[\d.]+)/, from, 20000);
-  const settled = await waitLine(/^crash: title settled /, from, 30000);
+  const settled = await waitLine(/^crash: title settled /, from, 60000);   // the card (120 ticks) and the reveal, frame-bound: a loaded box at 100 ms a frame needs 20 s
   if (!menuLine) detail = "no menu line on the boot";
   else if (!settled) detail = "the reveal did not settle";
   else if (consoleLines.slice(from, settled.index + 1).some((l) => /^crash: boot done/.test(l))) detail = `the boot was done before the reveal settled: the ${BOOT_SLOW} ms ambient delay did not hold it (a slow asset that does not hold the boot is the bug this leg exists for)`;
@@ -1190,11 +1272,19 @@ let iceLock = null;
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   let boardMs = null, menuMs = null;
-  const MS_RE = /^crash: frame-ms (\d+) (\d+)/;
+  const MS_RE = /^crash: frame-ms (\d+) (\d+).* underruns (\d+)$/;
+  let menuUnderruns = null, l1Under = null;
+  let boardUnder = null;
   if (!detail) {
     const l = await waitLine(MS_RE, booted.index, 60000);
     if (!l) detail = "no frame-ms line on the board within 60 s";
-    else boardMs = parseInt(l.m[1], 10);
+    else {
+      // the first window holds the boot; the second is the board at rest, the
+      // reference for the menu's frame and for whether this box feeds the sink at all
+      const l2 = await waitLine(MS_RE, l.index + 1, 40000);
+      if (!l2) detail = "no second frame-ms line on the board";
+      else { boardMs = parseInt(l2.m[1], 10); boardUnder = parseInt(l2.m[3], 10); }
+    }
   }
   const readMenu = () => evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
     const c = document.getElementById("stage");
@@ -1232,7 +1322,15 @@ let iceLock = null;
     if (!l) detail = "no frame-ms line on the menu within 40 s";
     else {
       menuMs = parseInt(l.m[1], 10);
+      // the window that holds the return (the first after Escape) and the next: no starved
+      // audio frames (David, 2026-09-20: "going back to the menu ... causes the music to slow down")
+      const l2 = await waitLine(MS_RE, l.index + 1, 40000);   // a window is 120 frames: 40 s covers a box at 300 ms a frame
+      menuUnderruns = parseInt(l.m[3], 10) + (l2 ? parseInt(l2.m[3], 10) : 0); l1Under = l.m[3];
       if (menuMs > boardMs * MENU_FRAME_FACTOR) detail = `the menu's frame mean ${menuMs} ms is over ${MENU_FRAME_FACTOR} x the board's ${boardMs} ms`;
+      else if (!l2) detail = "no second frame-ms line on the menu";
+      // the bound holds where it can be read: a box whose board at rest starves the sink
+      // (SwiftShader on the desktop viewport runs the GPU field at ~80 ms a frame) reports both
+      else if (boardUnder === 0 && parseInt(l2.m[3], 10) > 0) detail = `the audio sink starved for ${l2.m[3]} frames on the settled menu while the board at rest starved it for none (${l.m[3]} in the window of the return, which holds the one-time bake of the logo and the items)`;
     }
   }
   if (!detail) {
@@ -1244,7 +1342,7 @@ let iceLock = null;
     else if (!back) detail = "CONTINUE did not boot the board";
   }
   if (detail) fail("menu-return", detail);
-  else pass("menu-return", `board ${boardMs} ms, menu ${menuMs} ms a frame (mean over 300), 5 menu frames lit (${reads.map((r) => r.lit).join("/")} of ${reads[0].n}), nothing re-ran, CONTINUE back`);
+  else pass("menu-return", `board ${boardMs} ms, menu ${menuMs} ms a frame (mean over 300), 5 menu frames lit (${reads.map((r) => r.lit).join("/")} of ${reads[0].n}), nothing re-ran, audio underruns board ${boardUnder} / return ${l1Under} / menu ${menuUnderruns - parseInt(l1Under, 10)}${boardUnder > 0 ? " (the board starves on this box: bound not read)" : ""}, CONTINUE back`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------
