@@ -122,6 +122,8 @@
           (crash cards render)
           (crash cards fx)
           (crash menu)
+          (crash title)
+          (crash title logo)
           (crash look)
           (crash hud)
           (crash bg)
@@ -897,6 +899,31 @@
                                  (cons (+ (car r) (half (caddr r)))
                                        (cons (car ids) acc)))))))))
 
+    ;; The title reveal's trace (P3d), for the arm: its seed and settle
+    ;; tick once, a digest of the shown frame every tick while it runs,
+    ;; and at settle the digest and the grid row by row (glyph codes, fg
+    ;; roles, bg roles; the arm holds them to the data module).
+    ;;   crash: title seed N baud B settle T cells C
+    ;;   crash: title tick T digest D
+    ;;   crash: title settled T digest D
+    ;;   crash: title row Y GLYPHS FG BG
+    (define (say-title before after)
+      (let ((t0 (menu-title before))
+            (t1 (menu-title after)))
+        (when (and t0 t1)
+          (when (and (title-running? t0) (= (title-tick t0) 0))
+            (say "title" "seed" (title-seed t1) "baud" (title-baud t1)
+                 "settle" (title-settle-tick t1) "cells" (title-drawn-count (title-skip t1))))
+          (when (title-running? t1)
+            (say "title" "tick" (title-tick t1) "digest" (title-frame-digest t1)))
+          (when (and (title-running? t0) (title-settled? t1))
+            (say "title" "settled" (title-tick t1) "digest" (title-frame-digest t1))
+            (let loop ((y 0))
+              (when (< y LOGO-H)
+                (let ((row (vector-ref LOGO-ROWS y)))
+                  (say "title" "row" y (car row) (cadr row) (caddr row)))
+                (loop (+ y 1))))))))
+
     ;; A choice opens its table and draws it this same frame (with an
     ;; empty input frame), so no frame goes undrawn.
     (define (menu-tick f dt)
@@ -904,6 +931,8 @@
         (say-menu *menu*)
         (set! *announced* #t))
       (let ((r (menu-step *menu* f VW VH)))
+        (play-cues! (menu-cues *menu* (car r)))   ; the title reveal's cues (P3d)
+        (when *trace* (say-title *menu* (car r)))
         (set! *menu* (car r))
         (when (cdr r)
           (say "menu" "chose" (cdr r))
@@ -969,7 +998,8 @@
                                        ((stack) *session*)
                                        ((cards) *deal*)
                                        (else #f))
-                                     #t))))
+                                     #t)
+                                *seed*)))   ; ?seed=N seeds the title reveal too (P3d)
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
     ;; the saved one; STACK deals a NEW board: the next seed after the
@@ -1193,6 +1223,8 @@
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
+            ;; ?baud=N: the title reveal's pace (P3d)
+            ((string=? type "baud") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (title-baud! n))))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)
