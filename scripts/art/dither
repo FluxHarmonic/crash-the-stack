@@ -1,0 +1,124 @@
+#!/bin/sh
+# Dither a generated reference down to a palette subset: the Amiga
+# backdrop stage of the pipeline (ruling D38, part B). The raw is
+# flattened onto the ground, area-averaged to the target size (a
+# nearest-neighbor pick of one source pixel in sixteen would alias a
+# rendered image; point sampling is for pixel art, see scripts/art/shape),
+# then every pixel is snapped to the nearest color of the family, with the
+# error either spread by a fixed threshold map (ordered: Bayer 4x4 or 8x8,
+# the flat demoscene look) or carried to the neighbors (Floyd-Steinberg,
+# serpentine: the photographic look). The palette snap and the dither are
+# one pass in awk over the PPM, so the result is deterministic and the
+# same on any host; ImageMagick only decodes and encodes.
+#
+#   scripts/art/dither RAW.png OUT.png WxH ROLE,ROLE,... [--method o4x4|o8x8|fs]
+#                      [--spread N] [--ground ROLE] [--gamma G]
+#
+# ROLE,... are palette roles from assets/palette.sgl (the family's
+# allowance). --spread N (ordered only; default 40 of 255) is how far
+# the threshold map pushes a pixel before the snap: more spread, more
+# pattern. --gamma G (default 1.0) lifts (< 1) or sinks (> 1) the
+# midtones before the snap, for a raw that came back too dark for the
+# family. The color-count gate applies: every color of the output is one
+# of the family's, and the count is reported for the manifest row.
+set -eu
+export LC_ALL=C
+cd "$(dirname "$0")/../.." || exit 1
+raw="${1:?raw.png}"; out="${2:?out.png}"; size="${3:?WxH}"; roles="${4:?roles}"; shift 4
+method="o4x4"; spread=40; ground="C-BG"; gamma="1.0"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --method) method="${2:?method}"; shift 2 ;;
+    --spread) spread="${2:?n}"; shift 2 ;;
+    --ground) ground="${2:?role}"; shift 2 ;;
+    --gamma) gamma="${2:?g}"; shift 2 ;;
+    *) echo "dither: unknown argument $1"; exit 2 ;;
+  esac
+done
+[ -f "$raw" ] || { echo "dither: no $raw"; exit 1; }
+case "$method" in o4x4|o8x8|fs) ;; *) echo "dither: --method is o4x4, o8x8 or fs"; exit 1 ;; esac
+hex_of() { awk -v role="$1" '$0 ~ "^ *\\(?\\(" role " " { l = $0; sub(/^[^"]*"/, "", l); sub(/".*/, "", l); print l; exit }' assets/palette.sgl; }
+hexes=""
+for r in $(echo "$roles" | tr ',' ' '); do
+  h="$(hex_of "$r")"
+  [ -n "$h" ] || { echo "dither: unknown palette role $r"; exit 1; }
+  hexes="$hexes $h"
+done
+ground_hex="$(hex_of "$ground")"
+[ -n "$ground_hex" ] || { echo "dither: unknown --ground role $ground"; exit 1; }
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+# decode: flatten, area-average to the target, gamma, as a binary PPM
+convert "$raw" -background "$ground_hex" -alpha remove -alpha off -filter box -resize "${size}!" -gamma "$gamma" -depth 8 -compress none "PPM:$tmp/in.ppm"
+awk -v hexes="$hexes" -v method="$method" -v spread="$spread" '
+  function hex2(h, i) { return (index("0123456789ABCDEF", substr(h, i, 1)) - 1) * 16 + index("0123456789ABCDEF", substr(h, i + 1, 1)) - 1 }
+  function clamp(v) { return v < 0 ? 0 : (v > 255 ? 255 : v) }
+  # the nearest family color to (r, g, b), as its index
+  function nearest(r, g, b,    i, d, best, bi) {
+    best = 1e18
+    for (i = 1; i <= np; i++) {
+      d = (r - pr[i]) * (r - pr[i]) + (g - pg[i]) * (g - pg[i]) + (b - pb[i]) * (b - pb[i])
+      if (d < best) { best = d; bi = i }
+    }
+    return bi
+  }
+  BEGIN {
+    np = split(hexes, hx, " ")
+    for (i = 1; i <= np; i++) { pr[i] = hex2(hx[i], 2); pg[i] = hex2(hx[i], 4); pb[i] = hex2(hx[i], 6) }
+    # Bayer maps, threshold (m + 0.5) / n^2 - 0.5 in -0.5 .. 0.5
+    split("0 8 2 10 12 4 14 6 3 11 1 9 15 7 13 5", b4, " ")
+    split("0 32 8 40 2 34 10 42 48 16 56 24 50 18 58 26 12 44 4 36 14 46 6 38 60 28 52 20 62 30 54 22 3 35 11 43 1 33 9 41 51 19 59 27 49 17 57 25 15 47 7 39 13 45 5 37 63 31 55 23 61 29 53 21", b8, " ")
+    tok = 0
+  }
+  # a plain PPM: P3 W H 255 then the samples, whitespace-separated
+  {
+    for (f = 1; f <= NF; f++) {
+      tok++
+      if (tok == 1) continue
+      if (tok == 2) { W = $f; continue }
+      if (tok == 3) { H = $f; continue }
+      if (tok == 4) continue
+      v[tok - 5] = $f
+    }
+  }
+  END {
+    n = W * H
+    if (method == "fs") {
+      # error diffusion, serpentine rows, 7/16 right, 3/16 down-left, 5/16 down, 1/16 down-right
+      for (y = 0; y < H; y++) {
+        dir = (y % 2 == 0) ? 1 : -1
+        for (k = 0; k < W; k++) {
+          x = (dir == 1) ? k : W - 1 - k
+          p = y * W + x
+          r = clamp(v[p * 3] + e[p, 0]); g = clamp(v[p * 3 + 1] + e[p, 1]); b = clamp(v[p * 3 + 2] + e[p, 2])
+          i = nearest(r, g, b); pick[p] = i
+          er = r - pr[i]; eg = g - pg[i]; eb = b - pb[i]
+          if (x + dir >= 0 && x + dir < W) { q = p + dir; e[q, 0] += er * 7 / 16; e[q, 1] += eg * 7 / 16; e[q, 2] += eb * 7 / 16 }
+          if (y + 1 < H) {
+            if (x - dir >= 0 && x - dir < W) { q = p + W - dir; e[q, 0] += er * 3 / 16; e[q, 1] += eg * 3 / 16; e[q, 2] += eb * 3 / 16 }
+            q = p + W; e[q, 0] += er * 5 / 16; e[q, 1] += eg * 5 / 16; e[q, 2] += eb * 5 / 16
+            if (x + dir >= 0 && x + dir < W) { q = p + W + dir; e[q, 0] += er / 16; e[q, 1] += eg / 16; e[q, 2] += eb / 16 }
+          }
+        }
+      }
+    } else {
+      m = (method == "o4x4") ? 4 : 8
+      for (p = 0; p < n; p++) {
+        x = p % W; y = int(p / W)
+        t = (m == 4) ? b4[(y % 4) * 4 + (x % 4) + 1] : b8[(y % 8) * 8 + (x % 8) + 1]
+        t = ((t + 0.5) / (m * m) - 0.5) * spread
+        pick[p] = nearest(clamp(v[p * 3] + t), clamp(v[p * 3 + 1] + t), clamp(v[p * 3 + 2] + t))
+      }
+    }
+    printf "P6\n%d %d\n255\n", W, H
+    for (p = 0; p < n; p++) { i = pick[p]; printf "%c%c%c", pr[i], pg[i], pb[i] }
+  }' "$tmp/in.ppm" > "$tmp/out.ppm"
+mkdir -p "$(dirname "$out")"
+convert "$tmp/out.ppm" -type TrueColor +set date:create +set date:modify +set date:timestamp -define png:exclude-chunks=date,time,tIME,tEXt,zTXt "PNG24:$out"
+# the color-count gate: every color one of the family's
+colors="$(convert "$out" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u)"
+for c in $colors; do
+  case " $hexes " in *" $c "*) ;; *) echo "dither: REFUSED $out: $c is not a color of $roles"; exit 1 ;; esac
+done
+n="$(printf '%s\n' "$colors" | wc -l)"
+echo "dither: $out $(identify -format '%wx%h' "$out") $method colors $n of $(echo $hexes | wc -w) allowed ($(echo $colors))"

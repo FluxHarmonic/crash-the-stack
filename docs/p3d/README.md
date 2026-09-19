@@ -1,0 +1,63 @@
+# P3d: the title, candidates for David's read
+
+Ruling D38. Everything here came through `scripts/art/`: the logo with no
+image generation at any step (`assets/src/title/blocky.txt` is the
+alphabet, drawn by hand in text; `scripts/art/ansi` lays a spec out on
+the 80x50 cell grid), the backdrop with generation as step one
+(`scripts/art/gen title`, then `scripts/art/dither`).
+
+## What to decide
+
+1. **Alphabet and style**: `candidates-logo.png` (the nine below, one
+   sheet). Upright or slanted; which color scheme; which shadow.
+2. **Layout**: two lines (CRASH / THE STACK, 14 rows, fits over the menu)
+   or three (CRASH / THE / STACK, 21 rows: the menu would move down or the
+   logo scroll off). One line does not fit 80 columns at this letter size.
+3. **Dither**: `candidates-backdrop.png` (twelve: two raws x three
+   methods x two palette subsets). The game ships `backdrop-hero-o4x4-a`
+   today.
+4. **Glitch level**: `reveal-seed7.gif` (sixteen frames of seed 7 at 1200
+   baud, then the settled frame) and `reveal-strip.png`. The plan has
+   three to five glitches a boot: a wrong character that corrects itself,
+   a row in swapped colors that snaps, a row drawn shifted that settles,
+   noise in a row's shadow, one letter inverted. More, fewer, longer?
+   `?seed=N` reproduces a boot, `?baud=N` sets the pace (2400 default:
+   240 cells a second, about three seconds for the 737 cells).
+
+## The logo candidates (`logo-*.png`, specs in `assets/src/title/candidates/`)
+
+| file | what |
+|---|---|
+| `logo-hero.png` | the bible's hero colors: the ramp down from selection cyan to highlight magenta, shadow ▒ in the darkest bar tone (as built) |
+| `logo-hero-slant.png` | the same, slanted, shadow ▓ in the static dark |
+| `logo-split.png` | the two-tone split, cyan over magenta, no ramp |
+| `logo-hot.png` | ICE orange down to trace red, slanted |
+| `logo-cold.png` | the ramp up from the cold blue to the HUD text white |
+| `logo-gibson.png` | Gibson's violet down to highlight magenta, slanted, shadow ░ |
+| `logo-daemon.png` | daemon white down to selection cyan |
+| `logo-left.png` | left-aligned, no shadow: the plainest cut |
+| `logo-three-lines.png` | CRASH / THE / STACK |
+
+Every one is four palette colors or fewer on the ground. A new candidate
+is a spec file and one command: `scripts/art/ansi SPEC --png-only OUT`.
+
+## The backdrop candidates (`backdrop-*.png`, 320x200)
+
+Two references from `scripts/art/gen title`: `hero` is the bible's
+section 7 hero prompt as written (flat pixel art); `tonal` asks for
+smooth shading so the dither has tones to work with. Three methods:
+Bayer 4x4 and 8x8 (ordered: the flat demoscene look) and Floyd-Steinberg
+(the photographic look). Two palette subsets: `a` is twelve roles with
+the hot orange and ICE amber, `b` eight cool roles. Every output passed
+the color gate at its allowance. The raws stay under `assets/refs/title/`
+(provenance, never shipped); the hero pieces are reserved, not CC-BY, and
+David may hand-touch the chosen one in Nano Banana afterwards.
+
+## In the game
+
+`title-settled-seed7.png`: the menu with the logo over the backdrop.
+`title-mid-reveal-seed7.png`: mid-reveal. The reveal plays once per boot,
+only when the process opens on the menu; a tap or key skips it. The
+backdrop lands about two seconds after boot on the web (the shell holds
+every texture fetch until the service worker has activated), so the
+first frames of the reveal are over the copper bars.
