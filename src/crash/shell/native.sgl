@@ -14,7 +14,7 @@
 ;;;                                       the living background's rule (life on the GPU by default;
 ;;;                                       -cpu the fallback field, the oracle)
 ;;;                   [--copper roll|always|off|bitmap]  the copper raster over the field (roll: cleared only)
-;;;                   [--raster N]        the raster at a fixed roll N with the split, over everything
+;;;                   [--raster N]        the raster at a fixed roll N with the split, under the tiles
 ;;;                   [--phosphor on|off|probe]  persistence on the cascade
 ;;;                   [--bg-hold N]       the field stops after N steps and says "crash: bg held N"
 ;;;                   [--bg-only]         the background alone, no table drawn over it
@@ -164,6 +164,15 @@
     (define *bg-rsteps* #f)     ; --react-steps N
     (define *demo* #f)          ; --demo cleared: the cleared sequence on demand (the web shell's ?demo=)
     (define *demo-armed* #f)
+    (define *no-save* #f)       ; the demo's board or deal never reaches the store (nor a fake BEST record)
+
+    ;; The saves, unless the demo door opened this table (its board or
+    ;; deal, and the fake BEST a demo clear would set, never reach the store).
+    (define (save-session-after-frame! before after)
+      (if *no-save* after (save-after-frame! before after)))
+
+    (define (save-deal-after-frame-unless-demo! before after)
+      (if *no-save* after (save-deal-after-frame! before after)))
     (define *bg-said* #f)       ; the hold's line was said
     ;; With --log-keys, a line every MS-EVERY frames on stdout (the web
     ;; shell's, for the desktop numbers beside the phone's):
@@ -264,7 +273,7 @@
       (let* ((held (stage-session a))
              (s (cond ((and resume? held) held)
                       (else
-                       (let ((booted (boot-session lay seed fresh?)))
+                       (let ((booted (boot-session lay seed (or fresh? (eq? *demo* 'cleared)))))
                          (cond (resume? (car booted))
                                (held (session-next held))
                                ((cdr booted) (session-next (car booted)))
@@ -281,6 +290,7 @@
                      (begin
                        (set! *demo* #f)
                        (set! *demo-armed* #t)
+                       (set! *no-save* #t)
                        (display "crash: demo cleared stack") (newline)
                        (session-demo-near-cleared s))
                      s)))
@@ -293,6 +303,7 @@
                        (let ((booted (if (eq? *demo* 'cleared)
                                          (let ((won (demo-won-deal)))
                                            (set! *demo* #f)
+                                           (set! *no-save* #t)
                                            (display "crash: demo cleared ")
                                            (display (if won "cards" "FAILED: the won deal did not parse"))
                                            (newline)
@@ -345,7 +356,7 @@
     (define (step-stack a f dt geom log-keys?)
       (let* ((s (stage-session a))
              (x (fx-frame (stage-fx a) dt))
-             (after (save-after-frame!
+             (after (save-session-after-frame!
                       s
                       (session-advance (if *demo-armed*
                                            (begin (set! *demo-armed* #f) (session-demo-finish s))
@@ -369,7 +380,7 @@
     (define (step-cards a f dt geom)
       (let* ((d (stage-deal a))
              (x (card-fx-frame (stage-card-fx a) dt geom))
-             (after (save-deal-after-frame!
+             (after (save-deal-after-frame-unless-demo!
                       d
                       (probe-work
                         (deal-advance (deal-step d f geom)
@@ -414,6 +425,7 @@
                               (open-menu fresh)))))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))
+                   (dt (begin (set! *frame-ms* (* 1000.0 dt)) dt))
                    (f (poll-frame))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);

@@ -178,6 +178,15 @@
     (define *phosphor* 'on)  ; ?phosphor=off|probe
     (define *demo* #f)       ; ?demo=cleared: the cleared sequence on demand, once, on whichever table opens (David's door)
     (define *demo-armed* #f) ; the stack's near-cleared board is in; the next tick finishes it
+    (define *no-save* #f)    ; the demo's board or deal never reaches the store (nor a fake BEST record)
+
+    ;; The saves, unless the demo door opened this table (its board or
+    ;; deal, and the fake BEST a demo clear would set, never reach the store).
+    (define (save-session-after-frame! before after)
+      (if *no-save* after (save-after-frame! before after)))
+
+    (define (save-deal-after-frame-unless-demo! before after)
+      (if *no-save* after (save-deal-after-frame! before after)))
     (define *frame-n* 0)     ; frames presented (the probe alternates on it)
     (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
     (define *frame-ms* 0.0)   ; the frame's wall dt, ms
@@ -703,7 +712,7 @@
         (set! *announced* #t))
       (let* ((before *deal*)
              (x (card-fx-frame *card-fx* dt *card-geom*))
-             (after (save-deal-after-frame!
+             (after (save-deal-after-frame-unless-demo!
                       before
                       (probe-work
                         (deal-advance (deal-step before f *card-geom*)
@@ -742,7 +751,7 @@
         (set! *announced* #t))
       (let* ((before *session*)
              (x (fx-frame *fx* dt))
-             (after (save-after-frame!
+             (after (save-session-after-frame!
                       before
                       (session-advance (if *demo-armed*
                                            (begin (set! *demo-armed* #f) (session-demo-finish before))
@@ -867,6 +876,7 @@
     ;; here sees every one of them.
     (define (open-menu!)
       (set! *screen* 'menu)
+      (phosphor-reset!)          ; a cascade left behind blends with nothing on return
       (set! *announced* #f)
       (set! *menu* (launch-menu (and *update* #t)
                                 (and (case (active-game)
@@ -886,7 +896,7 @@
       (let ((lay (turtle-layout)))
         (unless *geom* (set! *geom* (make-geometry lay VW VH)))
         (unless (and resume? *session*)
-          (let* ((booted (boot-session lay *seed* *fresh*))
+          (let* ((booted (boot-session lay *seed* (or *fresh* (eq? *demo* 'cleared))))
                  (s (cond (resume? (car booted))
                           (*session* (session-next *session*))
                           ((cdr booted) (session-next (car booted)))
@@ -895,6 +905,7 @@
             (when (eq? *demo* 'cleared)
               (set! *session* (session-demo-near-cleared *session*))
               (set! *demo-armed* #t)
+              (set! *no-save* #t)
               (set! *demo* #f)
               (say "demo" "cleared" "stack"))
             (set! *restored* (and resume? (cdr booted)))
@@ -908,6 +919,7 @@
         (let* ((booted (if (eq? *demo* 'cleared)
                            (let ((won (demo-won-deal)))
                              (set! *demo* #f)
+                             (set! *no-save* #t)
                              (say "demo" "cleared" (if won "cards" "FAILED: the won deal did not parse"))
                              (if won (cons won #f) (boot-deal *seed* *fresh*)))
                            (boot-deal *seed* *fresh*)))
@@ -996,6 +1008,7 @@
         (cond ((eq? *phosphor* 'probe)
                (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
               ((and cascading? (eq? *phosphor* 'on))
+               (unless (phosphor-active?) (say "phosphor" "cascade"))   ; the play path engaged (the arm reads it)
                (phosphor-frame! VW VH PHOSPHOR draw))
               (else
                (phosphor-reset!)
@@ -1019,6 +1032,7 @@
                        react-steps: (or *bg-rsteps* (bg-react-steps *bg*)))))
       (set! *bg-said* #f)
       (when *bg* (say "bg" (if (bg-gpu? *bg*) "gpu" "cpu") (bg-mode *bg*)))
+      (say "atlas" (if (atlas-on?) "on" "off"))
       (set! *booted* #t)
       (set! *audio-ready* (audio-open!))
       (say "audio" (if *audio-ready* "open" "closed"))

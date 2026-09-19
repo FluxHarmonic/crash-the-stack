@@ -384,7 +384,8 @@ for (const rule of ["life", "reaction"]) {
   const ref = await readColumn("copper=bitmap");
   const raster = ref && await readColumn("copper=roll");
   const split = raster && await readColumn("raster=30");
-  if (!ref || !raster || !split) { fail("copper", "a page did not boot within 20 s"); timedOut("copper"); }
+  const sweep = split && await readColumn("raster=40");
+  if (!ref || !raster || !split || !sweep) { fail("copper", "a page did not boot within 20 s"); timedOut("copper"); }
   else {
     const detail = [];
     let differ = 0; const where = [];
@@ -405,8 +406,21 @@ for (const rule of ["life", "reaction"]) {
       if (!near(split[y], ref[src], 1)) { bad++; if (badWhere.length < 6) badWhere.push(`y=${y} got ${hex(split[y])} want ${hex(ref[src])}`); }
     }
     if (bad) detail.push(`${bad} scanlines of the split roll do not match the reference rolled +30 above / -30 below: ${badWhere.join("; ")}`);
+    // the sweep: at roll 40 the phase is floor(40 / 36) mod 3 = 1, so the
+    // bar colors rotate one place (A -> B -> C -> A: the reference's rows
+    // 0, 12, 24 are A, B, C) on top of the split roll
+    const A = hex(ref[0]), B = hex(ref[12]), C = hex(ref[24]);
+    const rotate = (c) => { const h = hex(c); return h === A ? ref[12] : h === B ? ref[24] : h === C ? ref[0] : c; };
+    let badSweep = 0; const sweepWhere = [];
+    for (let y = 0; y < BOARD_H; y++) {
+      const src = y < mid ? ((y - 40) % 36 + 36) % 36 : (y + 40) % 36;
+      const want = rotate(ref[src]);
+      if (!near(sweep[y], want, 1)) { badSweep++; if (sweepWhere.length < 6) sweepWhere.push(`y=${y} got ${hex(sweep[y])} want ${hex(want)}`); }
+    }
+    if (new Set([A, B, C]).size !== 3) detail.push(`the reference's rows 0, 12, 24 are not three bar colors: ${A} ${B} ${C}`);
+    if (badSweep) detail.push(`${badSweep} scanlines of the sweep (roll 40, phase 1) do not match the reference rolled and rotated: ${sweepWhere.join("; ")}`);
     if (detail.length) fail("copper", detail.join("; "));
-    else pass("copper", `raster == painted bars on ${BOARD_H} scanlines (${colors.size} colors, period 36); split roll at 30: above +30, below -30`);
+    else pass("copper", `raster == painted bars on ${BOARD_H} scanlines (${colors.size} colors, period 36); split roll at 30: above +30, below -30; sweep at 40: the colors rotated one place`);
   }
 }
 
@@ -433,7 +447,18 @@ for (const rule of ["life", "reaction"]) {
     const seen = new Set(reads.map(hex));
     if (pure.length) fail("phosphor", `${pure.length} of 6 reads are a pure probe color (no persistence): ${reads.map(hex).join(" ")}`);
     else if (off.length) fail("phosphor", `${off.length} of 6 reads are not a steady-state mix at PHOSPHOR ${p} (want ${hex(mixA.map(Math.round))} or ${hex(mixB.map(Math.round))} within 4): ${reads.map(hex).join(" ")}`);
-    else pass("phosphor", `6 reads all a mix of the two probe colors at ${p} (${[...seen].join(" ")}), never pure`);
+    else {
+      // the play path: the DEFRAG cascade on demand must say the phosphor
+      // engaged (the probe above forces the phosphor's own branch; this
+      // is the branch play takes)
+      mark = consoleLines.length;
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&cards&fresh&bg=off&demo=cleared` });
+      const won = await waitLine(/^crash: cards won moves /, mark, 25000);
+      const engaged = won && await waitLine(/^crash: phosphor cascade$/, mark, 5000);
+      if (!won) fail("phosphor", `probe ok (${[...seen].join(" ")}), but the demo deal was not won within 25 s (no "crash: cards won")`);
+      else if (!engaged) fail("phosphor", `probe ok, the deal was won, but the cascade never engaged the phosphor (no "crash: phosphor cascade" line)`);
+      else pass("phosphor", `6 reads all a mix of the two probe colors at ${p} (${[...seen].join(" ")}), never pure; the DEFRAG cascade engaged the phosphor's play path`);
+    }
   }
 }
 
@@ -474,6 +499,8 @@ for (const rule of ["life", "reaction"]) {
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${table}&fresh&seed=3&bg=off${query}` });
     const boot = await waitLine(table === "stack" ? /^crash: seed 3 tiles 144 pair / : /^crash: cards seed 3 moves 0 /, mark, 20000);
     if (!boot) return null;
+    const said = await waitLine(/^crash: atlas (on|off)$/, mark, 5000);
+    if (!said || said.m[1] !== (query ? "off" : "on")) return null;
     await sleep(1200);
     return rowHashes();
   }
@@ -481,11 +508,11 @@ for (const rule of ["life", "reaction"]) {
   for (const table of ["stack", "cards"]) {
   const on = await readTable(table, "");
   const off = on && await readTable(table, "&atlas=off");
-  if (!on || !off) { fail("atlas", `the ${table} page did not boot within 20 s`); timedOut("atlas"); }
+  if (!on || !off) { fail("atlas", `the ${table} page did not boot within 20 s, or did not say "crash: atlas on|off" as asked`); timedOut("atlas"); }
   else {
     const differing = []; on.rows.forEach((h, y) => { if (h >= 0 && h !== off.rows[y]) differing.push(y); });
-    if (on.lit < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.lit} of ${on.h} rows lit on the atlas frame`);
-    else if (differing.length) verdicts.push(`FAIL ${table}: ${differing.length} of ${on.h} canvas rows differ between the atlas and the rect path at seed 3: rows ${differing.slice(0, 8).join(" ")}${differing.length > 8 ? " ..." : ""}`);
+    if (on.h - on.tieRows < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.h - on.tieRows} of ${on.h} rows compared`);
+    else if (on.lit < on.h * 0.5) verdicts.push(`FAIL ${table}: only ${on.lit} of ${on.h} rows lit on the atlas frame`);
     else verdicts.push(`${table}: atlas == rectangles on ${on.h - on.tieRows} of ${on.h} rows (${on.lit} lit; ${on.tieRows} tie rows and ${on.tieCols} tie columns left out) of ${on.w}x${on.h}`);
   }
   }

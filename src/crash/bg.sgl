@@ -80,7 +80,7 @@
           (sigil math)
           (crash stack prng))
 
-  (export bg bg? bg-new bg-tick bg-field bg-sub bg-seed bg-ticks bg-steps bg-mode bg-gpu? bg-hold bg-stride bg-react-steps bg-iterations
+  (export bg bg? bg-new bg-tick bg-field bg-sub bg-seed bg-ticks bg-steps bg-mode bg-gpu? bg-hold bg-stride bg-react-steps bg-iterations bg-iterations-at bg-step-agit bg-pending
           bg-agitation bg-burst bg-severed
           bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean bg-flow
           bg-held? bg-agit bg-visit-permille bg-step-key bg-rain bg-kill bg-shown-value
@@ -179,6 +179,7 @@
       (hold default: #f)
       (stride default: STRIDE)         ; ticks between field steps (the tunable behind ?bgstride=)
       (react-steps default: REACT-STEPS) ; Gray-Scott iterations per field step at agitation 1 (?rsteps=)
+      (pending default: '())          ; a GPU field: (agit . severed?) of the last PENDING-MAX steps scheduled, oldest first
       (agitation default: AGITATION-TRACE)
       (burst default: 0)
       (severed default: #f)
@@ -308,8 +309,28 @@
 
     ;; Gray-Scott iterations this step: the struct's rate scaled by the
     ;; agitation, at least one, capped (the GPU runs the same count).
+    (define PENDING-MAX 8)
+
+    ;; The agitation and severed flag a field step ran (or will run) at:
+    ;; for a GPU field, the entry `pending` keeps for step index `step`
+    ;; (a slow frame drains two steps, and a burst or a phase can end
+    ;; between them: the targets must run each at its own agitation, as
+    ;; the CPU field did); otherwise the struct's current values.
+    (define (bg-step-agit b step)
+      (let* ((pending (bg-pending b))
+             (first (- (bg-steps b) (length pending)))
+             (i (- step first)))
+        (if (and (>= i 0) (< i (length pending)))
+            (list-ref pending i)
+            (cons (bg-agit b) (bg-severed b)))))
+
+    ;; Gray-Scott iterations at an agitation: the struct's rate scaled,
+    ;; at least one, capped (the GPU runs the same count).
+    (define (bg-iterations-at b agit)
+      (min REACT-STEPS-MAX (max 1 (exact (floor (* agit (bg-react-steps b)))))))
+
     (define (bg-iterations b)
-      (min REACT-STEPS-MAX (max 1 (exact (floor (* (bg-agit b) (bg-react-steps b)))))))
+      (bg-iterations-at b (bg-agit b)))
 
     (define (bg-held? b)
       (and (bg-hold b) (>= (bg-steps b) (bg-hold b))))
@@ -499,7 +520,12 @@
              (b0 (bg b ticks: ticks burst: (max 0 (- (bg-burst b) 1)))))
         (cond ((not (= 0 (modulo ticks (bg-stride b0)))) b0)
               ((bg-held? b0) b0)
-              ((bg-gpu? b0) (bg b0 steps: (+ 1 (bg-steps b0))))
+              ((bg-gpu? b0)
+               ;; the entry is what the CPU path would step at: b0, the burst counted down
+               (let ((pending (append (bg-pending b0) (list (cons (bg-agit b0) (bg-severed b0))))))
+                 (bg b0
+                     steps: (+ 1 (bg-steps b0))
+                     pending: (if (> (length pending) PENDING-MAX) (cdr pending) pending))))
               (else
                (let* ((key (bg-step-key (bg-seed b0) (bg-steps b0)))
                       (stepped (if (bg-severed b0)

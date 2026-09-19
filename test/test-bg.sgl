@@ -132,3 +132,37 @@
                 (test (string-append (symbol->string mode) ": under 3000 rectangles")
                   (assert-true (< (length runs) 3000)))))
             MODES))
+
+;; A GPU field keeps the schedule and none of the cell work (P3c): its
+;; steps count with the stride, its field stays the seed, and it records
+;; each step's agitation so the targets run a step the CPU would have
+;; run at that agitation, a burst ending between two steps of one frame
+;; included (the leader's review, 2026-09-19).
+(test-group "bg: a GPU field's schedule"
+  (test "steps count, the field is the seed, no runs"
+    (let* ((b (bg-new 1 'life #t))
+           (after (bg-tick b (* 4 STRIDE))))
+      (assert-true (bg-gpu? after))
+      (assert-equal 4 (bg-steps after))
+      (assert-equal (vector->list (bg-field b)) (vector->list (bg-field after)))
+      (assert-equal '() (bg-runs after))))
+  (test "each step remembers the agitation it ran at across a burst's end"
+    (let* ((b (bg-with-burst (bg-new 1 'life #t)))
+           (after (bg-tick b (+ BURST-TICKS STRIDE))))
+      ;; the burst counts down every tick and a step at the tick it reaches 0
+      ;; is already calm (b0, the CPU path's struct too): steps 0..8 at the
+      ;; burst, step 9 (tick 30) and after at the phase's
+      (assert-equal (cons AGITATION-BURST #f) (bg-step-agit after (- (quotient BURST-TICKS STRIDE) 2)))
+      (assert-equal (cons AGITATION-TRACE #f) (bg-step-agit after (- (quotient BURST-TICKS STRIDE) 1)))
+      ;; a step no longer remembered answers the struct's current values
+      (assert-equal (cons AGITATION-TRACE #f) (bg-step-agit after 0))
+      (assert-true (<= (length (bg-pending after)) 8))))
+  (test "the CPU field steps at the same agitation the GPU schedule records"
+    (let* ((cpu (bg-with-burst (bg-new 2 'life)))
+           (gpu (bg-with-burst (bg-new 2 'life #t)))
+           (cpu1 (bg-tick cpu STRIDE))
+           (gpu1 (bg-tick gpu STRIDE)))
+      ;; both stepped once, at the burst; a burst step visits every cell
+      (assert-equal 1 (bg-steps cpu1))
+      (assert-equal 1000 (bg-visit-permille (car (bg-step-agit gpu1 0)) (bg-stride gpu1)))
+      (assert-true (> (cells-changed cpu cpu1) (* 0.5 CELLS))))))
