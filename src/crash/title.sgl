@@ -20,9 +20,9 @@
 ;;;
 ;;; The shear (David, 2026-09-19: the slant, and "can it be shifted in
 ;;; real time"): the grid is stored upright and sheared per row when
-;;; drawn, the top two rows of each letter line SHEAR-REST × 2 cells
-;;; right of the bottom two, the middle two × 1 (the same stair the
-;;; spec's `slant` bakes). The modem draws the logo upright, the way a
+;;; drawn, row r of each letter line SLANT × (5 - r) cells right of its
+;;; bottom row, resolved to whole pixels (not the whole-cell stair the
+;;; spec's `slant` bakes for a PNG). The modem draws the logo upright, the way a
 ;;; terminal would, and once the last glitch has resolved the logo slams
 ;;; into its slant over SHEAR-TICKS with an out-back ease; a skip lands
 ;;; on the slanted logo at once. So the logo is fully correct and still
@@ -52,8 +52,9 @@
           glitch glitch? glitch-kind glitch-row glitch-col glitch-from glitch-to glitch-param
           DEFAULT-BAUD title-baud! title-default-baud
           DEFAULT-GLITCH title-glitch! title-default-glitch title-level
-          BLOCK-CODES SHEAR-REST SHEAR-TICKS
+          BLOCK-CODES DEFAULT-SLANT title-slant! title-default-slant SHEAR-TICKS
           BACKDROP-PATH
+          BOOT-TIMEOUT boot-reset! boot-add-step! boot-run! boot-done? boot-timed-out? boot-progress boot-pending-names
           logo-check)
 
   (begin
@@ -176,7 +177,16 @@
 
     ;; --- the shear ---------------------------------------------------------------
 
-    (define SHEAR-REST 1)        ; cells: the slant's stair, rows 0-1 at 2, 2-3 at 1, 4-5 at 0
+    ;; The slant at rest, in cells per row: row r of a letter line sits
+    ;; slant × (5 - r) cells right of row 5, resolved to whole pixels, not
+    ;; whole cells (David, 2026-09-19: "can we make it slant slightly
+    ;; less? Are we making it snap to the character grid?"; the first cut
+    ;; was a whole-cell stair, one cell per two rows). ?slant=N is the door,
+    ;; 0 upright; the default is half the first cut's angle.
+    (define DEFAULT-SLANT 0.25)
+    (define *slant* DEFAULT-SLANT)
+    (define (title-slant! n) (set! *slant* (max 0.0 (min 2.0 n))))
+    (define (title-default-slant) *slant*)
     (define SHEAR-TICKS 20)      ; the slam, from upright to the slant
 
     ;; --- the glitches -------------------------------------------------------------
@@ -310,6 +320,7 @@
       (slam-tick default: 0)       ; the last glitch resolved; the shear starts here
       (settle-tick default: 0)     ; the tick everything is correct and still from
       (level default: DEFAULT-GLITCH) ; the glitch level the plan was made at
+      (slant default: DEFAULT-SLANT)  ; cells per row at rest
       (plan default: '()))         ; the glitches, from the seed
 
     ;; A title for this boot. settled?: #t opens it already settled (the
@@ -327,6 +338,7 @@
                tick: (if settled? settle 0)
                done: settled?
                level: level
+               slant: *slant*
                slam-tick: slam
                settle-tick: settle
                plan: plan)))
@@ -350,25 +362,22 @@
       (if (title-done t) TOTAL-CELLS (drawn-at (title-tick t) (title-baud t))))
 
     ;; The shear at this tick, in cells: 0 while the modem draws, the slam
-    ;; from the last glitch's end, SHEAR-REST from settle on.
+    ;; from the last glitch's end, the slant from settle on.
     (define (title-shear t)
       (let ((tick (title-tick t)))
-        (cond ((title-done t) (* 1.0 SHEAR-REST))
+        (cond ((title-done t) (* 1.0 (title-slant t)))
               ((< tick (title-slam-tick t)) 0.0)
               (else (let ((p (/ (- tick (title-slam-tick t)) (* 1.0 SHEAR-TICKS))))
-                      (* SHEAR-REST (ease 'out-back (min 1.0 p))))))))
+                      (* (title-slant t) (ease 'out-back (min 1.0 p))))))))
 
-    ;; Row y's shear in cells at this tick: the stair of its row within
-    ;; its letter line (rows 0-1 at 2, 2-3 at 1, 4-5 at 0, others 0), times
-    ;; the shear. Every cell of a row moves together, a shadow cell with
-    ;; the row it sits in: giving a shadow the row above's stair (where
-    ;; the upright grid cast it from) would land it on the next letter
-    ;; cell where the stair steps down (the S's row 3, measured), and two
-    ;; cells on one spot is what the arm's dot read cannot allow.
+    ;; Row y's shear in cells at this tick: (5 - r) for row r of its letter
+    ;; line (0 for a row no letter covers), times the shear. Every cell of a
+    ;; row moves together, shadow cells with the row they sit in (a shadow
+    ;; given its caster's row landed on the next letter cell where the
+    ;; first cut's stair stepped down: measured, two cells on one spot).
     (define (title-row-shear t y)
-      (let* ((r (vector-ref ROW-LINE-INDEX y))
-             (stair (if (> r 5) 0 (quotient (- 5 r) 2))))
-        (* stair (title-shear t))))
+      (let ((r (vector-ref ROW-LINE-INDEX y)))
+        (if (> r 5) 0.0 (* (- 5 r) (title-shear t)))))
 
     ;; The cursor's blink at a tick: on for CURSOR-ON of every CURSOR-PERIOD
     ;; ticks (the reveal's cursor and the menu's, ruling D39, share it).
@@ -476,6 +485,69 @@
                        (>= (title-tick after) (title-slam-tick after)))
                   (list 'settle)
                   '())))
+
+
+    ;; --- the boot (ruling D40) ------------------------------------------------------
+    ;;
+    ;; Everything the menu and the first board need is readied BEFORE the
+    ;; menu becomes interactive, on both targets, so nothing pops in after
+    ;; it is live (David: "weird to see graphics pop in and the music start
+    ;; delayed"). The shells register STEPS at boot, in order, each a
+    ;; thunk that answers #t once its work is done (a texture landed or
+    ;; given up, the ambient decoded, P3c's atlas baked); the menu frame
+    ;; runs boot-run! and the menu is live once the reveal has settled and
+    ;; every step is done. The reveal is the cover; if the steps outlast it
+    ;; the cursor blinks on a CONNECTING line. A step that raises counts
+    ;; as done (a broken step must not hold the menu), and after
+    ;; BOOT-TIMEOUT ticks the boot is forced done and says so.
+    (define BOOT-TIMEOUT 1200)   ; ticks: 20 s
+
+    (define *boot-pending* '())  ; ((name . thunk) ...) not yet done, in order
+    (define *boot-done* '())     ; names done, newest first
+    (define *boot-total* 0)
+    (define *boot-ticks* 0)
+    (define *boot-timed-out* #f)
+
+    (define (boot-reset!)
+      (set! *boot-pending* '())
+      (set! *boot-done* '())
+      (set! *boot-total* 0)
+      (set! *boot-ticks* 0)
+      (set! *boot-timed-out* #f))
+
+    ;; Append a step; the shells add theirs at boot, later rows theirs.
+    (define (boot-add-step! name thunk)
+      (set! *boot-pending* (append *boot-pending* (list (cons name thunk))))
+      (set! *boot-total* (+ *boot-total* 1)))
+
+    ;; One frame of the boot: the first pending step runs; when it answers
+    ;; done the next runs in the same frame, so a run of quick steps
+    ;; costs one frame. Answers the names that finished this call, oldest
+    ;; first, with 'timeout last when the deadline forced the rest.
+    (define (boot-run!)
+      (set! *boot-ticks* (+ *boot-ticks* 1))
+      (let loop ((finished '()))
+        (cond ((null? *boot-pending*) (reverse finished))
+              ((and (> *boot-ticks* BOOT-TIMEOUT) (not *boot-timed-out*))
+               (set! *boot-timed-out* #t)
+               (set! *boot-done* (append (map car *boot-pending*) *boot-done*))
+               (set! *boot-pending* '())
+               (reverse (cons 'timeout finished)))
+              (else
+               (let* ((step (car *boot-pending*))
+                      (done? (guard (e (#t #t)) (and ((cdr step)) #t))))
+                 (if done?
+                     (begin
+                       (set! *boot-pending* (cdr *boot-pending*))
+                       (set! *boot-done* (cons (car step) *boot-done*))
+                       (loop (cons (car step) finished)))
+                     (reverse finished)))))))
+
+    (define (boot-done?) (null? *boot-pending*))
+    (define (boot-timed-out?) *boot-timed-out*)
+    ;; (done . total)
+    (define (boot-progress) (cons (length *boot-done*) *boot-total*))
+    (define (boot-pending-names) (map car *boot-pending*))
 
     ;; --- for the arm ----------------------------------------------------------------
 

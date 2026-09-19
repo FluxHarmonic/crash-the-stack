@@ -62,6 +62,10 @@
 //               the same tick digests and another seed does not, two boots
 //               without ?seed take different seeds from the page's clock, and a tap
 //               during the reveal skips it without choosing an entry
+//   preload     (P3d, ruling D40) with the ambient delayed 4 s the boot outlasts the
+//               reveal: a tap after the settle chooses nothing and boots no board,
+//               "crash: boot done" then arrives with the audio step last, and the
+//               tap then chooses STACK
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -109,7 +113,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -133,6 +137,8 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 // swVersionOverride, when set, is stamped into the served sw.js in place of
 // the build's version: how the update sub-arm plays a new deploy.
 let swVersionOverride = null;
+// slowPaths: path -> ms; the boot sub-arm delays one asset to hold the boot
+const slowPaths = {};
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
@@ -140,8 +146,11 @@ const server = http.createServer((req, res) => {
   fs.readFile(fp, (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
     if (urlPath === "/sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
+    const delay = slowPaths[urlPath] || 0;
+    setTimeout(() => {
     res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(buf);
+    }, delay);
   });
 });
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
@@ -545,6 +554,9 @@ else fail("keys-match", keysDetail);
     return "";
   };
   mark = consoleLines.length;
+  // the menu is live only once the boot's steps are done (ruling D40): the
+  // first visit's boot can outlast these sub-arms under load
+  if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
   await press("Escape");
   const menu = await waitLine(/^crash: menu (continue) /, mark, 3000);
   if (!menu) detail = "Escape did not open the menu (no \"crash: menu continue ...\" line)";
@@ -598,7 +610,11 @@ else fail("keys-match", keysDetail);
     const list = JSON.parse(entries);
     // every entry is same-origin (the page loads nothing else), so a status
     // other than 200 is a failure, 0 included (blocked, or never answered)
-    const bad = list.filter(([, st]) => st !== 200);
+    // a fetch that failed and was asked for again (the ambient, a texture:
+    // P3d, D40 starts them early and the page retries) is a later 200 for
+    // the same name; counted and shown, not failed
+    const retried = list.filter(([n, st], i) => st !== 200 && list.some(([m, s2], j) => j > i && m === n && s2 === 200));
+    const bad = list.filter(([n, st]) => st !== 200 && !retried.some(([m]) => m === n));
     const assets = list.filter(([n]) => n.startsWith("assets/") || n.endsWith(".wasm"));
     const tile = list.some(([n, st]) => n === "assets/test-tile.png" && st === 200);
     const lookRan = results.some((r) => r[0] === "look" && r[1] === "PASS");
@@ -606,7 +622,7 @@ else fail("keys-match", keysDetail);
     else if (bad.length) fail("assets", `${bad.length} of ${list.length} resources not 200: ${JSON.stringify(bad.slice(0, 5))}`);
     else if (assets.length === 0) fail("assets", `${list.length} resources, none under assets/ or the wasm`);
     else if (lookRan && !tile) fail("assets", "the look sub-arm asked for the test tile but assets/test-tile.png was never fetched with 200");
-    else pass("assets", `${list.length} resources all 200, ${assets.length} assets/wasm${lookRan ? ", test tile fetched on demand" : ""}`);
+    else pass("assets", `${list.length} resources all 200${retried.length ? ` (${retried.length} retried after a failed first fetch)` : ""}, ${assets.length} assets/wasm${lookRan ? ", test tile fetched on demand" : ""}`);
   } catch (err) {
     fail("assets", `CDP: ${err.message}`);
   }
@@ -734,10 +750,10 @@ let iceLock = null;
     const open = openAt >= 0 ? { m: consoleLines[openAt].match(/^crash: audio (open|closed)$/) } : null;
     // the ambient loop lands a few seconds after the boot (the page fetches
     // it late, on purpose) and must be playing under the cue
-    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 10000) : null;
+    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 20000) : null;
     if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
     else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
-    else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 10 s of the boot)";
+    else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
@@ -770,7 +786,8 @@ let iceLock = null;
           await tap(pair.m[7], pair.m[8]);
           const removed = await waitLine(/^crash: removed /, mark, 3000);
           let peak = 0;
-          for (let i = 0; i < 8; i++) {
+          // 16 reads over 800 ms: under load the cue landed after a 400 ms window twice (peaks 0.03 and 0)
+          for (let i = 0; i < 16; i++) {
             const r = await evalJS(rms);
             peak = Math.max(peak, r);
             await sleep(50);
@@ -860,9 +877,9 @@ let iceLock = null;
 // picked nothing).
 {
   const TITLE_SEED = 7, OTHER_SEED = 8, TITLE_BAUD = 9600;
-  // the shear: the settled logo's rows sit right by their stair times the shear
-  // the game reports (cells)
-  const stairOf = (r) => (r < 0 || r > 5) ? 0 : Math.floor((5 - r) / 2);
+  // the slant: row r of a letter line sits (5 - r) x the slant the game reports
+  // (thousandths of a cell per row) cells right, rounded to a pixel
+  const stairOf = (r) => (r < 0 || r > 5) ? 0 : 5 - r;
   const CELL = 8, TX = 0, TY = 8;
   let detail = "";
   const modulePath = path.join(path.dirname(new URL(import.meta.url).pathname), "src/crash/title/logo.sgl");
@@ -903,7 +920,7 @@ let iceLock = null;
     a = await bootTitle(TITLE_SEED);
     if (a.error) detail = a.error;
     else if (a.head[1] !== String(TITLE_SEED) || a.head[2] !== String(TITLE_BAUD)) detail = `the game took seed ${a.head[1]} baud ${a.head[2]}`;
-    else if (parseInt(a.settled[3], 10) < 1) detail = `the settled logo is upright (shear ${a.settled[3]}); the slant did not land`;
+    else if (parseInt(a.settled[3], 10) < 1) detail = `the settled logo is upright (slant ${a.settled[3]}/1000); the slant did not land`;
     else if (a.ticks.length < 10) detail = `only ${a.ticks.length} tick lines before settle`;
   }
   // the grid the game holds, against the module
@@ -930,7 +947,7 @@ let iceLock = null;
       const scale = Math.min(c.width / ${VW}, c.height / ${VH});
       const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
       const rows = ${JSON.stringify(moduleRows)}, roles = ${JSON.stringify(rolesM)}, hexes = ${JSON.stringify(hexes)};
-      const shear = ${parseInt(a.settled[3], 10)}, lineTops = ${JSON.stringify(lineTops)};
+      const shear = ${parseInt(a.settled[3], 10) / 1000}, lineTops = ${JSON.stringify(lineTops)};
       const lineRowOf = ${lineRowOf.toString()}, stairOf = ${stairOf.toString()};
       const ink = ${ink.toString()};
       let dots = 0, wrong = 0, sample = null;
@@ -941,7 +958,8 @@ let iceLock = null;
           const role = ink(gl, dx, dy) ? fg : bg; if (role === "-") continue;
           const want = hexes[roles[role.charCodeAt(0) - 97]]; if (!want) continue;
           const stair = stairOf(lineRowOf(y));
-          const vx = ${TX} + (x + stair * shear) * ${CELL} + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
+          // Math.round is half-up, Sigil's round half-even: they agree except at an exact .5, which the default slant never makes
+          const vx = ${TX} + x * ${CELL} + Math.round(stair * shear * ${CELL}) + dx * 2 + 1, vy = ${TY} + y * ${CELL} + dy * 2 + 1;
           const px = Math.floor(ox + vx * scale), py = Math.floor(oy + vy * scale);
           const i = (py * c.width + px) * 4; dots++;
           if (Math.abs(d[i] - want[0]) > 12 || Math.abs(d[i + 1] - want[1]) > 12 || Math.abs(d[i + 2] - want[2]) > 12) { wrong++; if (!sample) sample = [x, y, gl, dx, dy, [d[i], d[i + 1], d[i + 2]], want]; }
@@ -1010,6 +1028,63 @@ let iceLock = null;
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips`);
 }
 
+// ---- 9c. preload: nothing pops in after the menu is live (ruling D40) ---------
+// The server delays the ambient by BOOT_SLOW ms, longer than the reveal at
+// 9600 baud, so the boot's audio step outlasts the reveal: after "crash:
+// title settled" the boot must not be done, a tap on the first entry must
+// choose nothing and boot no board, then "crash: boot done" must arrive
+// with the audio step last, and the same tap must then choose STACK and
+// boot a board. The origin's service worker and caches are cleared first (the
+// worker serves cache first and the audio sub-arm already fetched the ambient),
+// so the ambient's fetch reaches the arm's server and its delay.
+{
+  const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
+  let detail = "";
+  slowPaths["/assets/audio/ambient.pcm"] = BOOT_SLOW;
+  // the worker serves cache first: drop this origin's workers and caches so
+  // the ambient goes to the (slow) server and the boot has to wait
+  await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
+  const menuLine = await waitLine(/^crash: menu .*\bstack (-?[\d.]+) (-?[\d.]+)/, from, 20000);
+  const settled = await waitLine(/^crash: title settled /, from, 30000);
+  if (!menuLine) detail = "no menu line on the boot";
+  else if (!settled) detail = "the reveal did not settle";
+  else if (consoleLines.slice(from, settled.index + 1).some((l) => /^crash: boot done/.test(l))) detail = `the boot was done before the reveal settled: the ${BOOT_SLOW} ms ambient delay did not hold it (a slow asset that does not hold the boot is the bug this leg exists for)`;
+  let tapAt = -1;
+  if (!detail) {
+    await sleep(300);
+    tapAt = consoleLines.length;
+    await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
+    await sleep(800);
+    const after = consoleLines.slice(tapAt);
+    if (after.some((l) => /^crash: menu chose /.test(l))) detail = "a tap during the boot chose an entry";
+    else if (after.some((l) => BOOT_ANY.test(l))) detail = "a board booted during the boot (tiles drew before the last step)";
+    else if (after.some((l) => /^crash: boot done/.test(l))) detail = "the boot finished within 1.1 s of the settle, before the slow ambient could have landed";
+  }
+  let done = null;
+  if (!detail) {
+    done = await waitLine(/^crash: boot done (\d+)$/, tapAt, BOOT_SLOW + 10000);
+    if (!done) detail = `no "crash: boot done" within ${BOOT_SLOW + 10000} ms`;
+    else {
+      const steps = consoleLines.slice(from, done.index).filter((l) => /^crash: boot step /.test(l));
+      if (steps.length !== parseInt(done.m[1], 10)) detail = `boot done says ${done.m[1]} steps, ${steps.length} step lines seen`;
+      else if (!/^crash: boot step audio done$/.test(steps[steps.length - 1])) detail = `the last step was not audio: ${steps[steps.length - 1]}`;
+    }
+  }
+  if (!detail) {
+    const m0 = consoleLines.length;
+    await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
+    const chose = await waitLine(/^crash: menu chose stack$/, m0, 3000);
+    const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
+    if (!chose) detail = "after the boot, a tap on STACK chose nothing";
+    else if (!booted) detail = "after the boot, STACK chosen but no board booted";
+  }
+  delete slowPaths["/assets/audio/ambient.pcm"];
+  if (detail) fail("preload", detail);
+  else pass("preload", `ambient held ${BOOT_SLOW} ms: reveal settled with the boot pending, a tap chose nothing and booted nothing, boot done after ${done.m[1]} steps (audio last), then the tap chose STACK and a board booted`);
+}
+
 // ---- 10. manifest: the PWA is installable from this origin ------------------
 {
   try {
@@ -1041,11 +1116,18 @@ let iceLock = null;
 // console.error, so they count here too (2026-09-17: a per-frame "=:
 // expected number" left this sub-arm reading "0 errors").
 const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
+// A texture fetch the page's own reload aborts is logged by the gles3
+// bridge as console.error ("image fetch failed: TypeError: Failed to
+// fetch"); the game asks again on the next boot (P3d, D40: fetches start
+// as soon as the worker is ready, so a reload the arm forces mid-boot
+// can cut one). Counted and shown, not failed.
+const abortedFetches = consoleErrors.filter((l) => /image fetch failed: TypeError: Failed to fetch/.test(l));
+const realErrors = consoleErrors.filter((l) => !/image fetch failed: TypeError: Failed to fetch/.test(l));
 // the three lines before the first error are the context a reader needs
 const firstErrorAt = consoleLines.findIndex((l) => /^Error: /.test(l));
 if (firstErrorAt > 0) console.log(`  before the first error: ${JSON.stringify(consoleLines.slice(Math.max(0, firstErrorAt - 3), firstErrorAt))}`);
-if (consoleErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors`);
-else fail("console", `${consoleErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(consoleErrors.concat(runtimeErrors).slice(0, 5))}`);
+if (realErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) aborted by a reload` : ""}`);
+else fail("console", `${realErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(realErrors.concat(runtimeErrors).slice(0, 5))}`);
 
 // ---- screenshot for the record ----------------------------------------------
 const shot = await send("Page.captureScreenshot", { format: "png" });

@@ -274,6 +274,8 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     // and reaches no entry, by design; so skip, wait for the settle, then
     // navigate
     await menuKey("ArrowUp");
+    // and the boot's steps must be done before the menu is live (D40)
+    if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
     const settledT = await waitLine(/^crash: title settled /, 0, 5000);
     if (!settledT) fail("menu", "a key during the title reveal did not settle it");
     m0 = consoleLines.length;
@@ -297,6 +299,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       await sleep(800);
       // the reveal again (a fresh process): a key skips it before the taps
       await menuKey("ArrowUp");
+      if (!(await waitLine(/^crash: boot done /, menu2 ? menu2.index : 0, 20000))) lookDetail0 = "no boot done line on the second boot";
       if (!(await waitLine(/^crash: title settled /, menu2 ? menu2.index : 0, 5000))) lookDetail0 = "a key during the second reveal did not settle it";
       m0 = consoleLines.length;
       // the LOOK entry (P3, the sheet switch) steps the look and keeps the

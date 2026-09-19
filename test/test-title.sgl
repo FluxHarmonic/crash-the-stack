@@ -189,24 +189,29 @@
       (assert-equal (+ slam SHEAR-TICKS) (title-settle-tick t))
       (let loop ((t t) (rising 0))
         (cond ((title-settled? t)
-               (assert-equal (* 1.0 SHEAR-REST) (title-shear t))
+               (assert-equal (title-default-slant) (title-shear t))
                (assert-true (> rising 0)))
               (else
                (let ((tick (title-tick t)) (s (title-shear t)))
                  (when (< tick slam) (assert-equal 0.0 s))
                  (loop (title-step t) (if (and (>= tick slam) (> s 0.0)) (+ rising 1) rising))))))))
-  (test "the stair: a letter line's rows 0-1 at two cells, 2-3 at one, 4-5 at none, a gap row none"
+  (test "the slant: row r of a letter line sits slant x (5 - r) cells right, a gap row none; ?slant=0 is upright"
     (let* ((t (title-new 13 BAUD #t))
-           (y0 (vector-ref LOGO-LETTERS 0)))
-      (assert-equal 2.0 (title-row-shear t y0))
-      (assert-equal 2.0 (title-row-shear t (+ y0 1)))
-      (assert-equal 1.0 (title-row-shear t (+ y0 2)))
-      (assert-equal 1.0 (title-row-shear t (+ y0 3)))
-      (assert-equal 0.0 (title-row-shear t (+ y0 4)))
+           (y0 (vector-ref LOGO-LETTERS 0))
+           (s (title-default-slant)))
+      (assert-equal 0.25 DEFAULT-SLANT)
+      (assert-equal (* 5 s) (title-row-shear t y0))
+      (assert-equal (* 4 s) (title-row-shear t (+ y0 1)))
+      (assert-equal (* 1 s) (title-row-shear t (+ y0 4)))
       (assert-equal 0.0 (title-row-shear t (+ y0 5)))
-      (assert-equal 0.0 (title-row-shear t (+ y0 6)))))
+      (assert-equal 0.0 (title-row-shear t (+ y0 6)))
+      (title-slant! 0)
+      (assert-equal 0.0 (title-shear (title-new 13 BAUD #t)))
+      (title-slant! 0.5)
+      (assert-equal 2.5 (title-row-shear (title-new 13 BAUD #t) y0))
+      (title-slant! DEFAULT-SLANT)))
   (test "a skip lands on the slant"
-    (assert-equal (* 1.0 SHEAR-REST) (title-shear (title-skip (title-new 13 BAUD #f))))))
+    (assert-equal (title-default-slant) (title-shear (title-skip (title-new 13 BAUD #f))))))
 
 (test-group "the glitch levels"
   (test "level 0 plans nothing; 1 a few; 2 (the default) five or more with a whole-row glitch first; 3 nine or more with two"
@@ -238,3 +243,56 @@
               (for-each (lambda (g) (assert-true (<= (glitch-to g) (title-slam-tick t)))) (title-plan t)))
             (loop (+ seed 1))))
         (level-loop (+ level 1))))))
+
+(test-group "the boot (ruling D40)"
+  (test "no steps: done at once; steps run in order, one frame at a time, quick ones in one frame"
+    (boot-reset!)
+    (assert-true (boot-done?))
+    (assert-equal '(0 . 0) (boot-progress))
+    (let ((calls 0))
+      (boot-add-step! 'quick (lambda () #t))
+      (boot-add-step! 'slow (lambda () (set! calls (+ calls 1)) (>= calls 3)))
+      (boot-add-step! 'last (lambda () #t))
+      (assert-false (boot-done?))
+      (assert-equal '(0 . 3) (boot-progress))
+      (assert-equal '(quick) (boot-run!))          ; quick done, slow ran once (calls 1)
+      (assert-equal '(slow last) (boot-pending-names))
+      (assert-equal '() (boot-run!))               ; slow: calls 2
+      (assert-equal '(slow last) (boot-run!))      ; slow: calls 3, done; last done in the same frame
+      (assert-true (boot-done?))
+      (assert-equal '(3 . 3) (boot-progress))
+      (assert-equal '() (boot-run!))))
+  (test "a step that raises counts as done; a step that never answers is forced by the timeout"
+    (boot-reset!)
+    (boot-add-step! 'broken (lambda () (error "no such asset")))
+    (assert-equal '(broken) (boot-run!))
+    (assert-true (boot-done?))
+    (boot-reset!)
+    (boot-add-step! 'stuck (lambda () #f))
+    (let loop ((i 0) (last '()))
+      (if (> i (+ BOOT-TIMEOUT 2))
+          (begin
+            (assert-true (boot-done?))
+            (assert-true (boot-timed-out?)))
+          (loop (+ i 1) (boot-run!))))
+    (assert-equal '(1 . 1) (boot-progress))
+    (boot-reset!))
+  (test "the menu is not live while a step is pending: a settled reveal, a tap on an entry picks nothing; then it does"
+    (boot-reset!)
+    (let ((ready #f))
+      (boot-add-step! 'asset (lambda () ready))
+      (let* ((m (menu-new '(stack cards) 'stack))    ; settled title
+             (c (let ((rect (menu-entry-rect 1 VW VH)))
+                  (cons (+ (car rect) 10) (+ (cadr rect) 10)))))
+        (assert-false (menu-live? m))
+        (assert-false (cdr (menu-step m (click-frame c) VW VH)))
+        (assert-false (cdr (menu-step m (frame '(return)) VW VH)))
+        (set! ready #t)
+        (boot-run!)
+        (assert-true (menu-live? m))
+        (assert-equal 'cards (cdr (menu-step m (click-frame c) VW VH)))))
+    (boot-reset!))
+  (test "the menu is not live while the reveal runs either, whatever the boot says"
+    (boot-reset!)
+    (assert-false (menu-live? (menu-new '(stack cards) 'stack 9)))
+    (assert-true (menu-live? (menu-new '(stack cards) 'stack)))))
