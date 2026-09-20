@@ -276,6 +276,7 @@
       if (params.has("card")) app.dispatch("card", params.get("card"));
       if (params.has("dial")) app.dispatch("dial", params.get("dial"));
       app.dispatch("clock", String(Date.now() % 2147483647));
+      app.dispatch("epoch", params.has("epoch") ? params.get("epoch") : String(Math.floor(Date.now() / 1000)));   // P4: the daily's day, the run seed (?epoch=N is the arm's door)
       if (coarse) app.dispatch("touch", "on");
       updates.app = app;
       updates.ready(app);
@@ -297,45 +298,63 @@
       Promise.all([swReady, window.crashRevealOver]).then(function () { fetchAmbient(app); });
     });
 
-    // The ambient loop (P3): s16le mono PCM under assets/audio/, fetched
-    // here because the wasm's bridges have no bytes fetch, and handed to
-    // the game as base64 chunks through the dispatch ("audio-chunk"),
-    // then ("audio-done", n), or ("audio-done", 0) when the fetch fails.
-    // Fetched once swReady resolves (D40),
-    // outside the service worker's activation window (the same reason the
-    // game's own texture fetches wait), and never fatal: no ambient means
-    // sound effects alone. One 16 KB chunk per animation frame: the game
-    // decodes each as it lands, so the decode is spread over about a
-    // second instead of stalling one frame for that long.
+    // The music (P4, ruling D50): three OGG Vorbis tunes under
+    // assets/audio/ (mono 22050, ~1 MB each: the 7 MB PCM renders are not
+    // shipped), fetched here because the wasm's bridges have no bytes
+    // fetch, decoded by the browser (decodeAudioData on an offline context
+    // at the tune's rate, so no resampling), and handed to the game as
+    // s16le mono PCM in base64 chunks through the dispatch: ("track",
+    // NAME) opens one, ("audio-chunk", b64) appends, ("audio-done", n)
+    // closes it; ("audio-done", 0) after ("track", NAME) means that tune
+    // was given up. The menu theme (spy) goes first: the boot's audio step
+    // waits for it (D40); the others land while the menu is up. Fetched
+    // once swReady resolves, outside the service worker's activation
+    // window, and never fatal: no tune means sound effects alone. One
+    // 16 KB chunk per animation frame, as the ambient was delivered.
+    var TRACKS = ["spy", "groove", "breaker"];
     var ambientSettled = null;
     window.crashAmbientSettled = new Promise(function (resolve) { ambientSettled = resolve; });
-    function fetchAmbient(app) {
-      // A fetch pending while a worker is swapped in fails ("Failed to
-      // fetch", measured 2026-09-19 under the arm's update sub-arm); it is
-      // asked for again, AMBIENT_TRIES in all, before the boot's audio
-      // step is told to stand down without it.
-      var AMBIENT_TRIES = 3, tries = 0;
+    function fetchAmbient(app) { fetchTracks(app, 0); }
+    function fetchTracks(app, index) {
+      if (index >= TRACKS.length) return;
+      var name = TRACKS[index];
+      var TRIES = 3, tries = 0;
+      function settled() { if (index === 0) ambientSettled(); fetchTracks(app, index + 1); }
+      function deliver(pcm) {
+        // float32 mono at the tune's rate -> s16le, 16 KB a frame
+        var n16 = pcm.length, bytes = new Uint8Array(n16 * 2);
+        for (var i = 0; i < n16; i++) {
+          var v = Math.max(-1, Math.min(1, pcm[i])), s = v < 0 ? v * 32768 : v * 32767;
+          var u = s < 0 ? s + 65536 : s;
+          bytes[2 * i] = u & 255; bytes[2 * i + 1] = (u >> 8) & 255;
+        }
+        var CHUNK = 16 * 1024, i2 = 0, n = 0;
+        app.dispatch("track", name);
+        (function next() {
+          if (i2 >= bytes.length) { app.dispatch("audio-done", String(n)); settled(); return; }
+          var part = bytes.subarray(i2, Math.min(i2 + CHUNK, bytes.length)), s = "";
+          for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
+          app.dispatch("audio-chunk", btoa(s));
+          i2 += CHUNK; n++;
+          requestAnimationFrame(next);
+        })();
+      }
       (function attempt() {
         tries++;
-        fetch("assets/audio/ambient.pcm", { cache: "force-cache" }).then(function (r) {
-          if (!r.ok) throw new Error("ambient " + r.status);
+        fetch("assets/audio/" + name + ".ogg", { cache: "force-cache" }).then(function (r) {
+          if (!r.ok) throw new Error(name + " " + r.status);
           return r.arrayBuffer();
         }).then(function (buf) {
-          // 16 KB a frame: the game decodes each on the main thread (~20 ms; 64 KB
-          // went quadratic in the old decoder and starved the sink under the meter)
-          var bytes = new Uint8Array(buf), CHUNK = 16 * 1024, i = 0, n = 0;
-          (function next() {
-            if (i >= bytes.length) { app.dispatch("audio-done", String(n)); ambientSettled(); return; }
-            var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
-            for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
-            app.dispatch("audio-chunk", btoa(s));
-            i += CHUNK; n++;
-            requestAnimationFrame(next);
-          })();
+          // decoded at 22050 mono on an offline context: what the file holds
+          var ctx = new OfflineAudioContext(1, 1, 22050);
+          return ctx.decodeAudioData(buf);
+        }).then(function (audio) {
+          console.log("crash: track " + name + " decoded " + audio.length + " frames at " + audio.sampleRate);
+          deliver(audio.getChannelData(0));
         }).catch(function (err) {
-          console.log("crash: ambient failed " + err.message + " (try " + tries + ")");
-          if (tries < AMBIENT_TRIES) setTimeout(attempt, 1500);
-          else { app.dispatch("audio-done", "0"); ambientSettled(); }   // D40: the boot's audio step does not wait on a lost fetch
+          console.log("crash: track " + name + " failed " + err.message + " (try " + tries + ")");
+          if (tries < TRIES) setTimeout(attempt, 1500);
+          else { app.dispatch("track", name); app.dispatch("audio-done", "0"); settled(); }   // D40: the boot's audio step does not wait on a lost fetch
         });
       })();
     }

@@ -135,29 +135,52 @@
     (from-git url: sigil-repo package: "sigil-test" version: ">=0.22")
     (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22"))
 
-  ;; The web build's task. The native configs take sigil-build's default
-  ;; build task, which is the same first three steps (a task's configs:
-  ;; gate is honored since sigil 0.22.2).
+
+  ;; The game's own C ((crash native): the music mixer's inner loop and
+  ;; the OGG decoder over sigil-audio's stb_vorbis, P4) is linked into the custom runtime on every
+  ;; target through this library entry (sigil-build collects native-init
+  ;; from the root package too) and compiled by the build task below.
+  libraries: (list
+    (library
+      name: 'crash-native
+      c-sources: '("src/c/crash-native.c")
+      c-include-dirs: '()
+      native-init: "sigil__init_crash_native_module"))
+
+  ;; One build task for every config; the steps that differ by target
+  ;; are lambdas over the context (sigil-build threads ctx through the
+  ;; steps). Native: the game's C, the modules, the docs, the assets
+  ;; (sigil-build's default task plus the C). Web: the same C (the decoder
+  ;; answers #f under __wasm__: the page decodes there) plus sigil-audio's
+  ;; native-init stub, then the link and the version stamp.
   tasks: (list
     (task
       name: 'build
-      configs: '(web)
-      description: "Compile the game and link the browser app"
+      description: "Compile the game (and, on the web config, link the browser app)"
       steps: (list
-        ;; sigil-audio's native-init has no C behind it on wasm (its package
-        ;; skips sokol_audio there), and the generated register below calls
-        ;; it anyway: an empty definition, web config only.
-        (compile-c-sources sources: (list "src/c/wasm-audio-stub.c"))
+        (lambda (ctx)
+          (if (memq (target-os ctx) '(wasm wasi))
+              ;; sigil-audio's native-init has no C behind it on wasm (its package
+              ;; skips miniaudio there), and the generated register below calls
+              ;; it anyway: an empty definition, web config only.
+              ((compile-c-sources sources: (list "src/c/wasm-audio-stub.c" "src/c/crash-native.c")
+                                  flags: (with-sigil-c-flags '("-std=c99" "-Wno-unused-function"))) ctx)
+              ((compile-c-sources sources: (list "src/c/crash-native.c")
+                                  flags: (with-sigil-c-flags (quote ("-std=c99" "-D_GNU_SOURCE")))) ctx)))
+        ;; the objects into an archive the custom runtime links (a native package's shape)
+        (create-static-library name: "crash-the-stack")
         (compile-sigil-modules sources: "src/**/*.sgl")
         (copy-package-docs)
-        ;; the whole assets/ tree -> build/web/assets/ (license, manifest
+        ;; the whole assets/ tree -> build/<config>/assets/ (license, manifest
         ;; and the art sources included), so the web page fetches every
         ;; texture from assets/ next to the wasm; then the generator
         ;; references come back out: provenance, not shipped.
         (link-assets)
-        ;; link-web-application generates the sigil_wasm_app_register that
-        ;; calls sigil-graphics' native-init (sigil 0.22.2), so the sokol C
-        ;; is linked in and the wasm imports `gl`.
-        (link-web-application name: "crash-the-stack" html-mount-id: "status")
-        stamp-web-version
-        drop-refs))))
+        (lambda (ctx)
+          (if (memq (target-os ctx) '(wasm wasi))
+              ;; link-web-application generates the sigil_wasm_app_register that
+              ;; calls sigil-graphics' native-init (sigil 0.22.2), so the sokol C
+              ;; is linked in and the wasm imports `gl`.
+              (drop-refs (stamp-web-version ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx)))
+              ctx)))))   ; native: the bundle wants every linked asset in place, refs included
+)

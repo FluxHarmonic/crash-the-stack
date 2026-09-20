@@ -89,7 +89,10 @@
           (crash store)
           (crash save)
           (crash cards save)
-          (crash gpu post))
+          (crash gpu post)
+          (crash music)
+          (crash native)
+          (crash trace))
 
   (export native-main load-editor)
 
@@ -305,6 +308,7 @@
     ;; the saved one, else a fresh deal of the flags' seed (a --stack or
     ;; --cards boot, and the arms).
     (define (open-stack a lay seed fresh? model resume?)
+      (unless (and resume? (stage-session a)) (music-fresh!))
       (let* ((held (stage-session a))
              (s (cond ((and resume? held) held)
                       (else
@@ -324,6 +328,7 @@
           (stage a screen: 'stack session: s fx: (if (eq? s held) (stage-fx a) (fx-new))))))
 
     (define (open-cards a seed fresh? resume?)
+      (unless (and resume? (stage-deal a)) (music-fresh!))
       (let* ((held (stage-deal a))
              (d (cond ((and resume? held) held)
                       (else
@@ -350,6 +355,7 @@
 
     (define (open-spec a sp lay model)
       (say-spec sp)
+      (music-fresh!)   ; a new deal: its rest track from the top (D50)
       (if (eq? (spec-table sp) 'cards)
           (begin
             (set-active-game! 'cards)
@@ -544,9 +550,9 @@
       (if (audio-open!)
           (begin
             (audio-set-muted! mute?)
-            (if (file-exists? AMBIENT-PATH)
-                (audio-set-ambient! (read-file-bytes AMBIENT-PATH) AMBIENT-RATE)
-                (begin (display "ambient not found: ") (display AMBIENT-PATH) (newline))))
+            ;; the music (P4, D50): the ambient loop is retired; the tracks are
+            ;; decoded as boot steps (boot-steps!) once the reveal is over
+            #t)
           (begin (display "audio: no device; playing silent") (newline))))
 
     ;; The boot's steps (ruling D40): every texture the title or the card
@@ -568,7 +574,23 @@
       ;; later rectangles undrawn: measured, the items vanished with the atlas
       ;; on), so the step only waits for it
       (boot-add-step! 'atlas (lambda () (and *reveal-over* (atlas-ready?))))
-      (boot-add-step! 'audio (lambda () (audio-render-next!))))   ; the rest of the cue bank, one a frame
+      (boot-add-step! 'audio (lambda () (audio-render-next!)))   ; the rest of the cue bank, one a frame
+      ;; the music's tracks (P4, D50): each OGG decoded by (crash native)'s
+      ;; stb_vorbis in a step of its own, after the reveal (a decode is a
+      ;; frame or two); a file that will not decode is said once and skipped
+      ;;   crash: track NAME FRAMES         a track landed (0: not decoded)
+      (for-each (lambda (name)
+                  (boot-add-step! name
+                                  (lambda ()
+                                    (and *reveal-over*
+                                         (let ((r (%decode-ogg (music-file name))))
+                                           (if r
+                                               (audio-add-track! name (caddr r) (car r))
+                                               #t)
+                                           (display "crash: track ") (display name) (display " ")
+                                           (display (if r (quotient (bytevector-length (caddr r)) 2) 0)) (newline)
+                                           #t)))))
+                TRACKS))
 
     (define (stage-loop seed model log-keys? fresh? cards? bg-mode bg-hold mute?)
       (lambda ()
@@ -609,7 +631,12 @@
                    (_ (boot-run!))   ; the boot's steps, one frame at a time, whatever the screen (D40)
                    ;; the ambient starts the frame the menu is ready (the reveal settled, the
                    ;; boot done), never under the reveal (David, 2026-09-20)
-                   (_ (when (and (not (audio-ambient-playing?)) *reveal-over* (boot-done?)) (audio-ambient-play!)))
+                   ;; the music (P4, D50) follows the screen and the table's phase once the menu is live
+                   (_ (when (and *reveal-over* (boot-done?))
+                        (case (stage-screen a)
+                          ((menu) (music-frame! (quote menu) #f))
+                          ((stack) (music-frame! (quote stack) (trace-phase (session-trace (stage-session a)))))
+                          (else (music-frame! (quote cards) (trace-phase (deal-trace (stage-deal a))))))))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
                    ;; Escape on the menu's top screen quits when nothing is
@@ -841,9 +868,9 @@
         ;; web's ?hud= door; any other word leaves the store alone)
         (when (and hud-arg (layout-name? (string->symbol hud-arg)))
           (set-stored-hud! (string->symbol hud-arg)))
-        ;; the build's commit for the credits (P4): assets/VERSION when a release
+        ;; the build's commit for the credits (P4): a VERSION file beside the binary when a release
         ;; artifact ships one, else git's word in a checkout, else unversioned
-        (title-stamp! (let ((file (guard (e (#t #f)) (read-file-string "assets/VERSION" missing: #f))))
+        (title-stamp! (let ((file (guard (e (#t #f)) (read-file-string "VERSION" missing: #f))))
                         (cond ((and file (> (string-length (string-trim file)) 0)) (string-trim file))
                               (else (let ((sha (guard (e (#t "")) (string-trim (process-output->string "git" "rev-parse" "--short=12" "HEAD")))))
                                       (if (string=? sha "") "unversioned" sha))))))

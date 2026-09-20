@@ -140,7 +140,8 @@
           (crash store)
           (crash cards save)
           (crash cards seeds)
-          (crash gpu post))
+          (crash gpu post)
+          (crash music))
 
   (export web-main web-dispatch)
 
@@ -428,15 +429,15 @@
 
     ;; --- the sound (P3) ----------------------------------------------------------
 
-    ;; The page fetches assets/audio/ambient.pcm (there is no bytes fetch
-    ;; in the bridges the wasm has; the page has fetch) and hands it over
-    ;; as ("audio-chunk", base64) dispatches, then ("audio-done", count).
-    ;; Decoded here into one s16le bytevector and handed to the mixer.
+    ;; The page fetches and decodes each tune under assets/audio/ (there is
+    ;; no bytes fetch in the bridges the wasm has; the page has fetch and
+    ;; decodeAudioData) and hands the PCM over as ("track", name), then
+    ;; ("audio-chunk", base64) dispatches, then ("audio-done", count): see
+    ;; the music below. Decoded here into one s16le bytevector a track.
     ;;   crash: audio open|closed             the context and sink at boot
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
-    ;;   crash: ambient FRAMES                the loop landed (frames at AMBIENT-RATE)
-    ;; ("ambient", "off") drops the loop again: the browser arm's way to
-    ;; hear a cue by itself.
+    ;; ("ambient", "off") fades the music out and holds it: the browser
+    ;; arm's way to hear a cue by itself.
     (define B64 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
 
     ;; code point -> value, a 128-entry table built once (1.1 MB of PCM is
@@ -486,21 +487,37 @@
 
     ;; One chunk a frame, decoded as it lands, so the cost is spread over
     ;; the seconds the page takes to send them.
+    ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
+    ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
+    ;; ("audio-chunk", b64) appends, ("audio-done", n) closes it into the
+    ;; player. The menu theme (spy) is what the boot's audio step waits for
+    ;; (the ambient's old place, and its lines: the arms read them):
+    ;;   crash: track NAME FRAMES             a track landed (0: given up)
+    ;;   crash: ambient FRAMES                the theme landed (spy; 0: given up)
+    ;;   crash: ambient start                 the music began (the menu live)
+    (define *track-name* 'spy)
+
+    (define (track! payload)
+      (set! *track-name* (string->symbol payload))
+      (set! *ambient-chunks* '())
+      0)
+
     (define (audio-chunk! payload)
       (set! *ambient-chunks* (cons (b64-decode payload) *ambient-chunks*))
       0)
 
     (define (audio-done! payload)
-      (let ((bytes (apply bytevector-append (reverse *ambient-chunks*))))
+      (let ((bytes (apply bytevector-append (reverse *ambient-chunks*)))
+            (name *track-name*))
         (set! *ambient-chunks* '())
-        (set! *ambient-ready* #t)
-        ;; no chunks: the page gave the ambient up (a failed fetch); sound
-        ;; effects alone, and the boot's audio step is done
-        (if (> (bytevector-length bytes) 0)
-            (begin
-              (audio-set-ambient! bytes AMBIENT-RATE)
-              (say "ambient" (quotient (bytevector-length bytes) 2)))
-            (say "ambient" 0))
+        ;; no chunks: the page gave the track up (a failed fetch); the
+        ;; boot's audio step does not wait on the theme then
+        (when (> (bytevector-length bytes) 0)
+          (audio-add-track! name bytes AMBIENT-RATE))
+        (say "track" name (quotient (bytevector-length bytes) 2))
+        (when (eq? name 'spy)
+          (set! *ambient-ready* #t)
+          (say "ambient" (quotient (bytevector-length bytes) 2)))
         0))
 
     ;; A user gesture (a pointer down, a key, the page's pointerup and
@@ -1230,21 +1247,24 @@
                     (say "menu" "slow-frame" (exact (round (- t3 t0))) "step" (exact (round (- t1 t0))) "draw" (exact (round (- t2 t1))) "end" (exact (round (- t3 t2))))))))
             (tick-screen (make-input-frame '() '() #f) dt))))
 
-    ;; The ambient's start (David on 410e39e, 2026-09-20): preloaded behind
-    ;; the gate as before, silent under the card, the reveal and its beeps,
-    ;; started from its top the frame the menu is ready (the slant settled,
-    ;; the boot's steps done: the items are in) or, on a table boot, the
-    ;; frame the boot is done. A later startup tune slots in here.
-    ;;   crash: ambient start                 the loop began
+    ;; The music (P4, D50; the ambient's start before it, David on 410e39e):
+    ;; silent under the card, the reveal and its beeps; from the frame the
+    ;; menu is ready (the slant settled, the boot's steps done) or, on a
+    ;; table boot, the frame the boot is done, what plays follows the
+    ;; screen and the table's phase ((crash shell) music-frame!).
+    ;;   crash: ambient start                 the music began
     (define *ambient-started* #f)
     (define (ambient-tick!)
-      (when (and (not *ambient-started*) *booted* (boot-done?)
+      (when (and *booted* (boot-done?)
                  (let ((t (and *menu* (menu-title *menu*))))
                    (or (not t) (title-settled? t))))
-        (set! *ambient-started* #t)
-        (audio-ambient-play!)
-        (say "ambient" "start")))
-
+        (unless *ambient-started*
+          (set! *ambient-started* #t)
+          (say "ambient" "start"))
+        (case *screen*
+          ((menu) (music-frame! 'menu #f))
+          ((stack) (when *session* (music-frame! 'stack (trace-phase (session-trace *session*)))))
+          (else (when *deal* (music-frame! 'cards (trace-phase (deal-trace *deal*))))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
     ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
     ;; bookkeeping, the audio pump, and OTHER = the tick minus every timed
@@ -1353,6 +1373,7 @@
     ;; A fresh stack from a spec (P4: a FREE PLAY deal in a version, the
     ;; daily, a share code, a run's layer).
     (define (open-stack-spec! sp)
+      (music-fresh!)   ; a new deal: its rest track from the top (D50)
       (set! *screen* 'stack)
       (set! *announced* #f)
       (set-active-game! 'stack)
@@ -1373,6 +1394,7 @@
           (say "spec" (spec-table sp) (spec-version sp) (spec-seed sp) (encode sp)))))
 
     (define (open-cards-spec! sp)
+      (music-fresh!)
       (set! *screen* 'cards)
       (set! *announced* #f)
       (set-active-game! 'cards)
@@ -1391,6 +1413,7 @@
     (define (open-stack! resume?)
       (set! *screen* 'stack)
       (set! *announced* #f)
+      (unless (and resume? *session*) (music-fresh!))   ; a new deal: its rest track from the top (D50)
       (let ((lay (turtle-layout)))
         (ensure-geometry! lay)
         (unless (and resume? *session*)
@@ -1410,6 +1433,7 @@
       (set! *screen* 'cards)
       (set! *announced* #f)
       (unless *card-geom* (set! *card-geom* (make-card-geometry VW VH)))
+      (unless (and resume? *deal*) (music-fresh!))
       (unless (and resume? *deal*)
         (let* ((booted (if (eq? *demo* 'cleared)
                            (let ((won (demo-won-deal)))
@@ -1722,15 +1746,19 @@
             ((string=? type "dial") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (<= 0 n 60000)) (title-dial-min! (exact (round (/ (* n 60) 1000)))))))))
             ((string=? type "diag") (param! (lambda () (title-diag! #t) (set! *diag* #t))))   ; the title's overlay and the shell's landing lines, one door
             ;; the page's clock at boot: the title reveal's seed when none is asked for
-            ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ (quotient *clock* 1000) (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))
+            ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n))))))
+            ;; the page's epoch second at boot (?epoch=N overrides it, the daily leg's door): the
+            ;; daily's day and the run seed come from it plus the time since
+            ((string=? type "epoch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ n (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))
             ;; ?code=XXXXX-XXXXX: the board of a share code, dealt at boot (P4)
             ((string=? type "code") (param! (lambda () (set! *code* payload))))
             ;; the page polls for a COPY (1 once): it reads the store's "code" key then
             ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
+            ((string=? type "track") (track! payload))
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)
-            ((string=? type "ambient") (when (string=? payload "off") (audio-set-ambient! #f AMBIENT-RATE)) 0)
+            ((string=? type "ambient") (when (string=? payload "off") (music-off!)) 0)
             ((string=? type "audio-done") (audio-done! payload))
             ;; the page's service worker is active (or absent): fetches are safe (D40)
             ((string=? type "sw") (param! (lambda () (set! *sw-ready* #t))))

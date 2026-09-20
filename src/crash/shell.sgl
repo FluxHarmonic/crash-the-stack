@@ -32,6 +32,7 @@
           (crash run)
           (crash code)
           (crash daily)
+          (crash music)
           (crash title)
           (sigil math)
           (sigil time)
@@ -46,13 +47,14 @@
 
   (export VW VH MODIFIERS bg-advance bg-choose copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
-          AMBIENT-PATH AMBIENT-RATE play-cues!
+          AMBIENT-RATE play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
           stored-hud set-stored-hud!
           settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code
           set-clock-source! now-second today
+          music-frame! music-fresh! music-off!
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
           daily-session? daily-deal?
           boot-session save-after-frame! run-after-frame! deal-run-after-frame!
@@ -429,12 +431,39 @@
           (store-write-datum! CARDS-KEY (deal->datum after)))
         after))
 
+    ;; --- the music (P4, ruling D50) ---------------------------------------------
+
+    ;; What plays follows the screen and the table's phase ((crash music));
+    ;; the shells call music-frame! every frame the menu or a table is up,
+    ;; and it asks (crash audio) only when the answer changes, so a track
+    ;; resumes or starts over once, not every frame. A new deal says
+    ;; music-fresh! first: its rest track then starts from the top; a
+    ;; continued or returned-to board resumes. music-off! (the arm's
+    ;; ambient-off door) fades everything out and holds it.
+    (define *music-want* 'none)
+    (define *music-fresh* #f)
+    (define *music-off* #f)
+
+    (define (music-fresh!) (set! *music-fresh* #t))
+    (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0))
+
+    (define (music-frame! screen phase)
+      (unless *music-off*
+        (let ((want (music-track-for screen phase *music-fresh*)))
+          (set! *music-fresh* #f)
+          (unless (equal? want *music-want*)
+            (set! *music-want* want)
+            (if want
+                (audio-play! (car want) (cdr want))
+                (audio-fade-out! 800))))))
+
     ;; --- the sound (P3) ---------------------------------------------------------
 
-    ;; The ambient loop: s16le mono PCM at AMBIENT-RATE (assets/MANIFEST
-    ;; names its provenance). The native shell reads the file; the web
-    ;; page fetches it and hands it over in chunks.
-    (define AMBIENT-PATH "assets/audio/ambient.pcm")
+    ;; The tracks' rate: every tune under assets/audio/ is OGG Vorbis mono
+    ;; at this rate (assets/MANIFEST names each one's provenance; the
+    ;; ambient loop that played before D50 is retired). The native shell
+    ;; decodes each file; the web page decodes and hands the PCM over in
+    ;; chunks. TRACK-FILES in (crash music) names the files.
     (define AMBIENT-RATE 22050)
 
     (define (play-cues! cues)

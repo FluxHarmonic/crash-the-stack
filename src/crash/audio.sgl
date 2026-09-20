@@ -26,13 +26,16 @@
 (define-library (crash audio)
   (import (sigil math)
           (sigil audio sink)
-          (crash synth))
+          (crash synth)
+          (crash native))
 
   (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
           audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-volume audio-set-volume! audio-music? audio-set-music! audio-sfx? audio-set-sfx!
           audio-set-depth! audio-depth
+          audio-add-track! audio-track? audio-track-names audio-play! audio-fade-out! audio-playing
+          audio-player-gain audio-players audio-positions audio-mix-chunk! FADE-IN-MS FADE-OUT-MS TRACK-GAIN
           audio-voices audio-ambient-frames audio-ambient-play! audio-ambient-playing? audio-underruns
           mix-cached-into audio-cache-reset! audio-cache-rendered
           audio-state
@@ -311,6 +314,113 @@
                             ((>= (+ 1 (cdr (car vs))) (cue-frames (car (car vs)))) (advance (cdr vs) acc))
                             (else (advance (cdr vs) (cons (cons (car (car vs)) (+ 1 (cdr (car vs)))) acc))))))))))
 
+    ;; --- the tracks (P4, ruling D50) --------------------------------------------
+    ;;
+    ;; Music is a set of named tracks, each decoded s16 mono PCM at its
+    ;; own rate ((crash music) says which plays where), played by up to
+    ;; two players at a time so one can fade out under another fading
+    ;; in. A player is (name pos gain target step): its position in
+    ;; source frames (fractional), its gain now, the gain it ramps
+    ;; toward, and the ramp's step per output frame (fixed when the ramp
+    ;; is set, so it lands: a step recomputed from the distance left
+    ;; never arrives). The inner loop is (crash native)'s %mix-track! (C
+    ;; on both targets): a three-minute tune rendered as the ambient's
+    ;; cache would be 65 MB, and the Sigil per-sample loop cost 9 ms a
+    ;; frame on the phone (P3c). Every track's last position is kept so
+    ;; a track resumes where it left off (the menu theme, the rest
+    ;; tracks); 'top starts it over. The master volume and MUSIC apply as
+    ;; factors on the players' gains at mix time, so a change needs no
+    ;; re-render.
+    (define FADE-IN-MS 1000)      ; a track coming in (menu -> board, the theme's return)
+    (define FADE-OUT-MS 500)      ; a track leaving
+    (define TRACK-GAIN 0.55)      ; the tracks' level under the cues (AMBIENT-GAIN's value)
+    (define *tracks* '())         ; ((name . (bytes . rate)) ...)
+    (define *players* '())        ; ((name pos gain target step) ...), the newest first
+    (define *positions* '())      ; ((name . pos) ...), where each track left off
+
+    (define (audio-add-track! name bytes rate)
+      (set! *tracks* (cons (cons name (cons bytes rate))
+                           (filter (lambda (t) (not (eq? (car t) name))) *tracks*))))
+
+    (define (audio-track? name) (and (assq name *tracks*) #t))
+    (define (audio-track-names) (map car *tracks*))
+
+    ;; The track playing (fading in or at rest), or #f while everything fades out.
+    (define (audio-playing)
+      (let loop ((ps *players*))
+        (cond ((null? ps) #f)
+              ((> (list-ref (car ps) 3) 0.0) (car (car ps)))
+              (else (loop (cdr ps))))))
+
+    (define (audio-player-gain name)
+      (let ((p (assq name *players*)))
+        (if p (list-ref p 2) 0.0)))
+
+    (define (audio-players) *players*)
+    (define (audio-positions) *positions*)
+
+    ;; A player ramping from its gain to target over ms at the context's rate.
+    (define (ramped name pos gain target ms)
+      (let ((frames (max 1 (exact (round (/ (* ms *rate*) 1000.0))))))
+        (list name pos gain target (/ (- target gain) (* 1.0 frames)))))
+
+    ;; Play name: 'top from its start, 'resume from where it left off. The
+    ;; track already playing at rest or coming in stays; every other player
+    ;; fades out over FADE-OUT-MS and the new one fades in over FADE-IN-MS
+    ;; (a cross-fade when both run). No track of that name: nothing changes.
+    (define (audio-play! name mode)
+      (when (audio-track? name)
+        (let ((current (assq name *players*)))
+          (if (and current (> (list-ref current 3) 0.0) (eq? mode 'resume))
+              #f   ; already on its way in or at rest
+              (let* ((others (map (lambda (p) (ramped (car p) (cadr p) (caddr p) 0.0 FADE-OUT-MS))
+                                  (filter (lambda (p) (not (eq? (car p) name))) *players*)))
+                     (pos (cond ((eq? mode 'top) 0.0)
+                                (current (cadr current))
+                                ((assq name *positions*) => cdr)
+                                (else 0.0)))
+                     (gain (if current (caddr current) 0.0)))
+                (set! *players* (cons (ramped name pos gain 1.0 FADE-IN-MS) others)))))))
+
+    ;; Everything fades out over ms (the cascade, a severed link); 0 is at once.
+    (define (audio-fade-out! ms)
+      (set! *players* (map (lambda (p) (ramped (car p) (cadr p) (caddr p) 0.0 ms)) *players*)))
+
+    ;; A chunk of n stereo frames of the tracks alone into out (the tests'
+    ;; door: silence, then the players), at the context's rate.
+    (define (audio-mix-chunk! out n)
+      (bytevector-copy! out 0 ZERO 0 (* 8 n))
+      (mix-tracks-into! out n))
+
+    ;; The players advanced through n output frames into out (added), at
+    ;; the context's rate; a player that reached silence on its way out
+    ;; leaves, its position kept.
+    (define (mix-tracks-into! out n)
+      (let ((factor (if (and *music-on* (not *muted*)) (* TRACK-GAIN *volume*) 0.0)))
+        (set! *players*
+              (let loop ((ps *players*) (acc '()))
+                (if (null? ps)
+                    (reverse acc)
+                    (let* ((p (car ps))
+                           (name (car p)) (pos (cadr p)) (gain (caddr p)) (target (cadddr p)) (step (list-ref p 4))
+                           (t (assq name *tracks*))
+                           (bytes (car (cdr t)))
+                           (rate (cdr (cdr t)))
+                           (frames (quotient (bytevector-length bytes) 2))
+                           ;; the gain after n frames, landing on the target
+                           (g1 (let ((g (+ gain (* n step))))
+                                 (if (or (and (> step 0.0) (>= g target)) (and (< step 0.0) (<= g target)) (= step 0.0))
+                                     target
+                                     g)))
+                           (pos1 (if (> frames 0)
+                                     (%mix-track! out n bytes frames pos (/ (* 1.0 rate) *rate*) (* factor gain) (* factor g1))
+                                     pos)))
+                      (set! *positions* (cons (cons name pos1) (filter (lambda (e) (not (eq? (car e) name))) *positions*)))
+                      (loop (cdr ps)
+                            (if (and (<= g1 0.0) (<= target 0.0))
+                                acc   ; faded out: leaves, its position kept
+                                (cons (list name pos1 g1 target (if (= g1 target) 0.0 step)) acc)))))))))
+
     ;; Once a frame: top the sink up to TARGET-DEPTH frames ahead of the
     ;; output, PUSH-MAX at most. Answers the frames pushed (0 when there is
     ;; no stream, or the depth is already there).
@@ -324,4 +434,5 @@
                 0
                 (begin
                   (set! *voices* (mix-cached-into *out* n (and (not *muted*) *music-on* *ambient-on* *ambient* #t) *voices*))
+                  (mix-tracks-into! *out* n)   ; the music (P4, D50), over the cues
                   (push-audio-samples *stream* *out* n))))))))

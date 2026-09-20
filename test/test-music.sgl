@@ -1,0 +1,109 @@
+;;; The music model (P4, ruling D50): which track plays where, in which
+;;; mode, and the player's fades in (crash audio): a cross-fade sums to
+;;; one track's level, a track resumes where it left off, 'top starts
+;;; it over, MUSIC off and the master volume scale the mix, the inner
+;;; loop ((crash native)'s %mix-track!) resamples and loops.
+
+(import (sigil test)
+        (sigil math)
+        (crash music)
+        (crash audio))
+
+(test-group "music: the table"
+  (test "three tracks with their files under assets/audio/"
+    (assert-equal '(spy groove breaker) TRACKS)
+    (for-each (lambda (name) (assert-true (and (music-file name) #t))) TRACKS)
+    (assert-equal "assets/audio/spy.ogg" (music-file 'spy))
+    (assert-false (music-file 'nothing)))
+  (test "the menu is the theme, resumed; the rest tracks: spy on the stack, groove on DEFRAG"
+    (assert-equal '(spy . resume) (music-track-for 'menu #f #f))
+    (assert-equal 'spy (music-rest-track 'stack))
+    (assert-equal 'groove (music-rest-track 'cards)))
+  (test "a fresh deal starts the rest track from the top; a continued board resumes it"
+    (assert-equal '(spy . top) (music-track-for 'stack 'trace #t))
+    (assert-equal '(spy . resume) (music-track-for 'stack 'trace #f))
+    (assert-equal '(groove . top) (music-track-for 'cards 'trace #t))
+    (assert-equal '(groove . resume) (music-track-for 'cards 'trace #f)))
+  (test "traced (the counter-hack phase) is BREAKER from the top on both tables; cleared and severed are silence"
+    (assert-equal '(breaker . top) (music-track-for 'stack 'counter #f))
+    (assert-equal '(breaker . top) (music-track-for 'cards 'counter #t))
+    (assert-false (music-track-for 'stack 'cleared #f))
+    (assert-false (music-track-for 'cards 'severed #f))))
+
+;; a 1 s test track at 22050: a constant 0.5 (s16 16384)
+(define (constant-track frames value)
+  (let ((bv (make-bytevector (* 2 frames) 0)))
+    (let loop ((i 0))
+      (when (< i frames)
+        (bytevector-u8-set! bv (* 2 i) (modulo value 256))
+        (bytevector-u8-set! bv (+ 1 (* 2 i)) (quotient value 256))
+        (loop (+ i 1))))
+    bv))
+
+(define (rms bv n)
+  (let loop ((i 0) (acc 0.0))
+    (if (= i n)
+        (sqrt (/ acc n))
+        (let ((v (bytevector-ieee-single-ref bv (* 8 i) 'little)))
+          (loop (+ i 1) (+ acc (* v v)))))))
+
+(define (mean bv n)
+  (let loop ((i 0) (acc 0.0))
+    (if (= i n) (/ acc n) (loop (+ i 1) (+ acc (bytevector-ieee-single-ref bv (* 8 i) 'little))))))
+
+(test-group "audio: the track player"
+  (audio-add-track! 'a (constant-track 22050 16384) 22050)   ; 0.5
+  (audio-add-track! 'b (constant-track 22050 8192) 22050)    ; 0.25
+  (let ((out (make-bytevector (* 8 512) 0)))
+    (test "a track plays at TRACK-GAIN times its level after its fade-in; a second play with 'resume keeps it"
+      (audio-play! 'a 'top)
+      (assert-equal 'a (audio-playing))
+      ;; the fade-in is FADE-IN-MS at the context's rate (44100 in the test bank): run 2 s of chunks
+      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
+      (audio-mix-chunk! out 512)
+      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01))
+      (audio-play! 'a 'resume)
+      (audio-mix-chunk! out 512)
+      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01)))
+    (test "a cross-fade: the new track comes in as the old goes out, and the old leaves at silence with its position kept"
+      (audio-play! 'b 'top)
+      (assert-equal 'b (audio-playing))
+      (assert-true (> (audio-player-gain 'a) 0.9))
+      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
+      (audio-mix-chunk! out 512)
+      (assert-true (< (abs (- (mean out 512) (* 0.55 0.25))) 0.01))
+      (assert-equal 0.0 (audio-player-gain 'a))
+      (assert-true (> (cdr (assq 'a (audio-positions))) 0.0)))
+    (test "'resume returns to the kept position, 'top to the start"
+      (let ((kept (cdr (assq 'a (audio-positions)))))
+        (audio-play! 'a 'resume)
+        (assert-true (< (abs (- (cadr (assq 'a (audio-players))) kept)) 1.0))
+        (audio-play! 'a 'top)
+        (assert-equal 0.0 (cadr (assq 'a (audio-players))))))
+    (test "MUSIC off silences the mix and keeps the position moving; the volume scales it"
+      (audio-play! 'b 'top)
+      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
+      (audio-set-music! #f)
+      (let ((p0 (cadr (assq 'b (audio-players)))))
+        (audio-mix-chunk! out 512)
+        (assert-equal 0.0 (rms out 512))
+        (assert-true (> (cadr (assq 'b (audio-players))) p0)))
+      (audio-set-music! #t)
+      (audio-set-volume! 0.5)
+      (audio-mix-chunk! out 512)
+      (assert-true (< (abs (- (mean out 512) (* 0.5 0.55 0.25))) 0.01))
+      (audio-set-volume! 1.0))
+    (test "a fade-out empties the players; a track that is not there is ignored"
+      (audio-fade-out! 100)
+      (let loop ((k 0)) (when (< k 40) (audio-mix-chunk! out 512) (loop (+ k 1))))
+      (assert-false (audio-playing))
+      (assert-equal '() (audio-players))
+      (audio-play! 'nothing 'top)
+      (assert-false (audio-playing)))
+    (test "the loop wraps: a 1 s track played for 3 s keeps its level"
+      (audio-play! 'a 'top)
+      (let loop ((k 0)) (when (< k 300) (audio-mix-chunk! out 512) (loop (+ k 1))))
+      (audio-mix-chunk! out 512)
+      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01))
+      (audio-fade-out! 0)
+      (audio-mix-chunk! out 512))))

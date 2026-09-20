@@ -1392,7 +1392,7 @@ let iceLock = null;
 }
 
 // ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --
-// The server delays the ambient by BOOT_SLOW ms, so the boot's audio step
+// The server delays the menu theme (spy.ogg, D50) by BOOT_SLOW ms, so the boot's audio step
 // outlasts the tap: after the gate's tap the DIALING meter must hold until
 // "crash: boot done" (the ambient landed, the audio step last), a tap during
 // the meter must choose nothing and skip nothing, the card must start only
@@ -1400,12 +1400,12 @@ let iceLock = null;
 // no card tick before it), and once the reveal settles the menu is live at
 // once: a tap on STACK chooses it and boots a board. The origin's service
 // worker and caches are cleared first (the worker serves cache first and the
-// audio sub-arm already fetched the ambient), so the ambient's fetch reaches
+// audio sub-arm already fetched the theme), so the theme's fetch reaches
 // the arm's server and its delay.
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
-  slowPaths["/assets/audio/ambient.pcm"] = BOOT_SLOW;
+  slowPaths["/assets/audio/spy.ogg"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
@@ -1462,7 +1462,7 @@ let iceLock = null;
       else if (!booted) detail = "after the settle, JACK IN chosen but no board booted (the run's first layer)";
     }
   }
-  delete slowPaths["/assets/audio/ambient.pcm"];
+  delete slowPaths["/assets/audio/spy.ogg"];
   if (detail) fail("preload", detail);
   else pass("preload", `ambient held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
 }
