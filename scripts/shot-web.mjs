@@ -13,6 +13,7 @@
 //   tap:NAME           tap a HUD control at the center the game printed
 //                      ("crash: control NAME X Y")
 //   menu:ID            tap a menu entry ("crash: menu ID X Y ...")
+//   tool:NAME          fire a tool through the stack (the corner button, then the entry)
 //   at:VX,VY           tap a virtual point
 //   key:K              a keydown/keyup pair (DOM key name)
 // The standing instruction (leader, 2026-09-18): every hosted slice with
@@ -146,6 +147,17 @@ for (const action of actions) {
     const ctl = await waitLine(new RegExp(`^crash: control ${rest} (-?[\\d.]+) (-?[\\d.]+)$`), 0, 3000);
     if (!ctl) { console.log(`SETUP-FAILED: no control ${rest}`); shutdown(2); }
     await tap(ctl.m[1], ctl.m[2]); await sleep(400);
+  } else if (kind === "tool") {
+    // a tool through the stack (ruling D33): the corner button, then the
+    // named entry once the stack has printed it and slid up
+    const btn = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, 0, 3000);
+    if (!btn) { console.log("SETUP-FAILED: no control tool"); shutdown(2); }
+    const from = consoleLines.length;
+    await tap(btn.m[1], btn.m[2]);
+    const entry = await waitLine(new RegExp(`^crash: tool ${rest} (-?[\\d.]+) (-?[\\d.]+) on$`), from, 3000);
+    if (!entry) { console.log(`SETUP-FAILED: no enabled tool ${rest}`); shutdown(2); }
+    await sleep(350);
+    await tap(entry.m[1], entry.m[2]); await sleep(400);
   } else if (kind === "menu") {
     const menu = await waitLine(/^crash: menu (.+)$/, 0, 3000);
     if (!menu) { console.log("SETUP-FAILED: no menu line"); shutdown(2); }

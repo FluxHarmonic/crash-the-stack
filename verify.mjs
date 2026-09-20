@@ -898,12 +898,17 @@ let iceLock = null;
       if (!detail && phase) {
         // the prompt and ICE IN
         const ice0 = bbox(await readRegion(mx + mw, my, rx - mx - mw, mh), PAL.ice);
-        await press("Tab"); await sleep(200);
+        // a typed letter needs the tags shown: hidden on a phone (Tab shows
+        // them), shown on a desktop already
+        const tagsLine = consoleLines.slice().reverse().find((l) => /^crash: tags (shown|hidden) /.test(l));
+        const hidden = !tagsLine || /hidden/.test(tagsLine);
+        if (hidden) { await press("Tab"); await sleep(200); }
         await press("a"); await sleep(400);
         const left = await readRegion(mx - 90, my - 2, 90, mh + 4);
         const right = await readRegion(mx + mw, my, rx - mx - mw, mh);
         const prompt = bbox(left, PAL.highlight), ice = bbox(right, PAL.ice), strayPrompt = bbox(right, PAL.highlight), strayIce = bbox(left, PAL.ice);
-        await press("Backspace"); await sleep(100); await press("Tab"); await sleep(200);
+        await press("Backspace"); await sleep(100);
+        if (hidden) { await press("Tab"); await sleep(200); }
         if (!ice0) detail = "no ICE IN (C-ICE) pixels right of the meter under the ICE";
         else if (!prompt) detail = "no prompt (C-HIGHLIGHT) pixels left of the meter after typing a tag letter";
         else if (strayPrompt) detail = "prompt pixels right of the meter (over the ICE countdown's lane)";
