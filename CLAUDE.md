@@ -27,6 +27,11 @@ suggestions.
   `set-color` elsewhere.
 - Prefer a stdlib procedure over a private one when the stdlib has it
   (`list-sort` from `(sigil list)`, not a hand-rolled sort).
+- No `make-vector` at a module's top level: make it on first use. Twice
+  on the web build a top-level one took a page down before its first
+  frame (`(crash title)` in P3d, `(crash cards render)` in the polish
+  row) while the same module ran natively; `(vector ...)` at top level
+  has not shown it. Unexplained at the sigil level.
 
 ## Layering
 

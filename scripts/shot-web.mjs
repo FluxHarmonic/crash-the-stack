@@ -152,7 +152,7 @@ for (const action of actions) {
     // named entry once the stack has printed it and slid up
     const btn = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, 0, 3000);
     if (!btn) { console.log("SETUP-FAILED: no control tool"); shutdown(2); }
-    const from = consoleLines.length;
+    const from = lines.length;
     await tap(btn.m[1], btn.m[2]);
     const entry = await waitLine(new RegExp(`^crash: tool ${rest} (-?[\\d.]+) (-?[\\d.]+) on$`), from, 3000);
     if (!entry) { console.log(`SETUP-FAILED: no enabled tool ${rest}`); shutdown(2); }
