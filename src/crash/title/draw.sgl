@@ -28,7 +28,7 @@
           (crash look)
           (crash hud))
 
-  (export title-draw draw-title draw-menu-item draw-menu-items title-covers? title-bake! title-diag! title-rt-filter! title-logo-path!
+  (export title-draw draw-title draw-menu-item draw-menu-items title-covers? title-bake! title-diag!
           TITLE-CELL TITLE-X TITLE-Y TITLE-H
           BACKDROP-W BACKDROP-H)
 
@@ -64,14 +64,6 @@
     (define *diag* #f)
     (define (title-bake! on?) (set! *bake* on?))
     (define (title-diag! on?) (set! *diag* on?))
-    ;; ?rtfilter=nearest: the render targets sampled nearest (the atlas and the
-    ;; tiles' choice) instead of linear; ?logo=texture: the settled logo drawn
-    ;; through render-target->texture + draw-texture-region (the tiles' path)
-    ;; instead of draw-render-target
-    (define *rt-filter* (quote linear))
-    (define *logo-path* (quote rt))
-    (define (title-rt-filter! f) (set! *rt-filter* f))
-    (define (title-logo-path! p) (set! *logo-path* p))
     (define *logo-bakes* 0)
     (define *items-bakes* 0)
     (define *backdrop-draws* 0)
@@ -89,7 +81,7 @@
                            (else (string-append (number->string (texture-width tex)) "X" (number->string (texture-height tex)))))))
     (define (draw-diag backdrop card vw vh)
       (let ((y 126) (x 8))
-        (diag-line! (string-append "DIAG FRAME " (number->string *frames*) " BAKE " (if *bake* "ON" "OFF") " RT " (symbol->string *rt-filter*) " LOGO " (symbol->string *logo-path*)) x y)
+        (diag-line! (string-append "DIAG FRAME " (number->string *frames*) " BAKE " (if *bake* "ON" "OFF")) x y)
         (diag-line! (tex-desc "TEX BACKDROP" backdrop) x (+ y 10))
         (diag-line! (tex-desc "TEX CARD" card) x (+ y 20))
         (diag-line! (string-append "RT LOGO " (if *logo-rt* (string-append (number->string (render-target-width *logo-rt*)) "X" (number->string (render-target-height *logo-rt*))) "NONE")
@@ -110,7 +102,6 @@
     (define BAKE-SCALE 2)
     (define BAKE-MARGIN 64)                     ; virtual px past the grid for the shear's overhang
     (define *logo-rt* #f)
-    (define *logo-tex* #f)                      ; the target as a texture: the tiles' path (render-target->texture), drawn as a region with the flip
     (define *logo-key* #f)                      ; (cell . shear) the target was baked for
     (define (logo-bake! t cell)
       (let ((key (cons cell (title-shear t))))
@@ -118,14 +109,13 @@
           (when *logo-rt* (render-target-free! *logo-rt*))
           (let ((rt (make-render-target (* BAKE-SCALE (+ (* LOGO-W cell) BAKE-MARGIN))
                                         (* BAKE-SCALE LOGO-H cell)
-                                        *rt-filter*)))
+                                        'linear)))
             (with-render-target rt
               (set-blend-mode 'none)
               (title-draw-cells t 0 0 (* BAKE-SCALE cell)))
             (set-blend-mode 'normal)
             (set! *logo-rt* rt)
             (rows-free!)
-            (set! *logo-tex* (render-target->texture rt))
             (set! *logo-bakes* (+ 1 *logo-bakes*))
             (set! *logo-key* key)))
         *logo-rt*))
@@ -135,12 +125,9 @@
                 (w (+ (* LOGO-W cell) BAKE-MARGIN))
                 (h (* LOGO-H cell)))
             (color! C-TEX-PLAIN)
-            (if (eq? *logo-path* 'texture)
-                ;; the region read bottom-up, as (crash atlas) and the tiles do
-                (draw-texture-region *logo-tex* x0 y0 w h
-                                     0 (* BAKE-SCALE h) (* BAKE-SCALE w) (- (* BAKE-SCALE h)))
-                (draw-render-target rt x0 y0 w h)))
+            (draw-render-target rt x0 y0 w h))
           (title-draw-cells t x0 y0 cell #t)))
+
     ;; --- the reveal's rows, baked as they complete -----------------------------
     ;;
     ;; David on the phone (2026-09-20): the typing beeps lag, because the
@@ -171,7 +158,7 @@
       (or (vector-ref (row-rts) y)
           (let* ((w (* BAKE-SCALE LOGO-W cell))
                  (h (* BAKE-SCALE cell))
-                 (rt (make-render-target w h *rt-filter*)))
+                 (rt (make-render-target w h 'linear)))
             (with-render-target rt
               (set-blend-mode 'none)
               (draw-row-cells t y 0 0 (* BAKE-SCALE cell) '() (cdr (title-row-extent y)) 0 0))
@@ -353,7 +340,7 @@
         (when *items-rt* (render-target-free! *items-rt*))
         (let* ((w (+ ITEM-CELL (* ITEM-CELL (fold (lambda (m l) (max m (block-text-width l))) 0 labels))))
                (h (* ITEM-H 2 (length labels)))
-               (rt (make-render-target (* BAKE-SCALE w) (* BAKE-SCALE h) *rt-filter*)))
+               (rt (make-render-target (* BAKE-SCALE w) (* BAKE-SCALE h) 'linear)))
           (with-render-target rt
             (set-blend-mode 'none)
             (let loop ((ls labels) (i 0))
