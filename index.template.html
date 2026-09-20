@@ -271,9 +271,9 @@
           if (!r.ok) throw new Error("ambient " + r.status);
           return r.arrayBuffer();
         }).then(function (buf) {
-          // 64 KB a frame: 1.1 MB in ~18 frames (16 KB was 69 frames, 7 s on a
-          // loaded box at 10 fps, the update prompt then past its window)
-          var bytes = new Uint8Array(buf), CHUNK = 64 * 1024, i = 0, n = 0;
+          // 16 KB a frame: the game decodes each on the main thread (~20 ms; 64 KB
+          // went quadratic in the old decoder and starved the sink under the meter)
+          var bytes = new Uint8Array(buf), CHUNK = 16 * 1024, i = 0, n = 0;
           (function next() {
             if (i >= bytes.length) { app.dispatch("audio-done", String(n)); ambientSettled(); return; }
             var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
@@ -296,7 +296,14 @@
     // suspends on lock; a keyboard-only player never taps.
     ["pointerup", "touchend", "click", "keydown"].forEach(function (name) {
       document.addEventListener(name, function () {
-        if (updates.app) updates.app.dispatch("gesture", name);
+        if (updates.app) {
+          // a gesture that costs the frame (the audio context's resume on a phone): the
+          // arms and the phone's console read it
+          var g0 = performance.now();
+          updates.app.dispatch("gesture", name);
+          var gMs = performance.now() - g0;
+          if (gMs > 20) console.log("crash: page gesture " + name + " ms " + Math.round(gMs));
+        }
       }, true);
     });
     globalThis.__crashUpdates = updates;

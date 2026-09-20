@@ -1050,12 +1050,13 @@ let iceLock = null;
   // mean (David, phone: "extremely glitchy at startup ... with the beeps")
   let reveal = null;
   if (!detail) {
-    reveal = await waitLine(/^crash: title reveal frames (\d+) max (\d+) over33 (\d+) underruns (\d+) mean (\d+)$/, 0, 3000);
+    reveal = await waitLine(/^crash: title reveal frames (\d+) max (\d+) over33 (\d+) underruns (\d+) dial (\d+) mean (\d+)$/, 0, 3000);
     if (!reveal) detail = "no \"crash: title reveal frames\" line at settle";
-    else if (parseInt(reveal.m[2], 10) > 5 * Math.max(8, parseInt(reveal.m[5], 10))) detail = `a stall inside the reveal: max frame ${reveal.m[2]} ms against a mean of ${reveal.m[5]} (${reveal.m[3]} of ${reveal.m[1]} frames over 33 ms)`;
+    else if (parseInt(reveal.m[2], 10) > 5 * Math.max(8, parseInt(reveal.m[6], 10))) detail = `a stall inside the reveal: max frame ${reveal.m[2]} ms against a mean of ${reveal.m[6]} (${reveal.m[3]} of ${reveal.m[1]} frames over 33 ms)`;
     // the phone viewport is where the sink can be fed at all on this box (the desktop
     // viewport starves under SwiftShader on every screen): no starved frame under the beeps
     else if (PHONE && parseInt(reveal.m[4], 10) > 0) detail = `the audio sink starved for ${reveal.m[4]} frames during the reveal (David: the typing beeps lag)`;
+    else if (PHONE && parseInt(reveal.m[5], 10) > 0) detail = `the audio sink starved for ${reveal.m[5]} frames under the DIALING meter (David: the dial beeps sound glitchy)`;
   }
   // the grid the game holds, against the module
   if (!detail) {
@@ -1220,7 +1221,7 @@ let iceLock = null;
   }
   delete substitutePaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[5]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
 }
 
 // ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --
@@ -1265,7 +1266,7 @@ let iceLock = null;
   let done = null, dialed = null;
   if (!detail) {
     done = await waitLine(/^crash: boot done (\d+)$/, from, BOOT_SLOW + 20000);
-    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+)$/, from, 5000);
+    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+) underruns (\d+)$/, from, 5000);
     if (!done) detail = `no "crash: boot done" within ${BOOT_SLOW + 20000} ms`;
     else if (!dialed) detail = "the boot is done but the meter never ended (no \"crash: title dialed\" line within 5 s)";
     else if (dialed.index < done.index) detail = "the meter ended before the boot was done";
@@ -1330,7 +1331,7 @@ let iceLock = null;
   let done = null, dialed = null, settled = null, sw = null;
   if (!detail) {
     done = await waitLine(/^crash: boot done (\d+)$/, from, 120000);
-    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+)$/, from, 10000);
+    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+) underruns (\d+)$/, from, 10000);
     if (!done) detail = "no \"crash: boot done\" within 120 s on the slow link";
     else if (!dialed) detail = "the boot is done but the meter never ended";
     else if (dialed.index < done.index) detail = "the meter ended before the boot was done";
@@ -1345,7 +1346,8 @@ let iceLock = null;
       else if (lost.length) detail = `boot texture steps not done before boot done: ${lost.join(", ")}`;
       else if (lines.some((l) => /^crash: sw registered$/.test(l))) detail = "the worker registered before the boot was done (its precache shares the link with the boot's fetches)";
       else if (lines.some((l) => /^crash: title card tick /.test(l))) detail = "the card started before the boot was done";
-      else summary = `${SLOW_KBPS} kbps / ${SLOW_RTT} ms: ${steps.length} texture steps done in ${tries} fetches, none given up, boot done then the meter ended at ${dialed.m[1]}/${dialed.m[2]}`;
+      else if (PHONE && parseInt(dialed.m[3], 10) > 0) detail = `the audio sink starved for ${dialed.m[3]} frames under the DIALING meter on the slow link`;
+      else summary = `${SLOW_KBPS} kbps / ${SLOW_RTT} ms: ${steps.length} texture steps done in ${tries} fetches, none given up, boot done then the meter ended at ${dialed.m[1]}/${dialed.m[2]} with ${dialed.m[3]} underruns`;
     }
   }
   if (!detail) {

@@ -428,7 +428,8 @@
       (gate-frames default: 0)     ; frames spent at the gate, for its cursor's blink
       (card-tick default: 0)       ; the publisher card (D43): 0 .. (card-ticks), then the reveal
       (card-ready default: #f)     ; the shell has the card's strip loaded; the card waits for it
-      (dial-tick default: 0))      ; ticks on the DIALING screen (D45): at least *dial-min* of them
+      (dial-tick default: 0)       ; ticks on the DIALING screen (D45): at least *dial-min* of them
+      (connected default: 0))      ; steps since the connect (the gate opened, or none): the dial cue on the first
 
     ;; A title for this boot. settled?: #t opens it already settled (the
     ;; menu after a table; the reveal is once per boot). An optional glitch
@@ -458,6 +459,9 @@
 
     ;; One tick. Done once the settle tick is reached; the tick stops there.
     (define (title-step t)
+      (let ((s (step-phase t)))
+        (if (or (title-gated t) (title-done t)) s (title s connected: (+ 1 (title-connected t))))))
+    (define (step-phase t)
       (cond ((title-done t) t)
             ((title-gated t) (title t gate-frames: (+ 1 (title-gate-frames t))))
             ((title-in-card? t)
@@ -596,7 +600,12 @@
                         (iota LOGO-H)))))
 
     (define (title-cues before after)
-      (append (if (and (title-gated before) (not (title-gated after))) (list 'dial) '())
+      ;; the dial cue one step after the connect, not in the tap's frame: the
+      ;; frame after a tap runs long on a phone (the audio context's resume)
+      ;; and a cue queued before it played its first 128 ms and broke off
+      ;; (David, 2026-09-20: the dial beeps glitchy); native, with no gate,
+      ;; dials on its first step
+      (append (if (and (= 0 (title-connected before)) (= 1 (title-connected after))) (list 'dial) '())
               ;; the card resolved (its fade in complete)
               (if (and (< (title-card-tick before) CARD-IN) (>= (title-card-tick after) CARD-IN)) (list 'card) '())
               (if (> (rows-begun after) (rows-begun before)) (list 'modem) '())
@@ -650,28 +659,33 @@
     ;; costs one frame. Answers the names that finished this call, oldest
     ;; first; when the deadline forces the rest, their names too, and
     ;; boot-timed-out? says so.
-    (define (boot-run!)
+    ;; boot-run! [more?]: more? is asked after each finished step; #f ends the
+    ;; frame's run there (the shell's time budget under the DIALING meter: the
+    ;; steps' decodes and bakes ran back to back in one frame and starved the
+    ;; sink under the dial cue; David on the phone, 2026-09-20).
+    (define (boot-run! . rest)
       (set! *boot-ticks* (+ *boot-ticks* 1))
-      (let loop ((finished '()))
-        (cond ((null? *boot-pending*) (reverse finished))
-              ((and (> *boot-ticks* BOOT-TIMEOUT) (not *boot-timed-out*))
-               ;; the names first: the pending list is emptied below (the
-               ;; reviewer: mapped after, this answered '() and the forced
-               ;; steps' trace lines never printed)
-               (let ((forced (map car *boot-pending*)))
-                 (set! *boot-timed-out* #t)
-                 (set! *boot-done* (append forced *boot-done*))
-                 (set! *boot-pending* '())
-                 (reverse (append (reverse forced) finished))))
-              (else
-               (let* ((step (car *boot-pending*))
-                      (done? (guard (e (#t #t)) (and ((cdr step)) #t))))
-                 (if done?
-                     (begin
-                       (set! *boot-pending* (cdr *boot-pending*))
-                       (set! *boot-done* (cons (car step) *boot-done*))
-                       (loop (cons (car step) finished)))
-                     (reverse finished)))))))
+      (let ((more? (if (pair? rest) (car rest) (lambda () #t))))
+        (let loop ((finished '()))
+          (cond ((null? *boot-pending*) (reverse finished))
+                ((and (> *boot-ticks* BOOT-TIMEOUT) (not *boot-timed-out*))
+                 ;; the names first: the pending list is emptied below (the
+                 ;; reviewer: mapped after, this answered '() and the forced
+                 ;; steps' trace lines never printed)
+                 (let ((forced (map car *boot-pending*)))
+                   (set! *boot-timed-out* #t)
+                   (set! *boot-done* (append forced *boot-done*))
+                   (set! *boot-pending* '())
+                   (reverse (append (reverse forced) finished))))
+                (else
+                 (let* ((step (car *boot-pending*))
+                        (done? (guard (e (#t #t)) (and ((cdr step)) #t))))
+                   (if done?
+                       (begin
+                         (set! *boot-pending* (cdr *boot-pending*))
+                         (set! *boot-done* (cons (car step) *boot-done*))
+                         (if (more?) (loop (cons (car step) finished)) (reverse (cons (car step) finished))))
+                       (reverse finished))))))))
 
     (define (boot-done?) (null? *boot-pending*))
     (define (boot-timed-out?) *boot-timed-out*)

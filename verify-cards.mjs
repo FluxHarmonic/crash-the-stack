@@ -366,7 +366,8 @@ await send("Page.navigate", { url: URL });
 const BOOT_RE = /^crash: cards seed (\d+) moves (\d+) draw (\d+)$/;
 const boot = await waitLine(BOOT_RE, bootMark, 20000);
 if (!boot) { fail("boot", "no card-table boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
-const first = await waitLine(/^crash: cards first (?:(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)|none)$/, bootMark, 3000);
+// from the boot line on, not the navigate: the previous page's "cards first" can land after the navigate
+const first = await waitLine(/^crash: cards first (?:(-?[\d.]+) (-?[\d.]+) (-?[\d.]+) (-?[\d.]+)|none)$/, boot.index, 3000);
 if (boot.m[2] !== "0") fail("boot", `expected a fresh deal (moves 0), got moves ${boot.m[2]}`);
 else if (!first) fail("boot", "no \"crash: cards first\" line");
 else if (!first.m[1]) fail("boot", `seed ${SEED} deals no legal move; pick another --seed`);

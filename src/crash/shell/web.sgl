@@ -102,6 +102,7 @@
   (import (sigil struct)
           (sigil math)
           (sigil string)
+          (sigil io)
           (sigil time)
           (sigil graphics)
           (sigil graphics image)
@@ -404,20 +405,25 @@
       (let ((k (char->integer c)))
         (and (< k 128) (vector-ref B64-TABLE k))))
 
-    ;; base64 text -> bytevector, exact to the padding. Indexed, not
-    ;; listed: a chunk is 22 thousand characters and the page sends
-    ;; seventy of them, one a frame; a string->list per chunk was the
-    ;; garbage that made the decode a one-second stall (the review).
+    ;; base64 text -> bytevector, exact to the padding. The text is walked
+    ;; as its UTF-8 bytes (string->utf8 once, then bytevector-u8-ref):
+    ;; string-ref on a Sigil string is not O(1), and indexed over a 64 KB
+    ;; chunk the decode went quadratic, ~300 ms a chunk, two chunks in one
+    ;; frame under the DIALING meter (2026-09-20, David: the dial beeps
+    ;; glitchy). Listed it was worse (a string->list per chunk, the review).
     (define (b64-decode text)
-      (let* ((n (string-length text))
-             (pads (cond ((and (>= n 2) (char=? (string-ref text (- n 1)) #\=) (char=? (string-ref text (- n 2)) #\=)) 2)
-                         ((and (>= n 1) (char=? (string-ref text (- n 1)) #\=)) 1)
+      (let* ((bytes (string->utf8 text))
+             (n (bytevector-length bytes))
+             (pads (cond ((and (>= n 2) (= (bytevector-u8-ref bytes (- n 1)) 61) (= (bytevector-u8-ref bytes (- n 2)) 61)) 2)
+                         ((and (>= n 1) (= (bytevector-u8-ref bytes (- n 1)) 61)) 1)
                          (else 0)))
-             (out (make-bytevector (quotient (* (- n pads) 3) 4) 0)))
+             (out (make-bytevector (quotient (* (- n pads) 3) 4) 0))
+             (len (bytevector-length out)))
         (let loop ((i 0) (acc 0) (bits 0) (k 0))
           (if (= i n)
               out
-              (let ((v (b64-value (string-ref text i))))
+              (let* ((c (bytevector-u8-ref bytes i))
+                     (v (and (< c 128) (vector-ref B64-TABLE c))))
                 (if (not v)
                     (loop (+ i 1) acc bits k)
                     (let ((acc (+ (* acc 64) v))
@@ -425,7 +431,7 @@
                       (if (>= bits 8)
                           (let* ((bits (- bits 8))
                                  (byte (quotient acc (expt 2 bits))))
-                            (when (< k (bytevector-length out))
+                            (when (< k len)
                               (bytevector-u8-set! out k byte))
                             (loop (+ i 1) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
                           (loop (+ i 1) acc bits k)))))))))
@@ -987,11 +993,20 @@
       ;; the rest of the cue bank, one cue a frame, then the ambient
       (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) *ambient-ready*)))))
 
+    (define BOOT-BUDGET 4.0)   ; ms of boot steps a frame
     (define (boot-tick! dt)
       ;;   crash: boot timeout                  the deadline forced the rest
       (unless (boot-done?)
         (let ((was-out (boot-timed-out?)))
-          (for-each (lambda (name) (say "boot" "step" name "done")) (boot-run!))
+          ;; BOOT-BUDGET ms of steps a frame: a step past the budget waits for the next
+          ;; frame (the decodes and bakes ran back to back in one frame and starved the
+          ;; sink under the dial cue: David on the phone, 2026-09-20)
+          (let ((t0 (now-ms)))
+            (for-each (lambda (name) (say "boot" "step" name "done"))
+                      (boot-run! (lambda ()
+                                   ;;   crash: boot step-ms M   (a step's wall time; the names come with the frame's list)
+                                   (say "boot" "step-ms" (exact (round (- (now-ms) t0))))
+                                   (< (- (now-ms) t0) BOOT-BUDGET)))))
           (when (and (boot-timed-out?) (not was-out)) (say "boot" "timeout")))
         (when (boot-done?) (say "boot" "done" (cdr (boot-progress))))))
 
@@ -1002,17 +1017,21 @@
     ;;   crash: title gate LINE               the boot screen is up, waiting for a tap or a key (D42)
     ;;   crash: title connect                 the gate opened
     ;;   crash: title dialing N M             the DIALING meter (D45): N of M boot steps done, each time it moves
-    ;;   crash: title dialed N M              the meter is over; the card starts (N = M unless the boot timed out or a table boot)
+    ;;   crash: title dialed N M underruns U   the meter is over; the card starts (N = M unless the boot timed out); U starved frames over the meter
     ;;   crash: title card tick C frame F ms M    the publisher card (D43): its tick and the strip frame shown
     ;;   crash: title card done C              the card is over; C is the last tick shown (CARD-TICKS - 1 when it ran out, less when a tap skipped it)
     ;;   crash: title seed N baud B glitch L settle T cells C
     ;;   crash: title tick T digest D ms M      (M: the frame's wall time)
     ;;   crash: title settled T digest D shear S   (S: the slant in thousandths of a cell per row)
-    ;;   crash: title reveal frames N max M over33 K underruns U mean A   the reveal's frame cost, ms, and the sink's starved frames over it (David: stutter under the beeps)
+    ;;   crash: title reveal frames N max M over33 K underruns U dial D mean A   the reveal's frame cost, ms, the sink's starved frames over it and over the DIALING phase (David: stutter under the beeps)
     ;;   crash: title row Y GLYPHS FG BG
     (define *dial-said* #f)
     (define *reveal-n* 0)
     (define *reveal-underruns0* 0)   ; the sink's starved frames at the reveal's first tick
+    (define *dial-underruns0* 0)     ; and at the connect (the DIALING phase's start)
+    (define *dial-underruns* 0)      ; starved over the DIALING phase
+    (define *dial-underruns-last* 0)
+    (define *dial-worst* 0.0)        ; the longest DIALING frame, ms
     (define *reveal-max* 0.0)
     (define *reveal-over33* 0)
     (define *reveal-sum* 0.0)
@@ -1023,15 +1042,24 @@
           (when (and (title-gated? t1) (= (title-gate-frames t1) 1))
             (say "title" "gate" (title-gate-line t1)))
           (when (and (title-gated? t0) (not (title-gated? t1)))
-            (say "title" "connect"))
+            (say "title" "connect")
+            (set! *dial-underruns0* (audio-underruns)))
           ;; the DIALING meter (D45): its progress as it moves, and the frame it ends
+          ;;   crash: title dial-frame T ms M underruns U   a DIALING frame that starved the sink (U frames), T ticks in
+          (when (title-dialing? t1)
+            (let ((u (- (audio-underruns) *dial-underruns-last*)))
+              (when (> u 0) (say "title" "dial-frame" (title-dial-tick t1) "ms" (exact (round *frame-ms*)) "underruns" u))
+              (set! *dial-worst* (max *dial-worst* *frame-ms*))
+              (title-diag-dial! (- (audio-underruns) *dial-underruns0*) (exact (round *dial-worst*)))
+              (set! *dial-underruns-last* (audio-underruns))))
           (when (and (title-dialing? t1) (not (equal? (boot-progress) *dial-said*)))
             (set! *dial-said* (boot-progress))
             (say "title" "dialing" (car *dial-said*) (cdr *dial-said*)))
           ;; (the boot's done flag moves between frames, so "was dialing" is kept here,
           ;; not read off t0: t0 already sees the boot done on the frame it ends)
           (when (and *dial-said* (not (title-dialing? t1)) (title-in-card? t1))
-            (say "title" "dialed" (car (boot-progress)) (cdr (boot-progress)))
+            (set! *dial-underruns* (- (audio-underruns) *dial-underruns0*))
+            (say "title" "dialed" (car (boot-progress)) (cdr (boot-progress)) "underruns" *dial-underruns*)
             (set! *dial-said* #f))
           (when (and (title-in-card? t1) (not (= (title-card-tick t0) (title-card-tick t1))))
             (say "title" "card" "tick" (title-card-tick t1) "frame" (title-card-frame t1 CARD-FRAMES) "ms" (exact (round *frame-ms*))))
@@ -1050,7 +1078,7 @@
           (when (and (title-running? t0) (title-settled? t1))
             (say "title" "settled" (title-tick t1) "digest" (title-frame-digest t1) "shear" (exact (round (* 1000 (title-shear t1)))))
             (say "title" "reveal" "frames" *reveal-n* "max" (exact (round *reveal-max*)) "over33" *reveal-over33*
-                 "underruns" (- (audio-underruns) *reveal-underruns0*)
+                 "underruns" (- (audio-underruns) *reveal-underruns0*) "dial" *dial-underruns*
                  "mean" (exact (round (/ *reveal-sum* (max 1 *reveal-n*)))))
             (let loop ((y 0))
               (when (< y LOGO-H)
@@ -1137,6 +1165,9 @@
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
+      ;; the pump first: the ring is fed for the frame before the boot's steps and the
+      ;; draw can run long (it was last, after everything)
+      (audio-pump!)
       (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
       (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
       (when *ms* (count-frame! dt))
@@ -1146,7 +1177,7 @@
       (set! *flush-ms* 0.0)
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
-      (audio-pump!))
+      (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
 
     (define (tick-screen f dt)
       (let ((click (input-frame-click f)))
