@@ -137,6 +137,9 @@
           (crash shell)
           (crash code)
           (crash run)
+          (only (crash scores) scores-best scores-streak)
+          (only (crash daily) daily-date)
+          (only (crash native) %b64-decode)
           (crash store)
           (crash cards save)
           (crash cards seeds)
@@ -438,55 +441,13 @@
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
     ;; ("ambient", "off") fades the music out and holds it: the browser
     ;; arm's way to hear a cue by itself.
-    (define B64 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a 7.5 MB
+    ;; tune decoded in Sigil a character at a time cost whole frames per
+    ;; 16 KB chunk (2026-09-20, the ambient's delivery; the tune is six
+    ;; times the ambient), so the page now hands 512 KB a frame and the
+    ;; decode is under a millisecond.
+    (define (b64-decode text) (%b64-decode text))
 
-    ;; code point -> value, a 128-entry table built once (1.1 MB of PCM is
-    ;; 1.5 million characters; a scan per character would be seconds)
-    (define B64-TABLE
-      (let ((t (make-vector 128 #f)))
-        (let loop ((i 0))
-          (when (< i 64)
-            (vector-set! t (char->integer (string-ref B64 i)) i)
-            (loop (+ i 1))))
-        t))
-
-    (define (b64-value c)
-      (let ((k (char->integer c)))
-        (and (< k 128) (vector-ref B64-TABLE k))))
-
-    ;; base64 text -> bytevector, exact to the padding. The text is walked
-    ;; as its UTF-8 bytes (string->utf8 once, then bytevector-u8-ref):
-    ;; string-ref on a Sigil string is not O(1), and indexed over a 64 KB
-    ;; chunk the decode went quadratic, ~300 ms a chunk, two chunks in one
-    ;; frame under the DIALING meter (2026-09-20, David: the dial beeps
-    ;; glitchy). Listed it was worse (a string->list per chunk, the review).
-    (define (b64-decode text)
-      (let* ((bytes (string->utf8 text))
-             (n (bytevector-length bytes))
-             (pads (cond ((and (>= n 2) (= (bytevector-u8-ref bytes (- n 1)) 61) (= (bytevector-u8-ref bytes (- n 2)) 61)) 2)
-                         ((and (>= n 1) (= (bytevector-u8-ref bytes (- n 1)) 61)) 1)
-                         (else 0)))
-             (out (make-bytevector (quotient (* (- n pads) 3) 4) 0))
-             (len (bytevector-length out)))
-        (let loop ((i 0) (acc 0) (bits 0) (k 0))
-          (if (= i n)
-              out
-              (let* ((c (bytevector-u8-ref bytes i))
-                     (v (and (< c 128) (vector-ref B64-TABLE c))))
-                (if (not v)
-                    (loop (+ i 1) acc bits k)
-                    (let ((acc (+ (* acc 64) v))
-                          (bits (+ bits 6)))
-                      (if (>= bits 8)
-                          (let* ((bits (- bits 8))
-                                 (byte (quotient acc (expt 2 bits))))
-                            (when (< k len)
-                              (bytevector-u8-set! out k byte))
-                            (loop (+ i 1) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
-                          (loop (+ i 1) acc bits k)))))))))
-
-    ;; One chunk a frame, decoded as it lands, so the cost is spread over
-    ;; the seconds the page takes to send them.
     ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
     ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
     ;; ("audio-chunk", b64) appends, ("audio-done", n) closes it into the
@@ -833,7 +794,8 @@
              (moves (legal-moves g)))
         (say "cards" "seed" (deal-seed d)
              "moves" (game-moves g)
-             "draw" (game-draw g))
+             "draw" (game-draw g)
+             "scoring" (game-scoring g))
         (let ((stock (place-center *card-geom* g '(stock))))
           (say "cards" "stock" (car stock) (cdr stock)))
         (if (null? moves)
@@ -1010,9 +972,14 @@
     ;;   crash: menu SCREEN ID X Y ...      each row's id and center (a value row's value follows its id: ID=VALUE)
     ;;   crash: menu-code CODE              the pause menu's share code line, when a board is live
     ;;   crash: keypad LABEL X Y ...        the CODE screen's keypad cells
+    ;;   crash: scores TABLE VERSION TIME MOVES CLEARS ... STREAK STACK N CARDS N
+    ;;                                      the SCORES screen's board (- for no best)
     (define *menu-said* #f)
     (define (say-menu m)
-      (let ((key (list (menu-screen m) (menu-entries m) (menu-code-line m))))
+      (let ((key (list (menu-screen m)
+                       (map (lambda (id) (cons id (menu-row-value m id))) (menu-entries m))
+                       (menu-code-line m)
+                       (menu-scores m))))
         (unless (equal? key *menu-said*)
           (set! *menu-said* key)
           (apply say "menu" (menu-screen m)
@@ -1030,6 +997,20 @@
           (when (and (eq? (menu-screen m) 'top) (menu-code-line m))
             (let ((r (code-line-rect m VW VH)))
               (say "menu-code" (code-display (menu-code-line m)) (+ (car r) (half (caddr r))) (+ (cadr r) (half (cadddr r))))))
+          (when (eq? (menu-screen m) 'scores)
+            (let ((s (menu-scores m)))
+              (apply say "scores"
+                     (append
+                      (apply append
+                             (map (lambda (c)
+                                    (let ((best (and s (scores-best s (car c) (cadr c)))))
+                                      (list (car c) (cadr c)
+                                            (if best (car best) "-")
+                                            (if best (cadr best) "-")
+                                            (if best (caddr best) 0))))
+                                  '((stack hacker) (stack original) (cards hacker) (cards original))))
+                      (list "streak" "stack" (if s (scores-streak s 'stack) 0)
+                            "cards" (if s (scores-streak s 'cards) 0))))))
           (when (eq? (menu-screen m) 'code)
             (apply say "keypad"
                    (apply append
@@ -1349,6 +1330,7 @@
 
     (define (open-menu!)
       (set! *screen* 'menu)
+      (set! *menu-said* #f)      ; the arm reads the rows on every opening
       (phosphor-reset!)          ; a cascade left behind blends with nothing on return
       (set! *announced* #f)
       ;; a menu rebuilt mid-reveal (the update word landing) keeps the reveal (P3d)
@@ -1556,8 +1538,8 @@
                ((jack-in) (jack-in! (now-second)))
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
-               ((daily-stack) (set-run! #f) (open-spec! (daily-spec 'stack)))
-               ((daily-cards) (set-run! #f) (open-spec! (daily-spec 'cards)))
+               ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
+               ((daily-cards) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'cards)))
                ((update) (update-chosen!))
                ((copy)
                 (let ((code (live-code)))
@@ -1567,6 +1549,13 @@
                     (say "copy" (code-display code)))))
                ((code-refused) (say "code" "refused" (menu-code *menu*)))
                (else #f)))))
+
+    ;; The daily's day, before its spec line (the arm's leg 3 reads both):
+    ;;   crash: daily DAY Y-M-D              days since 1970-01-01 UTC, and the civil date
+    (define (say-daily!)
+      (let* ((day (today))
+             (d (daily-date day)))
+        (say "daily" day (str (car d) "-" (cadr d) "-" (caddr d)))))
 
     ;; The page's poll for a COPY: 1 once, then 0.
     (define *copy-asked* #f)

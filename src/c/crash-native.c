@@ -16,6 +16,13 @@
  *     to gain1 over the n frames. Answers the position after the n frames
  *     (wrapped into the loop). Linear interpolation, as the Sigil mix did.
  *
+ *   (%b64-decode text) -> bytevector
+ *     Standard base64 (with or without padding; whitespace skipped) to
+ *     bytes. The page hands each tune over as base64 chunks through the
+ *     dispatch (a string is the only payload the bridge carries), and a
+ *     7.5 MB tune decoded a character at a time in Sigil took whole
+ *     frames per 16 KB; here a 512 KB chunk is under a millisecond.
+ *
  *   (%decode-ogg path) -> (rate channels bytevector) or #f
  *     The whole file decoded by stb_vorbis to s16le interleaved PCM.
  *     Native only: on the web the page decodes with decodeAudioData and
@@ -80,6 +87,45 @@ static Value native_mix_track(SigilVM *vm, int argc, Value *args)
     return sigil_flonum(pos);
 }
 
+static Value native_b64_decode(SigilVM *vm, int argc, Value *args)
+{
+    if (argc < 1 || !sigil_is_string(args[0])) {
+        sigil__vm_set_error(vm, SIGIL_ERR_TYPE, "%b64-decode: expected a string");
+        return SIGIL_FALSE;
+    }
+    SigilString *text = (SigilString *)sigil_as_ptr(args[0]);
+    const unsigned char *in = (const unsigned char *)text->data;
+    size_t n = text->byte_length;
+    /* the sextets in one pass: -1 for anything that is not a digit */
+    static signed char table[256];
+    static int ready = 0;
+    if (!ready) {
+        const char *digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 256; i++) table[i] = -1;
+        for (int i = 0; i < 64; i++) table[(unsigned char)digits[i]] = (signed char)i;
+        ready = 1;
+    }
+    size_t digits_n = 0;
+    for (size_t i = 0; i < n; i++) if (table[in[i]] >= 0) digits_n++;
+    size_t out_n = (digits_n / 4) * 3 + (digits_n % 4 == 3 ? 2 : digits_n % 4 == 2 ? 1 : 0);
+    Value bv = sigil_make_bytevector(vm, out_n);
+    unsigned char *out = (unsigned char *)sigil_bytevector_data(bv);
+    unsigned int acc = 0;
+    int bits = 0;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        signed char d = table[in[i]];
+        if (d < 0) continue;
+        acc = (acc << 6) | (unsigned int)d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o < out_n) out[o++] = (unsigned char)((acc >> bits) & 0xff);
+        }
+    }
+    return bv;
+}
+
 static Value native_decode_ogg(SigilVM *vm, int argc, Value *args)
 {
 #ifdef __wasm__
@@ -114,7 +160,10 @@ void sigil__init_crash_native_module(SigilVM *vm)
                                  "Add n frames of a looping s16 mono track into a stereo float buffer with a gain ramp");
     sigil_module_register_native(vm, "%decode-ogg", native_decode_ogg, SIGIL_ARITY_EXACT(1),
                                  "Decode an OGG Vorbis file to (rate channels s16-bytevector), or #f");
+    sigil_module_register_native(vm, "%b64-decode", native_b64_decode, SIGIL_ARITY_EXACT(1),
+                                 "Decode a base64 string to a bytevector");
     sigil_module_export(vm, "%mix-track!");
     sigil_module_export(vm, "%decode-ogg");
+    sigil_module_export(vm, "%b64-decode");
     sigil_end_module(vm);
 }

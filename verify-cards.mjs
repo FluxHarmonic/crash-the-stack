@@ -17,7 +17,7 @@
 //               a tap on the row under DEPTH (D48's entry, in LOOK's slot)
 //               is a tap on nothing: the menu stays, no line; a tap at CARDS' center
 //               -> "crash: menu chose cards" and the card table's boot line
-//   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
+//   boot        with ?cards: "crash: cards seed S moves 0 draw 1 scoring vegas" and the first legal
 //               move's centers; the bar line's readout box (the score, the
 //               bounty row under it) ends left of the ? button (nothing
 //               draws under the button, David's laptop read 2026-09-20)
@@ -350,7 +350,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       else {
         // a tap on FREE PLAY opens it: its rows are said once
         await tap(top2.entries["free-play"][0], top2.entries["free-play"][1]);
-        const freeLine = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
+        const freeLine = await waitLine(/^crash: menu (free .+)$/, m0, 3000);
         if (!freeLine) lookDetail = "a tap on FREE PLAY opened no FREE PLAY screen";
         else {
           free2 = parseMenu(freeLine.m[1]).entries;
@@ -387,7 +387,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
 const URL = `http://127.0.0.1:${PORT}/index.html?trace&cards&fresh&seed=${SEED}`;
 const bootMark = consoleLines.length;
 await send("Page.navigate", { url: URL });
-const BOOT_RE = /^crash: cards seed (\d+) moves (\d+) draw (\d+)$/;
+const BOOT_RE = /^crash: cards seed (\d+) moves (\d+) draw (\d+) scoring (\w+)$/;
 const boot = await waitLine(BOOT_RE, bootMark, 20000);
 if (!boot) { fail("boot", "no card-table boot line within 20 s"); timedOut("boot"); await new Promise(() => {}); }
 // from the boot line on, not the navigate: the previous page's "cards first" can land after the navigate

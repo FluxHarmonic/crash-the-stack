@@ -115,12 +115,13 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png" };
 
 const results = [];
-// the ambient loop must reach the output (its RMS peaks near 0.1 at gain
-// 0.55), and with it off the match cue must rise the RMS by this much (its
-// first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
+// the music must reach the output (the ambient loop's RMS peaked near 0.1
+// at gain 0.55; the theme's opening bars sit near 0.02-0.06 over its first
+// seconds, D50), and with it off the match cue must rise the RMS by this
+// much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "code", "daily", "scores", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -940,16 +941,18 @@ let iceLock = null;
         if (!pair) detail = "no boot line after NEXT";
         else if (!resumed) detail = "the context was never resumed from a tap";
         else {
-          // the ambient's level, its peak over 400 ms: it must be audible; then
-          // the ambient is dropped so the cue is measured by itself (over the
+          // the music's level, its peak over 2 s: it must be audible (the
+          // theme, spy, opens quietly: a 400 ms window read 0.023 against
+          // the 0.02 floor on the first run with the tunes, D50); then the
+          // music is dropped so the cue is measured by itself (over the
           // ambient a muted cue hid inside the music's own swings)
           const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
           let ambientPeak = -1;
-          for (let i = 0; i < 8; i++) {
+          for (let i = 0; i < 20; i++) {
             const r = await evalJS(rms);
             if (r < 0) { ambientPeak = r; break; }
             ambientPeak = Math.max(ambientPeak, r);
-            await sleep(50);
+            await sleep(100);
           }
           await evalJS("window.__crashUpdates.app.dispatch('ambient', 'off')");
           await sleep(1000);   // past the analyser's 680 ms window, so the ambient's tail is out of the before-read
@@ -1616,6 +1619,423 @@ let iceLock = null;
   }
   if (detail) fail("menu-return", detail);
   else pass("menu-return", `board ${boardMs} ms, menu ${menuMs} ms a frame (mean over 300), 5 menu frames lit (${reads.map((r) => r.lit).join("/")} of ${reads[0].n}), nothing re-ran, audio underruns board ${boardUnder} / return ${l1Under} / menu ${menuUnderruns - parseInt(l1Under, 10)}${boardUnder > 0 ? " (the board starves on this box: bound not read)" : ""}, CONTINUE back`);
+}
+
+// ---- 9e. P4: the menu's screens, the settings, share codes, the daily, the scoreboard --
+// The real menu (D14, D19, D41) and what sits behind it. Each leg starts
+// from a board booted fresh and Escape (the pause menu is live at once,
+// no title reveal to wait out), then walks the sub-screens by keyboard
+// and by tap on the row centers the game's own "crash: menu SCREEN ID X Y"
+// line names (a value row reads ID=VALUE).
+function parseMenuLine(line) {
+  const parts = line.split(" ").slice(2);   // after "crash: menu"
+  const rows = {};
+  const order = [];
+  for (let i = 1; i + 2 < parts.length; i += 3) {
+    const [id, value] = parts[i].split("=");
+    rows[id] = { x: parseFloat(parts[i + 1]), y: parseFloat(parts[i + 2]), value };
+    order.push(id);
+  }
+  return { screen: parts[0], rows, order };
+}
+const MENU_LINE = /^crash: menu ([a-z-]+) /;
+// the menu line for a screen, said after `from`
+async function menuOn(screen, from, ms = 3000) {
+  const l = await waitLine(new RegExp(`^crash: menu ${screen} `), from, ms);
+  return l ? parseMenuLine(consoleLines[l.index]) : null;
+}
+// the top screen's highlight after a sub-screen closes stays on the row
+// that opened it (SCORES and CODE close to the top screen with FREE PLAY
+// highlighted); the arm tracks it
+let topAt = 0;
+// a fresh board, then Escape: the pause menu's top screen
+async function pauseMenu(extra = "") {
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}` });
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) return { error: "no boot line" };
+  if (!(await waitLine(/^crash: boot done /, from, 20000))) return { error: "no \"crash: boot done\" within 20 s" };
+  await sleep(200);
+  const m0 = consoleLines.length;
+  await press("Escape");
+  const top = await menuOn("top", m0);
+  topAt = 0;   // a fresh menu highlights its first row
+  return top ? { top, from: m0 } : { error: "Escape did not open the pause menu" };
+}
+// the highlight to a row: the rows wrap, so Down from wherever it is
+// (the last Escape or step left it somewhere) lands by going round
+async function downTo(order, id, at = 0) {
+  const n = order.length, i = order.indexOf(id);
+  for (let k = 0; k < (i - at + n) % n; k++) await press("ArrowDown");
+}
+
+
+// screens: every entry of every screen reachable by keyboard and by tap
+{
+  let detail = "";
+  const seen = [];
+  const r = await pauseMenu();
+  if (r.error) detail = r.error;
+  else {
+    const want = { free: "stack cards daily-stack daily-cards code scores version back",
+                   settings: "draw scoring hud field music sfx volume scanlines veil back",
+                   credits: "back", scores: "back", code: "back" };
+    if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
+    // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; SCORES and CODE from FREE PLAY
+    const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null], ["free-play", "free", "scores"], ["free-play", "free", "code"]];
+    for (const [id, screen, sub] of walk) {
+      if (detail) break;
+      let m0 = consoleLines.length;
+      // the highlight is wherever the last Escape left it: Up past the top clamps there
+      await downTo(r.top.order, id, topAt); topAt = r.top.order.indexOf(id);
+      await press("Enter");
+      const s = await menuOn(screen, m0);
+      if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
+      if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
+      if (sub) {
+        m0 = consoleLines.length;
+        await downTo(s.order, sub);
+        await press("Enter");
+        const s2 = await menuOn(sub, m0);
+        if (!s2) { detail = `Enter on ${sub} did not open the ${sub} screen (keyboard)`; break; }
+        if (sub === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
+        if (sub === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
+        seen.push(`${sub} (keys)`);
+      }
+      seen.push(`${screen} (keys)`);
+      m0 = consoleLines.length;
+      await press("Escape");
+      if (!(await menuOn("top", m0))) { detail = `Escape on ${sub || screen} did not return to the top screen`; break; }
+    }
+    // by tap: the same screens from the row centers; the sub-screens' BACK row by tap
+    if (!detail && !EXPECT_NO_SELECTION) {
+      for (const [id, screen, sub] of walk) {
+        if (detail) break;
+        let m0 = consoleLines.length;
+          await tap(r.top.rows[id].x, r.top.rows[id].y);
+        const s = await menuOn(screen, m0);
+        if (!s) { detail = `a tap on ${id} did not open the ${screen} screen`; break; }
+        let backRow = s.rows.back;
+        if (sub) {
+          m0 = consoleLines.length;
+          await tap(s.rows[sub].x, s.rows[sub].y);
+          const s2 = await menuOn(sub, m0);
+          if (!s2) { detail = `a tap on ${sub} did not open the ${sub} screen`; break; }
+          seen.push(`${sub} (tap)`);
+          backRow = s2.rows.back;
+        }
+        seen.push(`${screen} (tap)`);
+        m0 = consoleLines.length;
+        await tap(backRow.x, backRow.y);
+        if (!(await menuOn("top", m0))) { detail = `a tap on BACK did not leave the ${sub || screen} screen`; break; }
+      }
+    }
+    // Escape on the pause menu is CONTINUE (D14): the board comes back
+    if (!detail) {
+      const m0 = consoleLines.length;
+      await press("Escape");
+      const chose = await waitLine(/^crash: menu chose continue$/, m0, 3000);
+      if (!chose) detail = "Escape on the pause menu did not choose CONTINUE";
+      else if (!(await waitLine(BOOT_ANY, m0, 5000))) detail = "CONTINUE did not boot the board back";
+    }
+  }
+  if (detail) fail("screens", detail);
+  else pass("screens", `top continue jack-in free-play settings credits; ${seen.join(", ")}; Escape continues`);
+}
+
+// settings: PULL and SCORING stepped on the SETTINGS screen, stored, and
+// read back the same after a reload (gate leg 4, the web half); the deal
+// after honours them (its draw and scoring lines); then the defaults back.
+{
+  let detail = "";
+  let r = await pauseMenu();
+  if (r.error) detail = r.error;
+  let s = null;
+  if (!detail) {
+    let m0 = consoleLines.length;
+    await downTo(r.top.order, "settings", topAt); topAt = r.top.order.indexOf("settings");
+    await press("Enter");
+    s = await menuOn("settings", m0);
+    if (!s) detail = "SETTINGS did not open";
+    else if (s.rows.draw.value !== "1" || s.rows.scoring.value !== "BOUNTY" || s.rows.scanlines.value !== "OFF" || s.rows.veil.value !== "OFF" || s.rows.music.value !== "ON" || s.rows.sfx.value !== "ON" || s.rows.field.value !== "REACTION") detail = `the fresh defaults read ${s.order.map((id) => `${id}=${s.rows[id].value}`).join(" ")}`;
+  }
+  if (!detail) {
+    // Right on PULL (the highlight starts on the first row), then Down and Enter on SCORING
+    let m0 = consoleLines.length;
+    await press("ArrowRight");
+    const draw = await waitLine(/^crash: setting draw (\d)$/, m0, 2000);
+    m0 = consoleLines.length;
+    await press("ArrowDown"); await press("Enter");
+    const scoring = await waitLine(/^crash: setting scoring (\w+)$/, m0, 2000);
+    const said = await menuOn("settings", m0);
+    if (!draw || draw.m[1] !== "3") detail = `Right on PULL said ${draw ? draw.m[0] : "nothing"}`;
+    else if (!scoring || scoring.m[1] !== "standard") detail = `Enter on SCORING said ${scoring ? scoring.m[0] : "nothing"}`;
+    else if (!said || said.rows.draw.value !== "3" || said.rows.scoring.value !== "AUDIT") detail = `the screen re-said ${said ? `draw=${said.rows.draw.value} scoring=${said.rows.scoring.value}` : "nothing"} after the steps`;
+  }
+  if (!detail) {
+    // a reload: the same values on the screen, and the stored keys hold them
+    await sleep(500);
+    const stored = await evalJS(`[localStorage.getItem("draw"), localStorage.getItem("scoring")]`);
+    r = await pauseMenu();
+    if (r.error) detail = r.error;
+    else {
+      const m0 = consoleLines.length;
+      await downTo(r.top.order, "settings", topAt); topAt = r.top.order.indexOf("settings");
+      await press("Enter");
+      const again = await menuOn("settings", m0);
+      if (!again) detail = "SETTINGS did not open after the reload";
+      else if (again.rows.draw.value !== "3" || again.rows.scoring.value !== "AUDIT") detail = `after the reload the screen reads draw=${again.rows.draw.value} scoring=${again.rows.scoring.value} (stored ${JSON.stringify(stored)})`;
+      else if (stored[0] !== "3" || stored[1] !== "standard") detail = `the store holds draw=${stored[0]} scoring=${stored[1]}`;
+    }
+  }
+  if (!detail) {
+    // a DEFRAG deal under them: FREE PLAY -> DEFRAG draws three with AUDIT scoring
+    let m0 = consoleLines.length;
+    await press("Escape");
+    if (!(await menuOn("top", m0))) detail = "Escape did not leave SETTINGS";
+    else {
+      m0 = consoleLines.length;
+      await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+      await press("Enter");
+      const free = await menuOn("free", m0);
+      if (!free) detail = "FREE PLAY did not open";
+      else {
+        m0 = consoleLines.length;
+        await downTo(free.order, "cards");
+        await press("Enter");
+        const spec = await waitLine(/^crash: spec cards hacker (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+        const dealt = spec && await waitLine(/^crash: cards seed (\d+) moves \d+ draw (\d) scoring (\w+)$/, m0, 5000);
+        if (!spec) detail = "FREE PLAY -> DEFRAG dealt no spec line";
+        else if (!dealt) detail = "the deal said no seed line";
+        else if (dealt.m[2] !== "3" || dealt.m[3] !== "standard") detail = `the deal under the settings is draw ${dealt.m[2]} scoring ${dealt.m[3]}, not 3 standard`;
+      }
+    }
+  }
+  // the defaults back through the screen (a red above still restores them)
+  {
+    const r2 = await pauseMenu();
+    if (!r2.error) {
+      let m0 = consoleLines.length;
+      await downTo(r2.top.order, "settings", topAt); topAt = r2.top.order.indexOf("settings");
+      await press("Enter");
+      const s2 = await menuOn("settings", m0);
+      if (s2) {
+        if (s2.rows.draw.value === "3") { m0 = consoleLines.length; await press("ArrowRight"); await waitLine(/^crash: setting draw 1$/, m0, 2000); }
+        await press("ArrowDown");
+        if (s2.rows.scoring.value === "AUDIT") { m0 = consoleLines.length; await press("ArrowRight"); await waitLine(/^crash: setting scoring vegas$/, m0, 2000); }
+        await sleep(300);
+      }
+    }
+  }
+  if (detail) fail("settings", detail);
+  else pass("settings", "PULL 3 and AUDIT stepped by Right and Enter, re-said, stored (draw=3 scoring=standard), the same after a reload; the DEFRAG deal after draws 3; defaults restored");
+}
+
+// code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says
+// the deal's spec (table, version, seed, code); ?code= with that code reads
+// it and deals the same seed on the same table (the deal is regenerated
+// from the fields, so structurally equal by construction: same seed, same
+// draw and scoring); the pause menu shows the code line and COPY hands
+// it to the page; one flipped character is refused (no spec line, the
+// menu opens) and the CODE screen refuses it typed too.
+{
+  let detail = "";
+  let code = null, seed = null, table = null;
+  const r = await pauseMenu();
+  if (r.error) detail = r.error;
+  else {
+    let m0 = consoleLines.length;
+    await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+    await press("Enter");
+    const free = await menuOn("free", m0);
+    if (!free) detail = "FREE PLAY did not open";
+    else {
+      m0 = consoleLines.length;
+      await downTo(free.order, "cards");
+      await press("Enter");
+      const spec = await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+      if (!spec) detail = "FREE PLAY -> DEFRAG said no spec line";
+      else { table = spec.m[1]; seed = spec.m[3]; code = spec.m[4]; }
+    }
+  }
+  let copied = null;
+  if (!detail) {
+    // the pause menu's code line, and COPY
+    await sleep(300);
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const top = await menuOn("top", m0);
+    const line = top && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, m0, 2000);
+    if (!top) detail = "Escape on the deal did not open the pause menu";
+    else if (!line) detail = "the pause menu said no code line for the live deal";
+    else if (line.m[1] !== `${code.slice(0, 5)}-${code.slice(5)}`) detail = `the pause menu's code is ${line.m[1]}, the deal's ${code}`;
+    else if (!EXPECT_NO_SELECTION) {
+      m0 = consoleLines.length;
+      await tap(parseFloat(line.m[2]), parseFloat(line.m[3]));
+      const copy = await waitLine(/^crash: copy ([0-9A-Z-]+)$/, m0, 2000);
+      if (!copy) detail = "a tap on the code line asked no COPY";
+      else {
+        await sleep(700);   // the page's poll runs every 300 ms
+        copied = await evalJS(`localStorage.getItem("code")`);
+        if (copied !== line.m[1]) detail = `after COPY the page's code key holds ${JSON.stringify(copied)}, not ${line.m[1]}`;
+      }
+    }
+  }
+  if (!detail) {
+    // ?code= deals the same
+    const from = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&code=${code}` });
+    const read = await waitLine(/^crash: code read ([0-9A-Z]{10}) (\w+)$/, from, 20000);
+    const spec = read && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, from, 10000);
+    const dealt = spec && await waitLine(/^crash: cards seed (\d+) /, from, 10000);
+    if (!read) detail = `?code=${code} was not read`;
+    else if (read.m[1] !== code || read.m[2] !== table) detail = `?code= read ${read.m[0]}`;
+    else if (!spec || spec.m[1] !== table || spec.m[3] !== seed || spec.m[4] !== code) detail = `?code= dealt ${spec ? spec.m[0] : "nothing"}, not ${table} seed ${seed}`;
+    else if (!dealt || dealt.m[1] !== seed) detail = `the deal's own seed line was ${dealt ? dealt.m[0] : "missing"}`;
+  }
+  let flipped = null;
+  if (!detail) {
+    // one character flipped: refused, the menu opens, no spec line
+    const i = 7;   // a payload digit (the seed's), not a check digit
+    const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    const other = alphabet[(alphabet.indexOf(code[i]) + 1) % 32];
+    flipped = code.slice(0, i) + other + code.slice(i + 1);
+    const from = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&code=${flipped}` });
+    const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, from, 20000);
+    await sleep(1500);
+    const after = consoleLines.slice(from);
+    if (!refused || refused.m[1] !== flipped) detail = `the flipped code ${flipped} was not refused (${refused ? refused.m[0] : "no refused line"})`;
+    else if (after.some((l) => /^crash: (spec|code read) /.test(l))) detail = `the flipped code ${flipped} dealt a board: ${after.find((l) => /^crash: (spec|code read) /.test(l))}`;
+    else if (!after.some((l) => /^crash: menu top /.test(l))) detail = "after the refusal no menu opened";
+  }
+  if (!detail) {
+    // typed on the CODE screen: the flipped code refused, the good one read
+    const r2 = await pauseMenu();
+    if (r2.error) detail = r2.error;
+    else {
+      let m0 = consoleLines.length;
+      await downTo(r2.top.order, "free-play", topAt); topAt = r2.top.order.indexOf("free-play");
+      await press("Enter");
+      const free = await menuOn("free", m0);
+      m0 = consoleLines.length;
+      if (free) { await downTo(free.order, "code"); await press("Enter"); }
+      const screen = free && await menuOn("code", m0);
+      if (!screen) detail = "the CODE screen did not open";
+      else {
+        m0 = consoleLines.length;
+        await type(flipped.toLowerCase());
+        await press("Enter");
+        const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, m0, 3000);
+        if (!refused || refused.m[1] !== flipped) detail = `typed, the flipped code was not refused (${refused ? refused.m[0] : "no line"})`;
+        else {
+          for (let k = 0; k < 10; k++) await press("Backspace");
+          m0 = consoleLines.length;
+          await type(code.toLowerCase());
+          await press("Enter");
+          const read = await waitLine(/^crash: code read ([0-9A-Z]{10}) (\w+)$/, m0, 3000);
+          const spec = read && await waitLine(/^crash: spec (\w+) (\w+) (\d+) /, m0, 5000);
+          if (!read || read.m[1] !== code) detail = `typed, the good code was not read (${read ? read.m[0] : "no line"})`;
+          else if (!spec || spec.m[3] !== seed) detail = `typed, the good code dealt ${spec ? spec.m[0] : "nothing"}`;
+        }
+      }
+    }
+  }
+  if (detail) fail("code", detail);
+  else pass("code", `${table} seed ${seed} -> ${code}; the pause menu shows it${copied ? " and COPY handed it to the page" : ""}; ?code= and the CODE screen deal seed ${seed} again; ${flipped} (one character flipped) refused by both`);
+}
+
+// daily: the seed for a fixed date is the pinned value (gate leg 3).
+// ?epoch=1789947000 is 2026-09-20T23:30:00Z (day 20716): DAILY STACK deals
+// seed 2029908705 and DAILY DEFRAG 182 (test/test-daily.sgl pins the same);
+// the day after (+86400) deals 1007910919; and with no ?epoch the day is
+// today's UTC day, read under a timezone where the local date is not the
+// UTC date (the S2 sabotage, a daily from local time, shows here as a day
+// off in either the fixture or the live boot).
+{
+  let detail = "";
+  const FIXTURE = 1789947000;
+  const dealDaily = async (extra, which) => {
+    const r = await pauseMenu(extra);
+    if (r.error) return { error: r.error };
+    let m0 = consoleLines.length;
+    await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+    await press("Enter");
+    const free = await menuOn("free", m0);
+    if (!free) return { error: "FREE PLAY did not open" };
+    m0 = consoleLines.length;
+    await downTo(free.order, which);
+    await press("Enter");
+    const day = await waitLine(/^crash: daily (\d+) (\d+-\d+-\d+)$/, m0, 3000);
+    const spec = day && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+    if (!day) return { error: `${which} said no daily line` };
+    if (!spec) return { error: `${which} dealt no spec line` };
+    return { day: parseInt(day.m[1], 10), date: day.m[2], table: spec.m[1], version: spec.m[2], seed: spec.m[3] };
+  };
+  const a = await dealDaily(`&epoch=${FIXTURE}`, "daily-stack");
+  const b = a.error ? a : await dealDaily(`&epoch=${FIXTURE}`, "daily-cards");
+  const c = b.error ? b : await dealDaily(`&epoch=${FIXTURE + 86400}`, "daily-stack");
+  if (a.error) detail = a.error;
+  else if (a.day !== 20716 || a.date !== "2026-9-20") detail = `the fixture's day read ${a.day} ${a.date}, not 20716 2026-9-20`;
+  else if (a.table !== "stack" || a.version !== "hacker" || a.seed !== "2029908705") detail = `DAILY STACK at the fixture dealt ${a.table} ${a.version} ${a.seed}, not stack hacker 2029908705`;
+  else if (b.error) detail = b.error;
+  else if (b.table !== "cards" || b.version !== "hacker" || b.seed !== "182") detail = `DAILY DEFRAG at the fixture dealt ${b.table} ${b.version} ${b.seed}, not cards hacker 182`;
+  else if (c.error) detail = c.error;
+  else if (c.day !== 20717 || c.seed !== "1007910919") detail = `the day after dealt day ${c.day} seed ${c.seed}, not 20717 1007910919`;
+  let live = null;
+  if (!detail) {
+    // no ?epoch: today's UTC day, with the page's clock in a zone whose local
+    // date differs from UTC right now (+14 in the UTC afternoon, -12 in its morning)
+    const zone = new Date().getUTCHours() >= 12 ? "Pacific/Kiritimati" : "Etc/GMT+12";
+    await send("Emulation.setTimezoneOverride", { timezoneId: zone });
+    live = await dealDaily("", "daily-stack");
+    const today = Math.floor(Date.now() / 86400000);
+    await send("Emulation.setTimezoneOverride", { timezoneId: "" });
+    if (live.error) detail = live.error;
+    else if (live.day !== today) detail = `with the page's clock in ${zone} the live daily's day read ${live.day}, today's UTC day is ${today}`;
+    else live.zone = zone;
+  }
+  if (detail) fail("daily", detail);
+  else pass("daily", `epoch ${FIXTURE} = day 20716 (${a.date}): stack ${a.seed}, cards ${b.seed}; day 20717: stack ${c.seed}; live boot under ${live.zone} read UTC day ${live.day}`);
+}
+
+// scores: the scoreboard persists across a reload (gate leg 4, the web
+// half) and shows on the SCORES screen. A fresh origin reads every cell
+// empty; a board written in the game's own datum shape ((crash scores)'s,
+// the same text scores-save! writes: the arm cannot clear a real board
+// here, and the demo door keeps the scoreboard clean by design) reads back
+// after a reload as the game's own "crash: scores" line; and a live clear's
+// recording is test-scores' and test-store's (record-clear! -> scores-save!).
+{
+  let detail = "";
+  const SCORES_RE = /^crash: scores stack hacker (\S+) (\S+) (\d+) stack original (\S+) (\S+) (\d+) cards hacker (\S+) (\S+) (\d+) cards original (\S+) (\S+) (\d+) streak stack (\d+) cards (\d+)$/;
+  const readScores = async () => {
+    const r = await pauseMenu();
+    if (r.error) return { error: r.error };
+    let m0 = consoleLines.length;
+    await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+    await press("Enter");
+    const free = await menuOn("free", m0);
+    if (!free) return { error: "FREE PLAY did not open" };
+    m0 = consoleLines.length;
+    await downTo(free.order, "scores");
+    await press("Enter");
+    const l = await waitLine(SCORES_RE, m0, 3000);
+    return l ? { m: l.m } : { error: "the SCORES screen said no scores line" };
+  };
+  await evalJS(`localStorage.removeItem("scores")`);
+  const empty = await readScores();
+  if (empty.error) detail = empty.error;
+  else if (empty.m.slice(1, 13).join(" ") !== "- - 0 - - 0 - - 0 - - 0" || empty.m[13] !== "0" || empty.m[14] !== "0") detail = `a fresh origin's board reads ${empty.m[0]}`;
+  if (!detail) {
+    await evalJS(`localStorage.setItem("scores", "(crash-scores 1 (best stack hacker 1234 72 3) (best cards original 900 110 1) (daily stack 20716 4))")`);
+    const again = await readScores();
+    if (again.error) detail = again.error;
+    else if (again.m[1] !== "1234" || again.m[2] !== "72" || again.m[3] !== "3" || again.m[10] !== "900" || again.m[11] !== "110" || again.m[12] !== "1" || again.m[13] !== "4" || again.m[14] !== "0") detail = `after the reload the board reads ${again.m[0]}`;
+  }
+  await evalJS(`localStorage.removeItem("scores")`);
+  if (detail) fail("scores", detail);
+  else pass("scores", "a fresh origin reads every cell empty; a stored board (stack hacker 1234/72/3, cards original 900/110/1, stack streak 4) reads back on the SCORES screen after a reload");
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------

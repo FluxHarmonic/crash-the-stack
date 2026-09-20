@@ -7,7 +7,27 @@
 (import (sigil test)
         (sigil math)
         (crash music)
-        (crash audio))
+        (crash audio)
+        (crash native)
+        (only (sigil io) string->utf8))
+
+;; the test's own encoder (the game never encodes)
+(define B64-DIGITS "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+(define (b64-encode bytes)
+  (let* ((n (bytevector-length bytes))
+         (out (make-string (* 4 (quotient (+ n 2) 3)) #\=)))
+    (let loop ((i 0) (o 0))
+      (when (< i n)
+        (let* ((b0 (bytevector-u8-ref bytes i))
+               (b1 (if (< (+ i 1) n) (bytevector-u8-ref bytes (+ i 1)) 0))
+               (b2 (if (< (+ i 2) n) (bytevector-u8-ref bytes (+ i 2)) 0))
+               (v (+ (* b0 65536) (* b1 256) b2)))
+          (string-set! out o (string-ref B64-DIGITS (quotient v 262144)))
+          (string-set! out (+ o 1) (string-ref B64-DIGITS (modulo (quotient v 4096) 64)))
+          (when (< (+ i 1) n) (string-set! out (+ o 2) (string-ref B64-DIGITS (modulo (quotient v 64) 64))))
+          (when (< (+ i 2) n) (string-set! out (+ o 3) (string-ref B64-DIGITS (modulo v 64))))
+          (loop (+ i 3) (+ o 4)))))
+    out))
 
 (test-group "music: the table"
   (test "three tracks with their files under assets/audio/"
@@ -107,3 +127,27 @@
       (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01))
       (audio-fade-out! 0)
       (audio-mix-chunk! out 512))))
+
+;; The page hands each tune over as base64 (the only payload the bridge
+;; carries); the decode is (crash native)'s C. RFC 4648's vectors, then
+;; padding absent, whitespace between the digits, and a run long enough
+;; to cross the chunk the page sends (512 KB of bytes is 700 KB of text).
+(test-group "music: the base64 decode (the page's delivery)"
+  (test "RFC 4648's vectors"
+    (assert-equal (bytevector) (%b64-decode ""))
+    (assert-equal (string->utf8 "f") (%b64-decode "Zg=="))
+    (assert-equal (string->utf8 "fo") (%b64-decode "Zm8="))
+    (assert-equal (string->utf8 "foo") (%b64-decode "Zm9v"))
+    (assert-equal (string->utf8 "foob") (%b64-decode "Zm9vYg=="))
+    (assert-equal (string->utf8 "fooba") (%b64-decode "Zm9vYmE="))
+    (assert-equal (string->utf8 "foobar") (%b64-decode "Zm9vYmFy")))
+  (test "no padding and whitespace both read"
+    (assert-equal (string->utf8 "foob") (%b64-decode "Zm9vYg"))
+    (assert-equal (string->utf8 "foobar") (%b64-decode "Zm9v\nYmFy ")))
+  (test "every byte value round-trips through a long run"
+    (let* ((n 700000)
+           (bytes (make-bytevector n 0)))
+      (let loop ((i 0)) (when (< i n) (bytevector-u8-set! bytes i (modulo (* i 7) 256)) (loop (+ i 1))))
+      (let ((text (b64-encode bytes)))
+        (assert-equal n (bytevector-length (%b64-decode text)))
+        (assert-equal bytes (%b64-decode text))))))
