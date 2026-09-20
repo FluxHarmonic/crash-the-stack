@@ -45,7 +45,7 @@
           draw-bg-in draw-background draw-board-background
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
           draw-tool-button draw-menu-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
-          draw-keys-button draw-prompt draw-beside-meter phase-color tiles-ensure!
+          draw-keys-button draw-prompt draw-beside-meter phase-color phase-line tiles-ensure!
           depth-set! depth-in-force text-cache cached-text)
 
   (begin
@@ -280,10 +280,15 @@
       (+ (cond ((eq? lock 'strong) 1) ((eq? lock 'weak) 2) (else 0))
          (if right-open? 3 0)))
 
-    ;; The body cell's index on the depth sheet: variant within (shade, edge).
-    (define (body-cell shade edge? lock right-open?)
-      (+ (* (+ (* shade 2) (if edge? 0 1)) TILE-VARIANTS)
-         (tile-variant lock right-open?)))
+    ;; The body cell's place on the depth sheet: row 0 holds B's shades
+    ;; (0 .. layers - 1), row 1 B2's tints (layers .. 2 layers - 1); within
+    ;; a row, (shade, edge) then the variant.
+    (define *depth-row-h* 0)
+    (define (body-cell-x shade edge? lock right-open? w layers)
+      (* w (+ (* (+ (* (modulo shade layers) 2) (if edge? 0 1)) TILE-VARIANTS)
+              (tile-variant lock right-open?))))
+    (define (body-cell-y shade layers)
+      (if (< shade layers) 0 *depth-row-h*))
 
     (define (tiles-ensure! g)
       (let* ((w (geometry-tile-w g))
@@ -313,29 +318,34 @@
             (set! *tiles-tex* (render-target->texture rt))
             (set! *tiles-h* (+ h side)))
           ;; the depth sheet
-          (let* ((bodies (* layers 2 TILE-VARIANTS))
+          (let* ((shades (* 2 layers))               ; B's steps (row 0), then B2's tints (row 1)
+                 (bodies (* layers 2 TILE-VARIANTS))   ; cells per row
                  (sides-x (* bodies w))
                  (sides-w (let loop ((d 1) (acc 0))
                             (if (> d MAX-SIDE-GROWTH) acc (loop (+ d 1) (+ acc w side d)))))
                  (shadow-x (+ sides-x sides-w))
-                 (cell-h (+ h (max (+ side MAX-SIDE-GROWTH) MAX-SHADOW)))
+                 (row-h (+ h (max (+ side MAX-SIDE-GROWTH) MAX-SHADOW)))
+                 (cell-h (* 2 row-h))                   ; two rows: a one-row sheet passed 4096 px wide on the Turtle
                  (rt (make-render-target (+ shadow-x w MAX-SHADOW) cell-h 'nearest)))
+            (set! *depth-row-h* row-h)
             (with-render-target rt
               (set-blend-mode 'none)
               ;; the bodies: for each shade step and edge, the six variants
-              (let shades ((shade 0))
-                (when (< shade layers)
+              (set! *shade-layers* layers)
+              (let shade-loop ((shade 0))
+                (when (< shade shades)
                   (let edges ((e 0))
                     (when (< e 2)
                       (let variants ((v 0))
                         (when (< v TILE-VARIANTS)
                           (let ((lock (case (modulo v 3) ((1) 'strong) ((2) 'weak) (else #f)))
                                 (open? (>= v 3)))
-                            (draw-face-rects (* (body-cell shade (= e 0) lock open?) w) 0 w h #f
-                                             lock open? 0.0 shade (= e 0)))
+                            (draw-face-rects (body-cell-x shade (= e 0) lock open? w layers)
+                                             (body-cell-y shade layers)
+                                             w h #f lock open? 0.0 shade (= e 0)))
                           (variants (+ v 1))))
                       (edges (+ e 1))))
-                  (shades (+ shade 1))))
+                  (shade-loop (+ shade 1))))
               ;; the deeper side pieces, one per drawn depth past the offset
               (let pieces ((d 1) (x sides-x))
                 (when (<= d MAX-SIDE-GROWTH)
@@ -347,7 +357,7 @@
             (set! *depth-rt* rt)
             (set! *depth-tex* (render-target->texture rt))
             (set! *depth-h* cell-h)
-            (set! *tiles-layers* layers)
+            (set! *tiles-layers* shades)
             (set! *sides-x* sides-x)
             (set! *shadow-x* shadow-x))
           (set! *tiles-key* key))))
@@ -368,10 +378,15 @@
                            cx *tiles-h* cw (- ch)))
 
     (define (draw-depth-cell x y cx cw ch)
+      (draw-depth-cell-at x y cx 0 cw ch))
+
+    ;; A cell whose top is at target row cy: the region reads from the
+    ;; target's bottom-up memory, so its source y is the height less cy.
+    (define (draw-depth-cell-at x y cx cy cw ch)
       (set-color 1.0 1.0 1.0 1.0)
       (draw-texture-region *depth-tex*
                            x y cw ch
-                           cx *depth-h* cw (- ch)))
+                           cx (- *depth-h* cy) cw (- ch)))
 
     ;; The side strips of a face at (x, y, w, h), depth px deep.
     (define (draw-sides-rects x y w h depth)
@@ -408,25 +423,30 @@
 
     ;; Bayer 4x4 at half: the cells whose threshold is below 8 of 16, as
     ;; 1 px rectangles in C-BAR-A (the bake draws it once; the rect path
-    ;; draws it per tile, the oracle). Built with vector, not quoted: a
-    ;; quoted literal at a module's top level is the shape the web
-    ;; runtime has corrupted before ((crash menu)'s MENU-ENTRIES, 2026-09-19).
-    (define BAYER-4
-      (vector 0 8 2 10
-              12 4 14 6
-              3 11 1 9
-              15 7 13 5))
+    ;; draws it per tile, the oracle). The matrix is made on first use:
+    ;; at the module's top level, quoted or built with vector, the web
+    ;; runtime read a cell of it as a non-number on a later page
+    ;; ("<: expected number", 2026-09-20; CLAUDE.md has the rule).
+    (define *bayer-4* #f)
+    (define (bayer-4)
+      (unless *bayer-4*
+        (set! *bayer-4* (vector 0 8 2 10
+                                12 4 14 6
+                                3 11 1 9
+                                15 7 13 5)))
+      *bayer-4*)
 
     (define (draw-shadow-patch x y w h)
       (color! C-BAR-A)
-      (let rows ((j 0))
-        (when (< j h)
-          (let cols ((i 0))
-            (when (< i w)
-              (when (< (vector-ref BAYER-4 (+ (* 4 (modulo j 4)) (modulo i 4))) 8)
-                (draw-filled-rect (+ x i) (+ y j) 1 1))
-              (cols (+ i 1))))
-          (rows (+ j 1)))))
+      (let ((m (bayer-4)))
+        (let rows ((j 0))
+          (when (< j h)
+            (let cols ((i 0))
+              (when (< i w)
+                (when (< (vector-ref m (+ (* 4 (modulo j 4)) (modulo i 4))) 8)
+                  (draw-filled-rect (+ x i) (+ y j) 1 1))
+                (cols (+ i 1))))
+            (rows (+ j 1))))))
 
     ;; glow: 0..1, how bright the selected face breathes this frame. lock:
     ;; #f, 'strong or 'weak: a locked face is dimmed and barred, red for a
@@ -452,16 +472,59 @@
             ((and (= shade 0) edge?)
              (draw-tile-cell x y (* (tile-variant lock right-open?) w) w h))
             ((< shade *tiles-layers*)
-             (draw-depth-cell x y (* (body-cell shade edge? lock right-open?) w) w h))
+             (draw-depth-cell-at x y
+                                 (body-cell-x shade edge? lock right-open? w *shade-layers*)
+                                 (body-cell-y shade *shade-layers*)
+                                 w h))
             (else
              (draw-face-rects x y w h selected? lock right-open? glow shade edge?))))
 
     ;; B's face per shade step: the base layer the ruled charcoal, each
     ;; step SHADE-STEP of the way to the side gray (a mix, not a palette
-    ;; slot: a candidate; the winner's steps become slots, D48).
+    ;; slot: a candidate; the winner's steps become slots, D48). A shade
+    ;; index at or past the layout's layer count is B2's: the layer's
+    ;; tint from the palette (face-tint), the same lightness climb with
+    ;; a faint hue each (David, 2026-09-20).
     (define SHADE-STEP 0.15)
+    (define *shade-layers* 1)   ; where B2's indices start (the bake's layer count)
     (define (face-shade shade)
-      (if (= shade 0) FACE-COLOR (mix FACE-COLOR C-SIDE (min 0.75 (* SHADE-STEP shade)))))
+      (cond ((= shade 0) FACE-COLOR)
+            ((< shade *shade-layers*) (mix FACE-COLOR C-SIDE (min 0.75 (* SHADE-STEP shade))))
+            (else (face-tint (- shade *shade-layers*)))))
+
+    ;; B2's faces by layer: the base charcoal; layer 1 C-FACE-1 (cool);
+    ;; layer 2 C-SIDE-DARK (neutral, the lightness between); layer 3
+    ;; C-FACE-2 (warm); layer 4 and up B's plain lightness step (the
+    ;; Turtle's apex is one tile; no slot was left for it).
+    (define (face-tint layer)
+      (cond ((= layer 0) FACE-COLOR)
+            ((= layer 1) C-FACE-1)
+            ((= layer 2) C-SIDE-DARK)
+            ((= layer 3) C-FACE-2)
+            (else (mix FACE-COLOR C-SIDE 0.6))))
+
+    ;; The shade index a tile's layer draws with under the depth in force.
+    (define (layer-shade layer)
+      (cond ((not (depth-shade *depth*)) 0)
+            ((depth-hue *depth*) (+ *shade-layers* layer))
+            (else layer)))
+
+    ;; E's edge lines, over the body: a free side (the rules' predicate)
+    ;; a step brighter than the top-left edge, a blocked left side bare
+    ;; (the body's C-SIDE line covered in the face's color); a blocked
+    ;; right side is bare already (the body draws its dark line only when
+    ;; the right is open, which is the same predicate).
+    (define EDGE-FREE-COLOR C-STATIC-A)
+    (define (draw-free-edges b id x y w h lock shade)
+      (if (side-free? b id 'left)
+          (begin (color! EDGE-FREE-COLOR) (draw-filled-rect x y 1 h))
+          (begin (color! (cond ((eq? lock 'strong) C-LOCKED)
+                               ((eq? lock 'weak) C-LOCK-WEAK)
+                               (else (face-shade shade))))
+                 (draw-filled-rect x (+ y 1) 1 (- h 1))))
+      (when (side-free? b id 'right)
+        (color! EDGE-FREE-COLOR)
+        (draw-filled-rect (+ x w -1) y 1 h)))
 
     (define (draw-face-rects x y w h selected? lock right-open? glow shade edge?)
       ;; the face, with a lighter top-left edge
@@ -650,8 +713,11 @@
                                         (lock-state b id now)
                                         (not (blocked-right? b id))
                                         glow
-                                        (if (depth-shade *depth*) *layer* 0)
+                                        (layer-shade *layer*)
                                         (or (not (depth-shade *depth*)) (not (covered? b id))))))
+              (edges (lambda (id face x y w h selected?)
+                       (unless selected?
+                         (draw-free-edges b id x y w h (lock-state b id now) (layer-shade *layer*)))))
               (glyphs (lambda (id face x y w h selected?)
                         (draw-face-glyph-part g look face x y w h selected?
                                               (and (tile-scrambled? b id) (cons ticks id)))))
@@ -664,6 +730,7 @@
                 (each-on-layer layer shadows))
               (each-on-layer layer sides)
               (each-on-layer layer bodies)
+              (when (depth-edges *depth*) (each-on-layer layer edges))
               (each-on-layer layer glyphs)
               (each-on-layer layer locks)
               (loop (+ layer 1)))))
@@ -779,22 +846,24 @@
       "CURSOR: ARROWS MOVE  ENTER PICK  SHIFT+TAB TAGS  BKSP UNDO  SPACE TOOLS  ^S ^H ^N")
     ;; Row 2 under the ICE and after the sever, in place of the keys line
     ;; (David, 2026-09-17: make the phase unmistakable, and say that being
-    ;; traced does not end the game).
-    (define (lock-line b now)
-      (let ((locked (board-locked-slots b)))
-        (cond ((null? locked) " CRASH THE STACK TO ESCAPE.")
-              ((any (lambda (id) (lock-weak? b id now)) locked)
-               " A LOCK IS WEAK: TAP IT TO BREAK.")
-              (else " A STRONG LOCK HOLDS UNTIL IT WEAKENS."))))
+    ;; traced does not end the game). The line never repeats a number the
+    ;; meter or the readout carries (David, 2026-09-20: "ICE IN 0:16" and
+    ;; "LINK 3:16" stood in the bar and again in the line): the meter owns
+    ;; LINK, the readout beside it owns ICE IN. Every line is a literal
+    ;; kept once (the native codegen allocates a literal per evaluation).
+    (define LINE-TRACED "TRACED. ICE INBOUND. CRASH THE STACK TO ESCAPE.")
+    (define LINE-TRACED-WEAK "TRACED. ICE INBOUND. A LOCK IS WEAK: TAP IT TO BREAK.")
+    (define LINE-TRACED-STRONG "TRACED. ICE INBOUND. A STRONG LOCK HOLDS UNTIL IT WEAKENS.")
+    (define LINE-SEVERED "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
 
     (define (phase-line tr b)
       (let ((phase (trace-phase tr)))
         (cond ((eq? phase 'counter)
-               (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
-                              ". LINK SEVERS IN " (trace-countdown-string tr) "."
-                              (lock-line b (trace-ticks tr))))
-              ((eq? phase 'severed)
-               "LINK SEVERED. TAP: RETRY LINK / NEW STACK / JACK OUT (^R ^N).")
+               (let ((locked (board-locked-slots b)))
+                 (cond ((null? locked) LINE-TRACED)
+                       ((any (lambda (id) (lock-weak? b id (trace-ticks tr))) locked) LINE-TRACED-WEAK)
+                       (else LINE-TRACED-STRONG))))
+              ((eq? phase 'severed) LINE-SEVERED)
               (else #f))))
 
     ;; The phase's color for a line of the bar (bible section 1: the ICE
@@ -1035,9 +1104,11 @@
         (if (<= w span)
             (text! text (+ LINE-2-X (quotient (- span w) 2)) (+ top LINE-2-Y) LINE-2-SCALE)
             (let* ((fit (quotient span cell))
-                   (at (or (split-point text fit) fit))
+                   (space (split-point text fit))
+                   (at (or space fit))
                    (head (substring text 0 at))
-                   (tail (substring text (min (string-length text) (+ at 1)) (string-length text)))
+                   ;; the split's space is dropped; a cut with no space keeps every glyph
+                   (tail (substring text (min (string-length text) (if space (+ at 1) at)) (string-length text)))
                    (tail (if (> (text-width tail LINE-2-SCALE) span)
                              (substring tail 0 (min (string-length tail) fit))
                              tail)))

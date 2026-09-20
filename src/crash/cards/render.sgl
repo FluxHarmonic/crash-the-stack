@@ -37,7 +37,7 @@
           (crash palette)
           (crash atlas))
 
-  (export draw-deal PORTRAITS-PATH PORTRAIT-W PORTRAIT-H)
+  (export draw-deal card-phase-line PORTRAITS-PATH PORTRAIT-W PORTRAIT-H)
 
   (begin
     (define SIDE LAYER-OFFSET)
@@ -77,9 +77,10 @@
     ;; Strings by suit and rank, built once: a literal or a case clause
     ;; allocates per evaluation in the native codegen, and the table draws
     ;; ~30 faces a frame (2026-09-20, the card table's allocation pass).
-    (define SUBSYSTEM-TAGS (vector "MEM" "PWR" "TX" "DSK"))
+    (define *subsystem-tags* #f)
     (define (subsystem-tag c)
-      (vector-ref SUBSYSTEM-TAGS (card-suit c)))
+      (unless *subsystem-tags* (set! *subsystem-tags* (vector "MEM" "PWR" "TX" "DSK")))
+      (vector-ref *subsystem-tags* (card-suit c)))
 
     (define (suit-color c)
       (if (card-red? c) C-HOT C-COLD))
@@ -679,17 +680,17 @@
             (cached-text *audit-line* (deal-seed d) audit-line))))
 
     ;; Row 2 under the ICE and after the sever, in place of the keys line.
-    (define (phase-line tr game)
-      (case (trace-phase tr)
-        ((counter)
-         (string-append "TRACED. ICE INBOUND. ICE IN " (trace-ice-string tr)
-                        ". LINK SEVERS IN " (trace-countdown-string tr) "."
-                        (if (game-corrupted? game)
-                            " THE BUFFER IS CORRUPTED: PULL PAST IT."
-                            " BRING THE SYSTEM ONLINE.")))
-        ((severed)
-         "LINK SEVERED. TAP: RETRY LINK / NEW DUMP / JACK OUT (^R ^N).")
-        (else #f)))
+    ;; No times in it: the meter carries LINK and the readout ICE IN
+    ;; (David, 2026-09-20; (crash render)'s phase-line has the rule).
+    (define LINE-TRACED-CORRUPT "TRACED. ICE INBOUND. THE BUFFER IS CORRUPTED: PULL PAST IT.")
+    (define LINE-TRACED-ONLINE "TRACED. ICE INBOUND. BRING THE SYSTEM ONLINE.")
+    (define LINE-SEVERED "LINK SEVERED. TAP: RETRY LINK / NEW DUMP / JACK OUT (^R ^N).")
+
+    (define (card-phase-line tr game)
+      (cond ((eq? (trace-phase tr) 'counter)
+             (if (game-corrupted? game) LINE-TRACED-CORRUPT LINE-TRACED-ONLINE))
+            ((eq? (trace-phase tr) 'severed) LINE-SEVERED)
+            (else #f)))
 
     ;; The state message that sits in the middle, or "": the win only.
     ;; Everything else (the ICE's lines, AUTOCOMMIT, a scramble, a jammed
@@ -736,7 +737,7 @@
                            (and (eq? (trace-phase tr) 'counter) (trace-ice-string tr))
                            (if (eq? (game-scoring game) 'vegas) BOUNTY-TEXT AUDIT-TEXT))
         (draw-keys-button (card-control-rect g layout 'keys) (deal-keys-shown d))
-        (let ((line (and (not (string=? (deal-message d) MSG-STUCK)) (phase-line tr game))))
+        (let ((line (and (not (string=? (deal-message d) MSG-STUCK)) (card-phase-line tr game))))
           (cond ((deal-keys-shown d)
                  (draw-line-2 vw top (if (deal-labels-shown d) TAGS-LINE TAGS-HIDDEN-LINE) C-TEXT-DIM))
                 (line (draw-line-2 vw top line (phase-color tr)))

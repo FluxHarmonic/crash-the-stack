@@ -57,8 +57,8 @@
                             ((member (cadr (car es)) acc) (loop (cdr es) acc))
                             (else (loop (cdr es) (cons (cadr (car es)) acc)))))))
       (assert-true (<= (+ (length distinct) (length in-hand)) SLOTS))))
-  (test "two slots are in hand (the third became C-MOSS, David 2026-09-19)"
-    (assert-equal 2 (length in-hand))))
+  (test "no slot is in hand (C-MOSS 2026-09-19, the two B2 face tints 2026-09-20)"
+    (assert-equal 0 (length in-hand))))
 
 (test-group "palette: (crash palette) agrees with the datum"
   (for-each (lambda (e)
@@ -75,3 +75,42 @@
               (test (string-append (symbol->string (car p)) " is in the datum")
                 (assert-true (and (assq (car p) datum) #t))))
             PALETTE))
+
+;; --- D48's B2: every suit glyph keeps contrast on every layer tint ----------
+;;
+;; WCAG relative luminance and contrast ratio. B lightens the faces up the
+;; stack, so the ratios fall with the layer by design (David chose B over
+;; the flat charcoal); the gate holds each tint to at least half the
+;; charcoal's ratio for every suit and the daemons, and prints the table
+;; into the evidence note by hand (investigations/crash-the-stack-polish).
+(define (linear c) (if (<= c 0.03928) (/ c 12.92) (expt (/ (+ c 0.055) 1.055) 2.4)))
+(define (luminance rgb) (+ (* 0.2126 (linear (car rgb))) (* 0.7152 (linear (cadr rgb))) (* 0.0722 (linear (caddr rgb)))))
+(define (contrast a b)
+  (let* ((la (luminance a)) (lb (luminance b)) (hi (max la lb)) (lo (min la lb)))
+    (/ (+ hi 0.05) (+ lo 0.05))))
+(define LAYER-FACES
+  (list (cons 'layer-1 C-FACE-1)
+        (cons 'layer-2 C-SIDE-DARK)
+        (cons 'layer-3 C-FACE-2)
+        (cons 'layer-4 (mix C-STATIC-B C-SIDE 0.6))))
+(define GLYPH-COLORS
+  (list (cons 'MEM C-SUIT-0) (cons 'PWR C-TRACE-HOT) (cons 'TX C-SUIT-2) (cons 'DSK C-SUIT-3) (cons 'daemon C-DAEMON)))
+
+(test-group "palette: B2's layer tints keep the glyphs readable"
+  (test "the tints climb in lightness with the layer"
+    (let loop ((fs LAYER-FACES) (prev (luminance C-STATIC-B)))
+      (unless (null? fs)
+        (assert-true (> (luminance (cdr (car fs))) prev))
+        (loop (cdr fs) (luminance (cdr (car fs)))))))
+  (for-each (lambda (face)
+              (for-each (lambda (glyph)
+                          (test (string-append (symbol->string (car glyph)) " on " (symbol->string (car face)) " keeps half the charcoal's contrast")
+                            (let ((on-charcoal (contrast C-STATIC-B (cdr glyph)))
+                                  (on-tint (contrast (cdr face) (cdr glyph))))
+                              (assert-true (>= on-tint (* 0.5 on-charcoal)))
+                              (assert-true (>= on-tint 1.2)))))
+                        GLYPH-COLORS))
+            LAYER-FACES)
+  (test "the detector: white on white has no contrast, white on black has the most"
+    (assert-true (< (contrast '(1.0 1.0 1.0) '(1.0 1.0 1.0)) 1.01))
+    (assert-true (> (contrast '(1.0 1.0 1.0) '(0.0 0.0 0.0)) 20.0))))

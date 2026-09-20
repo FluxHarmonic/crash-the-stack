@@ -28,7 +28,9 @@
         (crash cards deck)
         (crash cards rules)
         (crash cards geometry)
-        (crash cards input))
+        (crash cards input)
+        (crash render)
+        (crash cards render))
 
 (define VW 640)
 (define VH 400)
@@ -335,3 +337,65 @@
       (assert-equal 'menu (deal-request (cstep (card-deal) '() (cons (+ (car r) 12) (+ (cadr r) 12)))))))
   (test "? toggles the keys line on this table too"
     (assert-true (deal-keys-shown (cstep (card-deal) '(?))))))
+
+;; --- the prompt follows the last input device (David's laptop read, 2026-09-20) --
+
+(test-group "hud: the prompt follows the last input device"
+  (test "the stack: a key makes it the keyboard's line, a click the tap line; touch opens on touch"
+    (let* ((s (stack-session))
+           (by-key (step s '(shift)))
+           (by-click (step by-key '() (cons 1 1))))
+      (assert-equal 'mouse (session-device s))
+      (assert-equal "TAP TWO MATCHING TILES." (session-instruction s))
+      (assert-equal 'keyboard (session-device by-key))
+      (assert-equal "PRESS TWO MATCHING TILES' LETTERS." (session-instruction by-key))
+      (assert-equal 'mouse (session-device by-click))
+      (assert-equal "TAP TWO MATCHING TILES." (session-instruction by-click))
+      (assert-equal 'touch (session-device (session-with-tools-touch s #t)))
+      (assert-equal 'touch (session-device (step (session-with-tools-touch s #t) '() (cons 1 1))))
+      (assert-equal 'keyboard (frame-device (make-input-frame '(a) '() #f) #t))
+      (assert-false (frame-device (make-input-frame '() '() #f) #t))))
+  (test "the card table: F PULLS for the keyboard, the feed's tap otherwise"
+    (let* ((d (card-deal))
+           (by-key (cstep d '(shift)))
+           (by-click (cstep by-key '() (cons 1 1))))
+      (assert-equal "STACK THE PACKETS BY CLASS. TAP THE FEED TO PULL." (deal-instruction d))
+      (assert-equal "STACK THE PACKETS BY CLASS. F PULLS." (deal-instruction by-key))
+      (assert-equal 'keyboard (deal-device by-key))
+      (assert-equal 'mouse (deal-device by-click))
+      (assert-equal "STACK THE PACKETS BY CLASS. TAP THE FEED TO PULL." (deal-instruction by-click)))))
+
+;; --- the phase line never repeats a time the bar carries (David, 2026-09-20) --
+
+;; Does the string hold a clock, a digit before a colon before a digit?
+(define (has-clock? text)
+  (let loop ((i 1))
+    (cond ((>= (+ i 1) (string-length text)) #f)
+          ((and (char=? (string-ref text i) #\:)
+                (char-numeric? (string-ref text (- i 1)))
+                (char-numeric? (string-ref text (+ i 1))))
+           #t)
+          (else (loop (+ i 1))))))
+
+(test-group "hud: the phase lines carry no clock (the meter has LINK, the readout ICE IN)"
+  (test "the stack, under the ICE and severed, with and without locks"
+    (let* ((traced (session-advance (stack-session) (* 60 (+ 1 TRACE-AT))))
+           (tr (session-trace traced))
+           (severed (session-advance traced (* 60 (+ 1 SEVER-AT)))))
+      (assert-equal 'counter (trace-phase tr))
+      (assert-true (has-clock? (trace-ice-string tr)))          ; the readout does show one
+      (assert-false (has-clock? (phase-line tr (session-board traced))))
+      (assert-true (and (phase-line tr (session-board traced)) #t))
+      (assert-equal 'severed (trace-phase (session-trace severed)))
+      (assert-false (has-clock? (phase-line (session-trace severed) (session-board severed))))
+      (assert-true (has-clock? "TRACED. ICE IN 0:16."))))     ; the detector can fire
+  (test "the card table, under the ICE and severed"
+    (let* ((d (card-deal))
+           (traced (deal-advance d (* 60 (+ 1 TRACE-AT))))
+           (tr (deal-trace traced)))
+      (assert-equal 'counter (trace-phase tr))
+      (assert-false (has-clock? (card-phase-line tr (deal-game traced))))
+      (assert-true (and (card-phase-line tr (deal-game traced)) #t))
+      (let ((severed (deal-advance traced (* 60 (+ 1 SEVER-AT)))))
+        (assert-equal 'severed (trace-phase (deal-trace severed)))
+        (assert-false (has-clock? (card-phase-line (deal-trace severed) (deal-game severed))))))))

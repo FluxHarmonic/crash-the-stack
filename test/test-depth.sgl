@@ -1,0 +1,57 @@
+;;; (crash depth), ruling D48: the candidates as data, and E's free-side
+;;; predicate, which is the rules' occlusion rule and flips when the
+;;; neighbour leaves the board.
+
+(import (sigil test)
+        (sigil list)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack turtle)
+        (crash stack generate)
+        (crash depth))
+
+(test-group "depth: the candidates"
+  (test "NONE is the default and the first; every entry has a label; after wraps"
+    (assert-equal 'none DEFAULT-DEPTH)
+    (assert-equal '(none b b2 e abe abc b2e) DEPTH-NAMES)
+    (assert-true (every (lambda (n) (string? (depth-label (depth-ref n)))) DEPTH-NAMES))
+    (assert-equal 'b (depth-after 'none))
+    (assert-equal 'none (depth-after 'b2e))
+    (assert-equal 'none (depth-name (depth-ref 'abd)))   ; an old store's name reads as the default
+    (assert-false (depth-name? 'abd)))
+  (test "the parts: B2 is B with a hue, E edges alone, B2E both; no entry moves the offset"
+    (assert-true (and (depth-shade (depth-ref 'b2)) (depth-hue (depth-ref 'b2)) (not (depth-edges (depth-ref 'b2)))))
+    (assert-true (and (depth-edges (depth-ref 'e)) (not (depth-shade (depth-ref 'e)))))
+    (assert-true (and (depth-shade (depth-ref 'b2e)) (depth-hue (depth-ref 'b2e)) (depth-edges (depth-ref 'b2e))))
+    (assert-true (every (lambda (n) (= 3 (depth-offset (depth-ref n)))) DEPTH-NAMES)))
+  (test "A's side depth grows with the layer and caps; the flat depth is the offset"
+    (assert-equal 3 (depth-side (depth-ref 'none) 4))
+    (assert-equal '(3 4 5 6 6) (map (lambda (l) (depth-side (depth-ref 'abe) l)) '(0 1 2 3 4))))
+  (test "C's shadow falls only for raised tiles and only with C"
+    (assert-equal 0 (depth-shadow-fall (depth-ref 'abc) 0))
+    (assert-equal 4 (depth-shadow-fall (depth-ref 'abc) 1))
+    (assert-equal 0 (depth-shadow-fall (depth-ref 'b2e) 3))))
+
+(test-group "depth: E's free-side predicate is the rules' and flips with the neighbour"
+  (let* ((lay (turtle-layout))
+         (b (generate lay 1))
+         (ids (iota (layout-slot-count lay)))
+         (present (filter (lambda (id) (tile-present? b id)) ids)))
+    (test "free on a side is exactly not blocked on that side"
+      (for-each (lambda (id)
+                  (assert-equal (not (blocked-right? b id)) (side-free? b id 'right))
+                  (assert-equal (not (blocked-left? b id)) (side-free? b id 'left)))
+                present))
+    (test "a tile blocked on the right becomes free there when the pair to its right leaves"
+      ;; the first solution pair is a legal match; some tile is blocked on
+      ;; its right by one of the two: after the match it is free
+      (let* ((pair (car (board-solution b)))
+             (after (board-select (board-select b (car pair)) (cdr pair)))
+             (flipped (filter (lambda (id)
+                                (and (tile-present? after id)
+                                     (not (side-free? b id 'right))
+                                     (side-free? after id 'right)))
+                              present)))
+        (assert-false (tile-present? after (car pair)))
+        (assert-true (pair? flipped))
+        (for-each (lambda (id) (assert-true (side-free? after id 'right))) flipped)))))

@@ -18,6 +18,9 @@
 //               is a tap on nothing: the menu stays, no line; a tap at CARDS' center
 //               -> "crash: menu chose cards" and the card table's boot line
 //   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
+//               move's centers; the bar line's readout box (the score, the
+//               bounty row under it) ends left of the ? button (nothing
+//               draws under the button, David's laptop read 2026-09-20)
 //               move's centers, "crash: cards first SX SY DX DY"
 //   render      the table region is drawn: many lit pixels in several bins
 //   draw        a tap on the stock, at the center the "crash: cards stock X Y"
@@ -368,7 +371,15 @@ const first = await waitLine(/^crash: cards first (?:(-?[\d.]+) (-?[\d.]+) (-?[\
 if (boot.m[2] !== "0") fail("boot", `expected a fresh deal (moves 0), got moves ${boot.m[2]}`);
 else if (!first) fail("boot", "no \"crash: cards first\" line");
 else if (!first.m[1]) fail("boot", `seed ${SEED} deals no legal move; pick another --seed`);
-else pass("boot", `seed ${boot.m[1]} moves 0 draw ${boot.m[3]}; first move (${first.m[1]},${first.m[2]}) -> (${first.m[3]},${first.m[4]})`);
+else {
+  // the score readout and the bounty row under it are right-aligned to
+  // the bar line's readout box, which must end left of the ? button
+  const bar = await waitLine(/^crash: bar meter (-?\d+) (-?\d+) (\d+) (\d+) readout (-?\d+) (-?\d+) (\d+) (\d+)$/, 0, 2000);
+  const keys = await waitLine(/^crash: control keys (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  if (!bar || !keys) fail("boot", "no \"crash: bar\" or \"crash: control keys\" line on the card table");
+  else if (parseInt(bar.m[5], 10) + parseInt(bar.m[7], 10) > Math.round(keys.m[1]) - 12 - 2) fail("boot", `the readout box ends at ${parseInt(bar.m[5], 10) + parseInt(bar.m[7], 10)}, under the ? button (left edge ${Math.round(keys.m[1]) - 12})`);
+  else pass("boot", `seed ${boot.m[1]} moves 0 draw ${boot.m[3]}; first move (${first.m[1]},${first.m[2]}) -> (${first.m[3]},${first.m[4]}); the readout box ends at ${parseInt(bar.m[5], 10) + parseInt(bar.m[7], 10)}, left of the ? button`);
+}
 await sleep(1500);
 
 // ---- render -------------------------------------------------------------------

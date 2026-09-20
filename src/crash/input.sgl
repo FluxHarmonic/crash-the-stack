@@ -83,6 +83,7 @@
           session-retry session-next
           session-tools session-tools-list session-with-tools-touch
           session-hud session-with-hud session-keys-shown
+          session-device frame-device
           session-demo-near-cleared session-demo-finish
           session-request session-clear-request
           session-instruction
@@ -127,9 +128,19 @@
       (tools default: (tools-new))        ; the tool stack, (crash hud)
       (hud default: DEFAULT-LAYOUT)       ; the bar's layout, (crash hud): zones | strip
       (keys-shown default: #f)            ; the keys line in place of the instruction line (?)
+      (device default: 'mouse)            ; the last input device: touch | mouse | keyboard (the prompt follows it)
       (request default: #f)               ; for the shell: menu, or #f
       (seed default: 1)
       (message default: ""))
+
+    ;; The device a frame came from, or #f for an idle frame: a click is
+    ;; the touch screen or the mouse (the stack's touch flag says which),
+    ;; a key the keyboard. The prompt line follows it (David, 2026-09-20:
+    ;; "TAP TWO MATCHING TILES." reads wrong under a keyboard).
+    (define (frame-device f touch?)
+      (cond ((input-frame-click f) (if touch? 'touch 'mouse))
+            ((pair? (input-frame-pressed f)) 'keyboard)
+            (else #f)))
 
     (define MODELS '(hint cursor))
 
@@ -755,8 +766,11 @@
             (make-tool 'hint "HINT" 'h HINT-COST #f play?)
             (make-tool 'next "NEXT" 'n)))
 
+    ;; The touch flag also sets the device the session opens on.
     (define (session-with-tools-touch s touch?)
-      (session s tools: (tools-with-touch (session-tools s) touch?)))
+      (session s
+               tools: (tools-with-touch (session-tools s) touch?)
+               device: (if touch? 'touch 'mouse)))
 
     (define (session-with-hud s name)
       (session s hud: (if (layout-name? name) name DEFAULT-LAYOUT)))
@@ -777,6 +791,7 @@
               ((board-cleared? b) "STACK CRASHED. NEXT DEALS ANOTHER.")
               ((board-no-moves? b) "NO MOVES LEFT: SHUFFLE.")
               ((board-selected b) "NOW ITS MATCH.")
+              ((eq? (session-device s) 'keyboard) "PRESS TWO MATCHING TILES' LETTERS.")
               (else "TAP TWO MATCHING TILES."))))
 
     ;; The stack sees the raw frame first (a tap on the bar while it is
@@ -784,7 +799,9 @@
     ;; found the bar's rewrite swallowing such taps); only a frame the
     ;; stack left alone is rewritten by the bar's controls.
     (define (session-step s f0 g)
-      (let* ((was-open (tools-open? (session-tools s)))
+      (let* ((s (let ((d (frame-device f0 (tools-touch (session-tools s)))))
+                  (if (and d (not (eq? d (session-device s)))) (session s device: d) s)))
+             (was-open (tools-open? (session-tools s)))
              (r (tools-step (session-tools s)
                             (cons (input-frame-pressed f0) (input-frame-click f0))
                             (session-tools-list s)

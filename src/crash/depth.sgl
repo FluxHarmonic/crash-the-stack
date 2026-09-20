@@ -21,21 +21,38 @@
 ;;;      pixels or nothing, no alpha, so the frame's color count holds.
 ;;;   D  a larger per-layer x/y offset, 5 px instead of 3: the geometry's
 ;;;      side, so the faces of the upper layers move (and their tap
-;;;      targets with them: the hit test follows the draw).
+;;;      targets with them: the hit test follows the draw). Built, no
+;;;      entry uses it since David's first read (2026-09-20).
+;;;   B2 B plus a faint hue per layer (David's read of fd93be5: "B seems
+;;;      to be the best ... a faint hue in addition to the lightness ...
+;;;      it'd be clear which tiles are on the same layer"): the faces are
+;;;      palette slots, C-FACE-1 (layer 1, cool), C-SIDE-DARK (layer 2,
+;;;      neutral), C-FACE-2 (layer 3, warm), and B's lightness step on
+;;;      layer 4; (crash render)'s face-tint.
+;;;   E  a free-side cue (the same read: "the biggest problem is the
+;;;      right edge of the tiles, knowing when one is not occluded"): a
+;;;      tile whose right side is free by the rules' blocked-right?, the
+;;;      predicate the hint uses, draws its right edge a step brighter
+;;;      (C-STATIC-A); a tile blocked on the right draws no edge line
+;;;      there; the same on the left. The top edge is A/B/C's business.
+;;;      Tap targets unchanged.
 ;;;
-;;; The entries: NONE (today's look, the default), A, B, AB, ABC, ABD.
+;;; The entries: NONE (today's look, the default), B, B2, E, ABE, ABC,
+;;; B2E (the candidate for the default).
 ;;; Data only: (crash geometry) reads the offset, (crash render) the
 ;;; rest; the shells store the choice under its own key ("depth") and
 ;;; open ?depth=NAME (web) and --depth NAME (native) as doors.
 
 (define-library (crash depth)
-  (import (sigil struct))
+  (import (sigil struct)
+          (crash stack rules))
 
   (export depth depth? depth-name depth-label
-          depth-grow depth-shade depth-shadow depth-offset
+          depth-grow depth-shade depth-hue depth-edges depth-shadow depth-offset
           DEPTHS DEPTH-NAMES DEFAULT-DEPTH
           depth-ref depth-name? depth-after
-          depth-side depth-shadow-fall MAX-SIDE-GROWTH MAX-SHADOW)
+          depth-side depth-shadow-fall MAX-SIDE-GROWTH MAX-SHADOW
+          side-free?)
 
   (begin
     (define-struct depth
@@ -43,16 +60,19 @@
       (label default: "NONE")
       (grow default: #f)        ; A: the drawn side deepens with the layer
       (shade default: #f)       ; B: lighter faces up the stack, edge on the top tile only
+      (hue default: #f)         ; B2: a faint hue per layer as well (with shade)
+      (edges default: #f)       ; E: the free sides bright, the blocked sides bare
       (shadow default: #f)      ; C: the dithered drop shadow under raised tiles
       (offset default: 3))      ; D: the per-layer offset (the geometry's side)
 
     (define DEPTHS
       (list (depth name: 'none label: "NONE")
-            (depth name: 'a label: "A" grow: #t)
             (depth name: 'b label: "B" shade: #t)
-            (depth name: 'ab label: "AB" grow: #t shade: #t)
+            (depth name: 'b2 label: "B2" shade: #t hue: #t)
+            (depth name: 'e label: "E" edges: #t)
+            (depth name: 'abe label: "ABE" grow: #t shade: #t edges: #t)
             (depth name: 'abc label: "ABC" grow: #t shade: #t shadow: #t)
-            (depth name: 'abd label: "ABD" grow: #t shade: #t offset: 5)))
+            (depth name: 'b2e label: "B2E" shade: #t hue: #t edges: #t)))
 
     (define DEPTH-NAMES (map depth-name DEPTHS))
     (define DEFAULT-DEPTH (depth-name (car DEPTHS)))
@@ -85,6 +105,14 @@
       (if (depth-grow d)
           (+ (depth-offset d) (if (< layer MAX-SIDE-GROWTH) layer MAX-SIDE-GROWTH))
           (depth-offset d)))
+
+    ;; E's predicate, the rules': is the tile's side free, by the same
+    ;; occlusion rule the hint and a pick use (blocked-left?/blocked-right?
+    ;; in (crash stack rules)). side: left | right.
+    (define (side-free? b id side)
+      (if (eq? side 'right)
+          (not (blocked-right? b id))
+          (not (blocked-left? b id))))
 
     ;; How far C's shadow falls (down and left) for a tile on this layer,
     ;; or 0 for the base layer and when C is off.

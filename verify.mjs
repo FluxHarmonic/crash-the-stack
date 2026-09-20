@@ -639,11 +639,15 @@ else fail("keys-match", keysDetail);
 }
 
 // ---- 6b. removed: the polish row's prototype toggles do nothing ----------
-// One look ("crash: look a" at boot and never again); ctrl+t, ctrl+m, a tap
-// on the TILES readout and a tap on the meter change nothing: no look,
-// trace, select or shuffle line, the meter's face still TRACE (its first
-// five glyphs' pixels unchanged; a flip to clean would draw TIME), and the
-// readout's pixels unchanged. The rects come from the "crash: bar" line.
+// One look ("crash: look a" at boot and never again); a tap on the TILES
+// readout and a tap on the meter change nothing: no look, trace, select
+// or shuffle line, the meter's face still TRACE (its first five glyphs'
+// pixels unchanged; a flip to clean would draw TIME), and the readout's
+// pixels unchanged. The rects come from the "crash: bar" line. The ctrl
+// chords (ctrl+t, ctrl+m) cannot be tested here: the loader drops every
+// keydown with ctrlKey (sigil-web-app.js wireEvents), so they never reach
+// the game on the web; a planted ctrl+m flip left this leg green
+// (2026-09-20). test/test-hud.sgl and test/test-input.sgl hold them.
 const BAR_RE = /^crash: bar meter (-?\d+) (-?\d+) (\d+) (\d+) readout (-?\d+) (-?\d+) (\d+) (\d+)$/;
 let barRects = null;
 {
@@ -661,25 +665,20 @@ let barRects = null;
     const readout = () => readRegion(rx, ry, rw, rh);
     const face0 = await face(), readout0 = await readout();
     mark = consoleLines.length;
-    await key("keydown", "Control"); await sleep(60);
-    await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "t", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(40);
-    await evalJS(`document.dispatchEvent(new KeyboardEvent("keyup", { key: "t", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(60);
-    await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "m", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(40);
-    await evalJS(`document.dispatchEvent(new KeyboardEvent("keyup", { key: "m", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(60);
-    await key("keyup", "Control"); await sleep(300);
     if (!EXPECT_NO_SELECTION) {
       await tap(rx + rw / 2, ry + rh / 2); await sleep(300);
       await tap(mx + 20, my + 6); await sleep(300);
     }
     const stray = consoleLines.slice(mark).filter((l) => /^crash: (look|trace|select|deselect|shuffle|undo|removed|tools) /.test(l) || /^crash: (shuffle|tools open)$/.test(l));
     const face1 = await face(), readout1 = await readout();
-    if (stray.length) detail = `ctrl+t, ctrl+m, the readout tap or the meter tap did something: ${stray.slice(0, 3).join(" | ")}`;
+    if (stray.length) detail = `the readout tap or the meter tap did something: ${stray.slice(0, 3).join(" | ")}`;
     else if (litCount(face0) < 20) detail = `the meter's face shows nothing to compare (${litCount(face0)} lit pixels)`;
     else if (!sameRegion(face0, face1)) detail = "the meter's face changed (a flip to the clean face draws TIME where TRACE was)";
     else if (!sameRegion(readout0, readout1)) detail = "the TILES readout's pixels changed";
   }
   if (detail) fail("removed", detail);
-  else pass("removed", `one look (a); ctrl+t, ctrl+m${EXPECT_NO_SELECTION ? "" : ", the readout tap and the meter tap"} changed nothing (no line, the meter's face and the readout pixel-identical)`);
+  else if (EXPECT_NO_SELECTION) pass("removed", "one look (a); no look or mode control listed (the taps need forwarding)");
+  else pass("removed", "one look (a); the readout tap and the meter tap changed nothing (no line, the meter's face and the readout pixel-identical); the ctrl chords are the unit tests' (the loader drops them)");
 }
 
 // ---- 6c. assets: everything the page fetched answered (P3 leg 2, web) -----
@@ -730,14 +729,15 @@ let barRects = null;
     // the padding (David's phone read, 2026-09-20): a pixel above and below
     // the text, so 18 tall in zones (scale-2 text, 14) and 14 in the strip (7)
     else if (meterZones.m[4] !== "18" || meterStrip.m[4] !== "14") detail = `the meter's height is ${meterZones.m[4]} (zones) and ${meterStrip.m[4]} (strip), not 18 and 14`;
-    else {
-      await sleep(800);
-      mark = consoleLines.length;
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=zones` });
-      const back = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
-      if (!back || back.m[1] !== "zones") detail = "?hud=zones did not set the layout back";
-      else pass("hud", `zones meter ${meterZones.m.slice(1, 5).join("x")}, strip meter ${meterStrip.m.slice(1, 5).join("x")}, stored and restored`);
-    }
+    // zones back whatever the checks said, so a red here does not leave
+    // the strip stored for the legs after (it did once: the bar leg then
+    // read the prompt inside the strip)
+    await sleep(800);
+    mark = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=zones` });
+    const back = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
+    if (!back || back.m[1] !== "zones") detail = detail || "?hud=zones did not set the layout back";
+    else if (!detail) pass("hud", `zones meter ${meterZones.m.slice(1, 5).join("x")}, strip meter ${meterStrip.m.slice(1, 5).join("x")}, stored and restored`);
     await sleep(1500);
   }
   if (detail) fail("hud", detail);
@@ -745,12 +745,12 @@ let barRects = null;
 
 // ---- 6e. depth: the depth-cue candidates (ruling D48) -----------------------
 // ?depth=NAME boots each candidate (its "crash: depth NAME" line, stored
-// for the next boot), the board draws (lit pixels in the board region),
-// and the first pair's tile A, at the center the boot line gives, selects
-// on a tap: the hit test follows the draw. For the candidates that keep the
-// 3 px offset (none, a, b, ab, abc) the pair's centers are the ones the
-// plain look printed: nothing tappable moved; abd moves the layers apart
-// on purpose and its centers differ. Each boot is ?fresh (a restored
+// for the next boot), the board draws (lit pixels in the board region,
+// and not none's pixels), and the first pair's tile A, at the center the
+// boot line gives, selects on a tap: the hit test follows the draw. No
+// candidate moves the layers apart (D has no entry since David's read),
+// so the pair's centers are the ones the plain look printed for every
+// one: nothing tappable moved. Each boot is ?fresh (a restored
 // board has no solution pair to print), so the last one, none, is followed
 // by the first pair's match to leave the 142-tile board the legs after
 // this expect (the trace's hint count starts over; nothing reads it).
@@ -759,7 +759,9 @@ let barRects = null;
   else {
     let detail = "";
     const centers = {};
-    for (const name of ["none", "a", "b", "ab", "abc", "abd", "none"]) {
+    const boards = {};
+    const NAMES = ["none", "b", "b2", "e", "abe", "abc", "b2e"];
+    for (const name of NAMES.concat(["none"])) {
       if (detail) break;
       mark = consoleLines.length;
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&depth=${name}` });
@@ -773,6 +775,11 @@ let barRects = null;
       await sleep(600);
       const region = await readRegion(64, 40, VW - 128, VH - 48 - 80);
       if (litCount(region) < region.w * region.h * 0.3) { detail = `?depth=${name}: the board region is mostly dark (${litCount(region)} lit of ${region.w * region.h})`; break; }
+      // every candidate draws the board differently from none (the same
+      // seed, the same frame of a fresh board); a renderer that ignored
+      // the depth would draw none's pixels
+      if (name === "none" && !boards.none) boards.none = region;
+      else if (name !== "none" && boards.none && sameRegion(boards.none, region)) { detail = `?depth=${name} drew the board pixel-identical to none`; break; }
       centers[name] = m.slice(2, 4).join(",") + " " + m.slice(5, 7).join(",");
       const before = consoleLines.length;
       await tap(m[2], m[3]);
@@ -780,7 +787,7 @@ let barRects = null;
       if (!sel) { detail = `?depth=${name}: a tap at tile ${m[1]}'s center (${m[2]},${m[3]}) selected nothing`; break; }
       if (sel.m[1] !== m[1]) { detail = `?depth=${name}: the tap selected ${sel.m[1]}, not ${m[1]}`; break; }
       await press("Enter"); await sleep(200);   // deselect
-      if (name === "none" && centers.abd) {
+      if (name === "none" && centers.b2e) {
         // the last boot: match the pair, as the tap legs did on the first
         const before = consoleLines.length;
         await tap(m[2], m[3]); await sleep(300); await tap(m[5], m[6]);
@@ -789,12 +796,11 @@ let barRects = null;
       }
     }
     if (!detail) {
-      for (const name of ["a", "b", "ab", "abc"]) if (centers[name] !== centers.none) detail = `?depth=${name} moved the pair's centers: ${centers[name]} against none's ${centers.none}`;
-      if (!detail && centers.abd === centers.none) detail = "?depth=abd (the 5 px offset) left the pair's centers where none's are";
+      for (const name of NAMES) if (centers[name] !== centers.none) detail = `?depth=${name} moved the pair's centers: ${centers[name]} against none's ${centers.none}`;
     }
     await sleep(1000);
     if (detail) fail("depth", detail);
-    else pass("depth", `none a b ab abc abd boot and draw, tile A selects at its printed center under each; centers ${centers.none} for all but abd (${centers.abd}); none stored back`);
+    else pass("depth", `${NAMES.join(" ")} boot and draw (each differs from none), tile A selects at its printed center under each; centers ${centers.none} for all; none stored back`);
   }
 }
 
@@ -871,6 +877,9 @@ let iceLock = null;
     const rows = () => readRegion(60, top + 22, VW - 60 - 32, 20);
     if (!keysCtl || !toolCtl || !menuCtl) detail = "a bar button's control line is missing";
     else if (Math.round(keysCtl.m[1]) !== VW - 16 || Math.round(keysCtl.m[2]) !== VH - 16) detail = `the ? button's center is (${keysCtl.m[1]},${keysCtl.m[2]}), not (${VW - 16},${VH - 16})`;
+    // nothing draws under the ? button (David's laptop read): the readout
+    // box, which the readout rows are right-aligned to, ends left of it
+    else if (barRects.readout[0] + barRects.readout[2] > Math.round(keysCtl.m[1]) - 12 - 2) detail = `the readout box ends at ${barRects.readout[0] + barRects.readout[2]}, under the ? button (left edge ${Math.round(keysCtl.m[1]) - 12})`;
     else {
       const phase = consoleLines.some((l) => /^crash: trace \d+ \d+ \d+ counter \d+$/.test(l));
       const wrench0 = await button(toolCtl), menu0 = await button(menuCtl), keys0 = await button(keysCtl), rows0 = await rows();
@@ -895,6 +904,7 @@ let iceLock = null;
         // keys line's, not with the first read)
         else if (sameRegion(rows1, rows2)) detail = "the tap on ? did not put the line back";
       }
+      if (!detail && !phase) detail = "the traced leg did not reach the ICE, so the prompt / ICE IN lanes went unchecked";
       if (!detail && phase) {
         // the prompt and ICE IN
         const ice0 = bbox(await readRegion(mx + mw, my, rx - mx - mw, mh), PAL.ice);
@@ -918,7 +928,7 @@ let iceLock = null;
       }
     }
     if (detail) fail("bar", detail);
-    else pass("bar", `keys line wraps clear of the wrench and MENU; ? is a lit 24x24 button at (${keysCtl.m[1]},${keysCtl.m[2]}) and a tap on it toggles back${consoleLines.some((l) => /counter \d+$/.test(l)) ? "; the prompt sits left of the meter, ICE IN right of it, disjoint" : ""}`);
+    else pass("bar", `keys line wraps clear of the wrench and MENU; ? is a lit 24x24 button at (${keysCtl.m[1]},${keysCtl.m[2]}) and a tap on it toggles back; the prompt sits left of the meter, ICE IN right of it, disjoint`);
   }
 }
 
