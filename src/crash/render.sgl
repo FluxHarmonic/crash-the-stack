@@ -1,15 +1,13 @@
 ;;; (crash render) - Drawing the table.
 ;;;
-;;; Takes a session, a geometry, (optionally) the test-tile texture and the
-;;; frame's effects from (crash fx), and draws one frame with sigil-graphics
-;;; primitives: a copper-bar background, each tile as a flat face over a
-;;; darker side face offset per layer (moved, scaled or flipped as the
-;;; effects say), the glyph in its suit color from the bitmap font, the
-;;; selection and the keyboard highlight, the match ghosts and particles,
-;;; the hint tags, and the HUD with its tappable controls. Nothing here
-;;; reads input, a platform or a clock; the shell hands in the texture the
-;;; look names, if it has loaded it (native: load-image from assets/; web:
-;;; from memory), and the effects arrive already advanced.
+;;; Takes a session, a geometry and the frame's effects from (crash fx),
+;;; and draws one frame with sigil-graphics primitives: the living
+;;; background, each tile as a charcoal face over a darker side face
+;;; offset per layer (moved, scaled or flipped as the effects say), the
+;;; glyph in its suit color from sheet A through the atlas, the selection
+;;; and the keyboard highlight, the match ghosts and particles, the hint
+;;; tags, and the HUD with its three buttons. Nothing here reads input, a
+;;; platform or a clock; the effects arrive already advanced.
 ;;;
 ;;; Palette: the colors come from (crash palette), at most 32, so David
 ;;; can retune the look in one place (design decision 7).
@@ -46,7 +44,7 @@
           draw-bg-in draw-background draw-board-background
           draw-meter-in draw-glitch-in draw-severed-in draw-message-in draw-toast-in
           draw-tool-button draw-menu-button draw-tool-stack draw-bar-frame draw-readout draw-line-2
-          draw-keys-mark phase-color tiles-ensure!)
+          draw-keys-button draw-prompt draw-beside-meter phase-color tiles-ensure!)
 
   (begin
     ;; Every frame starts here: sokol_gp's begin resets its state, and its
@@ -60,28 +58,24 @@
       (set-blend-mode 'normal))
 
     ;; The bible's section 3: four suits of eight (MEM, PWR, TX, DSK) and
-    ;; the four daemons in the look's daemon color. On the charcoal face
-    ;; the PWR red is the palette's hot red, C-TRACE-HOT (David,
-    ;; 2026-09-18: C-SUIT-1's tone "doesn't feel right on charcoal"; keep
-    ;; it hot), and C-SUIT-1 stays the light face's.
+    ;; the four daemons in white (ruling D32). On the charcoal face the
+    ;; PWR red is the palette's hot red, C-TRACE-HOT (David, 2026-09-18:
+    ;; C-SUIT-1's tone "doesn't feel right on charcoal"; keep it hot).
     ;; A cond on the suit, not a case: every case clause the native codegen
     ;; tests allocates its datum list (96 bytes a tile a frame, 2026-09-20).
-    (define (suit-color look face)
+    (define (suit-color face)
       (let ((suit (face-suit face)))
         (cond ((eqv? suit 0) C-SUIT-0)
-              ((eqv? suit 1) (if (eq? (look-face look) 'light) C-SUIT-1 C-TRACE-HOT))
+              ((eqv? suit 1) C-TRACE-HOT)
               ((eqv? suit 2) C-SUIT-2)
               ((eqv? suit 3) C-SUIT-3)
-              (else (if (eq? (look-daemon look) 'orange) C-HOT C-DAEMON)))))
+              (else C-DAEMON))))
 
-    ;; The tile face in the look's color: charcoal (ruled) or the P0 light
-    ;; face; and its rim, which on charcoal is the mid gray of the side,
-    ;; not the white edge ("the tile-dividing lines may be a bit too white").
-    (define (face-color look)
-      (if (eq? (look-face look) 'light) C-FACE C-STATIC-B))
-
-    (define (face-edge-color look)
-      (if (eq? (look-face look) 'light) C-FACE-EDGE C-SIDE))
+    ;; The tile face: charcoal (ruling D32), and its rim the mid gray of
+    ;; the side, not the white edge ("the tile-dividing lines may be a
+    ;; bit too white").
+    (define FACE-COLOR C-STATIC-B)
+    (define FACE-EDGE-COLOR C-SIDE)
 
     ;; --- background -----------------------------------------------------------
 
@@ -215,7 +209,7 @@
              (gx (+ x (exact (floor (/ (- w gw) 2)))))
              (gy (+ y (exact (floor (/ (- h gh) 2))))))
         (when (>= w (+ gw 2))
-          (color! (if dark? C-BG (suit-color look face)))
+          (color! (if dark? C-BG (suit-color face)))
           (if scramble
               (begin
                 (draw-face-glyph-scrambled (look-glyphs look) face gx gy scale (car scramble) (cdr scramble))
@@ -244,8 +238,8 @@
     ;; with normal blending so the transparent part leaves the tiles under
     ;; it alone). A tile is then one draw-texture-region for its sides and
     ;; one for its body; the selected tile keeps the rectangles, its face
-    ;; color breathes with the glow. Keyed by (look tile-w tile-h side):
-    ;; a look or layout change re-bakes. tiles-ensure! runs from the shells'
+    ;; color breathes with the glow. Keyed by (tile-w tile-h side): a
+    ;; layout change re-bakes. tiles-ensure! runs from the shells'
     ;; present! before any other pass (a bake inside the phosphor's pass
     ;; would be a pass inside a pass); a draw with nothing baked falls back
     ;; to the rectangles. The atlas leg holds the two paths identical.
@@ -259,11 +253,11 @@
       (+ (cond ((eq? lock 'strong) 1) ((eq? lock 'weak) 2) (else 0))
          (if right-open? 3 0)))
 
-    (define (tiles-ensure! look g)
+    (define (tiles-ensure! g)
       (let* ((w (geometry-tile-w g))
              (h (geometry-tile-h g))
              (side (geometry-side g))
-             (key (list (look-name look) w h side)))
+             (key (list w h side)))
         (unless (equal? key *tiles-key*)
           (when *tiles-rt* (render-target-free! *tiles-rt*))
           (let ((rt (make-render-target (+ (* TILE-VARIANTS w) w side) (+ h side) 'nearest)))
@@ -271,7 +265,7 @@
               (set-blend-mode 'none)
               (let variants ((v 0))
                 (when (< v TILE-VARIANTS)
-                  (draw-face-rects look (* v w) 0 w h #f
+                  (draw-face-rects (* v w) 0 w h #f
                                    (case (modulo v 3) ((1) 'strong) ((2) 'weak) (else #f))
                                    (>= v 3)
                                    0.0)
@@ -320,19 +314,19 @@
     ;; between two bodies cost a draw call per tile: 170 GL calls a frame
     ;; against 40 before the atlas. Tiles on one layer never overlap, so
     ;; the grouping draws the same pixels.
-    (define (draw-face-body g look face x y w h selected? lock right-open? glow)
+    (define (draw-face-body g face x y w h selected? lock right-open? glow)
       (if (and (atlas-on?) *tiles-tex* (not selected?))
           (draw-tile-cell x y (* (tile-variant lock right-open?) w) w h)
-          (draw-face-rects look x y w h selected? lock right-open? glow)))
+          (draw-face-rects x y w h selected? lock right-open? glow)))
 
-    (define (draw-face-rects look x y w h selected? lock right-open? glow)
+    (define (draw-face-rects x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
       (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
                     ((eq? lock 'strong) C-LOCKED)
                     ((eq? lock 'weak) C-LOCK-WEAK)
-                    (else (face-color look))))
+                    (else FACE-COLOR)))
       (draw-filled-rect x y w h)
-      (color! (if selected? C-SELECTED (face-edge-color look)))
+      (color! (if selected? C-SELECTED FACE-EDGE-COLOR))
       (draw-filled-rect x y w 1)
       (draw-filled-rect x y 1 h)
       (when right-open?
@@ -347,44 +341,6 @@
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
         (draw-filled-rect x (+ y 3) w 2)
         (draw-filled-rect x (+ y h -5) w 2)))
-
-    ;; A textured look: the look's strip (frame 0 the blank block, side
-    ;; face included in the art; frames 1.. drawn faces for faces 0.., as
-    ;; P0's test tile carries three) scaled to the tile, the glyph sheet
-    ;; drawn on a blank frame. The frame carries the side art in its left
-    ;; and bottom cells (look-side of them), so the side pass draws the
-    ;; whole frame and the face pass redraws only the face region over it.
-
-    (define (tile-frame look b id)
-      (let ((face (tile-face b id)))
-        (if (and face (< face (- (look-frames look) 1)))
-            (+ face 1)
-            0)))
-
-    (define (draw-sides-texture g look b id tex x y w h selected?)
-      (let ((side (geometry-side g))
-            (frame (tile-frame look b id)))
-        (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
-        (draw-texture-region tex
-                             (- x side) y
-                             (+ w side) (+ h side)
-                             (* frame (look-frame-w look)) 0
-                             (look-frame-w look) (look-frame-h look))))
-
-    (define (draw-face-texture g look b id face tex x y w h selected? scramble)
-      (let ((frame (tile-frame look b id))
-            (fw (look-frame-w look))
-            (fh (look-frame-h look))
-            (inset (look-side look)))
-        (color! (if selected? C-TEX-SELECTED C-TEX-PLAIN))
-        (draw-texture-region tex
-                             x y
-                             w h
-                             (+ (* frame fw) inset) 0
-                             (- fw inset)
-                             (- fh inset))
-        (when (and face (= frame 0))
-          (draw-glyph-on g look face x y w h selected? scramble))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -514,7 +470,7 @@
                    (+ (vector-ref *layer-start* layer) (vector-ref *layer-count* layer))
                    proc))
 
-    (define (draw-tiles s g tex x)
+    (define (draw-tiles s g x)
       (let* ((b (session-board s))
              (lay (board-layout b))
              (selected (board-selected b))
@@ -522,7 +478,6 @@
              (ticks (fx-ticks x))
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
-             (textured? (and tex (look-texture look) #t))
              (highlight (and (eq? (session-model s) 'cursor)
                              (session-cursor-shown s)
                              (session-highlight s)
@@ -541,17 +496,12 @@
              (sorted (sort-tiles-by-layer! n (layout-layer-count lay))))
         ;; the four passes' procedures, made once a frame, not once a layer
         (let ((sides (lambda (id face x y w h selected?)
-                       (if textured?
-                           (draw-sides-texture g look b id tex x y w h selected?)
-                           (draw-sides-primitives g x y w h))))
+                       (draw-sides-primitives g x y w h)))
               (bodies (lambda (id face x y w h selected?)
-                        (if textured?
-                            (draw-face-texture g look b id face tex x y w h selected?
-                                               (and (tile-scrambled? b id) (cons ticks id)))
-                            (draw-face-body g look face x y w h selected?
-                                            (lock-state b id now)
-                                            (not (blocked-right? b id))
-                                            glow))))
+                        (draw-face-body g face x y w h selected?
+                                        (lock-state b id now)
+                                        (not (blocked-right? b id))
+                                        glow)))
               (glyphs (lambda (id face x y w h selected?)
                         (draw-face-glyph-part g look face x y w h selected?
                                               (and (tile-scrambled? b id) (cons ticks id)))))
@@ -561,9 +511,8 @@
             (when (< layer (layout-layer-count lay))
               (each-on-layer layer sides)
               (each-on-layer layer bodies)
-              (unless textured?
-                (each-on-layer layer glyphs)
-                (each-on-layer layer locks))
+              (each-on-layer layer glyphs)
+              (each-on-layer layer locks)
               (loop (+ layer 1)))))
         (draw-ghosts g look x)
         (draw-particles g look x)
@@ -591,7 +540,7 @@
                     (color-alpha! C-SELECTED a)
                     (draw-filled-rect gx gy w h)
                     (when face
-                      (color-alpha! (suit-color look face) a)
+                      (color-alpha! (suit-color face) a)
                       (let* ((scale (glyph-scale g))
                              (gw (* scale GLYPH-W))
                              (gh (* scale GLYPH-H)))
@@ -605,7 +554,7 @@
     ;; Glyph fragments and rain: small squares in the suit color.
     (define (draw-particles g look x)
       (for-each (lambda (pt)
-                  (color-alpha! (suit-color look (car pt)) (list-ref pt 4))
+                  (color-alpha! (suit-color (car pt)) (list-ref pt 4))
                   (draw-filled-rect (cadr pt)
                                     (caddr pt)
                                     (cadddr pt)
@@ -669,11 +618,12 @@
     ;; (the trace meter takes this spot in the trace slice) and the seed.
     ;; Row 2: the keys of the model in use.
 
-    ;; at most 94 characters: line 2 runs from x 34 to the ? mark at 618
+    ;; line 2 runs from the MENU button to the ? button (LINE-2-X to vw -
+    ;; LINE-2-INSET); a longer line wraps at a space onto two rows
     (define HINT-KEYS-LINE
-      "TAGS: TYPE ONE  TAB HIDE  ENTER DESELECT  SHIFT+TAB CURSOR  BKSP UNDO  SPACE TOOLS  ^S ^H ^N ^T")
+      "TAGS: TYPE ONE  TAB HIDE  ENTER DESELECT  SHIFT+TAB CURSOR  BKSP UNDO  SPACE TOOLS  ^S ^H ^N")
     (define CURSOR-KEYS-LINE
-      "CURSOR: ARROWS MOVE  ENTER PICK  SHIFT+TAB TAGS  BKSP UNDO  SPACE TOOLS  ^S ^H ^N ^T")
+      "CURSOR: ARROWS MOVE  ENTER PICK  SHIFT+TAB TAGS  BKSP UNDO  SPACE TOOLS  ^S ^H ^N")
     ;; Row 2 under the ICE and after the sever, in place of the keys line
     ;; (David, 2026-09-17: make the phase unmistakable, and say that being
     ;; traced does not end the game).
@@ -787,7 +737,7 @@
                            ((undo) C-SUIT-0)
                            ((shuf scram) C-SUIT-2)
                            ((hint probe) C-SUIT-3)
-                           ((look draw) C-LABEL-LIT)
+                           ((draw) C-LABEL-LIT)
                            ((next) C-TRACE)
                            (else C-TEXT-DIM))))
               (when (> p 0.0)
@@ -837,7 +787,7 @@
     (define (text-cache) (vector #f ""))
 
     (define (cached-text c key build)
-      (unless (eqv? key (vector-ref c 0))
+      (unless (equal? key (vector-ref c 0))
         (vector-set! c 0 key)
         (vector-set! c 1 (build key)))
       (vector-ref c 1))
@@ -848,7 +798,12 @@
     (define *trace-text* (text-cache))
     (define *link-text* (text-cache))
     (define *crashed-text* (text-cache))
+    (define *ice-text* (text-cache))
+    (define *prompt-text* (text-cache))
     (define (tiles-text n) (string-append "TILES " (number->string n)))
+    ;; keyed by a string (the ICE clock, the typed letters): equal, not eqv
+    (define (ice-text clock) (string-append "ICE IN " clock))
+    (define (prompt-text typed) (string-append "> " typed))
     (define (seed-text n) (string-append "SEED " (number->string n)))
     (define (time-text n) (string-append "TIME " (clock-string n)))
     (define (trace-text n) (string-append "TRACE " (number->string n)))
@@ -865,7 +820,7 @@
       (color! C-BAR-C)
       (draw-filled-rect 0 top vw 1)
       (draw-tool-button vh st badge?)
-      (draw-menu-button (list 32 (- vh 28) 24 24)))
+      (draw-menu-button (cdr (assq 'menu (bar-controls vw vh)))))
 
     ;; A readout at the right of the first row (zones) or inside the strip
     ;; (strip), right-aligned in its rect.
@@ -877,22 +832,119 @@
             (text! text (- (+ (car r) (caddr r)) (text-width text 2)) (+ (cadr r) 3) 2))))
 
     ;; The second line: the keys line when shown, else the phase line in
-    ;; its color, else the instruction; centered, clear of the button and
-    ;; the ? mark.
+    ;; its color, else the instruction; centered between the MENU button
+    ;; and the ? button, never over either. A line wider than that span
+    ;; wraps at the last space that fits onto two rows, the first above
+    ;; the second (David's phone read, 2026-09-20: the counter-hack lines
+    ;; ran under the buttons). A wrapped line costs two substrings a
+    ;; frame (the lines that wrap, the phase line and the keys line, are
+    ;; rare or already rebuilt each frame).
+    (define LINE-2-X 60)          ; the MENU button's right edge plus a cell
+    (define LINE-2-INSET 32)      ; the ? button's width plus its margin and a cell
+    (define LINE-2-Y 32)          ; the single row
+    (define LINE-2-UPPER-Y 24)    ; the first of two rows: under the meter and the UPDATE mark
+    (define LINE-2-LOWER-Y 33)    ; the second, a cell's gap below the first
+    (define LINE-2-SCALE 1)
+
+    ;; The index of the space nearest the middle of the text whose two
+    ;; halves both fit in limit characters, else the last space at or
+    ;; before the limit, else #f (no space: the line is cut at the limit).
+    ;; Balanced halves read as one sentence in two rows; a split at the
+    ;; last fitting space leaves a word or two alone on the second row.
+    (define (split-point text limit)
+      (let* ((n (string-length text))
+             (mid (quotient n 2)))
+        (let loop ((d 0))
+          (cond ((> d mid) (last-space-before text limit))
+                ((space-at? text (- mid d) limit n) (- mid d))
+                ((space-at? text (+ mid d) limit n) (+ mid d))
+                (else (loop (+ d 1)))))))
+
+    ;; A space at i whose halves (before it, after it) both fit.
+    (define (space-at? text i limit n)
+      (and (>= i 0)
+           (< i n)
+           (char=? (string-ref text i) #\space)
+           (<= i limit)
+           (<= (- n i 1) limit)))
+
+    (define (last-space-before text limit)
+      (let loop ((i (min limit (- (string-length text) 1))))
+        (cond ((< i 0) #f)
+              ((char=? (string-ref text i) #\space) i)
+              (else (loop (- i 1))))))
+
     (define (draw-line-2 vw top text color)
-      (let ((x (max 34 (exact (floor (/ (- vw (text-width text 1)) 2))))))
+      (let* ((span (- vw LINE-2-X LINE-2-INSET))
+             (w (text-width text LINE-2-SCALE))
+             (cell (+ 1 GLYPH-W)))
         (color! color)
-        (text! text x (+ top 32) 1)))
+        (if (<= w span)
+            (text! text (+ LINE-2-X (quotient (- span w) 2)) (+ top LINE-2-Y) LINE-2-SCALE)
+            (let* ((fit (quotient span cell))
+                   (at (or (split-point text fit) fit))
+                   (head (substring text 0 at))
+                   (tail (substring text (min (string-length text) (+ at 1)) (string-length text)))
+                   (tail (if (> (text-width tail LINE-2-SCALE) span)
+                             (substring tail 0 (min (string-length tail) fit))
+                             tail)))
+              (text! head (+ LINE-2-X (quotient (- span (text-width head LINE-2-SCALE)) 2)) (+ top LINE-2-UPPER-Y) LINE-2-SCALE)
+              (text! tail (+ LINE-2-X (quotient (- span (text-width tail LINE-2-SCALE)) 2)) (+ top LINE-2-LOWER-Y) LINE-2-SCALE)))))
 
-    ;; The ? mark at the bar's right end: the keys line's toggle, tappable.
-    (define (draw-keys-mark r shown?)
-      (color! (if shown? C-HIGHLIGHT C-TEXT-DIM))
-      (text! "?" (+ (car r) 4) (+ (cadr r) 3) 2))
+    ;; The ? button at the bar's right end, the wrench's peer: the keys
+    ;; icon over its key, lit while the keys line shows.
+    (define (draw-keys-button r shown?)
+      (draw-bar-button r 'keys "?" shown?))
 
-    ;; The meter in the rect the layout gives it: zones a 200x16 box on
-    ;; the first row, strip the band's top 12 px across the width.
+    ;; The tag letters typed so far: zones, at scale 2 to the left of the
+    ;; meter, right-aligned a cell short of its edge (the ICE countdown
+    ;; owns the meter's right; David's read 2026-09-20: the two wrote
+    ;; over each other); strip, inside the strip at its middle, at the
+    ;; strip's own scale. typed: the letters; the "> " string is kept
+    ;; until they change (both tables share the cache: one draws a frame).
+    (define (draw-prompt m top layout typed)
+      (color! C-HIGHLIGHT)
+      (draw-prompt-text m top layout (cached-text *prompt-text* typed prompt-text)))
+
+    (define (draw-prompt-text m top layout text)
+      (if (eq? layout 'strip)
+          (text! text (- (+ (car m) (half (caddr m))) (half (text-width text 1))) (+ (cadr m) STRIP-TEXT-Y) 1)
+          (text! text (- (car m) 6 (text-width text 2)) (+ top 7) 2)))
+
+    ;; The text row inside the strip: the border, then a pixel of padding.
+    (define STRIP-TEXT-Y 3)
+
+    ;; At the meter's right: the ICE countdown under the ICE (bible
+    ;; section 5) in C-ICE, else the caller's readout (the seed, the
+    ;; score's mode), dim. Zones: beside the box, the countdown at scale 1
+    ;; on the text's row, the readout in the mini font; strip: inside the
+    ;; strip, right-aligned a cell short of its end. ice-clock: the
+    ;; trace's m:ss under the ICE, else #f; the "ICE IN " string is kept
+    ;; until the clock changes.
+    (define (draw-beside-meter m top layout ice-clock other-text)
+      (draw-beside-meter-text m top layout
+                              (and ice-clock (cached-text *ice-text* ice-clock ice-text))
+                              other-text))
+
+    (define (draw-beside-meter-text m top layout ice-text other-text)
+      (if (eq? layout 'strip)
+          (let* ((text (or ice-text other-text))
+                 (x (- (+ (car m) (caddr m)) 6 (text-width text 1))))
+            (color! (if ice-text C-ICE C-TEXT-DIM))
+            (text! text x (+ (cadr m) STRIP-TEXT-Y) 1))
+          (let ((x (+ (car m) (caddr m) 8)))
+            (cond (ice-text
+                   (color! C-ICE)
+                   (text! ice-text x (+ (cadr m) (quotient (- (cadddr m) 7) 2)) 1))
+                  (else
+                   (color! C-TEXT-DIM)
+                   (text-mini! other-text x (+ (cadr m) (quotient (- (cadddr m) 5) 2)) 1))))))
+
+    ;; The meter in the rect the layout gives it: zones a METER-W x
+    ;; METER-H box on the first row, strip the band's top STRIP-H px
+    ;; across the width.
     (define (draw-meter g layout tr)
-      (draw-meter-in (control-rect g layout 'mode) tr))
+      (draw-meter-in (meter-rect g layout) tr))
 
     ;; The meter in any rect (both tables' bars): the text at scale 2 in
     ;; a box 16 or taller, scale 1 in the strip. The texts are kept by
@@ -1053,34 +1105,18 @@
              (st (session-tools s))
              (tools (session-tools-list s))
              (readout (cached-text *tiles-text* (board-tile-count b) tiles-text))
-             ;; the look's name under the readout: the readout is the tap
-             ;; target that steps it (P3, the sheet switch)
-             (look-label (look-label (look-ref (session-look s))))
              (cleared (fx-cleared x))
-             (look-rect (control-rect g layout 'look)))
+             (m (meter-rect g layout)))
         (draw-bar-frame vw vh top layout tr st (not (every tool-enabled tools)))
         (draw-meter g layout tr)
-        (draw-readout look-rect layout readout C-TEXT)
-        (color! C-TEXT-DIM)
-        (text-mini! look-label (- (+ (car look-rect) (caddr look-rect)) (text-width-mini look-label 1))
-                        (if (eq? layout 'strip) (+ top 16) (+ top 24))
-                        1)
-        ;; beside the meter: the ICE countdown under the ICE (bible
-        ;; section 5), else the seed in the mini font
-        (let ((m (control-rect g layout 'mode)))
-          (cond ((eq? (trace-phase tr) 'counter)
-                 (color! C-ICE)
-                 (if (eq? layout 'strip)
-                     (text! (string-append "ICE IN " (trace-ice-string tr)) (+ 100 (half vw)) (+ top 3) 1)
-                     (text! (string-append "ICE IN " (trace-ice-string tr)) (+ (car m) (caddr m) 8) (+ top 8) 1)))
-                (else
-                 (color! C-TEXT-DIM)
-                 (if (eq? layout 'strip)
-                     (text! (cached-text *seed-text* (session-seed s) seed-text) (+ 100 (half vw)) (+ top 3) 1)
-                     (text-mini! (cached-text *seed-text* (session-seed s) seed-text) (+ (car m) (caddr m) 8) (+ top 9) 1)))))
+        (draw-readout (readout-rect g layout) layout readout C-TEXT)
+        ;; beside the meter: the ICE countdown under the ICE, else the seed
+        (draw-beside-meter m top layout
+                           (and (eq? (trace-phase tr) 'counter) (trace-ice-string tr))
+                           (cached-text *seed-text* (session-seed s) seed-text))
         (when (or (eq? (session-update s) 'waiting) (eq? (session-update s) 'prompt))
           (draw-update-mark g layout))
-        (draw-keys-mark (control-rect g layout 'keys) (session-keys-shown s))
+        (draw-keys-button (control-rect g layout 'keys) (session-keys-shown s))
         ;; line 2: the keys line when asked for, else the phase line, else
         ;; the instruction (David, 2026-09-17: centered)
         (let ((line (phase-line tr b)))
@@ -1088,12 +1124,9 @@
                  (draw-line-2 vw top (if (eq? (session-model s) 'hint) HINT-KEYS-LINE CURSOR-KEYS-LINE) C-TEXT-DIM))
                 (line (draw-line-2 vw top line (phase-color tr)))
                 (else (draw-line-2 vw top (session-instruction s) C-TEXT-DIM))))
+        ;; the typed tag letters, at the meter's left (its right is the ICE's)
         (when (> (string-length (session-typed s)) 0)
-          (color! C-HIGHLIGHT)
-          (text! (string-append "> " (session-typed s))
-                     (- (car look-rect) 12 (text-width (string-append "> " (session-typed s)) 2))
-                     (+ top 7)
-                     2))
+          (draw-prompt m top layout (session-typed s)))
         ;; state messages sit; everything else is a toast from (crash fx)
         (let* ((state (cond ((board-cleared? b)
                              (string-append "STACK CRASHED " (trace-clock-string tr)
@@ -1363,11 +1396,11 @@
     ;; x: the frame's effects from (crash fx), already advanced; bg: the
     ;; living background, already stepped, or #f; copper: when the raster
     ;; draws over the field (draw-background).
-    (define (draw-session s g tex x bg copper)
+    (define (draw-session s g x bg copper)
       (let ((cleared (fx-cleared x))
             (glitch (fx-glitch x)))
         (draw-background g (if cleared (* cleared 400.0) 0.0) bg copper)
-        (draw-tiles s g tex x)
+        (draw-tiles s g x)
         (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
           (draw-hint-labels s g))
         (when glitch (draw-glitch g x glitch))

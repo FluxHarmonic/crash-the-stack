@@ -154,11 +154,11 @@
   (session-step s (make-input-frame keys '() (and (pair? rest) (car rest))) (geom)))
 
 (test-group "hud: the stack table's tools"
-  (test "the list is the note's less MENU (David, 2026-09-19): UNDO U, SHUFFLE S (60), HINT H (30), LOOK L, NEXT N"
+  (test "the list is the note's less MENU (David, 2026-09-19) and less LOOK (the polish row): UNDO U, SHUFFLE S (60), HINT H (30), NEXT N"
     (let ((tools (session-tools-list (stack-session))))
-      (assert-equal '(undo shuf hint look next) (map tool-name tools))
-      (assert-equal '(u s h l n) (map tool-tag tools))
-      (assert-equal (list #f 60 30 #f #f) (map tool-price tools))))
+      (assert-equal '(undo shuf hint next) (map tool-name tools))
+      (assert-equal '(u s h n) (map tool-tag tools))
+      (assert-equal (list #f 60 30 #f) (map tool-price tools))))
   (test "Space opens the stack; a tag letter then never reaches a tile"
     (let* ((s0 (stack-session))
            (s1 (step s0 '(space))))
@@ -185,9 +185,11 @@
     (assert-equal 1 (session-hints (step (step (stack-session) '(space)) '(|3|)))))
   (test "N is NEXT: the seed advances"
     (assert-equal 2 (session-seed (step (step (stack-session) '(space)) '(n)))))
-  (test "L is LOOK: the look steps"
-    (let ((s (stack-session)))
-      (assert-false (eq? (session-look s) (session-look (step (step s '(space)) '(l)))))))
+  (test "L is nothing now: the look does not step and the stack stays open"
+    (let* ((s (stack-session))
+           (after (step (step s '(space)) '(l))))
+      (assert-equal (session-look s) (session-look after))
+      (assert-true (tools-open? (session-tools after)))))
   (test "Escape is MENU (David, 2026-09-19): the session carries the request for the shell, which clears it; M is nothing"
     (let ((s (step (stack-session) '(escape))))
       (assert-equal 'menu (session-request s))
@@ -199,6 +201,27 @@
            (s (step (stack-session) '() (cons (+ (car r) 12) (+ (cadr r) 12)))))
       (assert-equal (list 32 (- VH 28) 24 24) r)
       (assert-equal 'menu (session-request s))))
+  (test "the ? button is the wrench's peer at the bar's right end (the polish row): a square, toggling the keys line"
+    (let* ((r (control-rect (geom) 'zones 'keys))
+           (s (step (stack-session) '() (cons (+ (car r) 12) (+ (cadr r) 12)))))
+      (assert-equal (list (- VW 28) (- VH 28) 24 24) r)
+      (assert-equal r (control-rect (geom) 'strip 'keys))
+      (assert-true (session-keys-shown s))
+      (assert-false (session-keys-shown (step s '() (cons (+ (car r) 12) (+ (cadr r) 12)))))))
+  (test "the controls are the three buttons; the meter and the readout are not tapped"
+    (assert-equal '(keys tool menu) (map car (geometry-controls (geom) 'zones)))
+    (assert-equal '(keys tool menu) (map car (geometry-controls (geom) 'strip)))
+    (for-each (lambda (layout)
+                (let ((m (meter-rect (geom) layout))
+                      (r (readout-rect (geom) layout)))
+                  (assert-false (hit-control (geom) layout (+ (car m) 10) (+ (cadr m) 3)))
+                  (assert-false (hit-control (geom) layout (+ (car r) 4) (+ (cadr r) 4)))))
+              HUD-LAYOUTS))
+  (test "the meter's box grew by the padding: 18 tall in zones, the strip 14 (David's phone read, 2026-09-20)"
+    (assert-equal METER-H (cadddr (meter-rect (geom) 'zones)))
+    (assert-equal 18 METER-H)
+    (assert-equal STRIP-H (cadddr (meter-rect (geom) 'strip)))
+    (assert-equal 14 STRIP-H))
   (test "Escape with the stack open closes it and asks for nothing"
     (let ((s (step (step (stack-session) '(space)) '(escape))))
       (assert-false (tools-open? (session-tools s)))
@@ -217,11 +240,11 @@
     (assert-equal 1 (session-hints (session-step (session-step (stack-session) (make-input-frame '(h) '(ctrl) #f) (geom))
                                                  (make-input-frame '(h) '(ctrl) #f)
                                                  (geom)))))
-  (test "under SEVERED every tool but LOOK and NEXT is disabled"
+  (test "under SEVERED every tool but NEXT is disabled"
     (let* ((s (session-advance (session-advance (stack-session) (* 60 (+ 1 SEVER-AT))) (* 60 (+ 1 SEVER-AT))))
            (tools (session-tools-list s)))
       (assert-true (trace-severed? (session-trace s)))
-      (assert-equal '(#f #f #f #t #t) (map tool-enabled tools))
+      (assert-equal '(#f #f #f #t) (map tool-enabled tools))
       (let ((s2 (step (step s '(space)) '(h))))
         (assert-true (tools-open? (session-tools s2)))
         (assert-equal 0 (session-hints s2)))))
@@ -233,14 +256,27 @@
   ;; the readout, and the bar's rewrite of a tap ran before the stack saw
   ;; it, so a tap on the bar with the stack open fired nothing and closed
   ;; nothing
-  (test "strip layout: a tap on the readout steps the look, not the meter face"
+  (test "strip layout: the readout's rect stops short of the meter's, and a tap on either changes nothing"
     (let* ((s (session-with-hud (stack-session) 'strip))
-           (r (control-rect (geom) 'strip 'look))
+           (r (readout-rect (geom) 'strip))
+           (m (meter-rect (geom) 'strip))
            (center (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (cadddr r) 2)))))
-      (assert-equal 'look (hit-control (geom) 'strip (car center) (cdr center)))
+      (assert-true (<= (+ (car m) (caddr m)) (car r)))
       (let ((after (step s '() center)))
-        (assert-false (eq? (session-look s) (session-look after)))
-        (assert-equal (trace-mode (session-trace s)) (trace-mode (session-trace after))))))
+        (assert-equal (session-look s) (session-look after))
+        (assert-equal (trace-mode (session-trace s)) (trace-mode (session-trace after)))
+        (assert-equal (session-board s) (session-board after)))))
+  (test "ctrl+m and a tap on the meter no longer flip the trace's face (ruling D19; the polish row)"
+    (for-each (lambda (layout)
+                (let* ((s (session-with-hud (stack-session) layout))
+                       (m (meter-rect (geom) layout))
+                       (by-key (session-step s (make-input-frame '(m) '(ctrl) #f) (geom)))
+                       (by-tap (step s '() (cons (+ (car m) 10) (+ (cadr m) 3)))))
+                  (assert-equal 'twist (trace-mode (session-trace by-key)))
+                  (assert-equal 'twist (trace-mode (session-trace by-tap)))
+                  (assert-equal (session-message s) (session-message by-key))
+                  (assert-equal (session-board s) (session-board by-tap))))
+              HUD-LAYOUTS))
   (test "both layouts: with the stack open a tap on every entry fires it, and a tap on the bar closes the stack"
     (for-each (lambda (layout)
                 (let* ((s (session-with-hud (stack-session) layout))
@@ -255,7 +291,7 @@
                         (when (eq? (tool-name (list-ref tools i)) 'next)
                           (assert-equal 2 (session-seed after))))
                       (loop (+ i 1))))
-                  (let* ((m (control-rect (geom) layout 'mode))
+                  (let* ((m (meter-rect (geom) layout))
                          (open (step s '(space)))
                          (after (step open '() (cons (+ (car m) 10) (+ (cadr m) 3)))))
                     (assert-false (tools-open? (session-tools after)))

@@ -1,9 +1,9 @@
 ;;; (crash shell) - What both shells agree on before either opens a window.
 ;;;
 ;;; The virtual viewport the game is drawn into on every target, the
-;;; texture paths the looks name (relative to where the game runs: the repo
-;;; root natively, the served build/web on the web; (crash look) holds
-;;; them), the modifier keys (crash input) reads,
+;;; texture paths the title and the card table name (relative to where
+;;; the game runs: the repo root natively, the served build/web on the
+;;; web), the modifier keys (crash input) reads,
 ;;; and the two things every shell does with the store: restore the saved
 ;;; board at boot (or deal) and save after a frame that changed something.
 ;;; The card table (P2) has the same two: boot-deal and save-deal-after-frame!,
@@ -41,9 +41,8 @@
   (export VW VH MODIFIERS bg-advance bg-choose copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
           AMBIENT-PATH AMBIENT-RATE play-cues!
-          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY LOOK-KEY HUD-KEY
-          stored-look set-stored-look! step-look!
-          stored-hud set-stored-hud! step-hud!
+          BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY HUD-KEY
+          stored-hud set-stored-hud!
           boot-session save-after-frame!
           boot-deal save-deal-after-frame!
           active-game set-active-game! saved-game?
@@ -124,13 +123,13 @@
         (check 'menu-entries
                (lambda ()
                  (and (list? MENU-ENTRIES)
-                      (= (length MENU-ENTRIES) 6)
+                      (= (length MENU-ENTRIES) 4)
                       (every (lambda (e) (and (pair? e) (symbol? (car e)) (pair? (cdr e)) (string? (cadr e))))
                              MENU-ENTRIES))))
         (check 'looks
                (lambda ()
                  (and (list? LOOK-NAMES)
-                      (>= (length LOOK-NAMES) 8)
+                      (= (length LOOK-NAMES) 1)
                       (every symbol? LOOK-NAMES)
                       (every (lambda (name) (string? (look-label (look-ref name)))) LOOK-NAMES))))
         ;; symbol lists: a mangled cell holds another symbol and passes any
@@ -141,7 +140,7 @@
         (check 'cues (lambda () (equal? CUES (list 'select 'match 'mismatch 'shuffle 'lock 'scramble 'cleared 'severed 'modem 'dial 'card))))
         ;; the title's grid (P3d): the shape (crash title) reads, vector of rows of three strings
         (check 'logo logo-check)
-        (check 'controls (lambda () (equal? CONTROL-NAMES (list 'mode 'look 'keys 'tool 'menu))))
+        (check 'controls (lambda () (equal? CONTROL-NAMES (list 'keys 'tool 'menu))))
         (check 'card-controls (lambda () (equal? CARD-CONTROL-NAMES (list 'score 'mode 'keys 'tool 'menu))))
         (check 'modifiers (lambda () (equal? MODIFIERS (list 'ctrl 'shift))))
         (reverse bad)))
@@ -151,10 +150,12 @@
     (define CARDS-KEY "cards")
     ;; The game last chosen from the menu: stack | cards.
     (define ACTIVE-KEY "active")
-    ;; The look in force (P3, the sheet switch), a name from (crash look);
-    ;; its own key so it outlives a deal and reaches both tables.
-    (define LOOK-KEY "look")
-    ;; The bar's layout (P3, ruling D33): zones | strip, its own key too.
+    ;; The bar's layout (P3, ruling D33): zones | strip, its own key.
+    ;; Until P4's settings screen the only doors to it are ?hud= on the
+    ;; web and --hud natively (the menu's HUD entry went with the polish
+    ;; row, ruling D34: zones is the default, strip stays behind the
+    ;; setting). The sheet switch's "look" key from P3 is left in the
+    ;; store unread: one look now (ruling D32).
     (define HUD-KEY "hud")
 
     (define (stored-hud)
@@ -164,44 +165,16 @@
     (define (set-stored-hud! name)
       (store-write-datum! HUD-KEY name))
 
-    (define (step-hud!)
-      (let ((next (layout-after (stored-hud))))
-        (set-stored-hud! next)
-        next))
-
-    ;; The stored look, or #f when nothing is stored yet.
-    (define (stored-look*)
-      (let ((d (store-read-datum LOOK-KEY)))
-        (and (look-name? d) d)))
-
-    (define (stored-look)
-      (or (stored-look*) DEFAULT-LOOK))
-
-    (define (set-stored-look! name)
-      (store-write-datum! LOOK-KEY name))
-
-    ;; The next look, stored; the shells call this for the menu's LOOK
-    ;; entry and hand the name to the table in memory, if any.
-    (define (step-look!)
-      (let ((next (look-after (stored-look))))
-        (set-stored-look! next)
-        next))
-
     ;; (cons session restored?): the saved session if there is one and
     ;; fresh? is #f, else a new deal of seed; the best result comes along
     ;; either way.
-    ;; The look comes from its own key; a save from before the key existed
-    ;; (P0..P2: the settings' render mode) seeds the key instead of being
-    ;; overridden by the default, so a player who had the texture on keeps it.
     (define (boot-session lay seed fresh?)
       (set! *title-shown* #t)   ; a boot straight to a table forfeits the title reveal (P3d)
       (let* ((saved (and (not fresh?)
                          (datum->session (store-read-datum BOARD-KEY))))
              (best (datum->best (store-read-datum BEST-KEY)))
-             (s (session-with-best (or saved (session-new lay (or seed 1))) best))
-             (stored (stored-look*)))
-        (unless stored (set-stored-look! (session-look s)))
-        (cons (session-with-hud (if stored (session-with-look s stored) s) (stored-hud))
+             (s (session-with-best (or saved (session-new lay (or seed 1))) best)))
+        (cons (session-with-hud s (stored-hud))
               (and saved #t))))
 
     ;; After a frame: save the session when the step warrants it, and when
@@ -220,9 +193,6 @@
                         after)))
         (when (save-due? before after)
           (store-write-datum! BOARD-KEY (session->datum after)))
-        ;; ctrl+t or the TILES tap stepped the look: it is the game's, not the board's
-        (unless (eq? (session-look before) (session-look after))
-          (set-stored-look! (session-look after)))
         after))
 
     ;; (cons deal restored?): the saved deal if there is one and fresh? is
@@ -345,13 +315,11 @@
                        (or (and (pair? rest) (car rest))
                            (guard (e (#t 1)) (exact (floor (current-second))))))))
         (set! *title-shown* #t)
-        (menu-with-hud (menu-with-look (menu-new (append (if continue? '(continue) '())
-                                                         '(stack cards look hud)
-                                                         (if update-waiting? '(update) '()))
-                                                 (if continue? 'continue 'stack)
-                                                 seed)
-                                       (stored-look))
-                       (stored-hud))))
+        (menu-new (append (if continue? '(continue) '())
+                          '(stack cards)
+                          (if update-waiting? '(update) '()))
+                  (if continue? 'continue 'stack)
+                  seed)))
 
     ;; Does this frame ask for the menu by key: ctrl+e? (The MENU tool
     ;; comes out of the table's step as a request, read after it.)

@@ -6,7 +6,9 @@
 ;;; lives in the modules this imports; the web shell (crash shell web) replaces
 ;;; only this file, and (crash main) picks between the two.
 ;;;
-;;;   crash-the-stack [--seed N] [--texture] [--keys hint|cursor] [--log-keys] [--fresh]
+;;;   crash-the-stack [--seed N] [--keys hint|cursor] [--log-keys] [--fresh]
+;;;                   [--hud zones|strip]  the bar's layout (stored, like ?hud= on the web;
+;;;                                       the door until P4's settings screen, ruling D34)
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;                   [--mute]            no sound (the context still opens)
@@ -71,7 +73,6 @@
           (crash cards solve)
           (crash menu)
           (crash title)
-          (crash look)
           (crash hud)
           (crash bg)
           (crash gpu bg)
@@ -118,9 +119,9 @@
              (window->virtual (mouse-x)
                               (mouse-y)))))
 
-    ;; The textures the looks name, loaded on demand the first time a look
-    ;; asks for one and kept by path: ((path . texture-or-#f) ...). A file
-    ;; that is not there is said once and the flat tile stands in.
+    ;; The textures the title and the card table name, loaded on demand
+    ;; the first time one is asked for and kept by path: ((path .
+    ;; texture-or-#f) ...). A file that is not there is said once.
     (define *textures* '())
 
     (define (load-texture-file path)
@@ -145,10 +146,6 @@
                  (let ((tex (load-texture-file path)))
                    (set! *textures* (cons (cons path tex) *textures*))
                    tex)))))
-
-    ;; The texture for a session's look, or #f for a flat look.
-    (define (texture-for s)
-      (texture-path (look-texture (look-ref (session-look s)))))
 
     (define (arg-value args flag default)
       (cond ((null? args) default)
@@ -289,7 +286,7 @@
     ;; the saved one; STACK deals a NEW board: the next seed after the
     ;; one in memory or in the store, else the flags' (David, 2026-09-18:
     ;; going "fresh" into a game put him back in the previous one).
-    (define (open-stack a lay seed fresh? texture-first? model resume?)
+    (define (open-stack a lay seed fresh? model resume?)
       (let* ((held (stage-session a))
              (s (cond ((and resume? held) held)
                       (else
@@ -298,14 +295,9 @@
                                (held (session-next held))
                                ((cdr booted) (session-next (car booted)))
                                (else (car booted)))))))
-             (s (if (eq? s held)
+             (s (if (or (eq? s held) (not model))
                     s
-                    (let ((s (if model (session-with-model s model) s)))
-                      (if texture-first?
-                          (begin
-                            (set-stored-look! 'test-tile)
-                            (session-with-look s 'test-tile))
-                          s)))))
+                    (session-with-model s model))))
         (let ((s (if (and (eq? *demo* 'cleared) (not (eq? s held)))
                      (begin
                        (set! *demo* #f)
@@ -356,28 +348,15 @@
                            (else (menu-with-title m (title-skip-card (menu-title m))))))))
 
     ;; A menu choice: CONTINUE resumes the active table; STACK and DEFRAG
-    ;; start a new game of theirs; LOOK steps the look (P3) and stays on
-    ;; the menu, the table in memory taking the new one.
-    (define (choose a choice lay seed fresh? texture-first? model)
+    ;; start a new game of theirs.
+    (define (choose a choice lay seed fresh? model)
       (let* ((resume? (eq? choice 'continue))
              (id (if resume? (active-game) choice)))
         (case id
           ((stack) (set-active-game! 'stack)
-                   (open-stack a lay seed fresh? texture-first? model resume?))
+                   (open-stack a lay seed fresh? model resume?))
           ((cards) (set-active-game! 'cards)
                    (open-cards a seed fresh? resume?))
-          ((look) (let ((next (step-look!)))
-                    (stage a
-                           menu: (menu-with-look (stage-menu a) next)
-                           session: (and (stage-session a)
-                                         (session-with-look (stage-session a) next)))))
-          ((hud) (let ((next (step-hud!)))
-                   (stage a
-                          menu: (menu-with-hud (stage-menu a) next)
-                          session: (and (stage-session a)
-                                        (session-with-hud (stage-session a) next))
-                          deal: (and (stage-deal a)
-                                     (deal-with-hud (stage-deal a) next)))))
           (else a))))
 
     (define (step-stack a f dt geom log-keys?)
@@ -432,25 +411,20 @@
                 (begin (display "ambient not found: ") (display AMBIENT-PATH) (newline))))
           (begin (display "audio: no device; playing silent") (newline))))
 
-    ;; The boot's steps (ruling D40): every texture a look or the title
-    ;; names, loaded from disk (one step each, done in the frame it runs),
+    ;; The boot's steps (ruling D40): every texture the title or the card
+    ;; table names, loaded from disk (one step each, done in the frame it runs),
     ;; then P3c's glyph atlas, then the audio (opened above, the ambient read from its file). The
     ;; menu is live once (crash title) has run them all.
     (define *reveal-over* #f)   ; the title's reveal has settled (or there was none); the loop keeps it
     (define (boot-steps!)
       (boot-reset!)
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH CARD-PATH)))
-                     (if (null? names)
-                         (reverse acc)
-                         (let ((p (look-texture (look-ref (car names)))))
-                           (loop (cdr names) (if (and p (not (member p acc))) (cons p acc) acc)))))))
-        (for-each (lambda (path)
-                    ;; the backdrop first (under the reveal); the rest once the reveal is
-                    ;; over, so their loads do not stutter it (as on the web)
-                    (boot-add-step! (string->symbol path)
-                                    (lambda () (and (or (equal? path CARD-PATH) (equal? path BACKDROP-PATH) *reveal-over*)
-                                                    (begin (texture-path path) #t)))))
-                  paths))
+      (for-each (lambda (path)
+                  ;; the backdrop first (under the reveal); the rest once the reveal is
+                  ;; over, so their loads do not stutter it (as on the web)
+                  (boot-add-step! (string->symbol path)
+                                  (lambda () (and (or (equal? path CARD-PATH) (equal? path BACKDROP-PATH) *reveal-over*)
+                                                  (begin (texture-path path) #t)))))
+                (list CARD-PATH BACKDROP-PATH PORTRAITS-PATH))
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
       ;; a frame; called from boot-run! outside one, the bake left the frame's
       ;; later rectangles undrawn: measured, the items vanished with the atlas
@@ -458,7 +432,7 @@
       (boot-add-step! 'atlas (lambda () (and *reveal-over* (atlas-ready?))))
       (boot-add-step! 'audio (lambda () (audio-render-next!))))   ; the rest of the cue bank, one a frame
 
-    (define (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)
+    (define (stage-loop seed model log-keys? fresh? cards? bg-mode bg-hold mute?)
       (lambda ()
         (gfx-setup)
         (set-viewport VW VH)
@@ -470,7 +444,7 @@
                (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
-                       (choose a choice lay seed fresh? texture-first? model))))
+                       (choose a choice lay seed fresh? model))))
           (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose bg-mode 1 bg-hold)))
                                                  (and b (bg b
                                                            stride: (or *bg-stride* (bg-stride b))
@@ -521,7 +495,7 @@
               (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
                         (lambda ()
                           (when (eq? (stage-screen a) 'stack)
-                            (tiles-ensure! (look-ref (session-look (stage-session a))) geom)))
+                            (tiles-ensure! geom)))
                         (case (stage-screen a)
                           ((stack) (and (fx-cleared (stage-fx a)) #t))
                           ((cards) (card-fx-cascading? (stage-card-fx a)))
@@ -533,7 +507,7 @@
                             ((stack)
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (geometry-hud-h geom)) 0.0 (stage-background a) *copper*)
-                                 (draw-session (stage-session a) geom (texture-for (stage-session a)) (stage-fx a) (stage-background a) *copper*)))
+                                 (draw-session (stage-session a) geom (stage-fx a) (stage-background a) *copper*)))
                             (else
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (card-geometry-hud-h card-geom)) 0.0 (stage-background a) *copper*)
@@ -601,7 +575,7 @@
                         (after (session-advance (session-step s f g) (clock-steps (fx-clock x))))
                         (x (fx-observe x s after g)))
                    (frame-begin!)
-                   (draw-session after g #f x #f 'roll)
+                   (draw-session after g x #f 'roll)
                    (end-frame)
                    (cond ((key-pressed? 'escape) (request-quit))
                          ((quit-requested?) #t)
@@ -670,7 +644,7 @@
                             (>= seed-arg 0))
                        seed-arg
                        #f))
-             (texture-first? (and (member "--texture" args) #t))
+             (hud-arg (arg-value args "--hud" #f))
              (model-arg (arg-value args "--keys" #f))
              (model (and model-arg (string->symbol model-arg)))
              (log-keys? (and (member "--log-keys" args) #t))
@@ -693,6 +667,10 @@
         (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") 'cleared))
         (atlas-set! (not (equal? (arg-value args "--atlas" "on") "off")))
         (let ((d (arg-value args "--audio-depth" #f))) (when (and d (string->number d)) (audio-set-depth! (string->number d))))
+        ;; --hud zones|strip: the bar's layout for this boot, stored (the
+        ;; web's ?hud= door; any other word leaves the store alone)
+        (when (and hud-arg (layout-name? (string->symbol hud-arg)))
+          (set-stored-hud! (string->symbol hud-arg)))
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))
@@ -701,5 +679,5 @@
                   WINDOW-H
                   (if edit-path
                       (editor-loop edit-path)
-                      (stage-loop seed texture-first? model log-keys? fresh? cards? bg-mode bg-hold mute?)))
+                      (stage-loop seed model log-keys? fresh? cards? bg-mode bg-hold mute?)))
         0))))

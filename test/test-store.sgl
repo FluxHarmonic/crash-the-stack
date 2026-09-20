@@ -38,9 +38,7 @@
          (s (session-advance s (* 60 (- TRACE-AT 90))))              ; to TRACE-AT: traced
          (s (session-advance s (* 60 (+ ICE-FIRST 1))))              ; the first ICE
          (s (session-pick s (car (car (unlocked-matches (session-board s)))))) ; a selection
-         (s (session-step s (frame '(tab) '(shift)) geom))            ; cursor model (shift+Tab, D33)
-         (s (session-step s (frame '(m) '(ctrl)) geom))              ; clean face
-         (s (session-step s (frame '(t) '(ctrl)) geom)))             ; the next look (P3)
+         (s (session-step s (frame '(tab) '(shift)) geom)))           ; cursor model (shift+Tab, D33)
     s))
 
 (define root (string-append (make-temp-directory) "/crash-store"))
@@ -55,9 +53,7 @@
       (assert-equal 1 (trace-ice-count (session-trace s)))
       (assert-true (and (board-selected (session-board s)) #t))
       (assert-equal 'cursor (session-model s))
-      ;; the flip to clean was refused: the game is already under the ICE
-      (assert-equal 'twist (trace-mode (session-trace s)))
-      (assert-equal MSG-TOO-LATE (session-message s)))
+      (assert-equal 'twist (trace-mode (session-trace s))))
     (test "nothing is stored yet"
       (assert-false (store-get "board"))
       (assert-false (store-read-datum "board")))
@@ -144,7 +140,7 @@
            (r (datum->session crafted)))
       (assert-true (and r #t))
       (assert-false (board-selected (session-board r)))))
-  (test "a P0..P2 save's render mode reads back as a look; an unknown look is refused"
+  (test "every earlier save's look reads back as the one look (P0..P2's render mode, P3's sheet names); a non-symbol is refused"
     (let* ((d (session->datum (session-new lay 1)))
            (with-settings (lambda (st)
                             (map (lambda (e)
@@ -152,25 +148,25 @@
                                        (cons 'settings st)
                                        e))
                                  d))))
-      (assert-equal 'test-tile (session-look (datum->session (with-settings '(hint #t texture)))))
+      (assert-equal DEFAULT-LOOK (session-look (datum->session (with-settings '(hint #t texture)))))
       (assert-equal DEFAULT-LOOK (session-look (datum->session (with-settings '(hint #t primitives)))))
-      (assert-false (datum->session (with-settings '(hint #t no-such-look))))))
-  (test "boot: a save from before the look key seeds the key; a stored look wins after"
+      (assert-equal DEFAULT-LOOK (session-look (datum->session (with-settings '(hint #t test-tile)))))
+      (assert-equal DEFAULT-LOOK (session-look (datum->session (with-settings '(hint #t b)))))
+      (assert-false (datum->session (with-settings '(hint #t "a"))))))
+  (test "boot: a stored look from the sheet switch's days is left alone and changes nothing"
     (let* ((d (session->datum (session-new lay 1)))
            (legacy (map (lambda (e)
                           (if (and (pair? e) (eq? (car e) 'settings))
                               (cons 'settings '(hint #t texture))
                               e))
                         d)))
-      (store-remove! LOOK-KEY)
+      (store-write-datum! "look" 'test-tile)
       (store-write-datum! BOARD-KEY legacy)
       (let ((booted (boot-session lay 1 #f)))
         (assert-true (cdr booted))
-        (assert-equal 'test-tile (session-look (car booted)))
-        (assert-equal 'test-tile (stored-look)))
-      (set-stored-look! DEFAULT-LOOK)
-      (assert-equal DEFAULT-LOOK (session-look (car (boot-session lay 1 #f))))
-      (store-remove! LOOK-KEY)))
+        (assert-equal DEFAULT-LOOK (session-look (car booted)))
+        (assert-equal 'test-tile (store-read-datum "look")))
+      (store-remove! "look")))
   (test "a board after a cross-daemon match reads back (the daemons count as one face)"
     (let loop ((seed 1))
       (let* ((s (session-new lay seed))

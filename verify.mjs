@@ -120,7 +120,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -330,6 +330,39 @@ async function evalJS(expr) {
   if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
   return r.result.value;
 }
+
+// The canvas over a virtual rect (x y w h), one sample per virtual pixel
+// at the pixel's center, read inside an animation frame like the render
+// leg: { w, h, px: [r,g,b, ...] }. Palette matching happens here in node.
+async function readRegion(x, y, w, h) {
+  return evalJS(`new Promise((resolve) => requestAnimationFrame(() => {
+    const c = document.getElementById("stage");
+    const off = document.createElement("canvas"); off.width = c.width; off.height = c.height;
+    const g = off.getContext("2d"); g.drawImage(c, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const px = [];
+    for (let j = 0; j < ${h}; j++) for (let i = 0; i < ${w}; i++) {
+      const bx = Math.floor(ox + (${x} + i + 0.5) * scale), by = Math.floor(oy + (${y} + j + 0.5) * scale);
+      const k = (by * c.width + bx) * 4; px.push(d[k], d[k + 1], d[k + 2]);
+    }
+    resolve({ w: ${w}, h: ${h}, px });
+  }))`);
+}
+const PAL = { bg: [13, 10, 26], ice: [255, 159, 26], highlight: [255, 89, 217], textDim: [115, 128, 166], text: [204, 230, 255] };
+const near = (px, i, c, tol = 40) => Math.abs(px[i] - c[0]) <= tol && Math.abs(px[i + 1] - c[1]) <= tol && Math.abs(px[i + 2] - c[2]) <= tol;
+// the bounding box (in the region's own coordinates) of the pixels near a
+// palette color, or null; and how many
+function bbox(region, color) {
+  let x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1, n = 0;
+  for (let j = 0; j < region.h; j++) for (let i = 0; i < region.w; i++) {
+    if (near(region.px, (j * region.w + i) * 3, color)) { n++; x0 = Math.min(x0, i); y0 = Math.min(y0, j); x1 = Math.max(x1, i); y1 = Math.max(y1, j); }
+  }
+  return n ? { x0, y0, x1, y1, n } : null;
+}
+const sameRegion = (a, b) => a.w === b.w && a.h === b.h && a.px.every((v, i) => Math.abs(v - b.px[i]) <= 8);
+const litCount = (r) => { let n = 0; for (let i = 0; i < r.px.length; i += 3) if (!near(r.px, i, PAL.bg, 30)) n++; return n; };
 
 // Wait for a console line matching `re` that arrived at index >= from.
 async function waitLine(re, from, ms) {
@@ -582,7 +615,14 @@ else fail("keys-match", keysDetail);
   await press("Escape");
   const menu = await waitLine(/^crash: menu (continue) /, mark, 3000);
   if (!menu) detail = "Escape did not open the menu (no \"crash: menu continue ...\" line)";
-  else detail = await back("Escape");
+  else {
+    // the entries (the polish row): CONTINUE, STACK, DEFRAG, and UPDATE
+    // only while a version waits; LOOK and HUD are gone (rulings D32, D34)
+    const ids = consoleLines[menu.index].split(" ").slice(2).filter((w) => /^[a-z]+$/.test(w));
+    if (ids.some((id) => !["continue", "stack", "cards", "update"].includes(id))) detail = `the menu shows an entry the polish row removed: ${ids.join(" ")}`;
+    else if (ids.join(" ") !== "continue stack cards") detail = `the menu's entries are ${ids.join(" ")}, not continue stack cards`;
+    else detail = await back("Escape");
+  }
   if (!detail && !EXPECT_NO_SELECTION) {
     const btn = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
     if (!btn) detail = "no \"crash: control menu\" boot line";
@@ -598,31 +638,48 @@ else fail("keys-match", keysDetail);
   else pass("menu", "Escape opens the menu and CONTINUE returns; the MENU button beside the wrench does the same");
 }
 
-// ---- 6b. look: the TILES counter steps the look (P3) ----------------------
+// ---- 6b. removed: the polish row's prototype toggles do nothing ----------
+// One look ("crash: look a" at boot and never again); ctrl+t, ctrl+m, a tap
+// on the TILES readout and a tap on the meter change nothing: no look,
+// trace, select or shuffle line, the meter's face still TRACE (its first
+// five glyphs' pixels unchanged; a flip to clean would draw TIME), and the
+// readout's pixels unchanged. The rects come from the "crash: bar" line.
+const BAR_RE = /^crash: bar meter (-?\d+) (-?\d+) (\d+) (\d+) readout (-?\d+) (-?\d+) (\d+) (\d+)$/;
+let barRects = null;
 {
-  const ctl = await waitLine(/^crash: control look (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
-  if (EXPECT_NO_SELECTION) skip("look", "controls are not tappable with forwarding off");
-  else if (!ctl) fail("look", "no \"crash: control look\" boot line");
+  let detail = "";
+  const boot = await waitLine(/^crash: look ([a-z-]+)$/, 0, 2000);
+  const bar = await waitLine(BAR_RE, 0, 2000);
+  if (!boot) detail = "no \"crash: look\" boot line";
+  else if (boot.m[1] !== "a") detail = `the look at boot is ${boot.m[1]}, not a`;
+  else if (!bar) detail = "no \"crash: bar meter ... readout ...\" boot line";
+  else if (consoleLines.some((l) => /^crash: control (look|mode) /.test(l))) detail = "the boot still lists a look or mode control";
   else {
-    // tap around the list until the test-tile look comes up (it asks for
-    // the tile, which the assets sub-arm then expects to see fetched);
-    // every tap must change the look, and the list must be short
-    let detail = "";
-    const boot = await waitLine(/^crash: look ([a-z-]+)$/, 0, 2000);
-    const seen = boot ? [boot.m[1]] : [];
-    if (!boot) detail = "no \"crash: look\" boot line";
-    for (let i = 0; !detail && i < 12 && seen[seen.length - 1] !== "test-tile"; i++) {
-      mark = consoleLines.length;
-      await tap(ctl.m[1], ctl.m[2]);
-      const next = await waitLine(/^crash: look ([a-z-]+)$/, mark, 2000);
-      if (!next) detail = `tap ${i + 1} on the TILES counter at (${ctl.m[1]},${ctl.m[2]}) produced no "crash: look" line`;
-      else if (next.m[1] === seen[seen.length - 1]) detail = `tap ${i + 1} stayed on ${next.m[1]}`;
-      else seen.push(next.m[1]);
+    barRects = { meter: bar.m.slice(1, 5).map(Number), readout: bar.m.slice(5, 9).map(Number) };
+    const [mx, my] = barRects.meter, [rx, ry, rw, rh] = barRects.readout;
+    const face = () => readRegion(mx + 3, my + 2, 30, 14);
+    const readout = () => readRegion(rx, ry, rw, rh);
+    const face0 = await face(), readout0 = await readout();
+    mark = consoleLines.length;
+    await key("keydown", "Control"); await sleep(60);
+    await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "t", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(40);
+    await evalJS(`document.dispatchEvent(new KeyboardEvent("keyup", { key: "t", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(60);
+    await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: "m", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(40);
+    await evalJS(`document.dispatchEvent(new KeyboardEvent("keyup", { key: "m", ctrlKey: true, bubbles: true, cancelable: true }))`); await sleep(60);
+    await key("keyup", "Control"); await sleep(300);
+    if (!EXPECT_NO_SELECTION) {
+      await tap(rx + rw / 2, ry + rh / 2); await sleep(300);
+      await tap(mx + 20, my + 6); await sleep(300);
     }
-    if (!detail && seen[seen.length - 1] !== "test-tile") detail = `no test-tile look within 12 taps: ${seen.join(" -> ")}`;
-    if (detail) fail("look", detail);
-    else { await sleep(1500); pass("look", seen.join(" -> ")); }
+    const stray = consoleLines.slice(mark).filter((l) => /^crash: (look|trace|select|deselect|shuffle|undo|removed|tools) /.test(l) || /^crash: (shuffle|tools open)$/.test(l));
+    const face1 = await face(), readout1 = await readout();
+    if (stray.length) detail = `ctrl+t, ctrl+m, the readout tap or the meter tap did something: ${stray.slice(0, 3).join(" | ")}`;
+    else if (litCount(face0) < 20) detail = `the meter's face shows nothing to compare (${litCount(face0)} lit pixels)`;
+    else if (!sameRegion(face0, face1)) detail = "the meter's face changed (a flip to the clean face draws TIME where TRACE was)";
+    else if (!sameRegion(readout0, readout1)) detail = "the TILES readout's pixels changed";
   }
+  if (detail) fail("removed", detail);
+  else pass("removed", `one look (a); ctrl+t, ctrl+m${EXPECT_NO_SELECTION ? "" : ", the readout tap and the meter tap"} changed nothing (no line, the meter's face and the readout pixel-identical)`);
 }
 
 // ---- 6c. assets: everything the page fetched answered (P3 leg 2, web) -----
@@ -638,13 +695,14 @@ else fail("keys-match", keysDetail);
     const retried = list.filter(([n, st], i) => st !== 200 && list.some(([m, s2], j) => j > i && m === n && s2 === 200));
     const bad = list.filter(([n, st]) => st !== 200 && !retried.some(([m]) => m === n));
     const assets = list.filter(([n]) => n.startsWith("assets/") || n.endsWith(".wasm"));
-    const tile = list.some(([n, st]) => n === "assets/test-tile.png" && st === 200);
-    const lookRan = results.some((r) => r[0] === "look" && r[1] === "PASS");
+    // the losing looks' assets left the tree with the polish row: nothing
+    // may still ask for them
+    const gone = list.filter(([n]) => /^assets\/(test-tile\.png|tiles\/|glyphs\/b\.png)/.test(n));
     if (list.length === 0) fail("assets", "no resource entries at all");
     else if (bad.length) fail("assets", `${bad.length} of ${list.length} resources not 200: ${JSON.stringify(bad.slice(0, 5))}`);
     else if (assets.length === 0) fail("assets", `${list.length} resources, none under assets/ or the wasm`);
-    else if (lookRan && !tile) fail("assets", "the look sub-arm asked for the test tile but assets/test-tile.png was never fetched with 200");
-    else pass("assets", `${list.length} resources all 200${retried.length ? ` (${retried.length} retried after a failed first fetch)` : ""}, ${assets.length} assets/wasm${lookRan ? ", test tile fetched on demand" : ""}`);
+    else if (gone.length) fail("assets", `the page asked for a removed look's asset: ${gone.map(([n]) => n).join(" ")}`);
+    else pass("assets", `${list.length} resources all 200${retried.length ? ` (${retried.length} retried after a failed first fetch)` : ""}, ${assets.length} assets/wasm, none of the removed looks' files`);
   } catch (err) {
     fail("assets", `CDP: ${err.message}`);
   }
@@ -657,25 +715,28 @@ else fail("keys-match", keysDetail);
 {
   let detail = "";
   const zones = await waitLine(/^crash: hud (zones|strip)$/, 0, 2000);
-  const meterZones = await waitLine(/^crash: control mode (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+  const meterZones = await waitLine(BAR_RE, 0, 2000);
   if (!zones || zones.m[1] !== "zones") detail = `the first boot's layout line was ${zones ? zones.m[0] : "missing"}, not zones`;
   else {
     mark = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=strip` });
     const strip = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
-    const meterStrip = await waitLine(/^crash: control mode (-?[\d.]+) (-?[\d.]+)$/, mark, 5000);
+    const meterStrip = await waitLine(BAR_RE, mark, 5000);
     if (!strip || strip.m[1] !== "strip") detail = `?hud=strip booted ${strip ? strip.m[0] : "no layout line"}`;
-    else if (!meterZones || !meterStrip) detail = "no \"crash: control mode\" line on one of the boots";
-    // the strip's meter runs from the left edge to the readout, so its
-    // centre sits left of the zones meter's and higher
-    else if (!(parseFloat(meterStrip.m[2]) < parseFloat(meterZones.m[2]) && parseFloat(meterStrip.m[1]) < parseFloat(meterZones.m[1]))) detail = `the meter did not move to the strip: zones (${meterZones.m[1]},${meterZones.m[2]}) strip (${meterStrip.m[1]},${meterStrip.m[2]})`;
+    else if (!meterZones || !meterStrip) detail = "no \"crash: bar meter\" line on one of the boots";
+    // the strip's meter runs from the left edge to the readout, so it
+    // starts left of the zones meter's box and higher, and is wider
+    else if (!(parseInt(meterStrip.m[2], 10) < parseInt(meterZones.m[2], 10) && parseInt(meterStrip.m[1], 10) < parseInt(meterZones.m[1], 10) && parseInt(meterStrip.m[3], 10) > parseInt(meterZones.m[3], 10))) detail = `the meter did not move to the strip: zones (${meterZones.m.slice(1, 5).join(",")}) strip (${meterStrip.m.slice(1, 5).join(",")})`;
+    // the padding (David's phone read, 2026-09-20): a pixel above and below
+    // the text, so 18 tall in zones (scale-2 text, 14) and 14 in the strip (7)
+    else if (meterZones.m[4] !== "18" || meterStrip.m[4] !== "14") detail = `the meter's height is ${meterZones.m[4]} (zones) and ${meterStrip.m[4]} (strip), not 18 and 14`;
     else {
       await sleep(800);
       mark = consoleLines.length;
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=zones` });
       const back = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
       if (!back || back.m[1] !== "zones") detail = "?hud=zones did not set the layout back";
-      else pass("hud", `zones meter at (${meterZones.m[1]},${meterZones.m[2]}), strip meter at (${meterStrip.m[1]},${meterStrip.m[2]}), stored and restored`);
+      else pass("hud", `zones meter ${meterZones.m.slice(1, 5).join("x")}, strip meter ${meterStrip.m.slice(1, 5).join("x")}, stored and restored`);
     }
     await sleep(1500);
   }
@@ -726,6 +787,78 @@ let iceLock = null;
       }
     }
     if (detail) fail("traced", detail);
+  }
+}
+
+// ---- 7b. bar: the HUD's polish (David's reads, 2026-09-19/20) ------------------
+// Under the ICE (the traced leg's counter phase): (1) the keys line (92
+// glyphs, wider than the span between the MENU and ? buttons) wraps onto
+// two rows and the wrench and MENU buttons' pixels stay what they were
+// with the one-row instruction: nothing of the line lands on a button;
+// (2) the ? button ("crash: control keys") is a 24x24 square at the bar's
+// right end, lit while the keys line shows, and a tap on it puts the phase
+// line back (the band's rows pixel-identical to before ?); (3) a typed tag
+// letter's prompt ("> A", C-HIGHLIGHT) sits left of the meter while ICE
+// IN (C-ICE) sits at its right: the two bounding boxes are disjoint and on
+// opposite sides of the meter's box.
+{
+  if (EXPECT_NO_SELECTION) skip("bar", "controls are not tappable with forwarding off");
+  else if (!barRects) skip("bar", "no bar rects from the boot line");
+  else {
+    let detail = "";
+    const keysCtl = await waitLine(/^crash: control keys (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    const toolCtl = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    const menuCtl = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    const [mx, my, mw, mh] = barRects.meter, [rx] = barRects.readout;
+    const top = VH - 48;
+    const button = (ctl) => readRegion(Math.round(ctl.m[1]) - 12, Math.round(ctl.m[2]) - 12, 24, 24);
+    // the band's text rows between the buttons: y top+22..top+41
+    const rows = () => readRegion(60, top + 22, VW - 60 - 32, 20);
+    if (!keysCtl || !toolCtl || !menuCtl) detail = "a bar button's control line is missing";
+    else if (Math.round(keysCtl.m[1]) !== VW - 16 || Math.round(keysCtl.m[2]) !== VH - 16) detail = `the ? button's center is (${keysCtl.m[1]},${keysCtl.m[2]}), not (${VW - 16},${VH - 16})`;
+    else {
+      const phase = consoleLines.some((l) => /^crash: trace \d+ \d+ \d+ counter \d+$/.test(l));
+      const wrench0 = await button(toolCtl), menu0 = await button(menuCtl), keys0 = await button(keysCtl), rows0 = await rows();
+      await press("?"); await sleep(400);
+      const wrench1 = await button(toolCtl), menu1 = await button(menuCtl), keys1 = await button(keysCtl), rows1 = await rows();
+      if (sameRegion(rows0, rows1)) detail = "? did not change the band's rows (no keys line)";
+      else if (!sameRegion(wrench0, wrench1)) detail = "the keys line changed the wrench button's pixels";
+      else if (!sameRegion(menu0, menu1)) detail = "the keys line changed the MENU button's pixels";
+      else if (sameRegion(keys0, keys1)) detail = "the ? button did not light with the keys line";
+      // the keys line wraps: lit pixels on both rows (top+24..30 and top+33..39)
+      else {
+        const upper = await readRegion(60, top + 24, VW - 92, 7), lower = await readRegion(60, top + 33, VW - 92, 7);
+        if (litCount(upper) < 50 || litCount(lower) < 50) detail = `the keys line did not wrap onto two rows (lit pixels upper ${litCount(upper)}, lower ${litCount(lower)})`;
+      }
+      if (!detail) {
+        mark = consoleLines.length;
+        await tap(keysCtl.m[1], keysCtl.m[2]); await sleep(400);
+        const rows2 = await rows(), keys2 = await button(keysCtl);
+        if (consoleLines.slice(mark).some((l) => /^crash: (select|tools open)/.test(l))) detail = "the tap on ? selected a tile or opened the stack";
+        else if (!sameRegion(keys0, keys2)) detail = "the tap on ? did not put the button back";
+        // (the phase line's clocks tick, so the rows are compared with the
+        // keys line's, not with the first read)
+        else if (sameRegion(rows1, rows2)) detail = "the tap on ? did not put the line back";
+      }
+      if (!detail && phase) {
+        // the prompt and ICE IN
+        const ice0 = bbox(await readRegion(mx + mw, my, rx - mx - mw, mh), PAL.ice);
+        await press("Tab"); await sleep(200);
+        await press("a"); await sleep(400);
+        const left = await readRegion(mx - 90, my - 2, 90, mh + 4);
+        const right = await readRegion(mx + mw, my, rx - mx - mw, mh);
+        const prompt = bbox(left, PAL.highlight), ice = bbox(right, PAL.ice), strayPrompt = bbox(right, PAL.highlight), strayIce = bbox(left, PAL.ice);
+        await press("Backspace"); await sleep(100); await press("Tab"); await sleep(200);
+        if (!ice0) detail = "no ICE IN (C-ICE) pixels right of the meter under the ICE";
+        else if (!prompt) detail = "no prompt (C-HIGHLIGHT) pixels left of the meter after typing a tag letter";
+        else if (strayPrompt) detail = "prompt pixels right of the meter (over the ICE countdown's lane)";
+        else if (strayIce) detail = "ICE IN pixels left of the meter (over the prompt's lane)";
+        else if (mx - 90 + prompt.x1 >= mx) detail = "the prompt reaches into the meter's box";
+        else if (!ice) detail = "ICE IN vanished while the prompt showed";
+      }
+    }
+    if (detail) fail("bar", detail);
+    else pass("bar", `keys line wraps clear of the wrench and MENU; ? is a lit 24x24 button at (${keysCtl.m[1]},${keysCtl.m[2]}) and a tap on it toggles back${consoleLines.some((l) => /counter \d+$/.test(l)) ? "; the prompt sits left of the meter, ICE IN right of it, disjoint" : ""}`);
   }
 }
 

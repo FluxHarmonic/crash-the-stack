@@ -25,10 +25,11 @@
           geometry-draw-order
           make-geometry make-canvas-geometry cell-rect
           TILE-RATIO LAYER-OFFSET HUD-HEIGHT
-          CONTROL-NAMES CONTROL-H METER-W STRIP-H READOUT-W
+          CONTROL-NAMES CONTROL-H METER-W METER-H STRIP-H READOUT-W BUTTON-SIZE
           slot-rect slot-x slot-y slot-extent slot-centre rect-contains? hit-slot
           column-x row-y
           geometry-controls control-rect hit-control
+          meter-rect readout-rect meter-box readout-box bar-controls
           update-controls hit-update-control
           frame->virtual)
 
@@ -46,16 +47,26 @@
     ;; readout at the right) or strip (the meter is the band's top STRIP-H
     ;; pixels across the width, stopping short of the readout).
     (define HUD-HEIGHT 48)
-    ;; The tappable controls: mode (the meter, flipping its twist and
-    ;; clean faces), look (the TILES readout, stepping the look), keys
-    ;; (the ? mark, showing the keys line), tool (the stack's button, which
-    ;; (crash hud) handles; listed so the web shell can say where it is).
-    (define CONTROL-NAMES '(mode look keys tool menu))
+    ;; The tappable controls: keys (the ? button at the bar's right end,
+    ;; showing the keys line), tool (the stack's button, which (crash hud)
+    ;; handles; listed so the web shell can say where it is), menu (its
+    ;; peer beside it). The meter and the TILES readout are drawn, not
+    ;; tapped (the polish row took the mode flip and the look step).
+    (define CONTROL-NAMES '(keys tool menu))
     (define METER-W 200)
-    (define STRIP-H 12)
+    ;; the meter's box: 7-px text at scale 2, a pixel of padding above and
+    ;; below it, and the 1-px border (David's phone read, 2026-09-20)
+    (define METER-H 18)
+    ;; the strip: 7-px text at scale 1, one pixel of padding each side of it,
+    ;; and the border
+    (define STRIP-H 14)
     (define READOUT-W 112)
     (define CONTROL-H 20)
     (define CONTROL-Y 4)
+    ;; the three square bar buttons (the wrench, MENU, ?): 24 px, their top
+    ;; this far above the viewport's bottom edge
+    (define BUTTON-SIZE 24)
+    (define BUTTON-RISE 28)
     ;; Space around the board for the tags on the top row and breathing room.
     (define GUTTER 22)
 
@@ -188,11 +199,8 @@
 
     ;; ((name x y w h) ...) for every control, in the HUD band, for the
     ;; layout named. Drawing and hit-testing both read this list, so a
-    ;; control is tapped where it is seen; the first match wins, so the
-    ;; readout comes before the meter (in the strip the two sit on one
-    ;; row). The TILES readout is the look control: a tap on it steps the
-    ;; look, the phone's stand-in for ctrl+t.
-    ;; The controls of a geometry and layout, five (name x y w h) lists,
+    ;; control is tapped where it is seen.
+    ;; The controls of a geometry and layout, three (name x y w h) lists,
     ;; kept for the pair last asked about: the HUD asks for a control's
     ;; rect several times a frame and a fresh list of lists is 960 bytes
     ;; in the native codegen (2026-09-20). A geometry is a value (a
@@ -209,20 +217,38 @@
       *controls*)
 
     (define (build-controls g layout)
-      (let* ((vw (geometry-vw g))
-             (vh (geometry-vh g))
-             (top (- vh (geometry-hud-h g)))
-             (strip? (eq? layout 'strip)))
-        (list (if strip?
-                  (list 'look (- vw 8 READOUT-W) (+ top 1) READOUT-W STRIP-H)
-                  (list 'look (- vw 8 READOUT-W) (+ top CONTROL-Y) READOUT-W CONTROL-H))
-              (if strip?
-                  (list 'mode 0 (+ top 1) (- vw 8 READOUT-W 4) STRIP-H)
-                  (list 'mode (- (half vw) (half METER-W)) (+ top CONTROL-Y) METER-W 16))
-              (list 'keys (- vw 22) (+ top 26) 18 20)
-              (list 'tool 4 (- vh 28) 24 24)
-              ;; the menu's peer button beside the wrench (David, 2026-09-19)
-              (list 'menu 32 (- vh 28) 24 24))))
+      (bar-controls (geometry-vw g) (geometry-vh g)))
+
+    ;; The three square buttons of a bar, ((name x y w h) ...), in the
+    ;; order the tables list them: the wrench, MENU beside it, ? at the
+    ;; right end. Both tables' bars share these (the card table adds its
+    ;; own readouts in front).
+    (define (bar-controls vw vh)
+      (list (list 'keys (- vw BUTTON-SIZE 4) (- vh BUTTON-RISE) BUTTON-SIZE BUTTON-SIZE)
+            (list 'tool 4 (- vh BUTTON-RISE) BUTTON-SIZE BUTTON-SIZE)
+            ;; the menu's peer button beside the wrench (David, 2026-09-19)
+            (list 'menu 32 (- vh BUTTON-RISE) BUTTON-SIZE BUTTON-SIZE)))
+
+    ;; (x y w h) of the trace meter for the layout, top the band's top:
+    ;; zones a METER-W x METER-H box centered on the first row, strip the
+    ;; band's top STRIP-H pixels from the left edge to the readout.
+    (define (meter-box vw top layout)
+      (if (eq? layout 'strip)
+          (list 0 (+ top 1) (- vw 8 READOUT-W 4) STRIP-H)
+          (list (- (half vw) (half METER-W)) (+ top CONTROL-Y) METER-W METER-H)))
+
+    ;; (x y w h) of the readout (TILES, or the card table's score): the
+    ;; right of the first row (zones) or the right end of the strip.
+    (define (readout-box vw top layout)
+      (if (eq? layout 'strip)
+          (list (- vw 8 READOUT-W) (+ top 1) READOUT-W STRIP-H)
+          (list (- vw 8 READOUT-W) (+ top CONTROL-Y) READOUT-W CONTROL-H)))
+
+    (define (meter-rect g layout)
+      (meter-box (geometry-vw g) (- (geometry-vh g) (geometry-hud-h g)) layout))
+
+    (define (readout-rect g layout)
+      (readout-box (geometry-vw g) (- (geometry-vh g) (geometry-hud-h g)) layout))
 
     ;; (x y w h) of a named control, or #f.
     (define (control-rect g layout name)
@@ -247,7 +273,7 @@
         (list (list 'apply (- mid 130) (- top 44) 120 26)
               (list 'later (+ mid 10) (- top 44) 120 26)
               (if (eq? layout 'strip)
-                  (list 'update (- vw 8 READOUT-W 8 78) (+ top 15) 78 16)
+                  (list 'update (- vw 8 READOUT-W 8 78) (+ top 1 STRIP-H 1) 78 16)
                   (list 'update (- vw 8 READOUT-W 8 78) (+ top CONTROL-Y) 78 CONTROL-H)))))
 
     (define (hit-update-control g layout x y)

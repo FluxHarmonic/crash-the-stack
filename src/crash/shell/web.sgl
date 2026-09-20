@@ -22,10 +22,8 @@
 ;;; hit-tested by (crash input) from the same rects, so a tap on them takes
 ;;; the pointer path like a tap on a tile; the page keeps only its
 ;;; fullscreen button (David, 2026-09-17: the controls belong in the game's
-;;; own UI). Tab, Backspace and the tag letters still arrive as keys. The
-;;; look switch (ctrl+t) has a tap on the TILES counter and the menu's LOOK
-;;; entry as its browser paths (P3). Escape does nothing
-;;; here; there is no window to close.
+;;; own UI). Tab, Backspace and the tag letters still arrive as keys.
+;;; Escape asks for the menu, as it does natively.
 ;;;
 ;;; Trace lines, printed only when the page was opened with ?trace (the
 ;;; page dispatches ("trace", "on") as soon as the loader is up; verify.mjs
@@ -34,11 +32,12 @@
 ;;;                                         and its centers in virtual pixels
 ;;;   crash: labels A TA B TB              the same pair's hint-mode tags
 ;;;   crash: tags shown|hidden touch on|off fresh on|off   the boot's inputs
-;;;   crash: look NAME                     the look in force, at boot and after a step
+;;;   crash: look NAME                     the look in force at boot (one name since the polish row)
 ;;;   crash: update waiting|prompt|apply   the web build's waiting update, as
 ;;;                                         the game shows it (ruling D14)
 ;;;   crash: control apply X Y             the prompt's APPLY box (with later, update)
-;;;   crash: control NAME X Y              the center of each HUD control (mode look keys tool)
+;;;   crash: control NAME X Y              the center of each HUD control (keys tool menu; apply later update)
+;;;   crash: bar meter X Y W H readout X Y W H   the meter's and the readout's rects (drawn, not tapped)
 ;;;   crash: tools open|closed             the tool stack (D33) opened or closed
 ;;;   crash: tool NAME X Y on|off          each entry's center while it opens
 ;;;   crash: hud zones|strip               the bar's layout at boot and after a HUD choice
@@ -60,8 +59,7 @@
 ;;;   crash: restored tiles N trace V phase P ice K locked A B ...   a saved
 ;;;                                         board came back at boot (verify.mjs's
 ;;;                                         reload sub-arm)
-;;;   crash: texture missing PATH after N fetches   a look's texture never
-;;;                                         landed; the flat tile stands in
+;;;   crash: texture missing PATH after N fetches   a texture never landed
 ;;;
 ;;;   crash: cards seed S moves N draw D    the card table booted (with ?cards)
 ;;;   crash: cards stock X Y                the stock's center
@@ -127,7 +125,6 @@
           (crash title draw)
           (crash title card)
           (crash title logo)
-          (crash look)
           (crash hud)
           (crash bg)
           (crash gpu bg)
@@ -159,7 +156,7 @@
     (define *restored* #f)   ; the boot restored a saved board
     (define *fresh* #f)      ; ?fresh: ignore the saved board
     (define *touch* #f)      ; the page reports a touch screen: fresh boards start with tags hidden
-    (define *hud* #f)        ; the bar's layout after a HUD choice or ?hud= (the store holds it)
+    (define *hud* #f)        ; the bar's layout after ?hud= (the store holds it)
     (define *version* #f)    ; the page's build stamp, for the menu's corner
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
@@ -534,9 +531,8 @@
 
     ;; --- textures, fetched by JS, decoded here once they land -------------
 
-    ;; A look's texture is optional (the primitives tile is the fallback),
-    ;; so it is fetched on demand, from the first stack frame that wants
-    ;; it, rather than from web-main: a fetch pending while the page's
+    ;; A texture is fetched on demand, from the first frame of the screen
+    ;; that wants it, rather than from web-main: a fetch pending while the page's
     ;; service worker activates over the boot's first frames failed under
     ;; load ("Failed to fetch", measured 2026-09-18 in headless Chrome, 7 of
     ;; 24 arm runs; the retry a second later always landed). One fetch is in
@@ -586,16 +582,12 @@
       (let ((entry (and path (assoc path *textures*))))
         (and entry (cdr entry))))
 
-    ;; The texture for the session's look, or #f for a flat look.
-    (define (texture-for s)
-      (texture-for-path (look-texture (look-ref (session-look s)))))
-
     ;; Ask for the texture at want (a path or #f) unless it is loaded or
     ;; in flight; called once a frame by the screen that draws it.
     (define (ensure-texture! dt want)
       (cond (*tex-path*
              ;; a fetch in flight is serviced whatever is wanted now (the
-             ;; look may have moved on): it lands or lapses on its own
+             ;; screen may have changed): it lands or lapses on its own
              ;; clock, and the next frame asks for what is wanted then
              (ensure-fetch! dt))
             ((not want) #f)
@@ -754,7 +746,9 @@
                          (car c)
                          (+ (cadr c) (half (cadddr c)))
                          (+ (caddr c) (half (list-ref c 4)))))
-                  (append (geometry-controls *geom* (session-hud s)) (update-controls *geom* (session-hud s))))))
+                  (append (geometry-controls *geom* (session-hud s)) (update-controls *geom* (session-hud s))))
+        (apply say "bar" "meter" (append (meter-rect *geom* (session-hud s))
+                                         (cons "readout" (readout-rect *geom* (session-hud s)))))))
 
     ;; What changed on the card table between two deals, as one line.
     (define (report-deal-change! before after)
@@ -838,7 +832,9 @@
                        (car c)
                        (+ (cadr c) (half (cadddr c)))
                        (+ (caddr c) (half (list-ref c 4)))))
-                (card-controls *card-geom* (deal-hud d))))
+                (card-controls *card-geom* (deal-hud d)))
+      (apply say "bar" "meter" (append (card-control-rect *card-geom* (deal-hud d) 'mode)
+                                       (cons "readout" (card-control-rect *card-geom* (deal-hud d) 'score)))))
 
     ;; --- one frame -----------------------------------------------------------
 
@@ -953,8 +949,6 @@
           (when (eq? (session-update after) 'apply) (update-chosen!)))
         (report-change! before after)
         (report-trace! before after)
-        (unless (eq? (session-look before) (session-look after))
-          (say "look" (session-look after)))
         (unless (eq? (tools-open? (session-tools before)) (tools-open? (session-tools after)))
           (say-tools (session-tools after) (session-tools-list after)))
         (when (not (= (session-seed before) (session-seed after)))
@@ -963,8 +957,7 @@
                   (lambda ()
                     (if *bg-only*
                         (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (background) *copper*)
-                        (draw-session after *geom* (texture-for after) x (background) *copper*))))
-        (ensure-texture! dt (look-texture (look-ref (session-look after))))))
+                        (draw-session after *geom* x (background) *copper*))))))
 
     ;; The tool stack opening or closing, and while it opens each entry's
     ;; center and whether it can fire, so the arm taps what the player sees:
@@ -1035,11 +1028,7 @@
       (boot-reset!)
       ;; the card strip first (D43: it shows before the reveal), the backdrop
       ;; (it belongs under the reveal), then the rest
-      (let ((paths (let loop ((names LOOK-NAMES) (acc (list PORTRAITS-PATH BACKDROP-PATH CARD-PATH)))
-                     (if (null? names)
-                         (reverse acc)
-                         (let ((p (look-texture (look-ref (car names)))))
-                           (loop (cdr names) (if (and p (not (member p acc))) (cons p acc) acc)))))))
+      (let ((paths (list CARD-PATH BACKDROP-PATH PORTRAITS-PATH)))
         (for-each (lambda (path)
                     (boot-add-step! (string->symbol path)
                                     (lambda ()
@@ -1372,9 +1361,7 @@
       (set! *update-chosen* #t))
 
     ;; A menu choice. UPDATE applies the waiting version the same way the
-    ;; in-game prompt does; LOOK steps the look (P3) and stays on the
-    ;; menu, the stack in memory taking the new one.
-    ;;   crash: look NAME                     the look after a LOOK choice
+    ;; in-game prompt does.
     (define (choose! choice)
       (let* ((resume? (eq? choice 'continue))
              (id (if resume? (active-game) choice)))
@@ -1382,16 +1369,6 @@
           ((stack) (set-active-game! 'stack) (open-stack! resume?))
           ((cards) (set-active-game! 'cards) (open-cards! resume?))
           ((update) (update-chosen!))
-          ((look) (let ((next (step-look!)))
-                    (set! *menu* (menu-with-look *menu* next))
-                    (when *session* (set! *session* (session-with-look *session* next)))
-                    (say "look" next)))
-          ((hud) (let ((next (step-hud!)))
-                   (set! *hud* next)
-                   (set! *menu* (menu-with-hud *menu* next))
-                   (when *session* (set! *session* (session-with-hud *session* next)))
-                   (when *deal* (set! *deal* (deal-with-hud *deal* next)))
-                   (say "hud" next)))
           (else #f))))
 
     ;; ?stack and ?cards open their table as CONTINUE would (the saved
@@ -1425,7 +1402,7 @@
         (frame-begin!)
         (atlas-ensure!)
         (when (and (eq? *screen* 'stack) *session* *geom*)
-          (tiles-ensure! (look-ref (session-look *session*)) *geom*))
+          (tiles-ensure! *geom*))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
         (cond ((eq? *phosphor* 'probe)
                (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
