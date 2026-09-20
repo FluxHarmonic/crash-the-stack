@@ -31,14 +31,17 @@
 ;;;      layer 4; (crash render)'s face-tint.
 ;;;   E  a free-side cue (the same read: "the biggest problem is the
 ;;;      right edge of the tiles, knowing when one is not occluded"): a
-;;;      tile whose right side is free by the rules' blocked-right?, the
-;;;      predicate the hint uses, draws its right edge a step brighter
-;;;      (C-STATIC-A); a tile blocked on the right draws no edge line
-;;;      there; the same on the left. The top edge is A/B/C's business.
-;;;      Tap targets unchanged.
+;;;      tile draws an edge line on a side exactly when it has no
+;;;      same-layer neighbour on that side (David's rule, 2026-09-20:
+;;;      with no lines between adjacent tiles, a line is always a
+;;;      boundary), a step brighter than the old top-left edge
+;;;      (C-STATIC-A); left and right by the rules' blocked-left?/
+;;;      blocked-right?, the hint's predicates, up and down by the same
+;;;      layout neighbourhoods two half-units off. Tap targets unchanged.
+;;;      RULED THE DEFAULT (David's read of abdce9f).
 ;;;
-;;; The entries: NONE (today's look, the default), B, B2, E, ABE, ABC,
-;;; B2E (the candidate for the default).
+;;; The entries: NONE (the look before D48), B, B2, E (the default), ABE,
+;;; ABC, B2E.
 ;;; Data only: (crash geometry) reads the offset, (crash render) the
 ;;; rest; the shells store the choice under its own key ("depth") and
 ;;; open ?depth=NAME (web) and --depth NAME (native) as doors.
@@ -75,7 +78,7 @@
             (depth name: 'b2e label: "B2E" shade: #t hue: #t edges: #t)))
 
     (define DEPTH-NAMES (map depth-name DEPTHS))
-    (define DEFAULT-DEPTH (depth-name (car DEPTHS)))
+    (define DEFAULT-DEPTH 'e)
 
     ;; A's cap: the side never grows more than this past the offset.
     (define MAX-SIDE-GROWTH 3)
@@ -85,19 +88,21 @@
     (define (depth-name? x)
       (and (memq x DEPTH-NAMES) #t))
 
-    ;; The depth of that name; an unknown name is the default.
+    ;; The depth of that name; an unknown name (a retired entry in an old
+    ;; store) is the default's.
     (define (depth-ref name)
-      (let loop ((ds DEPTHS))
-        (cond ((null? ds) (car DEPTHS))
+      (let loop ((ds DEPTHS) (fallback #f))
+        (cond ((null? ds) (or fallback (car DEPTHS)))
               ((eq? (depth-name (car ds)) name) (car ds))
-              (else (loop (cdr ds))))))
+              ((and (not fallback) (eq? (depth-name (car ds)) DEFAULT-DEPTH)) (loop (cdr ds) (car ds)))
+              (else (loop (cdr ds) fallback)))))
 
     ;; The name after this one, wrapping (the menu entry steps through).
     (define (depth-after name)
       (let loop ((names DEPTH-NAMES))
-        (cond ((null? names) DEFAULT-DEPTH)
+        (cond ((null? names) (car DEPTH-NAMES))
               ((eq? (car names) name)
-               (if (null? (cdr names)) DEFAULT-DEPTH (cadr names)))
+               (if (null? (cdr names)) (car DEPTH-NAMES) (cadr names)))
               (else (loop (cdr names))))))
 
     ;; The drawn side depth of a tile on this layer, in px.
@@ -106,13 +111,15 @@
           (+ (depth-offset d) (if (< layer MAX-SIDE-GROWTH) layer MAX-SIDE-GROWTH))
           (depth-offset d)))
 
-    ;; E's predicate, the rules': is the tile's side free, by the same
-    ;; occlusion rule the hint and a pick use (blocked-left?/blocked-right?
-    ;; in (crash stack rules)). side: left | right.
+    ;; E's predicate, the rules': is the tile's side free of a same-layer
+    ;; neighbour, by the occlusion rule the hint and a pick use for left
+    ;; and right (blocked-left?/blocked-right?) and its up/down twins.
+    ;; side: left | right | up | down.
     (define (side-free? b id side)
-      (if (eq? side 'right)
-          (not (blocked-right? b id))
-          (not (blocked-left? b id))))
+      (cond ((eq? side 'right) (not (blocked-right? b id)))
+            ((eq? side 'left) (not (blocked-left? b id)))
+            ((eq? side 'up) (not (blocked-up? b id)))
+            (else (not (blocked-down? b id)))))
 
     ;; How far C's shadow falls (down and left) for a tile on this layer,
     ;; or 0 for the base layer and when C is off.

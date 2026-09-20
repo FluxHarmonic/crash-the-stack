@@ -11,13 +11,14 @@
         (crash depth))
 
 (test-group "depth: the candidates"
-  (test "NONE is the default and the first; every entry has a label; after wraps"
-    (assert-equal 'none DEFAULT-DEPTH)
+  (test "E is the default (ruled from abdce9f); NONE the first entry; every entry has a label; after wraps"
+    (assert-equal 'e DEFAULT-DEPTH)
+    (assert-true (depth-edges (depth-ref DEFAULT-DEPTH)))
     (assert-equal '(none b b2 e abe abc b2e) DEPTH-NAMES)
     (assert-true (every (lambda (n) (string? (depth-label (depth-ref n)))) DEPTH-NAMES))
     (assert-equal 'b (depth-after 'none))
     (assert-equal 'none (depth-after 'b2e))
-    (assert-equal 'none (depth-name (depth-ref 'abd)))   ; an old store's name reads as the default
+    (assert-equal DEFAULT-DEPTH (depth-name (depth-ref 'abd)))   ; an old store's name reads as the default
     (assert-false (depth-name? 'abd)))
   (test "the parts: B2 is B with a hue, E edges alone, B2E both; no entry moves the offset"
     (assert-true (and (depth-shade (depth-ref 'b2)) (depth-hue (depth-ref 'b2)) (not (depth-edges (depth-ref 'b2)))))
@@ -37,11 +38,54 @@
          (b (generate lay 1))
          (ids (iota (layout-slot-count lay)))
          (present (filter (lambda (id) (tile-present? b id)) ids)))
-    (test "free on a side is exactly not blocked on that side"
+    (test "free on a side is exactly not blocked on that side, four sides"
       (for-each (lambda (id)
                   (assert-equal (not (blocked-right? b id)) (side-free? b id 'right))
-                  (assert-equal (not (blocked-left? b id)) (side-free? b id 'left)))
+                  (assert-equal (not (blocked-left? b id)) (side-free? b id 'left))
+                  (assert-equal (not (blocked-up? b id)) (side-free? b id 'up))
+                  (assert-equal (not (blocked-down? b id)) (side-free? b id 'down)))
                 present))
+    (test "up and down are same-layer neighbours two half-units off: the Turtle has tiles with a tile below and tiles without"
+      (let ((with (filter (lambda (id) (not (side-free? b id 'down))) present))
+            (without (filter (lambda (id) (side-free? b id 'down)) present)))
+        (assert-true (pair? with))
+        (assert-true (pair? without))
+        ;; a tile with one below is blocked down; the one below is blocked up
+        (for-each (lambda (id)
+                    (let* ((s (layout-slot lay id))
+                           (below (filter (lambda (o)
+                                            (let ((t (layout-slot lay o)))
+                                              (and (= (slot-layer t) (slot-layer s))
+                                                   (= (slot-hy t) (+ (slot-hy s) 2))
+                                                   (<= (abs (- (slot-hx t) (slot-hx s))) 1))))
+                                          present)))
+                      (assert-true (pair? below))
+                      (for-each (lambda (o) (assert-false (side-free? b o 'up))) below)))
+                  with)))
+    (test "a bottom edge appears on the tile above when the tile below leaves"
+      (let* ((pair (car (board-solution b)))
+             (after (board-select (board-select b (car pair)) (cdr pair)))
+             ;; the tiles whose only same-layer tile below is one of the pair
+             (same-layer-below (lambda (id)
+                                 (let ((s (layout-slot lay id)))
+                                   (filter (lambda (o)
+                                             (let ((t (layout-slot lay o)))
+                                               (and (tile-present? b o)
+                                                    (= (slot-layer t) (slot-layer s))
+                                                    (= (slot-hy t) (+ (slot-hy s) 2))
+                                                    (<= (abs (- (slot-hx t) (slot-hx s))) 1))))
+                                           ids))))
+             (uncovered (filter (lambda (id)
+                                  (let ((below (same-layer-below id)))
+                                    (and (tile-present? after id)
+                                         (pair? below)
+                                         (every (lambda (o) (or (= o (car pair)) (= o (cdr pair)))) below))))
+                                present)))
+        (assert-false (tile-present? after (car pair)))
+        (for-each (lambda (id)
+                    (assert-false (side-free? b id 'down))
+                    (assert-true (side-free? after id 'down)))
+                  uncovered)))
     (test "a tile blocked on the right becomes free there when the pair to its right leaves"
       ;; the first solution pair is a legal match; some tile is blocked on
       ;; its right by one of the two: after the match it is free
