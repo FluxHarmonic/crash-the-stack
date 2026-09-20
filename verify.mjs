@@ -1049,9 +1049,12 @@ let iceLock = null;
   // mean (David, phone: "extremely glitchy at startup ... with the beeps")
   let reveal = null;
   if (!detail) {
-    reveal = await waitLine(/^crash: title reveal frames (\d+) max (\d+) over33 (\d+) mean (\d+)$/, 0, 3000);
+    reveal = await waitLine(/^crash: title reveal frames (\d+) max (\d+) over33 (\d+) underruns (\d+) mean (\d+)$/, 0, 3000);
     if (!reveal) detail = "no \"crash: title reveal frames\" line at settle";
-    else if (parseInt(reveal.m[2], 10) > 5 * Math.max(8, parseInt(reveal.m[4], 10))) detail = `a stall inside the reveal: max frame ${reveal.m[2]} ms against a mean of ${reveal.m[4]} (${reveal.m[3]} of ${reveal.m[1]} frames over 33 ms)`;
+    else if (parseInt(reveal.m[2], 10) > 5 * Math.max(8, parseInt(reveal.m[5], 10))) detail = `a stall inside the reveal: max frame ${reveal.m[2]} ms against a mean of ${reveal.m[5]} (${reveal.m[3]} of ${reveal.m[1]} frames over 33 ms)`;
+    // the phone viewport is where the sink can be fed at all on this box (the desktop
+    // viewport starves under SwiftShader on every screen): no starved frame under the beeps
+    else if (PHONE && parseInt(reveal.m[4], 10) > 0) detail = `the audio sink starved for ${reveal.m[4]} frames during the reveal (David: the typing beeps lag)`;
   }
   // the grid the game holds, against the module
   if (!detail) {
@@ -1216,7 +1219,7 @@ let iceLock = null;
   }
   delete substitutePaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[4]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[5]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns`);
 }
 
 // ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --

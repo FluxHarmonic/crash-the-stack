@@ -95,7 +95,7 @@
         (diag-line! (string-append "RT LOGO " (if *logo-rt* (string-append (number->string (render-target-width *logo-rt*)) "X" (number->string (render-target-height *logo-rt*))) "NONE")
                                    " BAKES " (number->string *logo-bakes*)) x (+ y 30))
         (diag-line! (string-append "RT ITEMS " (if *items-rt* (string-append (number->string (render-target-width *items-rt*)) "X" (number->string (render-target-height *items-rt*))) "NONE")
-                                   " BAKES " (number->string *items-bakes*)) x (+ y 40))
+                                   " BAKES " (number->string *items-bakes*) " ROWS " (number->string *row-bakes*)) x (+ y 40))
         (diag-line! (string-append "BACKDROP DRAWN " (number->string *backdrop-draws*) " FRAMES") x (+ y 50))))
 
     ;; Draw the title with the grid's top-left at (x0, y0), cells of cell px.
@@ -124,6 +124,7 @@
               (title-draw-cells t 0 0 (* BAKE-SCALE cell)))
             (set-blend-mode 'normal)
             (set! *logo-rt* rt)
+            (rows-free!)
             (set! *logo-tex* (render-target->texture rt))
             (set! *logo-bakes* (+ 1 *logo-bakes*))
             (set! *logo-key* key)))
@@ -139,9 +140,78 @@
                 (draw-texture-region *logo-tex* x0 y0 w h
                                      0 (* BAKE-SCALE h) (* BAKE-SCALE w) (- (* BAKE-SCALE h)))
                 (draw-render-target rt x0 y0 w h)))
-          (title-draw-cells t x0 y0 cell)))
-    (define (title-draw-cells t x0 y0 cell)
-      (let* ((live (title-live-glitches t))
+          (title-draw-cells t x0 y0 cell #t)))
+    ;; --- the reveal's rows, baked as they complete -----------------------------
+    ;;
+    ;; David on the phone (2026-09-20): the typing beeps lag, because the
+    ;; in-progress logo was redrawn from the grid as rectangles every reveal
+    ;; frame (up to ~2,000 native calls, each an allocation on wasm) while
+    ;; the settled logo was baked. Now each row is baked into its own small
+    ;; render target the first time it is complete with no content glitch
+    ;; live on it, and drawn as one textured region from then on; the row
+    ;; being typed and any row a live glitch touches (a wrong character or
+    ;; color, an inversion, the noise on a shadow row) draw as rectangles
+    ;; that frame. A shift glitch and the slam's shear only move a row, so
+    ;; they translate the baked region. The targets are freed when the
+    ;; settled logo bakes whole.
+    (define *row-rts* #f)                        ; a vector of (rt . texture) per row, or #f, made on first use
+    (define (row-rts) (or *row-rts* (begin (set! *row-rts* (make-vector LOGO-H #f)) *row-rts*)))
+    (define (row-content-live? y live)
+      (let loop ((gs live))
+        (cond ((null? gs) #f)
+              ((let ((g (car gs)))
+                 (case (glitch-kind g)
+                   ((wrong-char wrong-color) (= (glitch-row g) y))
+                   ((noise) (= (glitch-row g) (- y 1)))
+                   ((invert) (and (>= y (glitch-row g)) (< y (+ (glitch-row g) 6))))
+                   (else #f)))
+               #t)
+              (else (loop (cdr gs))))))
+    (define (row-bake! t y cell)
+      (or (vector-ref (row-rts) y)
+          (let* ((w (* BAKE-SCALE LOGO-W cell))
+                 (h (* BAKE-SCALE cell))
+                 (rt (make-render-target w h *rt-filter*)))
+            (with-render-target rt
+              (set-blend-mode 'none)
+              (draw-row-cells t y 0 0 (* BAKE-SCALE cell) '() (cdr (title-row-extent y)) 0 0))
+            (set-blend-mode 'normal)
+            (let ((entry (cons rt (render-target->texture rt))))
+              (vector-set! (row-rts) y entry)
+              (set! *row-bakes* (+ 1 *row-bakes*))
+              entry))))
+    (define (rows-free!)
+      (let loop ((y 0))
+        (when (< y LOGO-H)
+          (let ((entry (vector-ref (row-rts) y)))
+            (when entry (render-target-free! (car entry)) (vector-set! (row-rts) y #f)))
+          (loop (+ y 1)))))
+    (define *row-bakes* 0)
+
+    ;; Row y's cells from its extent's start, in-row of them, as rectangles
+    ;; at (x0 + (x + dx) cell + shear-px, py); live is the glitch list.
+    (define (draw-row-cells t y x0 py cell live in-row dx shear-px)
+      (let* ((extent (title-row-extent y))
+             (xa (car extent))
+             (xb (+ xa in-row)))
+        (let cols ((x xa))
+          (when (< x xb)
+            (let ((shown (title-shown-cell t x y live)))
+              (when shown
+                (let ((px (+ x0 (* (+ x dx) cell) shear-px)))
+                  (when (caddr shown)
+                    (color! (role-color (caddr shown)))
+                    (draw-filled-rect px py cell cell))
+                  (when (cadr shown)
+                    (color! (role-color (cadr shown)))
+                    (draw-block (car shown) px py cell)))))
+            (cols (+ x 1))))))
+
+    ;; The title cell by cell, rows-rt? allowing a completed row to come
+    ;; from its baked target (off inside the whole-logo bake).
+    (define (title-draw-cells t x0 y0 cell . rest)
+      (let* ((rows-rt? (and (pair? rest) (car rest) *bake*))
+             (live (title-live-glitches t))
              (drawn (title-drawn-count t))
              (tick (title-tick t))
              (cursor-row (title-cursor-row t)))
@@ -149,23 +219,19 @@
           (when (< y LOGO-H)
             (let* ((extent (title-row-extent y))
                    (xa (car extent))
-                   (in-row (max 0 (min (cdr extent) (- drawn (title-row-start y)))))
+                   (width (cdr extent))
+                   (in-row (max 0 (min width (- drawn (title-row-start y)))))
                    (xb (+ xa in-row))
                    (dx (title-row-shift y live))
                    (shear-px (exact (round (* cell (title-row-shear t y)))))
                    (py (+ y0 (* y cell))))
-              (let cols ((x xa))
-                (when (< x xb)
-                  (let ((shown (title-shown-cell t x y live)))
-                    (when shown
-                      (let ((px (+ x0 (* (+ x dx) cell) shear-px)))
-                        (when (caddr shown)
-                          (color! (role-color (caddr shown)))
-                          (draw-filled-rect px py cell cell))
-                        (when (cadr shown)
-                          (color! (role-color (cadr shown)))
-                          (draw-block (car shown) px py cell)))))
-                  (cols (+ x 1))))
+              (if (and rows-rt? (= in-row width) (> width 0) (not (row-content-live? y live)))
+                  (let ((entry (row-bake! t y cell))
+                        (w (* LOGO-W cell)))
+                    (color! C-TEX-PLAIN)
+                    (draw-texture-region (cdr entry) (+ x0 (* dx cell) shear-px) py w cell
+                                         0 (* BAKE-SCALE cell) (* BAKE-SCALE w) (- (* BAKE-SCALE cell))))
+                  (draw-row-cells t y x0 py cell live in-row dx shear-px))
               ;; the cursor: a block leading the draw, blinking, on the
               ;; row being drawn
               (when (and cursor-row (= cursor-row y) (cursor-on? tick))
