@@ -1,0 +1,106 @@
+;;; (crash tracker) - The tracker mode: one state, one frame, one draw
+;;;
+;;; The mode owns a tstate ((crash tracker model)) and turns a frame's
+;;; keys and taps into actions, acts on the state's playback requests
+;;; through (crash tracker play), and hands the shell the requests it
+;;; must answer itself (save, open, share, new: files natively, the
+;;; page's stdout lines on the web). The tune file is its only contract:
+;;; (tracker-open-text text name) boots from canonical text and
+;;; (tracker-text s) prints it back, so a link, a file and the MCP tools
+;;; all meet here. Nothing from the board or the card table is imported;
+;;; test/test-imports.sgl holds the family to its allowlist.
+
+(define-library (crash tracker)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (sigil string)
+          (motif tune)
+          (crash tracker model)
+          (crash tracker keys)
+          (crash tracker draw)
+          (crash tracker play))
+
+  (export tracker-open-text tracker-blank tracker-text tracker-frame tracker-draw
+          tracker-state? tracker-error
+          BLANK-TUNE)
+
+  (begin
+    ;; A new tune: eight channels, one 64-row pattern, the starter bank.
+    (define BLANK-TUNE
+      (string-append
+        "(tune version: 1 name: \"untitled\" tempo: 125 speed: 6 channels: 8\n"
+        "  (bus reverb: zitarev size: 0.5 damp: 0.5 mix: 0.25)\n"
+        "  (instruments\n"
+        "    (instrument id: 1 name: \"pulse\" patch: (chip-pulse) volume: 40)\n"
+        "    (instrument id: 2 name: \"saw\" patch: (chip-saw) volume: 36)\n"
+        "    (instrument id: 3 name: \"tri\" patch: (chip-tri) volume: 44)\n"
+        "    (instrument id: 4 name: \"bass\" patch: (fm4-bass) volume: 44)\n"
+        "    (instrument id: 5 name: \"lead\" patch: (fm4-lead) volume: 34)\n"
+        "    (instrument id: 6 name: \"bell\" patch: (fm4-bell) volume: 30 send: 0.4)\n"
+        "    (instrument id: 7 name: \"pluck\" patch: (karplus-strong) volume: 44)\n"
+        "    (instrument id: 8 name: \"kick\" patch: (chip-kick) volume: 44)\n"
+        "    (instrument id: 9 name: \"snare\" patch: (chip-snare) volume: 40 send: 0.2)\n"
+        "    (instrument id: 10 name: \"hat\" patch: (chip-hat) volume: 30)\n"
+        "    (instrument id: 11 name: \"noise\" patch: (chip-noise) volume: 36)\n"
+        "    (instrument id: 12 name: \"sax\" patch: (fm4-sax) volume: 38 send: 0.2)\n"
+        "    (instrument id: 13 name: \"grit\" patch: (fm4-grit-bass) volume: 46))\n"
+        "  (patterns (pattern id: 0 rows: 64))\n"
+        "  (order 0))\n"))
+
+    (define (tracker-state? x) (tstate? x))
+
+    ;; Boot from canonical text; a bad file answers (error . message).
+    (define (tracker-open-text text name)
+      (guard (e (#t (cons 'error (if (error-object? e) (error-object-message e) "unreadable tune"))))
+        (tracker-new (read-tune-string text) name)))
+
+    (define (tracker-error x) (and (pair? x) (eq? (car x) 'error) (cdr x)))
+
+    (define (tracker-blank) (tracker-new (read-tune-string BLANK-TUNE) "untitled"))
+
+    (define (tracker-text s) (tune->string (tstate-tune s)))
+
+    ;; Act on a playback request; answer the state (the playing position
+    ;; is refreshed every frame from the audio clock).
+    (define (act s req)
+      (case req
+        ((play-row)
+         (play-start! (tstate-tune s) (tstate-pos s) (tstate-row s) #f)
+         s)
+        ((play-loop)
+         (play-start! (tstate-tune s) (tstate-pos s) (tstate-row s) #t)
+         s)
+        ((stop)
+         (play-stop!)
+         s)
+        (else s)))
+
+    ;; One frame: keys and a tap to actions, requests acted on, the
+    ;; playing row from the audio clock. Answers (state . shell-request)
+    ;; where shell-request is save | open | share | new | leave | #f.
+    (define (tracker-frame s pressed held click vw vh touch?)
+      (let* ((actions (tracker-actions pressed held (tstate-col s) (tstate-edit s) (tstate-octave s)))
+             (tap (and click (tracker-touch-hit (car click) (cdr click) vw vh touch?)))
+             (actions (if tap (append actions (list tap)) actions))
+             (leave (and (memq 'stop actions) (not (play-playing?)) (not (tstate-edit s))))
+             (s (fold-left tracker-apply s actions))
+             (rq (tracker-take-request s))
+             (req (car rq))
+             (s (cdr rq))
+             (s (act s req))
+             (shell-req (cond (leave 'leave)
+                              ((memq req '(save open share new)) req)
+                              (else #f)))
+             (pos (play-position))
+             (s (tracker-with-playing s pos))
+             ;; the cursor follows playback while it runs and the editor is not in edit mode
+             (s (if (and pos (not (tstate-edit s)) (= (car pos) (tstate-pos s)))
+                    (tstate s row: (cdr pos))
+                    s)))
+        (cons s shell-req)))
+
+    (define (tracker-draw s vw vh touch?)
+      (draw-tracker s vw vh touch?))
+
+    ))

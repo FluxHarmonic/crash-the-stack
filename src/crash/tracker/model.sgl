@@ -1,0 +1,429 @@
+;;; (crash tracker model) - The tracker editor's state and every edit
+;;;
+;;; Pure: a state is an immutable struct, an action is a symbol or a small
+;;; list, and (tracker-apply s action) answers the next state. Nothing here
+;;; draws, plays or reads a key; (crash tracker keys) turns keys into
+;;; actions, (crash tracker draw) draws a state, (crash tracker play) acts
+;;; on the state's `request`. The tune is (motif tune)'s model and every
+;;; edit goes through its cell operations, so what the editor writes is
+;;; what motif prints.
+;;;
+;;; Cursor columns (FT2's): 0 note, 1 inst hi, 2 inst lo, 3 vol hi,
+;;; 4 vol lo, 5 fx command, 6 fx x, 7 fx y.
+;;;
+;;; Actions:
+;;;   up down left right home end page-up page-down next-channel prev-channel
+;;;   (note MIDI) note-off clear (hex N) (octave N) inst-up inst-down
+;;;   toggle-edit play-row play-loop stop
+;;;   order-prev order-next order-insert order-delete order-pattern-up
+;;;   order-pattern-down
+;;;   insert-row delete-row
+;;;   (mark DIR) copy cut paste
+;;;   zoom save open share new
+;;; A movement in edit mode after a note entry advances one row (FT2's
+;;; edit skip of 1).
+
+(define-library (crash tracker model)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (motif tune))
+
+  (export tstate tstate? tstate-tune tstate-pos tstate-row tstate-ch tstate-col
+          tstate-octave tstate-inst tstate-edit tstate-zoom tstate-view-ch
+          tstate-mark tstate-clip tstate-message tstate-dirty tstate-request
+          tstate-playing tstate-name
+          tracker-new tracker-apply tracker-take-request tracker-with-playing
+          tracker-with-tune tracker-with-message tracker-with-name
+          tracker-pattern tracker-pattern-id tracker-rows tracker-channels
+          tracker-cell tracker-block
+          COLUMNS ZOOM-CHANNELS PAGE-ROWS)
+
+  (begin
+    (define COLUMNS 8)
+    (define ZOOM-CHANNELS 4)
+    (define PAGE-ROWS 16)
+
+    (define-struct tstate
+      (tune)
+      (name default: "untitled")   ; the file name (no extension) the tune came from or goes to
+      (pos default: 0)             ; order position
+      (row default: 0)
+      (ch default: 1)
+      (col default: 0)
+      (octave default: 4)
+      (inst default: 1)
+      (edit default: #f)
+      (zoom default: #f)
+      (view-ch default: 1)         ; first visible channel in the zoom
+      (mark default: #f)           ; #f or (row . ch): the block anchor
+      (clip default: #f)           ; #f or (rows chans cells) with cells relative to the block's corner
+      (message default: #f)
+      (dirty default: #f)
+      (request default: #f)        ; play-row | play-loop | stop | save | open | share | #f
+      (playing default: #f))       ; #f or (pos . row) under the audio, set by the mode
+
+    ;; ------------------------------------------------------------
+    ;; Lookups
+    ;; ------------------------------------------------------------
+
+    (define (tracker-pattern-id s)
+      (let ((order (tune-order (tstate-tune s))))
+        (if (and (>= (tstate-pos s) 0) (< (tstate-pos s) (length order)))
+            (list-ref order (tstate-pos s))
+            0)))
+
+    (define (tracker-pattern s)
+      (tune-find-pattern (tstate-tune s) (tracker-pattern-id s)))
+
+    (define (tracker-rows s)
+      (let ((p (tracker-pattern s)))
+        (if p (tune-pattern-rows p) 64)))
+
+    (define (tracker-channels s)
+      (tune-channels (tstate-tune s)))
+
+    (define (tracker-cell s row ch)
+      (tune-cell-at (tstate-tune s) (tracker-pattern-id s) row ch))
+
+    (define (first-instrument-id t)
+      (let ((is (tune-instruments t)))
+        (if (pair? is) (tune-instrument-id (car is)) 1)))
+
+    (define (tracker-new t name)
+      (tstate tune: t name: name inst: (first-instrument-id t)))
+
+    (define (tracker-with-tune s t)
+      (tstate s tune: t dirty: #t))
+
+    (define (tracker-with-message s m) (tstate s message: m))
+    (define (tracker-with-name s n) (tstate s name: n))
+    (define (tracker-with-playing s p) (tstate s playing: p))
+
+    ;; The mode reads and clears the request.
+    (define (tracker-take-request s)
+      (cons (tstate-request s) (tstate s request: #f)))
+
+    ;; The marked block as (row0 ch0 row1 ch1), or the cursor cell alone.
+    (define (tracker-block s)
+      (let ((m (tstate-mark s)))
+        (if m
+            (list (min (car m) (tstate-row s)) (min (cdr m) (tstate-ch s))
+                  (max (car m) (tstate-row s)) (max (cdr m) (tstate-ch s)))
+            (list (tstate-row s) (tstate-ch s) (tstate-row s) (tstate-ch s)))))
+
+    ;; ------------------------------------------------------------
+    ;; Movement
+    ;; ------------------------------------------------------------
+
+    (define (clamp x lo hi) (max lo (min hi x)))
+
+    (define (wrap-row s row)
+      (let ((n (tracker-rows s)))
+        (modulo row n)))
+
+    (define (set-row s row) (tstate s row: (wrap-row s row) mark: #f))
+
+    (define (clamp-view s)
+      ;; keep the cursor channel visible in the zoom
+      (if (not (tstate-zoom s))
+          s
+          (let* ((ch (tstate-ch s))
+                 (v (tstate-view-ch s))
+                 (v (cond ((< ch v) ch)
+                          ((>= ch (+ v ZOOM-CHANNELS)) (- ch (- ZOOM-CHANNELS 1)))
+                          (else v))))
+            (tstate s view-ch: (clamp v 1 (max 1 (- (tracker-channels s) (- ZOOM-CHANNELS 1))))))))
+
+    (define (move-col s d)
+      (let* ((col (+ (tstate-col s) d))
+             (nch (tracker-channels s)))
+        (cond
+          ((< col 0)
+           (if (> (tstate-ch s) 1)
+               (clamp-view (tstate s ch: (- (tstate-ch s) 1) col: (- COLUMNS 1) mark: #f))
+               s))
+          ((>= col COLUMNS)
+           (if (< (tstate-ch s) nch)
+               (clamp-view (tstate s ch: (+ (tstate-ch s) 1) col: 0 mark: #f))
+               s))
+          (else (tstate s col: col mark: #f)))))
+
+    (define (move-channel s d)
+      (let ((ch (clamp (+ (tstate-ch s) d) 1 (tracker-channels s))))
+        (clamp-view (tstate s ch: ch col: 0 mark: #f))))
+
+    ;; Shift+arrow: extend the block from the anchor (the cursor before the move).
+    (define (mark-move s dir)
+      (let* ((anchor (or (tstate-mark s) (cons (tstate-row s) (tstate-ch s))))
+             (s2 (case dir
+                   ((up) (tstate s row: (max 0 (- (tstate-row s) 1))))
+                   ((down) (tstate s row: (min (- (tracker-rows s) 1) (+ (tstate-row s) 1))))
+                   ((left) (tstate s ch: (max 1 (- (tstate-ch s) 1))))
+                   ((right) (tstate s ch: (min (tracker-channels s) (+ (tstate-ch s) 1))))
+                   (else s))))
+        (clamp-view (tstate s2 mark: anchor))))
+
+    ;; ------------------------------------------------------------
+    ;; Cell edits
+    ;; ------------------------------------------------------------
+
+    (define (cell-or-empty s)
+      (or (tracker-cell s (tstate-row s) (tstate-ch s))
+          (make-cell (tstate-row s) (tstate-ch s) #f 0 0 "000")))
+
+    (define (put-cell s c)
+      (tracker-with-tune s (tune-set-cell (tstate-tune s) (tracker-pattern-id s) c)))
+
+    (define (advance s)
+      (set-row s (+ (tstate-row s) 1)))
+
+    (define (enter-note s midi)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (c2 (make-cell (cell-row c) (cell-channel c) midi
+                                (tstate-inst s)
+                                (cell-vol c) (cell-fx c))))
+            (advance (put-cell s c2)))))
+
+    (define (enter-note-off s)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (c2 (make-cell (cell-row c) (cell-channel c) 'off 0 (cell-vol c) (cell-fx c))))
+            (advance (put-cell s c2)))))
+
+    (define (clear-cell s)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (col (tstate-col s))
+                 (c2 (cond
+                       ((= col 0) (make-cell (cell-row c) (cell-channel c) #f 0 (cell-vol c) (cell-fx c)))
+                       ((<= col 2) (make-cell (cell-row c) (cell-channel c) (cell-note c) 0 (cell-vol c) (cell-fx c)))
+                       ((<= col 4) (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) 0 (cell-fx c)))
+                       (else (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) (cell-vol c) "000")))))
+            (advance (put-cell s c2)))))
+
+    (define (hex-char n)
+      (string-ref "0123456789ABCDEF" n))
+
+    (define (set-string-char str i ch)
+      (let ((l (string->list str)))
+        (list->string
+          (let loop ((l l) (k 0))
+            (cond ((null? l) '())
+                  ((= k i) (cons ch (loop (cdr l) (+ k 1))))
+                  (else (cons (car l) (loop (cdr l) (+ k 1)))))))))
+
+    ;; A hex digit typed on the instrument, volume or effect columns. The
+    ;; instrument and volume columns are decimal-shaped two-digit numbers
+    ;; as FT2 shows them (01..99 and 00..64), typed a digit at a time;
+    ;; the effect column is three hex digits.
+    (define (enter-hex s n)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (col (tstate-col s)))
+            (define (two-digit old hi? limit)
+              (let* ((hi (quotient old 10))
+                     (lo (modulo old 10))
+                     (d (min n 9))
+                     (v (if hi? (+ (* d 10) lo) (+ (* hi 10) d))))
+                (min v limit)))
+            (cond
+              ((= col 0) s)
+              ((<= col 2)
+               (let ((v (two-digit (cell-inst c) (= col 1) 99)))
+                 (put-cell (tstate s col: (if (= col 1) 2 1) row: (if (= col 2) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s)))
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) v (cell-vol c) (cell-fx c)))))
+              ((<= col 4)
+               (let ((v (two-digit (cell-vol c) (= col 3) 64)))
+                 (put-cell (tstate s col: (if (= col 3) 4 3) row: (if (= col 4) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s)))
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) v (cell-fx c)))))
+              (else
+               (let* ((i (- col 5))
+                      (fx (set-string-char (cell-fx c) i (hex-char n)))
+                      (next-col (if (= i 2) 5 (+ col 1)))
+                      (next-row (if (= i 2) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s))))
+                 (put-cell (tstate s col: next-col row: next-row)
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) (cell-vol c) fx))))))))
+
+    ;; ------------------------------------------------------------
+    ;; Rows, order, block
+    ;; ------------------------------------------------------------
+
+    (define (insert-row s)
+      (if (not (tstate-edit s))
+          s
+          (tracker-with-tune s (tune-insert-row (tstate-tune s) (tracker-pattern-id s) (tstate-row s)))))
+
+    (define (delete-row s)
+      (if (not (tstate-edit s))
+          s
+          (tracker-with-tune s (tune-delete-row (tstate-tune s) (tracker-pattern-id s) (tstate-row s)))))
+
+    (define (set-order s order pos)
+      (tstate (tracker-with-tune s (tune-with-order (tstate-tune s) order))
+              pos: (clamp pos 0 (max 0 (- (length order) 1)))
+              row: 0 mark: #f))
+
+    (define (list-insert-at l i x)
+      (if (or (null? l) (= i 0)) (cons x l) (cons (car l) (list-insert-at (cdr l) (- i 1) x))))
+
+    (define (list-remove-at l i)
+      (cond ((null? l) '())
+            ((= i 0) (cdr l))
+            (else (cons (car l) (list-remove-at (cdr l) (- i 1))))))
+
+    (define (list-set-at l i x)
+      (cond ((null? l) '())
+            ((= i 0) (cons x (cdr l)))
+            (else (cons (car l) (list-set-at (cdr l) (- i 1) x)))))
+
+    (define (max-pattern-id t)
+      (fold-left (lambda (m p) (max m (tune-pattern-id p))) -1 (tune-patterns t)))
+
+    ;; Step the pattern number at the order position; past the last id a
+    ;; new empty pattern (same row count as the current one) is added.
+    (define (order-pattern s d)
+      (let* ((t (tstate-tune s))
+             (order (tune-order t))
+             (pid (tracker-pattern-id s))
+             (next (+ pid d)))
+        (cond
+          ((< next 0) s)
+          ((tune-find-pattern t next)
+           (set-order s (list-set-at order (tstate-pos s) next) (tstate-pos s)))
+          ((> d 0)
+           (let* ((new-id (+ (max-pattern-id t) 1))
+                  (p (tune-pattern id: new-id rows: (tracker-rows s) cells: '()))
+                  (t2 (tune-with-patterns t (append (tune-patterns t) (list p)))))
+             (set-order (tstate s tune: t2 dirty: #t)
+                        (list-set-at order (tstate-pos s) new-id)
+                        (tstate-pos s))))
+          (else s))))
+
+    (define (block-cells s)
+      (let* ((b (tracker-block s))
+             (r0 (car b)) (c0 (cadr b)) (r1 (caddr b)) (c1 (cadddr b))
+             (p (tracker-pattern s)))
+        (list (+ 1 (- r1 r0)) (+ 1 (- c1 c0))
+              (if p
+                  (filter (lambda (c) #t)
+                          (map (lambda (c)
+                                 (make-cell (- (cell-row c) r0) (- (cell-channel c) c0)
+                                            (cell-note c) (cell-inst c) (cell-vol c) (cell-fx c)))
+                               (filter (lambda (c)
+                                         (and (>= (cell-row c) r0) (<= (cell-row c) r1)
+                                              (>= (cell-channel c) c0) (<= (cell-channel c) c1)))
+                                       (tune-pattern-cells p))))
+                  '()))))
+
+    (define (copy-block s)
+      (tstate s clip: (block-cells s) mark: #f message: "COPIED"))
+
+    (define (clear-block s)
+      (let* ((b (tracker-block s))
+             (r0 (car b)) (c0 (cadr b)) (r1 (caddr b)) (c1 (cadddr b)))
+        (let loop ((r r0) (t (tstate-tune s)))
+          (if (> r r1)
+              (tstate s tune: t dirty: #t mark: #f)
+              (loop (+ r 1)
+                    (let cl ((c c0) (t t))
+                      (if (> c c1)
+                          t
+                          (cl (+ c 1) (tune-set-cell t (tracker-pattern-id s) (make-cell r c #f 0 0 "000"))))))))))
+
+    (define (cut-block s)
+      (if (not (tstate-edit s))
+          s
+          (tstate (clear-block (tstate s clip: (block-cells s))) message: "CUT")))
+
+    (define (paste-block s)
+      (let ((clip (tstate-clip s)))
+        (if (or (not clip) (not (tstate-edit s)))
+            s
+            (let ((r0 (tstate-row s)) (c0 (tstate-ch s))
+                  (nrows (tracker-rows s)) (nch (tracker-channels s)))
+              (let loop ((cs (caddr clip)) (t (tstate-tune s)))
+                (if (null? cs)
+                    (tstate s tune: t dirty: #t message: "PASTED")
+                    (let* ((c (car cs))
+                           (r (+ r0 (cell-row c)))
+                           (ch (+ c0 (cell-channel c))))
+                      (loop (cdr cs)
+                            (if (and (< r nrows) (<= ch nch))
+                                (tune-set-cell t (tracker-pattern-id s)
+                                               (make-cell r ch (cell-note c) (cell-inst c) (cell-vol c) (cell-fx c)))
+                                t)))))))))
+
+    (define (step-instrument s d)
+      (let* ((ids (list-sort < (map tune-instrument-id (tune-instruments (tstate-tune s)))))
+             (cur (tstate-inst s)))
+        (if (null? ids)
+            s
+            (let* ((idx (let find ((l ids) (i 0)) (cond ((null? l) 0) ((= (car l) cur) i) (else (find (cdr l) (+ i 1))))))
+                   (next (clamp (+ idx d) 0 (- (length ids) 1))))
+              (tstate s inst: (list-ref ids next))))))
+
+    ;; ------------------------------------------------------------
+    ;; The dispatcher
+    ;; ------------------------------------------------------------
+
+    (define (tracker-apply s a)
+      (let ((s (tstate s message: #f)))
+        (cond
+          ((pair? a)
+           (case (car a)
+             ((note) (enter-note s (cadr a)))
+             ((hex) (enter-hex s (cadr a)))
+             ((octave) (tstate s octave: (clamp (cadr a) 0 8)))
+             ((mark) (mark-move s (cadr a)))
+             (else s)))
+          (else
+           (case a
+             ((up) (set-row s (- (tstate-row s) 1)))
+             ((down) (set-row s (+ (tstate-row s) 1)))
+             ((left) (move-col s -1))
+             ((right) (move-col s 1))
+             ((home) (set-row s 0))
+             ((end) (set-row s (- (tracker-rows s) 1)))
+             ((page-up) (tstate s row: (max 0 (- (tstate-row s) PAGE-ROWS)) mark: #f))
+             ((page-down) (tstate s row: (min (- (tracker-rows s) 1) (+ (tstate-row s) PAGE-ROWS)) mark: #f))
+             ((next-channel) (move-channel s 1))
+             ((prev-channel) (move-channel s -1))
+             ((note-off) (enter-note-off s))
+             ((clear) (clear-cell s))
+             ((inst-up) (step-instrument s 1))
+             ((inst-down) (step-instrument s -1))
+             ((toggle-edit) (tstate s edit: (not (tstate-edit s))))
+             ((play-row) (tstate s request: 'play-row))
+             ((play-loop) (tstate s request: 'play-loop))
+             ((stop) (tstate s request: 'stop mark: #f))
+             ((order-prev) (tstate s pos: (max 0 (- (tstate-pos s) 1)) row: 0 mark: #f))
+             ((order-next) (tstate s pos: (min (- (length (tune-order (tstate-tune s))) 1) (+ (tstate-pos s) 1)) row: 0 mark: #f))
+             ((order-insert)
+              (let ((order (tune-order (tstate-tune s))))
+                (set-order s (list-insert-at order (+ (tstate-pos s) 1) (tracker-pattern-id s)) (+ (tstate-pos s) 1))))
+             ((order-delete)
+              (let ((order (tune-order (tstate-tune s))))
+                (if (<= (length order) 1)
+                    s
+                    (set-order s (list-remove-at order (tstate-pos s)) (tstate-pos s)))))
+             ((order-pattern-up) (order-pattern s 1))
+             ((order-pattern-down) (order-pattern s -1))
+             ((insert-row) (insert-row s))
+             ((delete-row) (delete-row s))
+             ((copy) (copy-block s))
+             ((cut) (cut-block s))
+             ((paste) (paste-block s))
+             ((zoom) (clamp-view (tstate s zoom: (not (tstate-zoom s)))))
+             ((save) (tstate s request: 'save))
+             ((open) (tstate s request: 'open))
+             ((share) (tstate s request: 'share))
+             ((new) (tstate s request: 'new))
+             (else s))))))
+
+    ))

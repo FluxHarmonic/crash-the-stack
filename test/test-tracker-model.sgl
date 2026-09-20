@@ -1,0 +1,104 @@
+;;; The tracker editor as a pure model: a scripted FT2 key sequence
+;;; produces a pinned pattern (gate leg 4), and every edit goes through
+;;; the tune's own cell operations so the printed file is canonical.
+
+(import (sigil test)
+        (sigil string)
+        (motif tune)
+        (crash tracker model)
+        (crash tracker keys))
+
+(define BLANK
+  (string-append
+    "(tune version: 1 name: \"blank\" tempo: 125 speed: 6 channels: 4\n"
+    "  (instruments (instrument id: 1 name: \"a\" patch: (chip-tri) volume: 48)\n"
+    "               (instrument id: 2 name: \"b\" patch: (chip-saw) volume: 40))\n"
+    "  (patterns (pattern id: 0 rows: 16) (pattern id: 1 rows: 8 (row 0 (1 \"E-4\" 2 0 \"000\"))))\n"
+    "  (order 0 1))\n"))
+
+(define (fresh) (tracker-new (read-tune-string BLANK) "blank"))
+
+;; Drive the editor with keys as the shells hand them: each entry is
+;; (pressed . held), one frame.
+(define (drive s frames)
+  (let loop ((s s) (fs frames))
+    (if (null? fs)
+        s
+        (let* ((f (car fs))
+               (actions (tracker-actions (car f) (cdr f) (tstate-col s) (tstate-edit s) (tstate-octave s))))
+          (loop (fold-left tracker-apply s actions) (cdr fs))))))
+
+(define (key k . mods) (cons (list k) mods))
+
+(test-group "tracker model: the FT2 key sequence (leg 4)"
+  ;; Space (edit on), F4 (octave 4), Z (C-4), X (D-4), Q (C-5), ` (note off),
+  ;; then to the volume column and 4 0, then the effect column A 0 5
+  (let* ((s (drive (fresh)
+                   (list (key 'space) (key 'f4)
+                         (key 'z) (key 'x) (key 'q) (key 'grave)
+                         (key 'up) (key 'up) (key 'up) (key 'up)   ; back to row 0
+                         (key 'right) (key 'right) (key 'right)    ; vol hi
+                         (key '|4|) (key '|0|)                       ; volume 40, cursor moves to row 1 vol hi
+                         (key 'up) (key 'right) (key 'right)      ; row 0, fx command
+                         (key 'a) (key '|0|) (key '|5|))))
+         (t (tstate-tune s))
+         (text (tune->string t)))
+    (test "row 0 is C-4 instrument 1 volume 40 A05"
+      (assert-true (string-find text "(row 0 (1 \"C-4\" 1 40 \"A05\"))")))
+    (test "row 1 is D-4" (assert-true (string-find text "(row 1 (1 \"D-4\" 1 0 \"000\"))")))
+    (test "row 2 is C-5 (the upper piano row)" (assert-true (string-find text "(row 2 (1 \"C-5\" 1 0 \"000\"))")))
+    (test "row 3 is a note off" (assert-true (string-find text "(row 3 (1 \"===\" 0 0 \"000\"))")))
+    (test "the tune is dirty" (assert-true (tstate-dirty s)))
+    (test "the printed tune reads back to the same text"
+      (assert-equal text (tune->string (read-tune-string text))))))
+
+(test-group "tracker model: octave, instrument, channels, order"
+  (let ((s (drive (fresh) (list (key 'space) (key 'f2) (key 'tab) (key 'up 'ctrl) (key 'z)))))
+    (test "F2 is octave 2, Tab the next channel, Ctrl-Up the next instrument: C-2 with instrument 2 on channel 2"
+      (assert-true (string-find (tune->string (tstate-tune s)) "(row 0 (2 \"C-2\" 2 0 \"000\"))"))))
+  (let ((s (drive (fresh) (list (key 'right 'ctrl)))))
+    (test "Ctrl-Right moves to order position 1 (pattern 1, 8 rows)"
+      (assert-true (and (= (tstate-pos s) 1) (= (tracker-pattern-id s) 1) (= (tracker-rows s) 8)))))
+  (let ((s (drive (fresh) (list (key 'right 'ctrl) (key 'right 'alt)))))
+    (test "Alt-Right past the last pattern id creates pattern 2 in the order"
+      (assert-equal '(0 2) (tune-order (tstate-tune s))))
+    (test "the new pattern has the current row count and no cells"
+      (assert-true (and (tune-find-pattern (tstate-tune s) 2)
+                        (= 8 (tune-pattern-rows (tune-find-pattern (tstate-tune s) 2)))))))
+  (let ((s (drive (fresh) (list (key 'insert 'ctrl) (key 'delete 'ctrl)))))
+    (test "Ctrl-Insert then Ctrl-Delete leaves the order as it was"
+      (assert-equal '(0 1) (tune-order (tstate-tune s))))))
+
+(test-group "tracker model: rows, block copy and paste"
+  (let* ((s (drive (fresh) (list (key 'space) (key 'z) (key 'x) (key 'c)
+                                 (key 'home) (key 'insert))))
+         (text (tune->string (tstate-tune s))))
+    (test "Insert at row 0 moves the three notes down one"
+      (assert-true (and (string-find text "(row 1 (1 \"C-4\"") (string-find text "(row 3 (1 \"E-4\"")
+                        (not (tracker-cell s 0 1))))))
+  (let* ((s (drive (fresh) (list (key 'space) (key 'z) (key 'x)
+                                 (key 'home) (key 'down 'shift)   ; mark rows 0..1
+                                 (key 'c 'ctrl)                     ; copy
+                                 (key 'tab) (key 'v 'ctrl))))      ; paste on channel 2 at row 1
+         (text (tune->string (tstate-tune s))))
+    (test "the copied block lands at the cursor on channel 2"
+      (assert-true (and (string-find text "(row 1 (1 \"D-4\" 1 0 \"000\") (2 \"C-4\" 1 0 \"000\"))")
+                        (string-find text "(row 2 (2 \"D-4\" 1 0 \"000\"))"))))
+    (test "the message says PASTED" (assert-equal "PASTED" (tstate-message s)))))
+
+(test-group "tracker model: nothing edits outside edit mode"
+  (let ((s (drive (fresh) (list (key 'z) (key 'grave) (key 'delete) (key 'insert)))))
+    (test "no cells were written" (assert-false (tstate-dirty s)))
+    (test "the cursor did not move" (assert-equal 0 (tstate-row s)))))
+
+(test-group "tracker keys: names from both shells"
+  (test "DOM PageUp is page-up" (assert-equal 'page-up (normalize-key 'PageUp)))
+  (test "DOM F1 is f1" (assert-equal 'f1 (normalize-key 'F1)))
+  (test "a DOM '.' is period" (assert-equal 'period (normalize-key (string->symbol "."))))
+  (test "Enter plays from the row" (assert-equal '(play-row) (tracker-actions '(return) '() 0 #t 4)))
+  (test "Ctrl-Enter loops the pattern" (assert-equal '(play-loop) (tracker-actions '(return) '(ctrl) 0 #t 4)))
+  (test "the piano's Z at octave 4 is MIDI 60" (assert-equal '((note 60)) (tracker-actions '(z) '() 0 #t 4)))
+  (test "the piano's comma is two octaves up" (assert-equal '((note 84)) (tracker-actions '(comma) '() 0 #t 4)))
+  (test "C on the effect column is a hex digit, not a note" (assert-equal '((hex 12)) (tracker-actions '(c) '() 5 #t 4)))
+  (test "Ctrl-3 is octave 3 (the fallback)" (assert-equal '((octave 3)) (tracker-actions (list (string->symbol "3")) '(ctrl) 0 #t 4))))
+

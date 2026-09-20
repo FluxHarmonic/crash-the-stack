@@ -1,0 +1,235 @@
+;;; (crash tracker draw) - The tracker screen at 640x400
+;;;
+;;; Eight channels in the 5x7 font at scale 1: a cell is `C-4 01 40 A0F`
+;;; (13 glyphs at 6 px = 78 px with its trailing gap), row numbers in hex
+;;; as FT2 (12 px), 636 px in all with 2 px margins. The header holds two
+;;; text lines (the tune and the cursor's state; the order list), and 47
+;;; rows fit below with the cursor row fixed at the middle. The zoom (and
+;;; the phone) shows four channels at scale 2, 23 rows. On a touch
+;;; screen a 40 px bar of five buttons closes the screen: previous entry,
+;;; play, stop, loop, next entry; a tap on the grid's upper or lower third
+;;; pages the cursor. Everything is drawn with (sigil graphics) rects
+;;; through (crash font); the colors are the bible's palette.
+
+(define-library (crash tracker draw)
+  (import (sigil graphics)
+          (sigil math)
+          (sigil list)
+          (sigil string)
+          (motif tune)
+          (crash font)
+          (crash palette)
+          (crash tracker model))
+
+  (export draw-tracker tracker-touch-hit
+          HEADER-H ROW-H BAR-H CELL-W ROW-COL-W)
+
+  (begin
+    (define HEADER-H 24)
+    (define ROW-H 8)              ; at scale 1 (7 px glyph + 1)
+    (define BAR-H 40)             ; the phone's button bar
+    (define CELL-W 78)            ; 13 glyphs at scale 1
+    (define ROW-COL-W 12)         ; two hex digits
+    (define MARGIN 2)
+
+    (define (hex2 n)
+      (let ((s (string-upcase (number->string n 16))))
+        (if (< (string-length s) 2) (string-append "0" s) s)))
+
+    (define (dec2 n)
+      (let ((s (number->string n)))
+        (if (< (string-length s) 2) (string-append "0" s) s)))
+
+    (define (dec3 n)
+      (let ((s (number->string n)))
+        (string-append (make-string (max 0 (- 3 (string-length s))) #\0) s)))
+
+    (define (cell-text c)
+      (if (not c)
+          "... .. .. ..."
+          (string-append
+            (cond ((not (cell-note c)) "...")
+                  ((eq? (cell-note c) 'off) "===")
+                  (else (midi->note-name (cell-note c))))
+            " " (if (= (cell-inst c) 0) ".." (dec2 (cell-inst c)))
+            " " (if (= (cell-vol c) 0) ".." (dec2 (cell-vol c)))
+            " " (if (string=? (cell-fx c) "000") "..." (cell-fx c)))))
+
+    ;; Glyph offset of a cursor column inside the cell text.
+    (define (col-glyph col)
+      (case col
+        ((0) 0) ((1) 4) ((2) 5) ((3) 7) ((4) 8) ((5) 10) ((6) 11) ((7) 12)
+        (else 0)))
+
+    (define (col-width col) (if (= col 0) 3 1))
+
+    (define (text! str x y scale color)
+      (color! color)
+      (draw-text str x y scale))
+
+    (define (instrument-name t id)
+      (let ((i (tune-find-instrument t id)))
+        (if i (tune-instrument-name i) "")))
+
+    ;; --- the header ----------------------------------------------------------
+
+    (define (draw-header s vw)
+      (let* ((t (tstate-tune s))
+             (line1 (string-append
+                      (string-upcase (tstate-name s))
+                      " " (dec3 (tune-tempo t)) "BPM"
+                      " SPD" (dec2 (tune-speed t))
+                      " ORD" (dec2 (tstate-pos s)) "/" (dec2 (length (tune-order t)))
+                      " PAT" (dec2 (tracker-pattern-id s))
+                      " OCT" (number->string (tstate-octave s))
+                      " INS" (dec2 (tstate-inst s)) " " (string-upcase (instrument-name t (tstate-inst s)))))
+             (right (cond ((tstate-message s) (tstate-message s))
+                          ((tstate-edit s) "EDIT")
+                          ((tstate-playing s) "PLAY")
+                          (else "")))
+             (order (tune-order t)))
+        (color! C-BAR-A)
+        (draw-filled-rect 0 0 vw HEADER-H)
+        (text! line1 MARGIN 2 1 C-TEXT)
+        (when (> (string-length right) 0)
+          (text! right (- vw MARGIN (text-width right 1)) 2 1
+                 (if (tstate-edit s) C-TRACE-HOT C-HIGHLIGHT)))
+        ;; the order list: the position bracketed, the playing one lit
+        (let loop ((os order) (i 0) (x MARGIN))
+          (when (and (pair? os) (< x (- vw 30)))
+            (let* ((here (= i (tstate-pos s)))
+                   (playing (and (tstate-playing s) (= i (car (tstate-playing s)))))
+                   (str (if here (string-append "[" (dec2 (car os)) "]") (string-append " " (dec2 (car os)) " "))))
+              (text! str x 12 1 (cond (playing C-TRACE-HOT) (here C-HIGHLIGHT) (else C-TEXT-DIM)))
+              (loop (cdr os) (+ i 1) (+ x (text-width str 1) 6)))))))
+
+    ;; --- the grid ------------------------------------------------------------
+
+    ;; The pattern's cells indexed (row . ch) -> cell, built once a frame.
+    (define (cell-index s)
+      (let ((p (tracker-pattern s)))
+        (if p (tune-pattern-cells p) '())))
+
+    (define (find-cell cells row ch)
+      (let loop ((cs cells))
+        (cond ((null? cs) #f)
+              ((and (= (cell-row (car cs)) row) (= (cell-channel (car cs)) ch)) (car cs))
+              ((> (cell-row (car cs)) row) #f)
+              (else (loop (cdr cs))))))
+
+    (define (draw-grid s vw grid-top grid-h)
+      (let* ((zoom (tstate-zoom s))
+             (scale (if zoom 2 1))
+             (row-h (* ROW-H scale))
+             (adv (* 6 scale))
+             (cell-w (* 13 adv))
+             (nvis (quotient grid-h row-h))
+             (mid (quotient nvis 2))
+             (nrows (tracker-rows s))
+             (nch (tracker-channels s))
+             (ch0 (if zoom (tstate-view-ch s) 1))
+             (ch1 (if zoom (min nch (+ ch0 (- ZOOM-CHANNELS 1))) nch))
+             (x0 (+ MARGIN ROW-COL-W 2))
+             (cells (cell-index s))
+             (cur-row (tstate-row s))
+             (play-row (and (tstate-playing s)
+                            (= (car (tstate-playing s)) (tstate-pos s))
+                            (cdr (tstate-playing s))))
+             (block (and (tstate-mark s) (tracker-block s))))
+        (let loop ((i 0))
+          (when (< i nvis)
+            (let* ((row (+ (- cur-row mid) i))
+                   (y (+ grid-top (* i row-h))))
+              (when (and (>= row 0) (< row nrows))
+                ;; row tint: the cursor row, then the playing row, then beats
+                (cond
+                  ((= row cur-row) (color! C-BAR-C) (draw-filled-rect 0 y vw row-h))
+                  ((and play-row (= row play-row)) (color! C-BAR-B) (draw-filled-rect 0 y vw row-h))
+                  ((= 0 (modulo row 4)) (color! C-BAR-A) (draw-filled-rect 0 y vw row-h)))
+                (text! (hex2 row) MARGIN y scale (if (= 0 (modulo row 4)) C-TEXT C-TEXT-DIM))
+                (let cl ((ch ch0) (x x0))
+                  (when (<= ch ch1)
+                    (let* ((c (find-cell cells row ch))
+                           (in-block (and block
+                                          (>= row (car block)) (<= row (caddr block))
+                                          (>= ch (cadr block)) (<= ch (cadddr block)))))
+                      (when in-block
+                        (color! C-SELECTED)
+                        (draw-filled-rect x y (- cell-w adv) row-h))
+                      (when (and (= row cur-row) (= ch (tstate-ch s)))
+                        (let ((gx (+ x (* adv (col-glyph (tstate-col s)))))
+                              (gw (- (* adv (col-width (tstate-col s))) scale)))
+                          (color! (if (tstate-edit s) C-TRACE-HOT C-HIGHLIGHT))
+                          (draw-filled-rect gx y gw row-h)))
+                      (text! (cell-text c) x y scale (if c C-TEXT C-TEXT-DIM))
+                      ;; the cursor glyphs in the background color over the highlight
+                      (when (and (= row cur-row) (= ch (tstate-ch s)))
+                        (let* ((str (cell-text c))
+                               (g (col-glyph (tstate-col s)))
+                               (part (substring str g (+ g (col-width (tstate-col s))))))
+                          (text! part (+ x (* adv g)) y scale C-BG))))
+                    (cl (+ ch 1) (+ x cell-w))))))
+            (loop (+ i 1))))
+        ;; channel gutters
+        (color! C-BAR-B)
+        (let gl ((ch ch0) (x (- x0 2)))
+          (when (<= ch (+ ch1 1))
+            (draw-filled-rect x grid-top 1 grid-h)
+            (gl (+ ch 1) (+ x cell-w))))))
+
+    ;; --- the phone bar -------------------------------------------------------
+
+    (define BUTTONS '(("<" . order-prev) ("PLAY" . play-row) ("STOP" . stop) ("LOOP" . play-loop) (">" . order-next)))
+
+    (define (button-rects vw vh)
+      (let* ((n (length BUTTONS))
+             (w (quotient vw n))
+             (y (- vh BAR-H)))
+        (let loop ((bs BUTTONS) (i 0) (acc '()))
+          (if (null? bs)
+              (reverse acc)
+              (loop (cdr bs) (+ i 1) (cons (list (cdr (car bs)) (car (car bs)) (* i w) y w BAR-H) acc))))))
+
+    (define (draw-bar s vw vh)
+      (color! C-BAR-A)
+      (draw-filled-rect 0 (- vh BAR-H) vw BAR-H)
+      (for-each (lambda (b)
+                  (let* ((label (cadr b)) (x (caddr b)) (y (cadddr b)) (w (list-ref b 4))
+                         (lit (and (tstate-playing s) (memq (car b) '(play-row play-loop)))))
+                    (color! (if lit C-TRACE-HOT C-BAR-C))
+                    (draw-filled-rect (+ x 4) (+ y 6) (- w 8) (- BAR-H 12))
+                    (text! label (+ x (quotient (- w (text-width label 2)) 2)) (+ y 13) 2 C-TEXT)))
+                (button-rects vw vh)))
+
+    ;; A tap: a button's action, or page-up/page-down on the grid's outer
+    ;; thirds, or #f.
+    (define (tracker-touch-hit x y vw vh touch?)
+      (or (and touch?
+               (let loop ((bs (button-rects vw vh)))
+                 (cond ((null? bs) #f)
+                       ((let ((b (car bs)))
+                          (and (>= x (caddr b)) (< x (+ (caddr b) (list-ref b 4)))
+                               (>= y (cadddr b)) (< y (+ (cadddr b) BAR-H))))
+                        (car (car bs)))
+                       (else (loop (cdr bs))))))
+          (let* ((top HEADER-H)
+                 (bottom (if touch? (- vh BAR-H) vh))
+                 (third (quotient (- bottom top) 3)))
+            (cond ((< y top) #f)
+                  ((>= y bottom) #f)
+                  ((< y (+ top third)) 'page-up)
+                  ((>= y (- bottom third)) 'page-down)
+                  (else #f)))))
+
+    ;; --- the screen ----------------------------------------------------------
+
+    (define (draw-tracker s vw vh touch?)
+      (color! C-BG)
+      (draw-filled-rect 0 0 vw vh)
+      (let* ((bar (if touch? BAR-H 0))
+             (grid-h (- vh HEADER-H bar)))
+        (draw-grid s vw HEADER-H grid-h)
+        (draw-header s vw)
+        (when touch? (draw-bar s vw vh))))
+
+    ))
