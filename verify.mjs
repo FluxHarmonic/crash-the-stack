@@ -907,11 +907,12 @@ let iceLock = null;
   // the publisher card's module (D43): its frame count, roles and the
   // resolved frame's samples; the card's length from (crash title)
   const cardPath = path.join(path.dirname(modulePath), "card.sgl");
-  let cardSamples = [], cardRoles = [], cardFrames = 0, cardTicks = 0;
+  let cardSamples = [], cardRoles = [], cardFrames = 0, cardTicks = 0, cardBox = [0, 0, 0, 0];
   try {
     const src = fs.readFileSync(cardPath, "utf8");
     cardFrames = parseInt((src.match(/\(define CARD-FRAMES (\d+)\)/) || [])[1] || "0", 10);
     const rs = src.match(/\(define CARD-ROLES\s+'#\(([^)]*)\)/); cardRoles = rs ? [...rs[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+    const bx = src.match(/\(define CARD-BOX\s+'#\(([^)]*)\)/); cardBox = bx ? bx[1].trim().split(/\s+/).map(Number) : [0, 0, 0, 0];
     const at = src.indexOf("(define CARD-SAMPLES");
     for (const [, x, y, r] of (at >= 0 ? src.slice(at) : "").matchAll(/\((\d+) (\d+) (\d+)\)/g)) cardSamples.push([+x, +y, +r]);
     const title = fs.readFileSync(path.join(path.dirname(modulePath), "../title.sgl"), "utf8");
@@ -956,9 +957,11 @@ let iceLock = null;
       const scale = Math.min(c.width / ${VW}, c.height / ${VH});
       const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
       const samples = ${JSON.stringify(cardSamples)}, wants = ${JSON.stringify(cardRoles.map((r) => hexes[r] || null))};
+      // the band under the mark's box holds the PRESENTS line the game draws over the frame: not sampled
+      const presentsTop = ${cardBox[1] + cardBox[3]}, presentsBottom = presentsTop + 20;
       let n = 0, wrong = 0, sample = null; const byRole = {};
       for (const [x, y, r] of samples) {
-        const want = wants[r]; if (!want) continue;
+        const want = wants[r]; if (!want || (y >= presentsTop && y < presentsBottom)) continue;
         // the 320x200 sample is a 2x2 block on the 640x400 virtual grid; its center
         const px = Math.floor(ox + (2 * x + 1) * scale), py = Math.floor(oy + (2 * y + 1) * scale);
         const i = (py * c.width + px) * 4; n++; byRole[r] = (byRole[r] || 0) + 1;

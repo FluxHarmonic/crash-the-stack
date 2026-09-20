@@ -28,7 +28,7 @@
           (crash look)
           (crash hud))
 
-  (export title-draw draw-title draw-menu-item draw-menu-items title-covers?
+  (export title-draw draw-title draw-menu-item draw-menu-items title-covers? title-bake! title-diag!
           TITLE-CELL TITLE-X TITLE-Y TITLE-H
           BACKDROP-W BACKDROP-H)
 
@@ -53,6 +53,42 @@
             (vector->list LOGO-ROLES))))
 
     (define (role-color i) (vector-ref ROLE-COLORS i))
+
+    ;; --- doors for David's phone (2026-09-20) --------------------------------
+    ;; ?bake=off draws the settled logo and the items cell by cell (the path
+    ;; before the bake); ?diag draws an overlay on the menu: each texture
+    ;; and render target with its size, how many times each bake ran, and
+    ;; how many frames drew the backdrop (his phone at 45ac055 shows the
+    ;; card but no backdrop; the arm's SwiftShader shows both).
+    (define *bake* #t)
+    (define *diag* #f)
+    (define (title-bake! on?) (set! *bake* on?))
+    (define (title-diag! on?) (set! *diag* on?))
+    (define *logo-bakes* 0)
+    (define *items-bakes* 0)
+    (define *backdrop-draws* 0)
+    (define *frames* 0)
+    (define *last-backdrop* #f)
+    (define *last-card* #f)
+    (define (diag-line! text x y)
+      (color! C-BG)
+      (draw-filled-rect (- x 2) (- y 1) (+ (text-width text 1) 4) (+ GLYPH-H 2))
+      (color! C-TEXT)
+      (draw-text text x y 1))
+    (define (tex-desc name tex)
+      (string-append name " "
+                     (cond ((not tex) "NONE")
+                           (else (string-append (number->string (texture-width tex)) "X" (number->string (texture-height tex)))))))
+    (define (draw-diag backdrop card vw vh)
+      (let ((y 126) (x 8))
+        (diag-line! (string-append "DIAG FRAME " (number->string *frames*) " BAKE " (if *bake* "ON" "OFF")) x y)
+        (diag-line! (tex-desc "TEX BACKDROP" backdrop) x (+ y 10))
+        (diag-line! (tex-desc "TEX CARD" card) x (+ y 20))
+        (diag-line! (string-append "RT LOGO " (if *logo-rt* (string-append (number->string (render-target-width *logo-rt*)) "X" (number->string (render-target-height *logo-rt*))) "NONE")
+                                   " BAKES " (number->string *logo-bakes*)) x (+ y 30))
+        (diag-line! (string-append "RT ITEMS " (if *items-rt* (string-append (number->string (render-target-width *items-rt*)) "X" (number->string (render-target-height *items-rt*))) "NONE")
+                                   " BAKES " (number->string *items-bakes*)) x (+ y 40))
+        (diag-line! (string-append "BACKDROP DRAWN " (number->string *backdrop-draws*) " FRAMES") x (+ y 50))))
 
     ;; Draw the title with the grid's top-left at (x0, y0), cells of cell px.
     ;; A settled title is one frame forever, so it is baked once into a
@@ -79,10 +115,11 @@
               (title-draw-cells t 0 0 (* BAKE-SCALE cell)))
             (set-blend-mode 'normal)
             (set! *logo-rt* rt)
+            (set! *logo-bakes* (+ 1 *logo-bakes*))
             (set! *logo-key* key)))
         *logo-rt*))
     (define (title-draw t x0 y0 cell)
-      (if (and (title-settled? t) (null? (title-live-glitches t)))
+      (if (and *bake* (title-settled? t) (null? (title-live-glitches t)))
           (let ((rt (logo-bake! t cell)))
             (color! C-TEX-PLAIN)
             (draw-render-target rt x0 y0 (+ (* LOGO-W cell) BAKE-MARGIN) (* LOGO-H cell)))
@@ -244,6 +281,7 @@
                 (loop (cdr ls) (+ i 1)))))
           (set-blend-mode 'normal)
           (set! *items-rt* rt)
+          (set! *items-bakes* (+ 1 *items-bakes*))
           (set! *items-tex* (render-target->texture rt))
           (set! *items-h* h)
           (set! *items-key* labels))))
@@ -265,7 +303,7 @@
              (th (* ITEM-CELL ALPHABET-H))
              (tx (+ x (quotient (- w tw) 2)))
              (ty (+ y (quotient (- h th ITEM-CELL) 2))))
-        (if (and index *items-tex*)
+        (if (and *bake* index *items-tex*)
             (draw-item-row index (if lit? 'ramp 'flat) tx ty tw)
             (draw-block-text label tx ty ITEM-CELL (if lit? 'ramp 'flat)))
         (when (and lit? (cursor-on? frames))
@@ -279,10 +317,13 @@
     ;; it has settled with steps still running, CONNECTING with the boot's
     ;; progress and the blinking cursor where the first item will be.
     (define (draw-menu-items m vw vh)
+      (draw-menu-items* m vw vh)
+      (when *diag* (draw-diag *last-backdrop* *last-card* vw vh)))
+    (define (draw-menu-items* m vw vh)
       (cond ((menu-live? m)
              (draw-title-line vw vh)
              (let ((labels (map (lambda (id) (entry-label m id)) (menu-entries m))))
-               (items-bake! labels)
+               (when *bake* (items-bake! labels))
                (let loop ((ls labels) (i 0))
                  (unless (null? ls)
                    (draw-menu-item (car ls)
@@ -304,6 +345,7 @@
     ;; 5x7 at scale 1, C-LABEL-LIT, one cell above the footer's line; with
     ;; the items, once the menu is live. No licence text on the title.
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
+    (define PRESENTS-LINE "PRESENTS")   ; under the publisher card's mark, with the resolve
 
     (define (draw-title-line vw vh)
       (let ((x (quotient (- vw (text-width TITLE-LINE 1)) 2))
@@ -351,7 +393,16 @@
                  (when (and card (> f 0))
                    (color! C-TEX-PLAIN)
                    (draw-texture-region card 0 0 vw vh
-                                        (* (- f 1) CARD-FRAME-W) 0 CARD-FRAME-W CARD-FRAME-H))))
+                                        (* (- f 1) CARD-FRAME-W) 0 CARD-FRAME-W CARD-FRAME-H))
+                 ;; PRESENTS under the mark, with the resolve (David, 2026-09-20):
+                 ;; the 5x7 at scale 2 in the items' flat color, centered under
+                 ;; the mark's box (CARD-BOX is at 1x; the frame is 2x)
+                 (when (= f CARD-FRAMES)
+                   (let* ((scale 2)
+                          (tw (text-width PRESENTS-LINE scale))
+                          (box-bottom (* 2 (+ (vector-ref CARD-BOX 1) (vector-ref CARD-BOX 3)))))
+                     (color! C-LABEL-LIT)
+                     (draw-text PRESENTS-LINE (quotient (- vw tw) 2) (+ box-bottom 12) scale)))))
               ((and t (title-gated? t))
                (color! C-BG)
                (draw-filled-rect 0 0 vw vh)
@@ -366,8 +417,12 @@
                  (color! C-TEXT)
                  (draw-text line (+ x (* GLYPH-W scale) (* 3 scale)) y scale)))
               (else
+               (set! *frames* (+ 1 *frames*))
+               (set! *last-backdrop* backdrop)
+               (set! *last-card* card)
                (when backdrop
                  (color! C-TEX-PLAIN)
+                 (set! *backdrop-draws* (+ 1 *backdrop-draws*))
                  (draw-texture-region backdrop 0 0 vw vh 0 0 BACKDROP-W BACKDROP-H))
                (when t
                  (title-draw t TITLE-X TITLE-Y TITLE-CELL))))))

@@ -122,8 +122,9 @@ Ruled and built: the hero ramp colors and the slant, the backdrop
   mark's raw (`assets/refs/card/flux-harmonic.png`, David's own, 2021):
   area-downscaled to 240 px on a 320x200 canvas, the lettering to 1 bit
   against C-BG / C-FACE-EDGE with Bayer 4x4 on the edge grays only, the
-  ring's two oranges snapped to C-ICE / C-HOT, a Bayer radial of C-BAR-B
-  to C-BAR-A behind; the fade is a Bayer 8x8 threshold sweep baked as a
+  ring's two oranges snapped to C-ICE / C-HOT, a Bayer radial of C-BAR-C
+  to C-BAR-B behind (two tones up: A/B was invisible on the phone); PRESENTS
+  under the mark with the resolve; the fade is a Bayer 8x8 threshold sweep baked as a
   four-frame strip (`assets/title/card-fade.png`, five colors), so every
   frame is palette-honest. `src/crash/title/card.sgl` carries 460 sampled
   pixels of the resolved frame; the arm reads them off the canvas.
