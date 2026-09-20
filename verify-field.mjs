@@ -46,6 +46,8 @@
 //                   scale rounding shows as differing rows, the HUD band with its
 //                   time-moving readouts left out, and the count of
 //                   lit rows floors it against a blank frame)
+//   default         a stack boot without ?bg= says "crash: bg gpu reaction" (David, 2026-09-20:
+//                   reaction is the default rule; life stays a door)
 //   gl-log          no sokol refusal reached the console (a "sokol[level=0|1]"
 //                   line: a failed pass or resource prints at log level with
 //                   no message on the web build)
@@ -93,7 +95,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["field-life", "field-reaction", "copper", "phosphor", "atlas", "gl-log", "console"];
+const planned = ["field-life", "field-reaction", "copper", "phosphor", "atlas", "default", "gl-log", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -554,6 +556,19 @@ for (const rule of ["life", "reaction"]) {
   else pass("atlas", verdicts.join("; "));
 }
 
+// ---- default: the rule a page gets without ?bg= ---------------------------------------------
+// David (2026-09-20, after the merge): "We should have made the other bg
+// mode 'reaction' the default." A stack boot with no bg= door must say
+// the reaction rule on the GPU; a boot that says life (the old default)
+// or the CPU field is red. ?bg=life stays a door, read above.
+{
+  mark = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh` });
+  const said = await waitLine(/^crash: bg (gpu|cpu) (\w+)$/, mark, 20000);
+  if (!said) fail("default", `no "crash: bg gpu|cpu" boot line within 20 s on a page without ?bg=`);
+  else if (said.m[1] !== "gpu" || said.m[2] !== "reaction") fail("default", `a page without ?bg= booted the ${said.m[2]} rule on the ${said.m[1]} (want reaction on the gpu)`);
+  else pass("default", `a page without ?bg= boots the reaction rule on the GPU ("crash: bg gpu reaction")`);
+}
 // ---- gl-log, console -------------------------------------------------------------------------
 {
   const sokol = consoleLines.filter((l) => /^sokol\[level=[01]\]/.test(l));
