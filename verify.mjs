@@ -949,13 +949,14 @@ let iceLock = null;
   // away as soon as the strip is up (the "done" tick is short of the
   // full length); "none" leaves it alone (a tap in the skip leg lands
   // during the card first)
-  const readCard = async (m0, mode) => {
+  const readCard = async (m0, mode, from) => {
     if (mode === "none") return {};
     // D45: the DIALING meter holds the card until the boot is done (this leg holds the
     // backdrop off, so its texture step ends by giving up: a few seconds)
     const first = await waitLine(/^crash: title card tick (\d+) frame (\d+) ms (\d+)$/, m0, 20000);
     if (!first) return { error: "no \"crash: title card tick\" line within 20 s of the connect (the card's strip never came, the boot never finished, or the card did not start)" };
-    if (!consoleLines.slice(m0, first.index).some((l) => /^crash: boot done /.test(l))) return { error: "the card started before the boot was done (D45: the meter must hold it)" };
+    // counted from the page's boot, not the tap: a quiet box finishes the boot during the gate wait
+    if (!consoleLines.slice(from, first.index).some((l) => /^crash: boot done /.test(l))) return { error: "the card started before the boot was done (D45: the meter must hold it)" };
     if (mode === "skip") {
       const t0 = consoleLines.length;
       await tap(320, 200);
@@ -1005,7 +1006,7 @@ let iceLock = null;
     if (!connect) return { error: "a tap on the gate did not connect" };
     let peak = 0;
     if (listen) { for (let i = 0; i < 20; i++) { peak = Math.max(peak, await evalJS(rms)); await sleep(50); } }
-    const card = await readCard(m0, cardMode || "skip");
+    const card = await readCard(m0, cardMode || "skip", from);
     if (card.error) return card;
     return { gate: gate.m[1], before, peak, ...card };
   };
