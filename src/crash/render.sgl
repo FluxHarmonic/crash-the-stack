@@ -246,20 +246,28 @@
     ;; would be a pass inside a pass); a draw with nothing baked falls back
     ;; to the rectangles. The atlas leg holds the two paths identical.
     ;;
-    ;; The depth cues (ruling D48, (crash depth)) add cells: the bodies are
-    ;; baked once per shade step (one per layer, B) and per edge (on, off),
-    ;; the side piece once per drawn depth (offset .. offset + 3, A), and
-    ;; one dithered shadow patch (C). Every cell is baked whatever depth is
-    ;; in force (the bake is once per geometry); the draw picks.
+    ;; The depth cues (ruling D48, (crash depth)) add cells, on a SECOND
+    ;; sheet: the bodies once per shade step (one per layer, B) and per
+    ;; edge (on, off), the side pieces one per deeper drawn depth (offset
+    ;; + 1 .. offset + 3, A), and one dithered shadow patch (C). The first
+    ;; sheet stays exactly the sheet before D48 (the six plain bodies and
+    ;; the offset-deep side piece, (7w + side) x (h + side)), so the plain
+    ;; look's draw reads the same texels through the same coordinates: a
+    ;; taller sheet moved the nearest-sampled rows at the phone's
+    ;; fractional scale and the atlas leg's row hashes went red
+    ;; (2026-09-20, 40 of 488 rows). Both sheets are baked once per
+    ;; geometry; the draw picks.
     (define *tiles-rt* #f)
     (define *tiles-tex* #f)
     (define *tiles-key* #f)
     (define *tiles-h* 0)
-    (define *tiles-layers* 1)            ; shade steps baked
-    (define *sides-x* 0)                 ; the first side piece's x on the sheet
-    (define *shadow-x* 0)                ; the shadow patch's x
+    (define *depth-rt* #f)
+    (define *depth-tex* #f)
+    (define *depth-h* 0)
+    (define *tiles-layers* 1)            ; shade steps baked on the depth sheet
+    (define *sides-x* 0)                 ; the first deeper side piece's x on the depth sheet
+    (define *shadow-x* 0)                ; the shadow patch's x on the depth sheet
     (define TILE-VARIANTS 6)             ; (plain strong weak) x (closed open)
-    (define SIDE-DEPTHS (+ 1 MAX-SIDE-GROWTH))   ; side pieces: offset .. offset + MAX-SIDE-GROWTH
 
     ;; The depth in force: the shells set it from the store or a door.
     (define *depth* (depth-ref DEFAULT-DEPTH))
@@ -272,7 +280,7 @@
       (+ (cond ((eq? lock 'strong) 1) ((eq? lock 'weak) 2) (else 0))
          (if right-open? 3 0)))
 
-    ;; The body cell's index: variant within (shade, edge).
+    ;; The body cell's index on the depth sheet: variant within (shade, edge).
     (define (body-cell shade edge? lock right-open?)
       (+ (* (+ (* shade 2) (if edge? 0 1)) TILE-VARIANTS)
          (tile-variant lock right-open?)))
@@ -285,10 +293,30 @@
              (key (list w h side layers)))
         (unless (equal? key *tiles-key*)
           (when *tiles-rt* (render-target-free! *tiles-rt*))
+          (when *depth-rt* (render-target-free! *depth-rt*))
+          ;; the plain sheet, as it was before D48
+          (let ((rt (make-render-target (+ (* TILE-VARIANTS w) w side) (+ h side) 'nearest)))
+            (with-render-target rt
+              (set-blend-mode 'none)
+              (let variants ((v 0))
+                (when (< v TILE-VARIANTS)
+                  (draw-face-rects (* v w) 0 w h #f
+                                   (case (modulo v 3) ((1) 'strong) ((2) 'weak) (else #f))
+                                   (>= v 3)
+                                   0.0
+                                   0
+                                   #t)
+                  (variants (+ v 1))))
+              (draw-sides-rects (+ (* TILE-VARIANTS w) side) 0 w h side))
+            (set-blend-mode 'normal)
+            (set! *tiles-rt* rt)
+            (set! *tiles-tex* (render-target->texture rt))
+            (set! *tiles-h* (+ h side)))
+          ;; the depth sheet
           (let* ((bodies (* layers 2 TILE-VARIANTS))
                  (sides-x (* bodies w))
-                 (sides-w (let loop ((d 0) (acc 0))
-                            (if (= d SIDE-DEPTHS) acc (loop (+ d 1) (+ acc w side d)))))
+                 (sides-w (let loop ((d 1) (acc 0))
+                            (if (> d MAX-SIDE-GROWTH) acc (loop (+ d 1) (+ acc w side d)))))
                  (shadow-x (+ sides-x sides-w))
                  (cell-h (+ h (max (+ side MAX-SIDE-GROWTH) MAX-SHADOW)))
                  (rt (make-render-target (+ shadow-x w MAX-SHADOW) cell-h 'nearest)))
@@ -308,35 +336,42 @@
                           (variants (+ v 1))))
                       (edges (+ e 1))))
                   (shades (+ shade 1))))
-              ;; the side pieces, one per drawn depth
-              (let pieces ((d 0) (x sides-x))
-                (when (< d SIDE-DEPTHS)
+              ;; the deeper side pieces, one per drawn depth past the offset
+              (let pieces ((d 1) (x sides-x))
+                (when (<= d MAX-SIDE-GROWTH)
                   (draw-sides-rects (+ x side d) 0 w h (+ side d))
                   (pieces (+ d 1) (+ x w side d))))
               ;; the shadow patch: Bayer 4x4 at half, C-BAR-A, nothing between
               (draw-shadow-patch shadow-x 0 (+ w MAX-SHADOW) (+ h MAX-SHADOW)))
             (set-blend-mode 'normal)
-            (set! *tiles-rt* rt)
-            (set! *tiles-tex* (render-target->texture rt))
-            (set! *tiles-h* cell-h)
+            (set! *depth-rt* rt)
+            (set! *depth-tex* (render-target->texture rt))
+            (set! *depth-h* cell-h)
             (set! *tiles-layers* layers)
             (set! *sides-x* sides-x)
-            (set! *shadow-x* shadow-x)
-            (set! *tiles-key* key)))))
+            (set! *shadow-x* shadow-x))
+          (set! *tiles-key* key))))
 
-    ;; The x of the side piece for a drawn depth on the sheet (the pieces
-    ;; widen by one px each: offset, offset + 1, ...).
+    ;; The x of the side piece for a drawn depth past the offset on the
+    ;; depth sheet (the pieces widen by one px each: offset + 1, + 2, ...).
     (define (side-piece-x w side depth)
-      (let loop ((d 0) (x *sides-x*))
+      (let loop ((d 1) (x *sides-x*))
         (if (= d (- depth side)) x (loop (+ d 1) (+ x w side d)))))
 
     ;; A baked cell (cx, 0, cw, ch) at (x, y), white-tinted, upright (the
-    ;; target is bottom-up: (crash atlas) has the flip).
+    ;; target is bottom-up: (crash atlas) has the flip), from the plain
+    ;; sheet or the depth sheet.
     (define (draw-tile-cell x y cx cw ch)
       (set-color 1.0 1.0 1.0 1.0)
       (draw-texture-region *tiles-tex*
                            x y cw ch
                            cx *tiles-h* cw (- ch)))
+
+    (define (draw-depth-cell x y cx cw ch)
+      (set-color 1.0 1.0 1.0 1.0)
+      (draw-texture-region *depth-tex*
+                           x y cw ch
+                           cx *depth-h* cw (- ch)))
 
     ;; The side strips of a face at (x, y, w, h), depth px deep.
     (define (draw-sides-rects x y w h depth)
@@ -351,10 +386,14 @@
       (if (depth-grow *depth*) (depth-side *depth* *layer*) (geometry-side g)))
 
     (define (draw-sides-primitives g x y w h)
-      (let ((depth (side-depth g)))
-        (if (and (atlas-on?) *tiles-tex*)
-            (draw-tile-cell (- x depth) y (side-piece-x w (geometry-side g) depth) (+ w depth) (+ h depth))
-            (draw-sides-rects x y w h depth))))
+      (let ((depth (side-depth g))
+            (side (geometry-side g)))
+        (cond ((not (and (atlas-on?) *tiles-tex*))
+               (draw-sides-rects x y w h depth))
+              ((= depth side)
+               (draw-tile-cell (- x side) y (* TILE-VARIANTS w) (+ w side) (+ h side)))
+              (else
+               (draw-depth-cell (- x depth) y (side-piece-x w side depth) (+ w depth) (+ h depth))))))
 
     ;; C's shadow: the patch's top-left (w x h) region drawn at the tile's
     ;; rect moved down and left by the layer's fall, under the tile's own
@@ -363,8 +402,8 @@
     (define (draw-shadow g x y w h)
       (let ((fall (depth-shadow-fall *depth* *layer*)))
         (when (> fall 0)
-          (if (and (atlas-on?) *tiles-tex*)
-              (draw-tile-cell (- x fall) (+ y fall) *shadow-x* w h)
+          (if (and (atlas-on?) *depth-tex*)
+              (draw-depth-cell (- x fall) (+ y fall) *shadow-x* w h)
               (draw-shadow-patch (- x fall) (+ y fall) w h)))))
 
     ;; Bayer 4x4 at half: the cells whose threshold is below 8 of 16, as
@@ -406,9 +445,14 @@
     ;; the light top-left edge is drawn (B: only on a tile with nothing on
     ;; top; else always).
     (define (draw-face-body g face x y w h selected? lock right-open? glow shade edge?)
-      (if (and (atlas-on?) *tiles-tex* (not selected?) (< shade *tiles-layers*))
-          (draw-tile-cell x y (* (body-cell shade edge? lock right-open?) w) w h)
-          (draw-face-rects x y w h selected? lock right-open? glow shade edge?)))
+      (cond ((or (not (atlas-on?)) (not *tiles-tex*) selected?)
+             (draw-face-rects x y w h selected? lock right-open? glow shade edge?))
+            ((and (= shade 0) edge?)
+             (draw-tile-cell x y (* (tile-variant lock right-open?) w) w h))
+            ((< shade *tiles-layers*)
+             (draw-depth-cell x y (* (body-cell shade edge? lock right-open?) w) w h))
+            (else
+             (draw-face-rects x y w h selected? lock right-open? glow shade edge?))))
 
     ;; B's face per shade step: the base layer the ruled charcoal, each
     ;; step SHADE-STEP of the way to the side gray (a mix, not a palette
