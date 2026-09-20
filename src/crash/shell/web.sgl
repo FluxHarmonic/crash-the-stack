@@ -608,9 +608,11 @@
       (cond ((gles3-image-ready? *tex-fetch*)
              (let ((img (load-image-from-memory (gles3-image-ptr *tex-fetch*)
                                                 (gles3-image-size *tex-fetch*))))
+               (unless img (say "texture" "decode-failed" *tex-path* (gles3-image-size *tex-fetch*) "bytes"))
                (if img
                    (let ((tex (load-texture img)))
                      (image-free! img)
+                     (say "texture" "loaded" *tex-path* (texture-width tex) (texture-height tex))
                      (texture-loaded! *tex-path* tex))
                    (texture-loaded! *tex-path* #f))))
             (else
@@ -627,9 +629,31 @@
     ;; The loader's WASI shim logs every fd_write as its own console entry,
     ;; so the line is built first (str) and written once; println's newline
     ;; is a second, empty entry, which nothing reads.
+    ;; ?diag: the last DIAG-LINES trace lines that say what landed (the
+    ;; textures, the boot steps, the card, the ambient, the audio, the
+    ;; atlas, the worker), drawn on every frame (render.sgl's
+    ;; draw-diag-lines); a phone has no console to read them from.
+    (define DIAG-LINES 16)          ; a 116 px band: the title's own diag lines start at y 126
+    (define DIAG-KEEP '("crash: texture" "crash: boot" "crash: title card ready" "crash: title card skipped" "crash: title card done"
+                        "crash: title gate" "crash: title settled" "crash: ambient" "crash: audio" "crash: atlas" "crash: sw"
+                        "crash: menu chose" "crash: page" "crash: bg " "crash: literal" "crash: update"))
+    (define *diag* #f)
+    (define *diag-lines* '())   ; newest first
+    (define (diag-keep! line)
+      (when (and *diag* (any (lambda (p) (prefix? p line)) DIAG-KEEP))
+        (set! *diag-lines* (cons line *diag-lines*))
+        (when (> (length *diag-lines*) DIAG-LINES)
+          (set! *diag-lines* (first-n *diag-lines* DIAG-LINES)))))
+    (define (prefix? p s)
+      (and (<= (string-length p) (string-length s))
+           (string=? p (substring s 0 (string-length p)))))
+    (define (first-n l n) (if (or (= n 0) (null? l)) (quote ()) (cons (car l) (first-n (cdr l) (- n 1)))))
+    (define (draw-diag!) (when *diag* (draw-diag-lines (reverse *diag-lines*))))
+
     (define (say . parts)
-      (when *trace*
-        (println "~a" (apply str "crash:" (map (lambda (p) (str " " p)) parts)))))
+      (let ((line (apply str "crash:" (map (lambda (p) (str " " p)) parts))))
+        (diag-keep! line)
+        (when *trace* (println "~a" line))))
 
     ;; The meter's line, whenever a hint, a shuffle or the lock moved it.
     (define (report-trace! before after)
@@ -1154,6 +1178,7 @@
       ;; landed, skipped when it was given up (a black card is no card)
       (let ((t (menu-title *menu*)))
         (when (and t (title-in-card? t) (not (title-card-ready t)) (assoc CARD-PATH *textures*))
+          (say "title" "card" (if (texture-for-path CARD-PATH) "ready" "skipped"))
           (set! *menu* (menu-with-title *menu* (if (texture-for-path CARD-PATH)
                                                    (title-card-ready! t)
                                                    (title-skip-card t))))))
@@ -1173,6 +1198,7 @@
               (frame-begin!)
               (when (reveal-over?) (atlas-ensure!))   ; P3c's atlas, baked inside this frame once the reveal is over (the boot's atlas step waits on it)
               (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH) (texture-for-path CARD-PATH))   ; the title's backdrop and card strip (P3d)
+              (draw-diag!)
               (when s1 (menu-part! 1 t1 (caddr s1) (car s1)))
               (let ((s2 (and *ms* (gc-snapshot)))
                     (t2 (now-ms)))
@@ -1409,6 +1435,7 @@
               (else
                (phosphor-reset!)
                (draw)))
+        (draw-diag!)
         (when *ms*
           (let ((gpu (gpu-bg-ms)))
             (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text*)))
@@ -1515,10 +1542,10 @@
             ((string=? type "slant") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (< -1e9 n 1e9)) (title-slant! (* 1.0 n)))))))
             ;; ?bake=off: the settled title cell by cell; ?diag: the overlay (David's phone, 2026-09-20)
             ((string=? type "bake") (param! (lambda () (title-bake! (not (string=? payload "off"))))))
-            ((string=? type "diag") (param! (lambda () (title-diag! #t))))
             ;; ?card=MS: the card's hold; ?dial=MS: the DIALING screen's minimum (both in ms, ticks at 60 a second)
             ((string=? type "card") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (<= 0 n 60000)) (title-card-hold! (exact (round (/ (* n 60) 1000)))))))))
             ((string=? type "dial") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (<= 0 n 60000)) (title-dial-min! (exact (round (/ (* n 60) 1000)))))))))
+            ((string=? type "diag") (param! (lambda () (title-diag! #t) (set! *diag* #t))))   ; the title's overlay and the shell's landing lines, one door
             ;; the page's clock at boot: the title reveal's seed when none is asked for
             ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n))))))
             ((string=? type "audio-chunk") (audio-chunk! payload))
