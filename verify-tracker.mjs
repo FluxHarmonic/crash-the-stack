@@ -55,7 +55,7 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   let fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
-  if (urlPath.endsWith("/")) fp = path.join(fp, "index.html");
+  if (urlPath !== "/" && urlPath.endsWith("/")) fp = path.join(fp, "index.html");
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   fs.readFile(fp, (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
@@ -111,7 +111,7 @@ ws.addEventListener("message", (ev) => {
     consoleLines.push(text);
     if (msg.params.type === "error") consoleErrors.push("console.error: " + text);
   }
-  if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") consoleErrors.push("log: " + msg.params.entry.text);
+  if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") consoleErrors.push("log: " + msg.params.entry.text + (msg.params.entry.url ? " " + msg.params.entry.url : ""));
   if (msg.method === "Runtime.exceptionThrown") consoleErrors.push("exception: " + (msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text));
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
@@ -174,6 +174,7 @@ async function press(key, mods = 0) {
   await sleep(120);
 }
 const CTRL = 2;
+let stopRow = -1;   // the row the play leg stopped on; the edit leg writes there
 
 // the canvas over a virtual rect, one sample per virtual pixel: { px: [r,g,b,...] }
 const VW = 640, VH = 400;
@@ -230,6 +231,7 @@ await sleep(800);
     await press("Escape");
     const stopped = await waitLine(/^crash: tracker stop (\d+) (\d+)$/, from2, 5000);
     const row = stopped ? parseInt(stopped.m[2], 10) : -1;
+    stopRow = row;
     if (rms >= 0.01 && stopped && row > 0) pass("play", `play ${started.m[1]} ${started.m[2]}; rms ${rms.toFixed(3)}; stop at row ${row}`);
     else fail("play", `rms ${rms.toFixed(4)} (want >= 0.01), stop line ${stopped ? stopped.m[0] : "missing"} (want row > 0)`);
   }
@@ -260,9 +262,9 @@ let firstURL = null;
       var bin = atob(s), bytes = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       var buf = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer();
       return new TextDecoder().decode(buf); })()`);
-    const hasCell = /\(1 "C-4" 1 0 "000"\)/.test(text);
-    if (hasCell && /^\(tune version: 1 name: "spy"/.test(text)) pass("edit", `the shared text carries (1 "C-4" 1 0 "000"); ${text.length} bytes of tune text`);
-    else fail("edit", `the shared text ${text.length ? "lacks the C-4 cell" : "did not decode"}`);
+    const hasCell = new RegExp("\\(row " + stopRow + " \\(1 \"C-4\" 1 \\d+ \"[0-9A-F]{3}\"\\)").test(text);   // at the row the cursor stopped on; it may already carry a volume or an effect
+    if (hasCell && /^\(tune version: 1 name: "spy"/.test(text)) pass("edit", `the shared text carries (row ${stopRow} (1 "C-4" 1 ...); ${text.length} bytes of tune text`);
+    else fail("edit", `the shared text ${text.length ? "lacks the C-4 cell at row " + stopRow : "did not decode"} (${text.length} bytes)`);
     if (s.url && s.chars <= TUNE_URL_MAX && s.chars === s.url.length) { pass("share", `${s.name}: url ${s.chars} chars (budget ${TUNE_URL_MAX})`); firstURL = s.url; }
     else fail("share", `url ${s.url ? s.url.length : "missing"} chars, page said ${s.chars}`);
   }
@@ -270,9 +272,9 @@ let firstURL = null;
 
 // ---- fragment -----------------------------------------------------------------
 if (firstURL) {
-  const target = firstURL.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${PORT}`) + "&"; // a distinct navigation
+  const target = firstURL.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${PORT}`).replace("?tracker#", "?tracker&trace#");
   const from = consoleLines.length;
-  await send("Page.navigate", { url: target.replace(/&$/, "") + "&trace" });
+  await send("Page.navigate", { url: target });
   const loaded = await waitLine(/^crash: tune loaded shared$/, from, 40000);
   if (!loaded) fail("fragment", "no 'crash: tune loaded shared' after navigating to the share URL");
   else {
@@ -287,7 +289,7 @@ if (firstURL) {
 if (firstURL) {
   const frag = /#t=[A-Za-z0-9_-]+/.exec(firstURL)[0];
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/${frag}` });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace${frag}` });
   const loaded = await waitLine(/^crash: tune loaded shared$/, from, 40000);
   const where = await evalJS("location.pathname + location.search + location.hash");
   if (loaded && /\?tracker/.test(where) && where.endsWith(frag)) pass("door", `/tracker/ landed on ${where.slice(0, 40)}... with the fragment kept`);
