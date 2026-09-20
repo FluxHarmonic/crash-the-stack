@@ -89,6 +89,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import zlib from "node:zlib";
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -113,7 +114,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "menu-return", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "look", "assets", "hud", "traced", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -139,11 +140,25 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 let swVersionOverride = null;
 // slowPaths: path -> ms; the boot sub-arm delays one asset to hold the boot
 const slowPaths = {};
+// a path answered with this buffer instead of the file (the title leg stands a
+// flat backdrop in for the real one: the boot needs the texture to land, D45,
+// and the dot read needs a ground that is never a logo color)
+const substitutePaths = {};
+// a solid-color PNG of w x h (RGB, one filter-0 scanline per row, zlib, CRC32)
+function solidPng(w, h, rgb) {
+  const crcTable = []; for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crcTable.push(c >>> 0); }
+  const crc = (buf) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type, data) => { const len = Buffer.alloc(4); len.writeUInt32BE(data.length); const td = Buffer.concat([Buffer.from(type, "ascii"), data]); const c = Buffer.alloc(4); c.writeUInt32BE(crc(td)); return Buffer.concat([len, td, c]); };
+  const ihdr = Buffer.alloc(13); ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const row = Buffer.alloc(1 + w * 3); for (let x = 0; x < w; x++) { row[1 + x * 3] = rgb[0]; row[2 + x * 3] = rgb[1]; row[3 + x * 3] = rgb[2]; }
+  const raw = Buffer.concat(Array.from({ length: h }, () => row));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", ihdr), chunk("IDAT", zlib.deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+}
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
-  fs.readFile(fp, (err, buf) => {
+  const serve = (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
     if (urlPath === "/sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
     const delay = slowPaths[urlPath] || 0;
@@ -151,7 +166,8 @@ const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(buf);
     }, delay);
-  });
+  };
+  if (substitutePaths[urlPath]) serve(null, substitutePaths[urlPath]); else fs.readFile(fp, serve);
 });
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
@@ -234,7 +250,7 @@ process.on("SIGTERM", () => shutdown(143));
 process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 480000;   // P3d added three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
+const WHOLE_RUN_MS = 600000;   // P3d added a throttled boot (slow-link: the 20 MB wasm at 8 Mbps is ~25 s), three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -845,7 +861,7 @@ let iceLock = null;
       mark = consoleLines.length;
       await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
-      const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 10000) : null;
+      const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 20000) : null;   // the worker registers once the board's boot is done (the ambient in ~18 frames)
       const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;
       if (!boot2) detail = "no boot line on the next launch";
       else if (!prompt) detail = "the game was not told \"prompt\" on the next launch with a version waiting";
@@ -935,8 +951,11 @@ let iceLock = null;
   // during the card first)
   const readCard = async (m0, mode) => {
     if (mode === "none") return {};
-    const first = await waitLine(/^crash: title card tick (\d+) frame (\d+) ms (\d+)$/, m0, 6000);
-    if (!first) return { error: "no \"crash: title card tick\" line within 6 s of the connect (the card's strip never came, or the card did not start)" };
+    // D45: the DIALING meter holds the card until the boot is done (this leg holds the
+    // backdrop off, so its texture step ends by giving up: a few seconds)
+    const first = await waitLine(/^crash: title card tick (\d+) frame (\d+) ms (\d+)$/, m0, 20000);
+    if (!first) return { error: "no \"crash: title card tick\" line within 20 s of the connect (the card's strip never came, the boot never finished, or the card did not start)" };
+    if (!consoleLines.slice(m0, first.index).some((l) => /^crash: boot done /.test(l))) return { error: "the card started before the boot was done (D45: the meter must hold it)" };
     if (mode === "skip") {
       const t0 = consoleLines.length;
       await tap(320, 200);
@@ -1005,10 +1024,10 @@ let iceLock = null;
     const rows = consoleLines.slice(settled.index).filter((l) => /^crash: title row /.test(l)).map((l) => l.slice("crash: title row ".length));
     return { head: head.m, settled: settled.m, ticks, rows, gate: opened.gate, before: opened.before, peak: opened.peak, card: opened.card, cardDone: opened.cardDone, cardSkippedAt: opened.cardSkippedAt, from };
   };
-  // the backdrop held off for this leg (the texture step gives it up after its
-  // tries): the dots with no bg then show the bars, never a backdrop pixel
-  // that happens to be the fg color
-  slowPaths["/assets/title/backdrop.png"] = 120000;
+  // a flat C-BG backdrop stands in for the real one on this leg: the boot needs
+  // the texture to land (D45: the card waits for it; a boot fetch is never given
+  // up), and the dots with no bg must show a ground that is never a logo color
+  substitutePaths["/assets/title/backdrop.png"] = solidPng(640, 400, hexes["C-BG"] || [0, 0, 0]);
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   let a = null;
   if (!detail) {
@@ -1068,7 +1087,7 @@ let iceLock = null;
         for (let dy = 0; dy < 4; dy++) for (let dx = 0; dx < 4; dx++) {
           // an ink dot must be the fg; a dot with no bg must NOT be the fg (a draw
           // that painted every code as a full block passed the ink-only read: the
-          // review); the backdrop is held off this boot so the ground is the bars
+          // review); the backdrop is a flat C-BG on this boot, so the ground is never a logo color
           const isInk = ink(gl, dx, dy); const role = isInk ? fg : bg;
           // (a shadow cell's fg is a bar tone, and the bars are what shows through: no negative read there)
           const negative = role === "-"; if (negative && (fg === "-" || fg === shadowRole)) continue;
@@ -1195,69 +1214,146 @@ let iceLock = null;
       else if (chose) detail = `the skipping tap also chose: ${chose.m[0]}`;
     }
   }
-  delete slowPaths["/assets/title/backdrop.png"];
+  delete substitutePaths["/assets/title/backdrop.png"];
   if (detail) fail("title", detail);
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[4]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33`);
 }
 
-// ---- 9c. preload: nothing pops in after the menu is live (ruling D40) ---------
-// The server delays the ambient by BOOT_SLOW ms, longer than the reveal at
-// 9600 baud, so the boot's audio step outlasts the reveal: after "crash:
-// title settled" the boot must not be done, a tap on the first entry must
-// choose nothing and boot no board, then "crash: boot done" must arrive
-// with the audio step last, and the same tap must then choose STACK and
-// boot a board. The origin's service worker and caches are cleared first (the
-// worker serves cache first and the audio sub-arm already fetched the ambient),
-// so the ambient's fetch reaches the arm's server and its delay.
+// ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --
+// The server delays the ambient by BOOT_SLOW ms, so the boot's audio step
+// outlasts the tap: after the gate's tap the DIALING meter must hold until
+// "crash: boot done" (the ambient landed, the audio step last), a tap during
+// the meter must choose nothing and skip nothing, the card must start only
+// after the boot is done ("crash: title dialed" after "crash: boot done",
+// no card tick before it), and once the reveal settles the menu is live at
+// once: a tap on STACK chooses it and boots a board. The origin's service
+// worker and caches are cleared first (the worker serves cache first and the
+// audio sub-arm already fetched the ambient), so the ambient's fetch reaches
+// the arm's server and its delay.
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
   slowPaths["/assets/audio/ambient.pcm"] = BOOT_SLOW;
-  // the worker serves cache first: drop this origin's workers and caches so
-  // the ambient goes to the (slow) server and the boot has to wait
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
-  // the gate first (D42): the reveal, and so the boot's cover, starts on the tap
-  const gateP = await waitLine(/^crash: title gate /, from, 20000);
-  if (gateP) { await tap(320, 200); await waitLine(/^crash: title connect$/, gateP.index, 3000); }
   const menuLine = await waitLine(/^crash: menu .*\bstack (-?[\d.]+) (-?[\d.]+)/, from, 20000);
-  const settled = await waitLine(/^crash: title settled /, from, 60000);   // the card (120 ticks) and the reveal, frame-bound: a loaded box at 100 ms a frame needs 20 s
+  const gateP = await waitLine(/^crash: title gate /, from, 20000);
+  let connect = null;
+  if (gateP) { await tap(320, 200); connect = await waitLine(/^crash: title connect$/, gateP.index, 3000); }
   if (!menuLine) detail = "no menu line on the boot";
-  else if (!settled) detail = "the reveal did not settle";
-  else if (consoleLines.slice(from, settled.index + 1).some((l) => /^crash: boot done/.test(l))) detail = `the boot was done before the reveal settled: the ${BOOT_SLOW} ms ambient delay did not hold it (a slow asset that does not hold the boot is the bug this leg exists for)`;
+  else if (!gateP) detail = "no gate line on the boot";
+  else if (!connect) detail = "the gate's tap did not connect";
+  // a tap during the meter: nothing chosen, nothing skipped
   let tapAt = -1;
   if (!detail) {
     await sleep(300);
-    tapAt = consoleLines.length;
-    await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
-    await sleep(800);
-    const after = consoleLines.slice(tapAt);
-    if (after.some((l) => /^crash: menu chose /.test(l))) detail = "a tap during the boot chose an entry";
-    else if (after.some((l) => BOOT_ANY.test(l))) detail = "a board booted during the boot (tiles drew before the last step)";
-    else if (after.some((l) => /^crash: boot done/.test(l))) detail = "the boot finished within 1.1 s of the settle, before the slow ambient could have landed";
+    if (consoleLines.slice(connect.index).some((l) => /^crash: title dialed /.test(l))) detail = `the meter ended within 300 ms of the tap: the ${BOOT_SLOW} ms ambient delay did not hold the boot (a slow asset that does not hold the card is the bug this leg exists for)`;
+    else {
+      tapAt = consoleLines.length;
+      await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
+      await sleep(500);
+      const after = consoleLines.slice(tapAt);
+      if (after.some((l) => /^crash: menu chose /.test(l))) detail = "a tap during the meter chose an entry";
+      else if (after.some((l) => /^crash: title (dialed|card tick|seed) /.test(l))) detail = "a tap during the meter skipped it (the card or the reveal began)";
+    }
   }
-  let done = null;
+  let done = null, dialed = null;
   if (!detail) {
-    done = await waitLine(/^crash: boot done (\d+)$/, tapAt, BOOT_SLOW + 20000);   // the steps after the backdrop wait for settle now (D42/the yielding boot), and a lost ambient fetch retries at 1.5 s + the delay
+    done = await waitLine(/^crash: boot done (\d+)$/, from, BOOT_SLOW + 20000);
+    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+)$/, from, 5000);
     if (!done) detail = `no "crash: boot done" within ${BOOT_SLOW + 20000} ms`;
+    else if (!dialed) detail = "the boot is done but the meter never ended (no \"crash: title dialed\" line within 5 s)";
+    else if (dialed.index < done.index) detail = "the meter ended before the boot was done";
+    else if (consoleLines.slice(from, done.index).some((l) => /^crash: title card tick /.test(l))) detail = "the card started before the boot was done";
+    else if (dialed.m[1] !== dialed.m[2]) detail = `the meter ended at ${dialed.m[1]} of ${dialed.m[2]} steps`;
     else {
       const steps = consoleLines.slice(from, done.index).filter((l) => /^crash: boot step /.test(l));
       if (steps.length !== parseInt(done.m[1], 10)) detail = `boot done says ${done.m[1]} steps, ${steps.length} step lines seen`;
       else if (!/^crash: boot step audio done$/.test(steps[steps.length - 1])) detail = `the last step was not audio: ${steps[steps.length - 1]}`;
     }
   }
+  // the card, then the reveal; the menu live at settle: a tap chooses STACK
+  let settled = null;
   if (!detail) {
-    const m0 = consoleLines.length;
-    await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
-    const chose = await waitLine(/^crash: menu chose stack$/, m0, 3000);
-    const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
-    if (!chose) detail = "after the boot, a tap on STACK chose nothing";
-    else if (!booted) detail = "after the boot, STACK chosen but no board booted";
+    const cardDone = await waitLine(/^crash: title card done /, dialed.index, 30000);
+    settled = cardDone && await waitLine(/^crash: title settled /, cardDone.index, 60000);
+    if (!cardDone) detail = "the card never ended after the meter";
+    else if (!settled) detail = "the reveal did not settle after the card";
+    else {
+      await sleep(300);
+      const m0 = consoleLines.length;
+      await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
+      const chose = await waitLine(/^crash: menu chose stack$/, m0, 3000);
+      const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
+      if (!chose) detail = "after the settle, a tap on STACK chose nothing (the menu was not live at once)";
+      else if (!booted) detail = "after the settle, STACK chosen but no board booted";
+    }
   }
   delete slowPaths["/assets/audio/ambient.pcm"];
   if (detail) fail("preload", detail);
-  else pass("preload", `ambient held ${BOOT_SLOW} ms: reveal settled with the boot pending, a tap chose nothing and booted nothing, boot done after ${done.m[1]} steps (audio last), then the tap chose STACK and a board booted`);
+  else pass("preload", `ambient held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
+}
+
+// ---- 9c'. slow-link: a boot on a throttled link loads every texture ----------
+// David's phone over WireGuard (2026-09-20): every texture fetch in the
+// boot's first ~4 s failed while the service worker precached the wasm,
+// and the loader's two tries a second apart gave the card and the backdrop
+// up for good. Now the worker registers only once the menu is live (the
+// page's crashLive), a boot fetch is retried with backoff and never given
+// up, and the DIALING meter (D45) covers the wait. This leg boots a fresh
+// origin (workers and caches cleared) on an emulated link of SLOW_KBPS
+// with SLOW_RTT ms round trips (Network.emulateNetworkConditions, switched
+// on at the game's first line so the wasm itself is not throttled) and
+// holds: every boot texture step done with no "texture missing" line, the
+// meter ended after the boot's done line, the card and the reveal ran, and
+// "crash: sw registered" came after the settle.
+{
+  const SLOW_KBPS = 2000, SLOW_RTT = 200, TITLE_SEED = 7, TITLE_BAUD = 9600;
+  let summary = "";
+  await send("Network.enable");
+  let detail = "";
+  await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
+  const first = await waitLine(/^crash: page /, from, 60000);
+  if (!first) detail = "the game never printed its first line";
+  else await send("Network.emulateNetworkConditions", { offline: false, latency: SLOW_RTT, downloadThroughput: SLOW_KBPS * 1000 / 8, uploadThroughput: SLOW_KBPS * 1000 / 8 });
+  const gateS = !detail && await waitLine(/^crash: title gate /, from, 20000);
+  let connect = null;
+  if (!detail && !gateS) detail = "no gate line";
+  if (gateS) { await tap(320, 200); connect = await waitLine(/^crash: title connect$/, gateS.index, 3000); if (!connect) detail = "the gate's tap did not connect"; }
+  let done = null, dialed = null, settled = null, sw = null;
+  if (!detail) {
+    done = await waitLine(/^crash: boot done (\d+)$/, from, 120000);
+    dialed = done && await waitLine(/^crash: title dialed (\d+) (\d+)$/, from, 10000);
+    if (!done) detail = "no \"crash: boot done\" within 120 s on the slow link";
+    else if (!dialed) detail = "the boot is done but the meter never ended";
+    else if (dialed.index < done.index) detail = "the meter ended before the boot was done";
+    else {
+      const lines = consoleLines.slice(from, done.index);
+      const missing = lines.filter((l) => /^crash: texture missing /.test(l));
+      const steps = lines.filter((l) => /^crash: boot step assets\//.test(l)).map((l) => l.replace(/^crash: boot step (\S+) done$/, "$1"));
+      const tries = lines.filter((l) => /^crash: texture fetch /.test(l)).length;
+      const mustHave = ["assets/title/card-fade.png", "assets/title/backdrop.png", "assets/packets/portraits.png"];
+      const lost = mustHave.filter((p) => !steps.includes(p));
+      if (missing.length) detail = `a texture was given up on the slow link: ${missing[0]}`;
+      else if (lost.length) detail = `boot texture steps not done before boot done: ${lost.join(", ")}`;
+      else if (lines.some((l) => /^crash: sw registered$/.test(l))) detail = "the worker registered before the boot was done (its precache shares the link with the boot's fetches)";
+      else if (lines.some((l) => /^crash: title card tick /.test(l))) detail = "the card started before the boot was done";
+      else summary = `${SLOW_KBPS} kbps / ${SLOW_RTT} ms: ${steps.length} texture steps done in ${tries} fetches, none given up, boot done then the meter ended at ${dialed.m[1]}/${dialed.m[2]}`;
+    }
+  }
+  if (!detail) {
+    settled = await waitLine(/^crash: title settled /, dialed.index, 60000);
+    sw = settled && await waitLine(/^crash: sw registered$/, from, 30000);
+    if (!settled) detail = "the reveal did not settle after the meter";
+    else if (!sw) detail = "the worker never registered within 30 s of the settle";
+    else if (sw.index < settled.index) detail = "the worker registered before the settle";
+  }
+  await send("Network.emulateNetworkConditions", { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+  if (detail) fail("slow-link", detail);
+  else pass("slow-link", `${summary}, the reveal settled, the worker registered after`);
 }
 
 // ---- 9d. menu-return: board -> menu -> board stays drawn and under a bound --

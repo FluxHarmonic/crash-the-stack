@@ -292,7 +292,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     // the gate first (D42): one key opens it, the next skips the reveal
     if (await waitLine(/^crash: title gate /, 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title connect$/, 0, 3000); }
     // then the publisher card (D43): a key skips it once its strip is up
-    if (await waitLine(/^crash: title card tick /, 0, 6000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, 0, 3000); }
+    if (await waitLine(/^crash: title card tick /, 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, 0, 3000); }   // D45: the card waits for the boot
     await menuKey("ArrowUp");
     // and the boot's steps must be done before the menu is live (D40)
     if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
@@ -320,7 +320,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       await sleep(800);
       // the reveal again (a fresh process): a key skips it before the taps
       if (await waitLine(/^crash: title gate /, menu2 ? menu2.index : 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title connect$/, menu2 ? menu2.index : 0, 3000); }
-      if (await waitLine(/^crash: title card tick /, menu2 ? menu2.index : 0, 6000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, menu2 ? menu2.index : 0, 3000); }
+      if (await waitLine(/^crash: title card tick /, menu2 ? menu2.index : 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, menu2 ? menu2.index : 0, 3000); }
       await menuKey("ArrowUp");
       if (!(await waitLine(/^crash: boot done /, menu2 ? menu2.index : 0, 20000))) lookDetail0 = "no boot done line on the second boot";
       if (!(await waitLine(/^crash: title settled /, menu2 ? menu2.index : 0, 5000))) lookDetail0 = "a key during the second reveal did not settle it";

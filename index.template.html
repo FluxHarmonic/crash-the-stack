@@ -61,6 +61,14 @@
     var POINTER_FORWARDING = true;
     var revealOver = null;
     window.crashRevealOver = new Promise(function (resolve) { revealOver = resolve; });
+    // and the menu live (the reveal settled, the boot's steps done, or a table
+    // up): the worker registers then, so its precache never shares the boot
+    // window with the boot's own fetches (David's phone, 2026-09-20: every
+    // texture fetch in the first ~4 s failed while the worker precached the
+    // wasm over WireGuard); resolved by the game's word or at 90 s (a slow link)
+    var liveDone = null;
+    window.crashLive = new Promise(function (resolve) { liveDone = resolve; });
+    setTimeout(function () { liveDone(); }, 90000);
     setTimeout(function () { revealOver(); }, 20000);
 
     // The canvas backing resolution (P3c, the phone's budget): the art is
@@ -103,6 +111,10 @@
       var done = false, fire = function () { if (!done) { done = true; resolve(); } };
       setTimeout(fire, 2500);
       if (!("serviceWorker" in navigator)) { fire(); return; }
+      // no worker controls this page (a fresh origin, or the worker not yet
+      // registered: it registers after the menu is live): nothing activates
+      // over the boot, so the boot's fetches start at once
+      if (!navigator.serviceWorker.controller) { fire(); return; }
       // 750 ms after activation, not at it: a fetch made right at ready still
       // failed under load (2026-09-19, the arm), the P3 finding again; the
       // page retries a lost ambient fetch and the game a lost texture fetch
@@ -228,6 +240,10 @@
         setTimeout(poll, 200);
       })();
       swReady.then(function () { app.dispatch("sw", "ready"); });
+      (function pollLive() {
+        if (app.dispatch("title", "live?") === 1) { liveDone(); return; }
+        setTimeout(pollLive, 500);
+      })();
       Promise.all([swReady, window.crashRevealOver]).then(function () { fetchAmbient(app); });
     });
 
@@ -255,7 +271,9 @@
           if (!r.ok) throw new Error("ambient " + r.status);
           return r.arrayBuffer();
         }).then(function (buf) {
-          var bytes = new Uint8Array(buf), CHUNK = 16 * 1024, i = 0, n = 0;
+          // 64 KB a frame: 1.1 MB in ~18 frames (16 KB was 69 frames, 7 s on a
+          // loaded box at 10 fps, the update prompt then past its window)
+          var bytes = new Uint8Array(buf), CHUNK = 64 * 1024, i = 0, n = 0;
           (function next() {
             if (i >= bytes.length) { app.dispatch("audio-done", String(n)); ambientSettled(); return; }
             var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
@@ -370,7 +388,9 @@
       });
       return;
     }
-    var launchUntil = Date.now() + 8000;
+    // the launch window opens when the worker registers (after the menu is live,
+    // or the board is up): a version found waiting inside it is the launch prompt
+    var launchUntil = 0;
     var gameReady = false;
     var applied = false;
     var polling = null;
@@ -442,13 +462,15 @@
         c.postMessage({ type: "VERSION" }, [ch.port2]);
       });
     };
-    // registered once the reveal is over (its install precaches the whole
-    // version, which the reveal's frames on a phone cannot spare); the
-    // promise is the first script's, resolved by the game's word or at 20 s
-    (window.crashRevealOver || Promise.resolve()).then(function () {
+    // registered once the menu is live (its install precaches the whole
+    // version, which the boot's own fetches on a phone cannot share the link
+    // with); the promise is the first script's, resolved by the game's word
+    // or at 90 s
+    (window.crashLive || Promise.resolve()).then(function () {
     return navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }); }).then(function (reg) {
       if (status.state === "none") status.state = "registered";
-      console.log("crash: sw registered");   // the arms read it (the registration waits for the reveal, D42)
+      launchUntil = Date.now() + 8000;
+      console.log("crash: sw registered");   // the arms read it (the registration waits for the menu to be live)
       track(reg);
     }).catch(function (err) {
       status.state = "failed";
