@@ -524,6 +524,16 @@ for (const rule of ["life", "reaction"]) {
     if (!boot) return null;
     const said = await waitLine(/^crash: atlas (on|off)$/, mark, 5000);
     if (!said || said.m[1] !== (query ? "off" : "on")) return null;
+    // the card table draws the daemons' portraits from a texture the boot
+    // fetches after the title's two (2026-09-20, P3d's boot order): the
+    // two loads must be read in the same texture state, so the read waits
+    // for the portraits to land (or be given up) rather than a fixed 1.2 s
+    // after the boot line, which fell between the two loads' fetches
+    // (1.3 s and 1.8 s since boot) and read 125 rows apart
+    if (table === "cards") {
+      const tex = await waitLine(/^crash: texture (loaded|missing) assets\/packets\/portraits\.png/, mark, 15000);
+      if (!tex) return null;
+    }
     await sleep(1200);
     return rowHashes();
   }
