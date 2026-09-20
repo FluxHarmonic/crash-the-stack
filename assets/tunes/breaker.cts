@@ -1,5 +1,5 @@
 (tune version: 1 name: "breaker" tempo: 140 speed: 4 channels: 8
-  (bus reverb: zitarev size: 0.5 damp: 0.4 mix: 0.3)
+  (bus reverb: zitarev size: 0.5 damp: 0.4 mix: 0.3 comp: on threshold: -12 ratio: 4 attack: 5 release: 80 makeup: 2)
   (instruments
     (instrument id: 1 name: "kick" patch: (chip-kick decay: 0.26 drive: 1.2 sweep: 3) volume: 52)
     (instrument id: 2 name: "snare" patch: (chip-snare noise-decay: 0.14) volume: 46 send: 0.12)

@@ -221,15 +221,91 @@
                   ((>= y (- bottom third)) 'page-down)
                   (else #f)))))
 
+    ;; --- the meters and mute marks, on the grid's top edge -------------------
+
+    ;; A 2 px bar under the header per visible channel: the channel's peak
+    ;; since the last frame on a dB scale (-40 dB at the left edge, 0 dBFS
+    ;; across the cell width); a muted channel's strip is solid red, a
+    ;; soloed channel's strip is lit under its peak.
+    (define METER-FLOOR-DB -40.0)
+    (define (meter-level peak)
+      (if (<= peak 0.0001)
+          0.0
+          (max 0.0 (min 1.0 (- 1.0 (/ (* 20.0 (/ (log peak) (log 10.0))) METER-FLOOR-DB))))))
+
+    (define (draw-meters s vw peaks)
+      (let* ((zoom (tstate-zoom s))
+             (scale (if zoom 2 1))
+             (cell-w (* 13 6 scale))
+             (ch0 (if zoom (tstate-view-ch s) 1))
+             (ch1 (if zoom (min (tracker-channels s) (+ ch0 (- ZOOM-CHANNELS 1))) (tracker-channels s)))
+             (x0 (+ MARGIN ROW-COL-W 2))
+             (y (- HEADER-H 3)))
+        (let loop ((ch ch0) (x x0))
+          (when (<= ch ch1)
+            (let* ((peak (let ((p (and (>= (length peaks) ch) (list-ref peaks (- ch 1))))) (if (number? p) (min 1.0 p) 0.0)))
+                   (muted (tracker-muted? s ch))
+                   (soloed (and (tstate-solo s) (= (tstate-solo s) ch)))
+                   (w (- cell-w 6)))
+              (color! (cond (muted C-TRACE-HOT) (soloed C-HIGHLIGHT) (else C-BAR-B)))
+              (draw-filled-rect x y w 2)
+              (color! C-TEXT)
+              (unless muted (draw-filled-rect x y (exact (round (* w (meter-level peak)))) 2)))
+            (loop (+ ch 1) (+ x cell-w))))))
+
+    ;; --- the instrument panel -------------------------------------------------
+
+    ;; A box on the right: the current instrument's kind and every parameter,
+    ;; the selected line inverted, a value being typed shown with a caret.
+    (define (draw-panel s vw vh)
+      (let* ((lines (tracker-panel-lines s))
+             (sel (car (tstate-panel s)))
+             (entry (cdr (tstate-panel s)))
+             (w 200)
+             (x (- vw w 2))
+             (h (+ 20 (* 9 (+ 1 (length lines)))))
+             (y HEADER-H))
+        (color! C-BAR-A)
+        (draw-filled-rect x y w (min h (- vh y)))
+        (color! C-HIGHLIGHT)
+        (draw-filled-rect x y w 1)
+        (text! (if (eq? (tstate-panel-page s) (quote bus))
+                   "BUS  REVERB / COMP"
+                   (string-append "INS " (dec2 (tstate-inst s)) " "
+                              (string-upcase (instrument-name (tstate-tune s) (tstate-inst s)))))
+               (+ x 4) (+ y 3) 1 C-HIGHLIGHT)
+        (let loop ((ls lines) (i 0) (ly (+ y 13)))
+          (when (and (pair? ls) (< ly (- vh 8)))
+            (let* ((line (car ls))
+                   (key (symbol->string (car line)))
+                   (val (if (and (= i sel) entry)
+                            (string-append entry "_")
+                            (value-text (cdr line))))
+                   (sel? (= i sel)))
+              (when sel?
+                (color! C-BAR-C)
+                (draw-filled-rect (+ x 2) (- ly 1) (- w 4) 9))
+              (text! (string-upcase key) (+ x 4) ly 1 (if sel? C-TEXT C-TEXT-DIM))
+              (text! val (- (+ x w) 4 (text-width val 1)) ly 1 (if sel? C-HIGHLIGHT C-TEXT)))
+            (loop (cdr ls) (+ i 1) (+ ly 9))))))
+
+    (define (value-text v)
+      (cond ((symbol? v) (string-upcase (symbol->string v)))
+            ((number? v) (number->string v))
+            ((list? v) (string-append "(" (number->string (length v)) " VALUES)"))
+            (else "?")))
+
     ;; --- the screen ----------------------------------------------------------
 
-    (define (draw-tracker s vw vh touch?)
+    (define (draw-tracker s vw vh touch? peaks)
       (color! C-BG)
       (draw-filled-rect 0 0 vw vh)
       (let* ((bar (if touch? BAR-H 0))
              (grid-h (- vh HEADER-H bar)))
         (draw-grid s vw HEADER-H grid-h)
         (draw-header s vw)
+        (draw-meters s vw peaks)
+        (when (tstate-panel s) (draw-panel s vw vh))
         (when touch? (draw-bar s vw vh))))
 
     ))

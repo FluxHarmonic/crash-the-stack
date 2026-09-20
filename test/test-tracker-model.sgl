@@ -25,7 +25,8 @@
     (if (null? fs)
         s
         (let* ((f (car fs))
-               (actions (tracker-actions (car f) (cdr f) (tstate-col s) (tstate-edit s) (tstate-octave s))))
+               (actions (tracker-actions (car f) (cdr f) (tstate-col s) (tstate-edit s) (tstate-octave s)
+                                         (and (tstate-panel s) #t))))
           (loop (fold-left tracker-apply s actions) (cdr fs))))))
 
 (define (key k . mods) (cons (list k) mods))
@@ -121,3 +122,34 @@
     (test "a new edit after an undo clears the redo stack"
       (assert-equal '() (tstate-future (drive s1 (list (key 'c))))))
     (test "moving the cursor pushes nothing" (assert-equal 2 (length (tstate-past (drive s (list (key 'down)))))))))
+
+(test-group "tracker model: the panel's bus page edits the compressor and reverb in range"
+  (let* ((s (drive (fresh) (list (key 'b 'ctrl))))
+         (lines (tracker-panel-lines s))
+         (keys (map car lines))
+         ;; row 4 is comp (reverb size damp mix comp ...): Right toggles it off
+         (s-off (drive s (list (key 'down) (key 'down) (key 'down) (key 'down) (key 'right))))
+         (comp-of (lambda (st) (cdr (assq 'comp (tune-comp (tstate-tune st))))))
+         ;; row 5 threshold: type -30 Enter
+         (s-thr (drive s-off (list (key 'down) (key '|3| ) (key '|0|) (key 'return))))
+         (s-thr2 (drive s-off (list (key 'down) (key 'minus) (key '|3|) (key '|0|) (key 'return))))
+         ;; row 6 ratio: Shift-Right (+10) twice would pass 20: refused
+         (s-ratio (drive s-thr2 (list (key 'down) (key 'right 'shift) (key 'right 'shift)))))
+    (test "Ctrl-B opens the bus page with every bus key"
+      (assert-equal '(reverb size damp mix comp threshold ratio attack release makeup) keys))
+    (test "a tune without a bus section starts the page at mix 0 and comp on"
+      (assert-true (and (= 0.0 (cdr (assq 'mix lines))) (eq? 'on (cdr (assq 'comp lines))))))
+    (test "Right on the comp line turns it off in the tune value" (assert-equal 'off (comp-of s-off)))
+    (test "a typed threshold of 30 is out of range and refused"
+      (assert-true (and (equal? (tstate-message s-thr) "OUT OF RANGE")
+                        (= -12 (cdr (assq 'threshold (tune-comp (tstate-tune s-thr))))))))
+    (test "a typed threshold of -30 lands" (assert-equal -30 (cdr (assq 'threshold (tune-comp (tstate-tune s-thr2))))))
+    (test "the ratio stops at 20 (the second big step is refused)"
+      (assert-equal 14 (cdr (assq 'ratio (tune-comp (tstate-tune s-ratio))))))
+    (test "the edited tune prints with its bus line"
+      (assert-true (string-find (tune->string (tstate-tune s-thr2)) "comp: off threshold: -30")))
+    (test "Ctrl-I switches the page to the instrument, Ctrl-I again closes"
+      (let* ((si (drive s-off (list (key 'i 'ctrl))))
+             (sc (drive si (list (key 'i 'ctrl)))))
+        (assert-true (and (tstate-panel si) (eq? 'inst (tstate-panel-page si)) (not (tstate-panel sc))))))
+    (test "a bus edit is undoable" (assert-equal 'on (comp-of (drive s-off (list (key 'escape) (key 'z 'ctrl))))))))

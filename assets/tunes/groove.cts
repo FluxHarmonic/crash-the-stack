@@ -1,7 +1,7 @@
 (tune version: 1 name: "groove" tempo: 110 speed: 6 channels: 8
-  (bus reverb: zitarev size: 0.45 damp: 0.5 mix: 0.25)
+  (bus reverb: zitarev size: 0.45 damp: 0.5 mix: 0.25 comp: on threshold: -12 ratio: 4 attack: 5 release: 80 makeup: 2)
   (instruments
-    (instrument id: 1 name: "grit" patch: (fm4-grit-bass attack-index: 5 index: 1.6) volume: 48)
+    (instrument id: 1 name: "grit" patch: (fm4-grit-bass attack-index: 5 index: 1.6) volume: 48 layers: ((chip-sub octave: -1 volume: 0.5)))
     (instrument id: 2 name: "kick" patch: (chip-kick decay: 0.3 sweep: 2.5) volume: 48)
     (instrument id: 3 name: "snare" patch: (chip-snare noise-decay: 0.12) volume: 44 send: 0.15)
     (instrument id: 4 name: "hat" patch: (chip-hat) volume: 30)
@@ -469,4 +469,4 @@
   (order 0 1 1 2 1 3 2 4 5 1 2 3 1 2 4 5 1 2 6)
   (chart (channel 1 lane: 1) (channel 7 lane: 5) (channel 8 lane: 8))
   (history
-    ("claude" "2026-09-20" "groove: DEFRAG's rest track. 110 BPM speed 6, D dorian; a pocketed funk line on fm4-grit-bass with ghost notes, octave pops and a 3xx slide in the turnaround; kick/snare/hat with ghost snares and an open hat on the push; muted pulse chords on the off-beats over two channels; karplus-strong comping on the 16ths after the beat; the sax as a quiet two-bar hook in pattern 2 only. Variants: pattern 3 moves to G minor, pattern 4 drops the drums, pattern 5 steps the chord instrument from a 600 Hz saw to 5 kHz across its four bars (a stepped filter sweep: there is no per-tick filter effect). The order plays the intro once; pattern 6 (the groove again) ends with B01, which loops past the intro: 19 entries, 166 s per pass")))
+    ("claude" "2026-09-20" "groove: DEFRAG's rest track. 110 BPM speed 6, D dorian; a pocketed funk line on fm4-grit-bass with ghost notes, octave pops and a 3xx slide in the turnaround; kick/snare/hat with ghost snares and an open hat on the push; muted pulse chords on the off-beats over two channels; karplus-strong comping on the 16ths after the beat; the sax as a quiet two-bar hook in pattern 2 only. Variants: pattern 3 moves to G minor, pattern 4 drops the drums, pattern 5 steps the chord instrument from a 600 Hz saw to 5 kHz across its four bars (a stepped filter sweep: there is no per-tick filter effect). v2: a chip-sub layer an octave under the bass at half volume fattens the low end (David). The order plays the intro once; pattern 6 (the groove again) ends with B01, which loops past the intro: 19 entries, 166 s per pass")))

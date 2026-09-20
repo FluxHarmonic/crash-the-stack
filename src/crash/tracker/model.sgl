@@ -20,6 +20,9 @@
 ;;;   insert-row delete-row
 ;;;   (mark DIR) copy cut paste
 ;;;   zoom save open share new undo redo
+;;;   (mute CH) mute-cursor solo unmute-all
+;;;   panel panel-up panel-down panel-inc panel-dec panel-inc-big panel-dec-big
+;;;   (panel-type CHAR) panel-commit panel-backspace panel-close panel-bus
 ;;; A movement in edit mode after a note entry advances one row (FT2's
 ;;; edit skip of 1).
 
@@ -27,7 +30,8 @@
   (import (sigil struct)
           (sigil math)
           (sigil list)
-          (motif tune))
+          (motif tune)
+          (motif synth))
 
   (export tstate tstate? tstate-tune tstate-pos tstate-row tstate-ch tstate-col
           tstate-octave tstate-inst tstate-edit tstate-zoom tstate-view-ch
@@ -37,7 +41,8 @@
           tracker-new tracker-apply tracker-take-request tracker-with-playing
           tracker-with-tune tracker-with-message tracker-with-name
           tracker-pattern tracker-pattern-id tracker-rows tracker-channels
-          tracker-cell tracker-block
+          tracker-cell tracker-block tracker-muted? tstate-mutes tstate-solo tstate-panel
+          tracker-panel-lines tstate-panel-page
           COLUMNS ZOOM-CHANNELS PAGE-ROWS)
 
   (begin
@@ -66,7 +71,17 @@
       ;; undo/redo: the tune is an immutable value, so these are two
       ;; stacks of tune values (David, 2026-09-20), unbounded in the session
       (past default: '())
-      (future default: '()))
+      (future default: '())
+      ;; per-channel mute flags (vector, index 1..n) and the solo channel or #f
+      (mutes default: #f)
+      (solo default: #f)
+      ;; the instrument panel: #f, or (row . entry) with row the selected
+      ;; line (0 = the kind, 1.. the parameters) and entry #f or the text
+      ;; being typed for the selected value
+      (panel default: #f)
+      ;; which page the panel shows: inst (the cursor's instrument) or bus
+      ;; (the tune's reverb and compressor settings)
+      (panel-page default: 'inst))
 
     ;; ------------------------------------------------------------
     ;; Lookups
@@ -96,7 +111,8 @@
         (if (pair? is) (tune-instrument-id (car is)) 1)))
 
     (define (tracker-new t name)
-      (tstate tune: t name: name inst: (first-instrument-id t)))
+      (tstate tune: t name: name inst: (first-instrument-id t)
+              mutes: (make-vector (+ (tune-channels t) 1) #f)))
 
     (define (tracker-with-tune s t)
       (tstate s tune: t dirty: #t))
@@ -364,6 +380,146 @@
                                                (make-cell r ch (cell-note c) (cell-inst c) (cell-vol c) (cell-fx c)))
                                 t)))))))))
 
+    ;; ------------------------------------------------------------
+    ;; Mute and solo (the mode applies them to the player)
+    ;; ------------------------------------------------------------
+
+    (define (tracker-muted? s ch)
+      (and (tstate-mutes s) (< ch (vector-length (tstate-mutes s))) (vector-ref (tstate-mutes s) ch)))
+
+    (define (toggle-mute s ch)
+      (let ((v (vector-copy (or (tstate-mutes s) (make-vector (+ (tracker-channels s) 1) #f)))))
+        (when (< ch (vector-length v)) (vector-set! v ch (not (vector-ref v ch))))
+        (tstate s mutes: v)))
+
+    ;; ------------------------------------------------------------
+    ;; The instrument panel: the current instrument's kind and parameters
+    ;; ------------------------------------------------------------
+
+    ;; The panel's lines for the cursor's instrument: ((key . value) ...)
+    ;; where the first is (kind . KIND) and the rest every parameter of the
+    ;; kind's defaults with the instrument's own values on top.
+    (define (tracker-panel-lines s)
+      (if (eq? (tstate-panel-page s) 'bus)
+          (bus-lines (tstate-tune s))
+          (instrument-lines s)))
+
+    ;; The bus page: every bus key with the defaults filled in. A tune
+    ;; without a bus section starts from mix 0, so opening the page and
+    ;; changing the compressor does not switch a reverb on.
+    (define (bus-lines t)
+      (bus-canonical (or (tune-bus t) '((mix . 0.0)))))
+
+    ;; the symbol-valued bus keys and what they cycle through
+    (define BUS-CHOICES '((reverb zitarev revsc) (comp on off)))
+
+    ;; A bus edit that the validator refuses (a value out of range) is
+    ;; dropped with a message; the tune value only ever holds valid text.
+    (define (put-bus s key value)
+      (let* ((t (tstate-tune s))
+             (bus (bus-lines t))
+             (bus2 (map (lambda (kv) (if (eq? (car kv) key) (cons key value) kv)) bus))
+             (t2 (tune t bus: bus2))
+             (errs (tune-errors t2)))
+        (if (null? errs)
+            (tracker-with-tune s t2)
+            (tstate s message: "OUT OF RANGE"))))
+
+    (define (bus-step s d big?)
+      (let* ((lines (bus-lines (tstate-tune s)))
+             (row (car (tstate-panel s))))
+        (if (>= row (length lines))
+            s
+            (let* ((line (list-ref lines row))
+                   (key (car line))
+                   (v (cdr line))
+                   (choices (assq key BUS-CHOICES)))
+              (cond
+                (choices
+                 (let* ((cs (cdr choices))
+                        (idx (let find ((xs cs) (n 0)) (cond ((null? xs) 0) ((eq? (car xs) v) n) (else (find (cdr xs) (+ n 1)))))))
+                   (put-bus s key (list-ref cs (modulo (+ idx d) (length cs))))))
+                ((number? v)
+                 (let* ((step (if (and (exact? v) (integer? v)) 1 0.05))
+                        (step (if big? (* step 10) step))
+                        (nv (+ v (* d step)))
+                        (nv (if (and (exact? v) (integer? v)) nv (/ (round (* nv 1000)) 1000.0))))
+                   (put-bus s key nv)))
+                (else s))))))
+
+    (define (instrument-lines s)
+      (let ((i (tune-find-instrument (tstate-tune s) (tstate-inst s))))
+        (if (not i)
+            '()
+            (let* ((kind (tune-instrument-kind i))
+                   (defaults (if (memq kind (synth-kinds)) (synth-default-params kind) '()))
+                   (own (tune-instrument-params i)))
+              (cons (cons 'kind kind)
+                    (map (lambda (d)
+                           (let ((o (assq (car d) own)))
+                             (cons (car d) (if o (cdr o) (cdr d)))))
+                         defaults))))))
+
+    (define (put-instrument s i)
+      (tracker-with-tune s (tune-with-instruments
+                             (tstate-tune s)
+                             (map (lambda (x) (if (= (tune-instrument-id x) (tune-instrument-id i)) i x))
+                                  (tune-instruments (tstate-tune s))))))
+
+    ;; Step the selected panel line: the kind cycles through the synth
+    ;; kinds; a number moves by 1 when it is an integer-valued parameter,
+    ;; else by 0.05 (big: x10); a list (an fm4 operator) is not editable here.
+    (define (panel-step s d big?)
+      (if (eq? (tstate-panel-page s) 'bus)
+          (bus-step s d big?)
+          (instrument-step s d big?)))
+
+    (define (instrument-step s d big?)
+      (let* ((lines (tracker-panel-lines s))
+             (row (car (tstate-panel s)))
+             (i (tune-find-instrument (tstate-tune s) (tstate-inst s))))
+        (cond
+          ((or (not i) (>= row (length lines))) s)
+          ((= row 0)
+           (let* ((kinds (synth-kinds))
+                  (idx (let find ((ks kinds) (n 0)) (cond ((null? ks) 0) ((eq? (car ks) (tune-instrument-kind i)) n) (else (find (cdr ks) (+ n 1))))))
+                  (next (list-ref kinds (modulo (+ idx d) (length kinds)))))
+             (put-instrument s (tune-instrument i kind: next params: '()))))
+          (else
+           (let* ((line (list-ref lines row))
+                  (key (car line))
+                  (v (cdr line)))
+             (if (not (number? v))
+                 (tstate s message: "NOT EDITABLE HERE")
+                 (let* ((step (if (and (exact? v) (integer? v)) 1 0.05))
+                        (step (if big? (* step 10) step))
+                        (nv (+ v (* d step)))
+                        (nv (if (and (exact? v) (integer? v)) nv (/ (round (* nv 1000)) 1000.0))))
+                   (put-instrument s (tune-instrument i params: (alist-set (tune-instrument-params i) key nv))))))))))
+
+    ;; Typing a value for the selected line: digits, - and . accumulate;
+    ;; Enter commits (a number), Backspace deletes, Escape drops it.
+    (define (panel-type s ch)
+      (let ((entry (or (cdr (tstate-panel s)) "")))
+        (tstate s panel: (cons (car (tstate-panel s)) (string-append entry (string ch))))))
+
+    (define (panel-commit s)
+      (let* ((entry (cdr (tstate-panel s)))
+             (row (car (tstate-panel s)))
+             (lines (tracker-panel-lines s))
+             (bus? (eq? (tstate-panel-page s) 'bus))
+             (i (tune-find-instrument (tstate-tune s) (tstate-inst s)))
+             (n (and entry (string->number entry))))
+        (cond
+          ((not entry) s)
+          ((or (not n) (>= row (length lines)) (if bus? (assq (car (list-ref lines row)) BUS-CHOICES) (or (= row 0) (not i))))
+           (tstate s panel: (cons row #f) message: "NOT A NUMBER"))
+          (else
+           (tstate (if bus?
+                       (put-bus s (car (list-ref lines row)) n)
+                       (put-instrument s (tune-instrument i params: (alist-set (tune-instrument-params i) (car (list-ref lines row)) n))))
+                   panel: (cons row #f))))))
+
     (define (step-instrument s d)
       (let* ((ids (list-sort < (map tune-instrument-id (tune-instruments (tstate-tune s)))))
              (cur (tstate-inst s)))
@@ -414,6 +570,8 @@
              ((hex) (enter-hex s (cadr a)))
              ((octave) (tstate s octave: (clamp (cadr a) 0 8)))
              ((mark) (mark-move s (cadr a)))
+             ((mute) (toggle-mute s (cadr a)))
+             ((panel-type) (if (tstate-panel s) (panel-type s (cadr a)) s))
              (else s)))
           (else
            (case a
@@ -457,6 +615,23 @@
              ((open) (tstate s request: 'open))
              ((share) (tstate s request: 'share))
              ((new) (tstate s request: 'new))
+             ((mute-cursor) (toggle-mute s (tstate-ch s)))
+             ((solo) (tstate s solo: (if (eqv? (tstate-solo s) (tstate-ch s)) #f (tstate-ch s))))
+             ((unmute-all) (tstate s mutes: (make-vector (+ (tracker-channels s) 1) #f) solo: #f))
+             ((panel) (tstate s panel: (if (and (tstate-panel s) (eq? (tstate-panel-page s) 'inst)) #f (cons 0 #f)) panel-page: 'inst))
+             ((panel-bus) (tstate s panel: (if (and (tstate-panel s) (eq? (tstate-panel-page s) 'bus)) #f (cons 0 #f)) panel-page: 'bus))
+             ((panel-up) (if (tstate-panel s) (tstate s panel: (cons (max 0 (- (car (tstate-panel s)) 1)) #f)) s))
+             ((panel-down) (if (tstate-panel s) (tstate s panel: (cons (min (- (length (tracker-panel-lines s)) 1) (+ (car (tstate-panel s)) 1)) #f)) s))
+             ((panel-inc) (if (tstate-panel s) (panel-step s 1 #f) s))
+             ((panel-dec) (if (tstate-panel s) (panel-step s -1 #f) s))
+             ((panel-inc-big) (if (tstate-panel s) (panel-step s 1 #t) s))
+             ((panel-dec-big) (if (tstate-panel s) (panel-step s -1 #t) s))
+             ((panel-commit) (if (tstate-panel s) (panel-commit s) s))
+             ((panel-backspace) (if (and (tstate-panel s) (cdr (tstate-panel s)))
+                                    (let ((e (cdr (tstate-panel s))))
+                                      (tstate s panel: (cons (car (tstate-panel s)) (if (<= (string-length e) 1) #f (substring e 0 (- (string-length e) 1))))))
+                                    s))
+             ((panel-close) (tstate s panel: #f))
              (else s))))))
 
     ))

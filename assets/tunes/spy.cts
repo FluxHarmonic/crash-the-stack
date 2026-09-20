@@ -1,5 +1,5 @@
 (tune version: 1 name: "spy" tempo: 96 speed: 6 channels: 8
-  (bus reverb: zitarev size: 0.7 damp: 0.5 mix: 0.35)
+  (bus reverb: zitarev size: 0.7 damp: 0.5 mix: 0.35 comp: on threshold: -12 ratio: 4 attack: 5 release: 80 makeup: 2)
   (instruments
     (instrument id: 1 name: "bass" patch: (fm4-bass amp-release: 0.12 drive: 0.5 fb: 0.3 index: 2.6) volume: 36)
     (instrument id: 2 name: "kick" patch: (chip-kick decay: 0.32 drive: 1 sweep: 2.5) volume: 40)
