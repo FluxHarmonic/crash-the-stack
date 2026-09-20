@@ -47,7 +47,8 @@
           title-settle-tick title-slam-tick title-plan
           title-step title-skip title-running? title-settled?
           title-cues title-gate! title-gated? title-ungate title-gate-line title-gate-frames
-          CARD-IN CARD-HOLD CARD-OUT CARD-TICKS title-card! title-in-card? title-dialing? title-card-ready! title-card-ready
+          CARD-IN CARD-HOLD CARD-OUT card-ticks title-card-hold! title-card! title-in-card? title-dialing? title-dial-shown title-dial-tick
+          DIAL-MIN title-dial-min! title-card-ready! title-card-ready
           title-skip-card title-card-frame title-card-tick
           title-cell title-drawn-count title-frame-digest
           title-live-glitches title-shown-cell title-row-shift title-row-extent title-row-start
@@ -365,33 +366,50 @@
     (define (title-ungate t) (if (title-gated t) (title t gated: #f) t))
 
     ;; The publisher card (ruling D43): between the gate and the reveal, the
-    ;; Flux Harmonic mark for CARD-TICKS, a dither fade in over CARD-IN
+    ;; Flux Harmonic mark for (card-ticks), a dither fade in over CARD-IN
     ;; frames (the strip's frames 1..CARD-FRAMES in turn), a hold, the fade
     ;; out; a tap or a key skips to the reveal. It waits for its strip to
     ;; be loaded (the shell says so), so an instant tap never shows a blank.
     (define CARD-IN 20)
-    (define CARD-HOLD 80)
+    (define CARD-HOLD 125)   ; 2.08 s at 60 fps; was 80 (1.33 s): David, "goes away too fast" (2026-09-20)
     (define CARD-OUT 20)
-    (define CARD-TICKS (+ CARD-IN CARD-HOLD CARD-OUT))
+    ;; the hold in force: CARD-HOLD unless ?card=MS set another (title-card-hold!)
+    (define *card-hold* CARD-HOLD)
+    (define (title-card-hold! ticks) (set! *card-hold* (max 0 ticks)))
+    (define (card-ticks) (+ CARD-IN *card-hold* CARD-OUT))
     ;; The DIALING screen (ruling D45): after the gate, before the card, while
-    ;; the boot's steps run; the meter is boot-progress.
+    ;; the boot's steps run, and for at least DIAL-MIN ticks whatever the boot
+    ;; (a cached visit, native: the meter is always seen filling; David,
+    ;; 2026-09-20). The meter shown is the boot's progress capped by the
+    ;; second's fraction, so it climbs to full over the second instead of
+    ;; snapping; a slow boot shows its real progress once the second is up.
+    (define DIAL-MIN 60)
+    (define *dial-min* DIAL-MIN)   ; ?dial=MS sets another (title-dial-min!)
+    (define (title-dial-min! ticks) (set! *dial-min* (max 0 ticks)))
     (define (title-dialing? t)
-      (and (title-in-card? t) (= 0 (title-card-tick t)) (not (boot-done?))))
+      (and (title-in-card? t) (= 0 (title-card-tick t))
+           (or (not (boot-done?)) (< (title-dial-tick t) *dial-min*))))
+    ;; (shown . total) for the meter
+    (define (title-dial-shown t)
+      (let* ((p (boot-progress))
+             (total (cdr p))
+             (by-time (if (<= *dial-min* 0) total (quotient (* total (min *dial-min* (title-dial-tick t))) *dial-min*))))
+        (cons (min (car p) by-time) total)))
     (define (title-in-card? t)
-      (and (not (title-gated t)) (not (title-done t)) (< (title-card-tick t) CARD-TICKS)))
+      (and (not (title-gated t)) (not (title-done t)) (< (title-card-tick t) (card-ticks))))
     ;; the shells ask for the card once at boot (title-card! #t); a title made
     ;; without it (the tests, a menu rebuilt on a table) opens on the reveal
     (define *card* #f)
     (define (title-card! on?) (set! *card* on?))
     (define (title-card-ready! t) (if (title-card-ready t) t (title t card-ready: #t)))
-    (define (title-skip-card t) (if (title-in-card? t) (title t card-tick: CARD-TICKS) t))
+    (define (title-skip-card t) (if (title-in-card? t) (title t card-tick: (card-ticks)) t))
     ;; the strip frame to show, 1..CARD-FRAMES, or 0 for none
     (define (title-card-frame t frames)
       (let ((c (title-card-tick t)))
         (cond ((not (title-in-card? t)) 0)
               ((< c CARD-IN) (+ 1 (quotient (* c frames) CARD-IN)))
-              ((< c (+ CARD-IN CARD-HOLD)) frames)
-              (else (max 1 (- frames (quotient (* (- c CARD-IN CARD-HOLD) frames) CARD-OUT)))))))
+              ((< c (+ CARD-IN *card-hold*)) frames)
+              (else (max 1 (- frames (quotient (* (- c CARD-IN *card-hold*) frames) CARD-OUT)))))))
 
     ;; --- the state ----------------------------------------------------------------
 
@@ -408,8 +426,9 @@
       (gated default: #f)          ; the gate (D42): the boot screen before the reveal, until a gesture
       (gate-line default: #f)      ; its line (TAP TO CONNECT / PRESS ANY KEY TO CONNECT)
       (gate-frames default: 0)     ; frames spent at the gate, for its cursor's blink
-      (card-tick default: 0)       ; the publisher card (D43): 0 .. CARD-TICKS, then the reveal
-      (card-ready default: #f))    ; the shell has the card's strip loaded; the card waits for it
+      (card-tick default: 0)       ; the publisher card (D43): 0 .. (card-ticks), then the reveal
+      (card-ready default: #f)     ; the shell has the card's strip loaded; the card waits for it
+      (dial-tick default: 0))      ; ticks on the DIALING screen (D45): at least *dial-min* of them
 
     ;; A title for this boot. settled?: #t opens it already settled (the
     ;; menu after a table; the reveal is once per boot). An optional glitch
@@ -431,7 +450,7 @@
                settle-tick: settle
                plan: plan
                gated: (and (not settled?) *gate-line* #t)
-               card-tick: (if (and (not settled?) *card*) 0 CARD-TICKS)
+               card-tick: (if (and (not settled?) *card*) 0 (card-ticks))
                gate-line: *gate-line*)))
 
     (define (title-running? t) (not (title-done t)))
@@ -444,7 +463,9 @@
             ((title-in-card? t)
              ;; D45: the card starts only with the boot done (everything resident under
              ;; the card and the title); until then the DIALING screen, a meter of the steps
-             (if (and (title-card-ready t) (boot-done?)) (title t card-tick: (+ 1 (title-card-tick t))) t))
+             (cond ((title-dialing? t) (title t dial-tick: (+ 1 (title-dial-tick t))))
+                   ((title-card-ready t) (title t card-tick: (+ 1 (title-card-tick t))))
+                   (else t)))
             (else
           (let ((tick (+ 1 (title-tick t))))
             (if (>= tick (title-settle-tick t))
