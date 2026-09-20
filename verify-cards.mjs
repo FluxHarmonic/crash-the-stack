@@ -333,15 +333,15 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       // the row under DEFRAG, where LOOK sat, reaches nothing
       let lookDetail = lookDetail0;
       const shown = Object.keys(entries2);
-      if (shown.some((id) => id === "look" || id === "hud")) lookDetail = `the menu still shows ${shown.join(" ")}`;
-      else if (shown.join(" ") !== "stack cards depth") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not stack cards depth`;
+      if (shown.some((id) => id === "look" || id === "hud" || id === "depth")) lookDetail = `the menu still shows ${shown.join(" ")}`;
+      else if (shown.join(" ") !== "stack cards") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not stack cards`;
       else {
-        // 32 px per entry: the row under DEPTH (where UPDATE sits when a
+        // 32 px per entry: the row under DEFRAG (where UPDATE sits when a
         // version waits; nothing waits on a fresh origin)
-        await tap(entries2.depth[0], parseFloat(entries2.depth[1]) + 32);
+        await tap(entries2.cards[0], parseFloat(entries2.cards[1]) + 32);
         await sleep(600);
         const stray = consoleLines.slice(m0).filter((l) => /^crash: (look|depth|menu chose|cards seed|seed) /.test(l));
-        if (stray.length) lookDetail = `a tap on the empty row under DEPTH did something: ${stray[0]}`;
+        if (stray.length) lookDetail = `a tap on the empty row under DEFRAG did something: ${stray[0]}`;
       }
       m0 = consoleLines.length;
       if (lookDetail) fail("menu", lookDetail);

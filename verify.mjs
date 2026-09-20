@@ -120,7 +120,7 @@ const results = [];
 // first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "depth", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -619,8 +619,8 @@ else fail("keys-match", keysDetail);
     // the entries (the polish row): CONTINUE, STACK, DEFRAG, and UPDATE
     // only while a version waits; LOOK and HUD are gone (rulings D32, D34)
     const ids = consoleLines[menu.index].split(" ").slice(2).filter((w) => /^[a-z]+$/.test(w));
-    if (ids.some((id) => !["continue", "stack", "cards", "depth", "update"].includes(id))) detail = `the menu shows an entry the polish row removed: ${ids.join(" ")}`;
-    else if (ids.join(" ") !== "continue stack cards depth") detail = `the menu's entries are ${ids.join(" ")}, not continue stack cards depth`;
+    if (ids.some((id) => !["continue", "stack", "cards", "update"].includes(id))) detail = `the menu shows an entry the polish row removed: ${ids.join(" ")}`;
+    else if (ids.join(" ") !== "continue stack cards") detail = `the menu's entries are ${ids.join(" ")}, not continue stack cards`;
     else detail = await back("Escape");
   }
   if (!detail && !EXPECT_NO_SELECTION) {
@@ -741,67 +741,6 @@ let barRects = null;
     await sleep(1500);
   }
   if (detail) fail("hud", detail);
-}
-
-// ---- 6e. depth: the depth-cue candidates (ruling D48) -----------------------
-// ?depth=NAME boots each candidate (its "crash: depth NAME" line, stored
-// for the next boot), the board draws (lit pixels in the board region,
-// and not none's pixels), and the first pair's tile A, at the center the
-// boot line gives, selects on a tap: the hit test follows the draw. No
-// candidate moves the layers apart (D has no entry since David's read),
-// so the pair's centers are the ones the plain look printed for every
-// one: nothing tappable moved. Each boot is ?fresh (a restored
-// board has no solution pair to print), so the last one, none, is followed
-// by the first pair's match to leave the 142-tile board the legs after
-// this expect (the trace's hint count starts over; nothing reads it).
-{
-  if (EXPECT_NO_SELECTION) skip("depth", "controls are not tappable with forwarding off");
-  else {
-    let detail = "";
-    const centers = {};
-    const boards = {};
-    const NAMES = ["none", "b", "b2", "e", "abe", "abc", "b2e"];
-    for (const name of NAMES.concat(["none"])) {
-      if (detail) break;
-      mark = consoleLines.length;
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&depth=${name}` });
-      const said = await waitLine(/^crash: depth ([a-z]+)$/, mark, 15000);
-      const pair = await waitLine(BOOT_ANY, mark, 15000);
-      if (!said || said.m[1] !== name) { detail = `?depth=${name} booted with ${said ? said.m[0] : "no depth line"}`; break; }
-      if (!pair) { detail = `?depth=${name}: no boot line`; break; }
-      const m = consoleLines[pair.index].match(/^crash: seed \d+ tiles \d+ pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/);
-      if (!m) { detail = `?depth=${name}: the boot line has no pair (${consoleLines[pair.index]})`; break; }
-      if (!(await waitLine(/^crash: boot done /, mark, 20000))) { detail = `?depth=${name}: no boot done line`; break; }
-      await sleep(600);
-      const region = await readRegion(64, 40, VW - 128, VH - 48 - 80);
-      if (litCount(region) < region.w * region.h * 0.3) { detail = `?depth=${name}: the board region is mostly dark (${litCount(region)} lit of ${region.w * region.h})`; break; }
-      // every candidate draws the board differently from none (the same
-      // seed, the same frame of a fresh board); a renderer that ignored
-      // the depth would draw none's pixels
-      if (name === "none" && !boards.none) boards.none = region;
-      else if (name !== "none" && boards.none && sameRegion(boards.none, region)) { detail = `?depth=${name} drew the board pixel-identical to none`; break; }
-      centers[name] = m.slice(2, 4).join(",") + " " + m.slice(5, 7).join(",");
-      const before = consoleLines.length;
-      await tap(m[2], m[3]);
-      const sel = await waitLine(/^crash: select (\d+)$/, before, 3000);
-      if (!sel) { detail = `?depth=${name}: a tap at tile ${m[1]}'s center (${m[2]},${m[3]}) selected nothing`; break; }
-      if (sel.m[1] !== m[1]) { detail = `?depth=${name}: the tap selected ${sel.m[1]}, not ${m[1]}`; break; }
-      await press("Enter"); await sleep(200);   // deselect
-      if (name === "none" && centers.b2e) {
-        // the last boot: match the pair, as the tap legs did on the first
-        const before = consoleLines.length;
-        await tap(m[2], m[3]); await sleep(300); await tap(m[5], m[6]);
-        const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles 142$/, before, 3000);
-        if (!rem) detail = "after the depth boots, the first pair did not match on the fresh none board";
-      }
-    }
-    if (!detail) {
-      for (const name of NAMES) if (centers[name] !== centers.none) detail = `?depth=${name} moved the pair's centers: ${centers[name]} against none's ${centers.none}`;
-    }
-    await sleep(1000);
-    if (detail) fail("depth", detail);
-    else pass("depth", `${NAMES.join(" ")} boot and draw (each differs from none), tile A selects at its printed center under each; centers ${centers.none} for all; none stored back`);
-  }
 }
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
@@ -936,19 +875,26 @@ let iceLock = null;
 // A fresh Chrome profile means an empty localStorage at the first boot (the
 // boot line said tiles 144). After the taps above the board has 142 tiles,
 // three shuffles and one locked pair; a reload must restore exactly that.
+// The count in play is read from the page's own last "tiles N" line (a
+// boot, a removal, an undo or a restore), and the sequence is held to 142
+// separately: a leg that broke off on a fresh page once left 144 in play
+// and this leg blamed the restore (2026-09-20).
 {
   const tracedOk = results.some((r) => r[0] === "traced" && r[1] === "PASS");
   if (EXPECT_NO_SELECTION) skip("reload", "nothing was changed to restore with forwarding off");
   else if (!tracedOk) skip("reload", "the traced sub-arm did not reach a state to restore");
   else {
+    const inPlay = consoleLines.slice().reverse().map((l) => l.match(/^crash: (?:seed \d+|removed(?: \d+)+|undo|restored) tiles (\d+)/)).find(Boolean);
     mark = consoleLines.length;
     await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
     const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
-    if (!restored) fail("reload", `no "crash: restored" line within 20 s of the reload`);
+    if (!inPlay) fail("reload", "no \"tiles N\" line before the reload to hold the restore to");
+    else if (inPlay[1] !== "142") fail("reload", `the legs before this one left ${inPlay[1]} tiles in play, not 142 (the sequence, not the restore, is off: ${inPlay[0]})`);
+    else if (!restored) fail("reload", `no "crash: restored" line within 20 s of the reload`);
     else {
       const got = restored.m[5].trim().split(/\s+/).filter(Boolean).sort((a, b) => a - b).join(" ");
       const want = iceLock ? iceLock.slice().sort((a, b) => a - b).join(" ") : "";
-      if (restored.m[1] !== "142") fail("reload", `expected tiles 142 after the reload, got ${restored.m[0]}`);
+      if (restored.m[1] !== inPlay[1]) fail("reload", `expected tiles ${inPlay[1]} after the reload (the page's last count), got ${restored.m[0]}`);
       else if (restored.m[3] !== "counter") fail("reload", `expected phase counter after the reload, got ${restored.m[0]}`);
       else if (parseInt(restored.m[4], 10) < 1) fail("reload", `expected at least one counter-hack restored, got ${restored.m[0]}`);
       else if (iceLock && got !== want) fail("reload", `expected locked ${want}, got ${restored.m[0]}`);
@@ -1048,8 +994,19 @@ let iceLock = null;
     if (!controlled) detail = "the reloaded page is not controlled by a service worker";
     else if (active !== builtVersion) detail = `active worker version ${active}, built ${builtVersion}`;
     if (!detail) {
-      // past the launch window, with a board in play: a new deploy lands
-      await sleep(8500);
+      // past the launch window, with a board in play: a new deploy lands.
+      // The window is 8 s from the worker's REGISTRATION (after boot done and
+      // the ambient, not the navigation), so the page says when it closes; a
+      // fixed sleep from here landed inside it once when the audio leg was
+      // skipped and this leg read "prompt" (2026-09-20)
+      {
+        let until = 0;
+        for (let i = 0; i < 120 && !(until > 0); i++) { until = await evalJS("window.crashUpdate.launchUntil || 0"); if (!(until > 0)) await sleep(250); }
+        if (!(until > 0)) detail = "the worker never registered on the reloaded page (no launch window)";
+        else { const wait = until - Date.now() + 500; if (wait > 0) await sleep(wait); }
+      }
+    }
+    if (!detail) {
       await evalJS(`window.__crashToken = "still-here"`);
       const bootsBefore = consoleLines.filter((l) => BOOT_ANY.test(l)).length;
       mark = consoleLines.length;
