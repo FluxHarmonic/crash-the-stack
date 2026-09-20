@@ -1,0 +1,112 @@
+;;; Gate leg 4 (P4, native half): the scoreboard persists across a
+;;; restart, and its arithmetic: a better time or fewer moves replaces
+;;; the best, a worse clear only counts, the daily streak grows on
+;;; consecutive UTC days, holds on the same day, and starts over after a
+;;; gap.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil math)
+        (sigil time)
+        (sigil process)
+        (crash scores)
+        (crash store))
+
+(define ROOT (string-append "/tmp/crash-scores-test-" (number->string (exact (floor (current-second))))))
+(set-store-root! ROOT)
+(when (directory-exists? ROOT) (process-run "rm" "-rf" ROOT))
+
+(test-group "scores: a clear"
+  (test "the first clear on a table and version is a best of its own, and the news says first, time and moves"
+    (let* ((r (scores-record (scores-empty) 'stack 'hacker 3600 80))
+           (s (car r)))
+      (assert-equal '(first time moves) (record-news r))
+      (assert-equal '(3600 80 1) (scores-best s 'stack 'hacker))
+      (assert-equal 1 (scores-clears s 'stack 'hacker))
+      (assert-false (scores-best s 'stack 'original))
+      (assert-false (scores-best s 'cards 'hacker))))
+  (test "a faster clear replaces the time, a slower one with fewer moves replaces the moves; clears count either way"
+    (let* ((s (car (scores-record (scores-empty) 'stack 'hacker 3600 80)))
+           (r2 (scores-record s 'stack 'hacker 3000 90))
+           (s2 (car r2))
+           (r3 (scores-record s2 'stack 'hacker 5000 70))
+           (s3 (car r3))
+           (r4 (scores-record s3 'stack 'hacker 9000 99))
+           (s4 (car r4)))
+      (assert-equal '(time) (record-news r2))
+      (assert-equal '(3000 80 2) (scores-best s2 'stack 'hacker))
+      (assert-equal '(moves) (record-news r3))
+      (assert-equal '(3000 70 3) (scores-best s3 'stack 'hacker))
+      (assert-equal '() (record-news r4))
+      (assert-equal '(3000 70 4) (scores-best s4 'stack 'hacker))))
+  (test "an equal time or move count is not news"
+    (let* ((s (car (scores-record (scores-empty) 'cards 'original 100 10)))
+           (r (scores-record s 'cards 'original 100 10)))
+      (assert-equal '() (record-news r))
+      (assert-equal '(100 10 2) (scores-best (car r) 'cards 'original))))
+  (test "the four table x version cells are independent"
+    (let* ((s (car (scores-record (scores-empty) 'stack 'hacker 1 1)))
+           (s (car (scores-record s 'stack 'original 2 2)))
+           (s (car (scores-record s 'cards 'hacker 3 3)))
+           (s (car (scores-record s 'cards 'original 4 4))))
+      (assert-equal '(1 1 1) (scores-best s 'stack 'hacker))
+      (assert-equal '(2 2 1) (scores-best s 'stack 'original))
+      (assert-equal '(3 3 1) (scores-best s 'cards 'hacker))
+      (assert-equal '(4 4 1) (scores-best s 'cards 'original)))))
+
+(test-group "scores: the daily streak"
+  (test "grows on consecutive days, holds on the same day, starts over after a gap; per table"
+    (let* ((s (scores-daily-clear (scores-empty) 'stack 20716))
+           (_ (assert-equal 1 (scores-streak s 'stack)))
+           (s (scores-daily-clear s 'stack 20716))
+           (_ (assert-equal 1 (scores-streak s 'stack)))
+           (s (scores-daily-clear s 'stack 20717))
+           (_ (assert-equal 2 (scores-streak s 'stack)))
+           (s (scores-daily-clear s 'stack 20718))
+           (_ (assert-equal 3 (scores-streak s 'stack)))
+           (_ (assert-equal 20718 (scores-last-daily s 'stack)))
+           (_ (assert-equal 0 (scores-streak s 'cards)))
+           (s (scores-daily-clear s 'cards 20718))
+           (_ (assert-equal 1 (scores-streak s 'cards)))
+           (s (scores-daily-clear s 'stack 20720)))
+      (assert-equal 1 (scores-streak s 'stack))
+      (assert-equal 1 (scores-streak s 'cards))
+      (assert-equal 20720 (scores-last-daily s 'stack)))))
+
+(test-group "scores: the store round trip (gate leg 4, native)"
+  (test "an empty store is an empty board"
+    (assert-equal (scores-empty) (scores-load)))
+  (test "a board with every cell and two streaks reads back equal after a fresh load"
+    (let* ((s (car (scores-record (scores-empty) 'stack 'hacker 3600 80)))
+           (s (car (scores-record s 'stack 'original 4200 72)))
+           (s (car (scores-record s 'cards 'hacker 9000 120)))
+           (s (car (scores-record s 'cards 'hacker 8000 130)))
+           (s (scores-daily-clear s 'stack 20716))
+           (s (scores-daily-clear s 'stack 20717))
+           (s (scores-daily-clear s 'cards 20717)))
+      (assert-true (scores-save! s))
+      (let ((back (scores-load)))
+        (assert-equal s back)
+        (assert-equal '(8000 120 2) (scores-best back 'cards 'hacker))
+        (assert-equal 2 (scores-streak back 'stack))
+        (assert-equal 1 (scores-streak back 'cards)))))
+  (test "the datum's shape, and a row it does not know is skipped while the rest is kept"
+    (let* ((s (car (scores-record (scores-empty) 'stack 'hacker 3600 80)))
+           (d (scores->datum s)))
+      (assert-equal '(crash-scores 1 (best stack hacker 3600 80 1)) d)
+      (assert-equal s (datum->scores (append d '((future row) (best pyramid hacker 1 1 1) (daily cards -1 3)))))
+      (assert-equal 3 (scores-streak (datum->scores (append d '((daily cards 20716 3)))) 'cards))))
+  (test "garbage in the store is an empty board, never a trap"
+    (store-set! "scores" "(crash-scores 1 (best stack")
+    (assert-equal (scores-empty) (scores-load))
+    (store-write-datum! "scores" '(crash-scores 2 (best stack hacker 1 1 1)))
+    (assert-equal (scores-empty) (scores-load))
+    (store-write-datum! "scores" 42)
+    (assert-equal (scores-empty) (scores-load)))
+  (test "the detector: a lost write reads as empty, not as the board in memory"
+    (let ((s (car (scores-record (scores-empty) 'stack 'hacker 1 1))))
+      (store-remove! "scores")
+      (assert-equal '(1 1 1) (scores-best s 'stack 'hacker))
+      (assert-false (scores-best (scores-load) 'stack 'hacker)))))
+
+(process-run "rm" "-rf" ROOT)

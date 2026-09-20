@@ -1,0 +1,158 @@
+;;; (crash run) - JACK IN: a run down the stack, for release 0.1.
+;;;
+;;; The campaign before the overworld (P5) is a fixed sequence of layers,
+;;; LAYERS as data: six of them, STACK and DEFRAG alternating, every one
+;;; the hacker version with the trace on, dealt from one run seed. A
+;;; layer's seed is a mix of the run seed, the layer's index and the
+;;; attempt (the count of severed links on that layer so far), so a
+;;; reconnect is a different board of the same layer and the whole run
+;;; replays from its seed (which is what the run's share code carries:
+;;; (crash code), table run). A stack layer's seed is the mix itself; a
+;;; DEFRAG layer's is drawn from WINNABLE-SEEDS through the progression's
+;;; window with the level climbing one WINDOW-STEP per layer, so the
+;;; dumps get harder down the stack and every one is winnable.
+;;;
+;;; Losing is a severed link, never a death (design decision 20): the
+;;; severed screen's first choice is RECONNECT, the same layer on its
+;;; next attempt, and the ledger counts it; JACK OUT keeps the run for
+;;; CONTINUE. Clearing a layer adds its time and moves to the ledger and
+;;; moves to the next; after the last, the run is done and the ledger is
+;;; the result. One tier (RUNNER's rules as tuned) in 0.1; the tier, the
+;;; layer descriptors' constants, Gibson's lines and the tools are P5's,
+;;; which replaces the sequence with the hub and keeps this shape.
+;;;
+;;; The store key "run" holds one datum:
+;;;   (crash-run 1 (seed . S) (layer . L) (attempt . A)
+;;;              (ledger cleared ticks moves reconnects))
+;;; Rules family but for the two store verbs; no platform.
+
+(define-library (crash run)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack prng)
+          (crash cards seeds)
+          (crash store))
+
+  (export run run? run-seed run-layer run-attempt run-ledger
+          ledger ledger? ledger-cleared ledger-ticks ledger-moves ledger-reconnects
+          LAYERS RUN-KEY run-layer-count
+          run-new run-layer-table run-layer-seed run-layer-level run-mix
+          run-cleared run-severed run-done? run-layer-number
+          run->datum datum->run run-load run-save! run-clear!)
+
+  (begin
+    (define RUN-KEY "run")
+
+    ;; The sequence, top of the stack first. Data: P5 replaces it with
+    ;; the hub's layers. Built with list (the wasm literal hazard, see
+    ;; (crash menu)).
+    (define LAYERS (list 'stack 'cards 'stack 'cards 'stack 'cards))
+
+    (define (run-layer-count) (length LAYERS))
+
+    (define-struct ledger
+      (cleared default: 0)       ; layers cleared so far
+      (ticks default: 0)         ; the cleared layers' time, ticks at 60 a second
+      (moves default: 0)         ; their moves
+      (reconnects default: 0))   ; severed links over the whole run
+
+    (define-struct run
+      (seed default: 1)
+      (layer default: 0)         ; index into LAYERS; = the count when the run is done
+      (attempt default: 0)       ; severed links on the current layer so far
+      (ledger default: (ledger)))
+
+    (define (run-new seed)
+      (run seed: (max 1 seed)))
+
+    (define (run-done? r)
+      (>= (run-layer r) (run-layer-count)))
+
+    ;; The layer as a player counts it: 1 .. the count.
+    (define (run-layer-number r)
+      (+ 1 (min (run-layer r) (- (run-layer-count) 1))))
+
+    (define (run-layer-table r)
+      (and (not (run-done? r)) (list-ref LAYERS (run-layer r))))
+
+    ;; A 31-bit mix of the run seed, the layer and the attempt: distinct
+    ;; for distinct inputs in practice (two rounds of a linear
+    ;; congruence with the golden-ratio constant), never 0.
+    (define TWO31 (expt 2 31))
+    (define (run-mix seed layer attempt)
+      (let* ((s (modulo (+ (* seed 2654435761) (* layer 40503) (* attempt 97) 1597334677) TWO31))
+             (s (modulo (+ (* s 1103515245) 12345) TWO31))
+             (s (modulo (+ (* (quotient s 65536) 2654435761) (modulo s 65536)) TWO31)))
+        (max 1 s)))
+
+    ;; The progression level a DEFRAG layer draws from: one step per
+    ;; layer down the stack.
+    (define (run-layer-level r)
+      (* (run-layer r) WINDOW-STEP))
+
+    ;; The seed the current layer deals from, or #f when the run is done.
+    (define (run-layer-seed r)
+      (and (not (run-done? r))
+           (let ((mix (run-mix (run-seed r) (run-layer r) (run-attempt r))))
+             (if (eq? (run-layer-table r) 'cards)
+                 (car (pick-seed (run-layer-level r) '() (prng-seed mix)))
+                 mix))))
+
+    ;; The layer cleared in ticks and moves: on to the next.
+    (define (run-cleared r ticks moves)
+      (let ((l (run-ledger r)))
+        (run r
+             layer: (+ 1 (run-layer r))
+             attempt: 0
+             ledger: (ledger l
+                             cleared: (+ 1 (ledger-cleared l))
+                             ticks: (+ ticks (ledger-ticks l))
+                             moves: (+ moves (ledger-moves l))))))
+
+    ;; The link severed: the same layer, the next attempt, one more on
+    ;; the ledger.
+    (define (run-severed r)
+      (let ((l (run-ledger r)))
+        (run r
+             attempt: (+ 1 (run-attempt r))
+             ledger: (ledger l reconnects: (+ 1 (ledger-reconnects l))))))
+
+    ;; --- the datum ---------------------------------------------------------------
+
+    (define (run->datum r)
+      (let ((l (run-ledger r)))
+        (list 'crash-run 1
+              (cons 'seed (run-seed r))
+              (cons 'layer (run-layer r))
+              (cons 'attempt (run-attempt r))
+              (list 'ledger (ledger-cleared l) (ledger-ticks l) (ledger-moves l) (ledger-reconnects l)))))
+
+    (define (nat? x) (and (integer? x) (exact? x) (>= x 0)))
+
+    (define (field d name)
+      (let ((e (assq name (cddr d))))
+        (and e (cdr e))))
+
+    ;; The run of a datum, or #f for anything that is not one.
+    (define (datum->run d)
+      (and (pair? d) (eq? (car d) 'crash-run) (pair? (cdr d)) (eqv? (cadr d) 1) (list? (cddr d))
+           (every pair? (cddr d))
+           (let ((seed (field d 'seed))
+                 (layer (field d 'layer))
+                 (attempt (field d 'attempt))
+                 (l (field d 'ledger)))
+             (and (nat? seed) (>= seed 1)
+                  (nat? layer) (<= layer (run-layer-count))
+                  (nat? attempt)
+                  (list? l) (= (length l) 4) (every nat? l)
+                  (run seed: seed layer: layer attempt: attempt
+                       ledger: (ledger cleared: (car l) ticks: (cadr l) moves: (caddr l) reconnects: (cadddr l)))))))
+
+    (define (run-load)
+      (datum->run (store-read-datum RUN-KEY)))
+
+    (define (run-save! r)
+      (store-write-datum! RUN-KEY (run->datum r)))
+
+    (define (run-clear!)
+      (store-remove! RUN-KEY))))

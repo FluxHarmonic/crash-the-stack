@@ -1,0 +1,152 @@
+;;; Gate leg 2 (P4): share codes round-trip, and a corrupted code is
+;;; refused, never mapped to another board.
+;;;
+;;; The positive control is deterministic: every single substituted
+;;; character of every code below is refused (the check's weighted sum
+;;; moves by at most 248 under a modulus of 1021), and so is every
+;;; adjacent transposition of two unequal digits. The regenerated board
+;;; is held structurally equal to the original through the tables' own
+;;; constructors.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (sigil string)
+        (crash code)
+        (crash stack layout)
+        (crash stack rules)
+        (crash stack turtle)
+        (crash stack generate)
+        (crash cards rules))
+
+(define SPECS
+  (list (spec-new 'stack 'hacker 1 'vegas 'turtle 1)
+        (spec-new 'stack 'original 1 'standard 'turtle 7)
+        (spec-new 'cards 'hacker 3 'vegas 'turtle 280)
+        (spec-new 'cards 'original 1 'standard 'turtle 600)
+        (spec-new 'run 'hacker 3 'standard 'turtle 1789923677)
+        (spec-new 'stack 'hacker 3 'vegas 'turtle SEED-MAX)
+        (spec-new 'cards 'hacker 1 'vegas 'turtle 0)))
+
+(test-group "code: the shape"
+  (test "ten characters of the alphabet, shown as XXXXX-XXXXX"
+    (for-each (lambda (s)
+                (let ((code (encode s)))
+                  (assert-equal CODE-LENGTH (string-length code))
+                  (assert-true (every (lambda (c) (and (string-index ALPHABET (lambda (a) (char=? a c))) #t))
+                                      (string->list code)))
+                  (assert-equal #\- (string-ref (code-display code) 5))
+                  (assert-equal 11 (string-length (code-display code)))))
+              SPECS))
+  (test "the alphabet is Crockford's: 32 characters, no I L O U"
+    (assert-equal 32 (string-length ALPHABET))
+    (for-each (lambda (c) (assert-false (string-index ALPHABET (lambda (a) (char=? a c)))))
+              (string->list "ILOUilou")))
+  (test "spec-new refuses a part out of range"
+    (assert-false (spec-new 'pyramid 'hacker 1 'vegas 'turtle 1))
+    (assert-false (spec-new 'stack 'twist 1 'vegas 'turtle 1))
+    (assert-false (spec-new 'stack 'hacker 2 'vegas 'turtle 1))
+    (assert-false (spec-new 'stack 'hacker 1 'bounty 'turtle 1))
+    (assert-false (spec-new 'stack 'hacker 1 'vegas 'spider 1))
+    (assert-false (spec-new 'stack 'hacker 1 'vegas 'turtle -1))
+    (assert-false (spec-new 'stack 'hacker 1 'vegas 'turtle (+ SEED-MAX 1)))
+    (assert-false (spec-new 'stack 'hacker 1 'vegas 'turtle 1.5))))
+
+(test-group "code: the round trip"
+  (test "decode (encode s) is s, field by field"
+    (for-each (lambda (s)
+                (let ((back (decode (encode s))))
+                  (assert-true (and back #t))
+                  (assert-true (spec-equal? s back))))
+              SPECS))
+  (test "the display form, lower case, and stray spaces read the same"
+    (for-each (lambda (s)
+                (let ((code (encode s)))
+                  (assert-true (spec-equal? s (decode (code-display code))))
+                  (assert-true (spec-equal? s (decode (string-downcase code))))
+                  (assert-true (spec-equal? s (decode (string-append " " (substring code 0 3) " " (substring code 3 10) " "))))))
+              SPECS))
+  (test "two different specs never share a code"
+    (let loop ((a SPECS))
+      (unless (null? a)
+        (for-each (lambda (b) (assert-false (string=? (encode (car a)) (encode b)))) (cdr a))
+        (loop (cdr a)))))
+  (test "the regenerated stack board is structurally equal (faces, presence, solution)"
+    (let* ((s (spec-new 'stack 'hacker 1 'vegas 'turtle 42))
+           (back (decode (encode s)))
+           (lay (turtle-layout))
+           (b0 (generate lay (spec-seed s)))
+           (b1 (generate lay (spec-seed back))))
+      (assert-true (equal? (board-faces b0) (board-faces b1)))
+      (assert-true (equal? (board-present b0) (board-present b1)))
+      (assert-true (equal? (board-solution b0) (board-solution b1)))))
+  (test "the regenerated deal is structurally equal (every pile, the stock, the draw count and the scoring)"
+    (let* ((s (spec-new 'cards 'original 3 'standard 'turtle 280))
+           (back (decode (encode s)))
+           (g0 (game-with-scoring (game-new (spec-seed s) (spec-draw s)) (spec-scoring s)))
+           (g1 (game-with-scoring (game-new (spec-seed back) (spec-draw back)) (spec-scoring back))))
+      (assert-true (equal? (game-tableau g0) (game-tableau g1)))
+      (assert-true (equal? (game-stock g0) (game-stock g1)))
+      (assert-equal (game-draw g0) (game-draw g1))
+      (assert-equal (game-scoring g0) (game-scoring g1)))))
+
+;; every character of the alphabet but the one at i
+(define (substitutions code i)
+  (map (lambda (c) (string-append (substring code 0 i) (string c) (substring code (+ i 1) (string-length code))))
+       (filter (lambda (c) (not (char=? c (string-ref code i)))) (string->list ALPHABET))))
+
+(test-group "code: a corrupted code is refused (the positive control)"
+  (test "every single substitution of every code is refused: 7 codes x 10 positions x 31 characters"
+    (let ((refused 0))
+      (for-each (lambda (s)
+                  (let ((code (encode s)))
+                    (let loop ((i 0))
+                      (when (< i CODE-LENGTH)
+                        (for-each (lambda (bad)
+                                    (assert-false (decode bad))
+                                    (set! refused (+ refused 1)))
+                                  (substitutions code i))
+                        (loop (+ i 1))))))
+                SPECS)
+      (assert-equal (* 7 10 31) refused)))
+  (test "an adjacent transposition of two unequal characters is refused"
+    (for-each (lambda (s)
+                (let ((code (encode s)))
+                  (let loop ((i 0))
+                    (when (< i (- CODE-LENGTH 1))
+                      (let ((a (string-ref code i)) (b (string-ref code (+ i 1))))
+                        (unless (char=? a b)
+                          (assert-false (decode (string-append (substring code 0 i) (string b a) (substring code (+ i 2) CODE-LENGTH))))))
+                      (loop (+ i 1))))))
+              SPECS))
+  (test "the wrong length, a character outside the alphabet, and non-strings are refused"
+    (let ((code (encode (car SPECS))))
+      (assert-false (decode (substring code 0 9)))
+      (assert-false (decode (string-append code "0")))
+      (assert-false (decode (string-append "I" (substring code 1 10))))
+      (assert-false (decode (string-append "O" (substring code 1 10))))
+      (assert-false (decode ""))
+      (assert-false (decode 42))
+      (assert-false (decode #f))))
+  (test "a nonzero format or a table of 3 is refused even with a matching check"
+    ;; the top digit holds format(2) table(2) version(1): 4 is format 0
+    ;; table 2 (run), 8 is format 1, 6 is table 3. Recompute the check by
+    ;; hand: c = sum (i+1) d_i mod 1021, then two digits.
+    (let* ((code (encode (car SPECS)))
+           (digit (lambda (c) (string-index ALPHABET (lambda (a) (char=? a c)))))
+           (forged (lambda (top)
+                     (let* ((ds (map digit (string->list (substring code 0 8))))
+                            (ds (cons top (cdr ds)))
+                            (c (modulo (let loop ((ds ds) (i 1) (sum 0))
+                                         (if (null? ds) sum (loop (cdr ds) (+ i 1) (+ sum (* i (car ds))))))
+                                       CHECK-MODULUS)))
+                       (list->string (map (lambda (d) (string-ref ALPHABET d))
+                                          (append ds (list (quotient c 32) (modulo c 32)))))))))
+      (assert-false (decode (forged 8)))
+      (assert-false (decode (forged 6)))
+      ;; the control: the same forgery with table 2 (run) is a valid run code
+      (assert-equal 'run (spec-table (decode (forged 4))))))
+  (test "the detector: a check digit changed alone is refused, and the original still reads"
+    (let ((code (encode (car SPECS))))
+      (assert-true (code-valid? code))
+      (assert-false (code-valid? (string-append (substring code 0 9) (if (char=? (string-ref code 9) #\0) "1" "0")))))))

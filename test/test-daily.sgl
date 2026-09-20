@@ -1,0 +1,80 @@
+;;; Gate leg 3 (P4): the daily's seed for a fixed date is the pinned value
+;;; and differs from the adjacent dates'; the day comes from the UTC
+;;; epoch and no zone.
+;;;
+;;; The fixture instant is 2026-09-20T23:30:00Z (epoch 1789947000), thirty
+;;; minutes before UTC midnight: any derivation through a local time east
+;;; of UTC (sabotage S2: an offset of even one hour added before the
+;;; division) lands it on 2026-09-21 and both seeds change. The pinned
+;;; values were read from the module once (2026-09-20) and are the gate:
+;;; a change in (crash daily) is a different daily for everyone.
+
+(import (sigil test)
+        (sigil math)
+        (crash daily)
+        (crash cards seeds))
+
+(define FIXTURE-SECOND 1789947000)          ; 2026-09-20T23:30:00Z
+(define FIXTURE-DAY 20716)                  ; days since 1970-01-01
+(define PINNED
+  ;; (day stack-seed cards-seed)
+  '((20715 284647276 275)
+    (20716 2029908705 182)
+    (20717 1007910919 198)))
+
+(test-group "daily: the day"
+  (test "the fixture instant is the pinned day, and 2026-09-20 in civil terms"
+    (assert-equal FIXTURE-DAY (daily-day FIXTURE-SECOND))
+    (assert-equal '(2026 9 20) (daily-date FIXTURE-DAY)))
+  (test "thirty minutes later is the next day; one hour earlier is the same day"
+    (assert-equal (+ FIXTURE-DAY 1) (daily-day (+ FIXTURE-SECOND 1800)))
+    (assert-equal FIXTURE-DAY (daily-day (- FIXTURE-SECOND 3600))))
+  (test "the day is the UTC epoch divided by 86400 and nothing else (S2 would add a zone's offset)"
+    (assert-equal 0 (daily-day 0))
+    (assert-equal 0 (daily-day 86399))
+    (assert-equal 1 (daily-day 86400))
+    (assert-equal 20716 (daily-day (* 20716 86400)))
+    (assert-equal 20716 (daily-day (+ (* 20716 86400) 86399)))
+    (assert-equal 20716 (daily-day 1789947000.9)))
+  (test "civil dates: the epoch, a leap day, a year's edges"
+    (assert-equal '(1970 1 1) (daily-date 0))
+    (assert-equal '(2024 2 29) (daily-date 19782))
+    (assert-equal '(2024 3 1) (daily-date 19783))
+    (assert-equal '(2026 12 31) (daily-date 20818))
+    (assert-equal '(2027 1 1) (daily-date 20819))))
+
+(test-group "daily: the seeds (the pinned fixture)"
+  (test "the fixture day's seeds are the pinned values"
+    (for-each (lambda (row)
+                (assert-equal (cadr row) (daily-stack-seed (car row)))
+                (assert-equal (caddr row) (daily-cards-seed (car row))))
+              PINNED))
+  (test "the adjacent days differ from the fixture day on both tables"
+    (let ((today (assv FIXTURE-DAY PINNED)))
+      (for-each (lambda (row)
+                  (unless (= (car row) FIXTURE-DAY)
+                    (assert-false (= (cadr row) (cadr today)))
+                    (assert-false (= (caddr row) (caddr today)))))
+                PINNED)))
+  (test "a stack seed is never 0 (prng-seed folds 0 onto 1) and fits 31 bits"
+    (let loop ((d 0))
+      (when (< d 4000)
+        (let ((s (daily-stack-seed d)))
+          (assert-true (>= s 1))
+          (assert-true (< s (expt 2 31))))
+        (loop (+ d 1)))))
+  (test "a DEFRAG daily is always a winnable seed, and the year 2026 uses many of them"
+    (let loop ((d 20454) (seen '()))
+      (if (< d 20819)
+          (let ((s (daily-cards-seed d)))
+            (assert-true (and (vector-index-of WINNABLE-SEEDS s) #t))
+            (loop (+ d 1) (if (memv s seen) seen (cons s seen))))
+          (assert-true (> (length seen) 200)))))
+  (test "the detector: a one-hour offset before the division (S2's shape) moves the fixture to the next day"
+    (assert-equal (+ FIXTURE-DAY 1) (daily-day (+ FIXTURE-SECOND 3600)))))
+
+(define (vector-index-of v x)
+  (let loop ((i 0))
+    (cond ((= i (vector-length v)) #f)
+          ((eqv? (vector-ref v i) x) i)
+          (else (loop (+ i 1))))))

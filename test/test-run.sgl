@@ -1,0 +1,143 @@
+;;; JACK IN's run (P4, release 0.1): six layers alternating STACK and
+;;; DEFRAG from one seed, every DEFRAG layer a winnable seed from a
+;;; window climbing with the layer, a reconnect a different board of the
+;;; same layer, the ledger's arithmetic, and the store round trip.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil math)
+        (sigil time)
+        (sigil process)
+        (crash run)
+        (crash cards seeds)
+        (crash store))
+
+(define ROOT (string-append "/tmp/crash-run-test-" (number->string (exact (floor (current-second))))))
+(set-store-root! ROOT)
+(when (directory-exists? ROOT) (process-run "rm" "-rf" ROOT))
+
+(define (winnable? s)
+  (let loop ((i 0))
+    (cond ((= i (vector-length WINNABLE-SEEDS)) #f)
+          ((= (vector-ref WINNABLE-SEEDS i) s) #t)
+          (else (loop (+ i 1))))))
+
+(define (window-index s)
+  (let loop ((i 0))
+    (cond ((= i (vector-length WINNABLE-SEEDS)) #f)
+          ((= (vector-ref WINNABLE-SEEDS i) s) i)
+          (else (loop (+ i 1))))))
+
+(test-group "run: the sequence"
+  (test "six layers, STACK and DEFRAG alternating, STACK first"
+    (assert-equal '(stack cards stack cards stack cards) LAYERS)
+    (assert-equal 6 (run-layer-count)))
+  (test "a fresh run is on layer 1, attempt 0, an empty ledger; seed 0 folds onto 1"
+    (let ((r (run-new 7)))
+      (assert-equal 7 (run-seed r))
+      (assert-equal 0 (run-layer r))
+      (assert-equal 1 (run-layer-number r))
+      (assert-equal 'stack (run-layer-table r))
+      (assert-false (run-done? r))
+      (assert-equal 0 (ledger-cleared (run-ledger r)))
+      (assert-equal 1 (run-seed (run-new 0)))))
+  (test "walking the run clears every layer in order and ends done, the ledger summing the clears"
+    (let loop ((r (run-new 7)) (i 0))
+      (if (< i 6)
+          (begin
+            (assert-equal i (run-layer r))
+            (assert-equal (list-ref LAYERS i) (run-layer-table r))
+            (loop (run-cleared r 600 10) (+ i 1)))
+          (begin
+            (assert-true (run-done? r))
+            (assert-false (run-layer-table r))
+            (assert-false (run-layer-seed r))
+            (assert-equal 6 (run-layer-number r))
+            (assert-equal 6 (ledger-cleared (run-ledger r)))
+            (assert-equal 3600 (ledger-ticks (run-ledger r)))
+            (assert-equal 60 (ledger-moves (run-ledger r)))
+            (assert-equal 0 (ledger-reconnects (run-ledger r))))))))
+
+(test-group "run: the seeds"
+  (test "a stack layer's seed is the mix; a DEFRAG layer's is a winnable seed"
+    (let* ((r (run-new 7))
+           (s0 (run-layer-seed r))
+           (r1 (run-cleared r 1 1))
+           (s1 (run-layer-seed r1)))
+      (assert-equal (run-mix 7 0 0) s0)
+      (assert-true (>= s0 1))
+      (assert-true (winnable? s1))))
+  (test "the DEFRAG window climbs with the layer: layer 6 draws from a later window than layer 2"
+    (let* ((r (run-new 7))
+           (r1 (run-cleared r 1 1))          ; layer index 1: cards, level 8
+           (r5 (let loop ((r r1) (n 4)) (if (= n 0) r (loop (run-cleared r 1 1) (- n 1)))))   ; index 5: cards, level 40
+           (i1 (window-index (run-layer-seed r1)))
+           (i5 (window-index (run-layer-seed r5))))
+      (assert-equal 8 (run-layer-level r1))
+      (assert-equal 40 (run-layer-level r5))
+      (assert-true (and i1 (< i1 (+ 8 WINDOW-WIDTH))))
+      (assert-true (and i5 (>= i5 40)))))
+  (test "the same run seed replays the same layers; a different seed does not"
+    (let ((walk (lambda (seed)
+                  (let loop ((r (run-new seed)) (acc '()))
+                    (if (run-done? r) (reverse acc) (loop (run-cleared r 1 1) (cons (run-layer-seed r) acc)))))))
+      (assert-equal (walk 7) (walk 7))
+      (assert-false (equal? (walk 7) (walk 8)))
+      (assert-equal 6 (length (walk 7)))))
+  (test "a reconnect is a different board of the same layer, and the ledger counts it"
+    (let* ((r (run-new 7))
+           (r1 (run-severed r))
+           (r2 (run-severed r1)))
+      (assert-equal 0 (run-layer r1))
+      (assert-equal 1 (run-attempt r1))
+      (assert-equal 2 (run-attempt r2))
+      (assert-equal 2 (ledger-reconnects (run-ledger r2)))
+      (assert-false (= (run-layer-seed r) (run-layer-seed r1)))
+      (assert-false (= (run-layer-seed r1) (run-layer-seed r2)))
+      ;; a clear after a reconnect starts the next layer at attempt 0
+      (assert-equal 0 (run-attempt (run-cleared r2 1 1)))
+      (assert-equal 2 (ledger-reconnects (run-ledger (run-cleared r2 1 1))))))
+  (test "the mix is never 0 and distinct across the first thousand (seed layer attempt) triples"
+    (let loop ((seed 1) (seen '()) (n 0))
+      (if (> seed 40)
+          (assert-equal n (length seen))
+          (let inner ((layer 0) (seen seen) (n n))
+            (if (= layer 5)
+                (loop (+ seed 1) seen n)
+                (let att ((attempt 0) (seen seen) (n n))
+                  (if (= attempt 5)
+                      (inner (+ layer 1) seen n)
+                      (let ((m (run-mix seed layer attempt)))
+                        (assert-true (>= m 1))
+                        (assert-false (memv m seen))
+                        (att (+ attempt 1) (cons m seen) (+ n 1)))))))))))
+
+(test-group "run: the store round trip"
+  (test "no run in a fresh store"
+    (assert-false (run-load)))
+  (test "a run mid-way, with a reconnect, reads back equal"
+    (let* ((r (run-severed (run-cleared (run-cleared (run-new 7) 600 10) 900 20))))
+      (assert-true (run-save! r))
+      (let ((back (run-load)))
+        (assert-true (and back #t))
+        (assert-equal (run->datum r) (run->datum back))
+        (assert-equal 2 (run-layer back))
+        (assert-equal 1 (run-attempt back))
+        (assert-equal 1500 (ledger-ticks (run-ledger back)))
+        (assert-equal (run-layer-seed r) (run-layer-seed back)))))
+  (test "run-clear! removes it"
+    (run-clear!)
+    (assert-false (run-load)))
+  (test "garbage, a wrong version, a layer past the end or a seed of 0 read as no run"
+    (store-set! "run" "(crash-run 1 (seed")
+    (assert-false (run-load))
+    (store-write-datum! "run" '(crash-run 2 (seed . 7) (layer . 0) (attempt . 0) (ledger 0 0 0 0)))
+    (assert-false (run-load))
+    (store-write-datum! "run" '(crash-run 1 (seed . 7) (layer . 7) (attempt . 0) (ledger 0 0 0 0)))
+    (assert-false (run-load))
+    (store-write-datum! "run" '(crash-run 1 (seed . 0) (layer . 0) (attempt . 0) (ledger 0 0 0 0)))
+    (assert-false (run-load))
+    (store-write-datum! "run" '(crash-run 1 (seed . 7) (layer . 6) (attempt . 0) (ledger 6 1 1 0)))
+    (assert-true (run-done? (run-load)))))
+
+(process-run "rm" "-rf" ROOT)

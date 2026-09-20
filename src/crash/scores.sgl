@@ -1,0 +1,130 @@
+;;; (crash scores) - The local scoreboard.
+;;;
+;;; Per table (stack, cards) and version (original, hacker): the best
+;;; time (ticks at 60 a second, a cleared board only), the fewest moves
+;;; of a clear, and the count of clears; per table, the daily streak (the
+;;; number of consecutive UTC days whose daily was cleared, and the last
+;;; such day). One store key, "scores", one datum:
+;;;   (crash-scores 1
+;;;     (best stack hacker TIME MOVES CLEARS) ...      one per table x version seen
+;;;     (daily stack LAST-DAY STREAK) ...)             one per table with a daily cleared
+;;; Anything that does not read as that shape is an empty board. Pure
+;;; but for the two store verbs; no platform.
+
+(define-library (crash scores)
+  (import (sigil struct)
+          (sigil math)
+          (crash store))
+
+  (export scores-empty scores-load scores-save! scores->datum datum->scores
+          scores-best scores-clears scores-streak scores-last-daily
+          scores-record scores-daily-clear record-news
+          SCORES-KEY TABLES VERSIONS)
+
+  (begin
+    (define SCORES-KEY "scores")
+    (define TABLES '(stack cards))
+    (define VERSIONS '(original hacker))
+
+    ;; The board: (bests . dailies), bests an alist of ((table . version)
+    ;; . (time moves clears)), dailies an alist of (table . (last-day . streak)).
+    (define (scores-empty) (cons '() '()))
+    (define (bests s) (car s))
+    (define (dailies s) (cdr s))
+
+    (define (key table version) (cons table version))
+    (define (best-entry s table version)
+      (let ((e (assoc (key table version) (bests s))))
+        (and e (cdr e))))
+
+    ;; (time moves clears) or #f when nothing has been cleared there.
+    (define (scores-best s table version)
+      (best-entry s table version))
+
+    (define (scores-clears s table version)
+      (let ((b (best-entry s table version)))
+        (if b (caddr b) 0)))
+
+    (define (daily-entry s table)
+      (let ((e (assq table (dailies s))))
+        (and e (cdr e))))
+
+    (define (scores-streak s table)
+      (let ((d (daily-entry s table))) (if d (cdr d) 0)))
+
+    (define (scores-last-daily s table)
+      (let ((d (daily-entry s table))) (and d (car d))))
+
+    (define (alist-set alist k v same?)
+      (let loop ((l alist) (acc '()) (seen #f))
+        (cond ((null? l) (reverse (if seen acc (cons (cons k v) acc))))
+              ((same? (car (car l)) k) (loop (cdr l) (cons (cons k v) acc) #t))
+              (else (loop (cdr l) (cons (car l) acc) seen)))))
+
+    ;; A clear: the board after it, and the news: a list of what improved
+    ;; among 'time, 'moves, 'first (the first clear there). ticks and
+    ;; moves are the clear's; a lower value is better for both.
+    (define (scores-record s table version ticks moves)
+      (let* ((old (best-entry s table version))
+             (time (if (and old (car old) (<= (car old) ticks)) (car old) ticks))
+             (fewest (if (and old (cadr old) (<= (cadr old) moves)) (cadr old) moves))
+             (clears (+ 1 (if old (caddr old) 0)))
+             (news (append (if (not old) '(first) '())
+                           (if (or (not old) (< ticks (car old))) '(time) '())
+                           (if (or (not old) (< moves (cadr old))) '(moves) '()))))
+        (cons (cons (alist-set (bests s) (key table version) (list time fewest clears) equal?)
+                    (dailies s))
+              news)))
+
+    ;; The news of a record's answer.
+    (define (record-news r) (cdr r))
+
+    ;; Today's daily cleared on this table: the streak grows when
+    ;; yesterday's was the last, holds when today's already was, and
+    ;; starts over otherwise.
+    (define (scores-daily-clear s table day)
+      (let* ((d (daily-entry s table))
+             (streak (cond ((not d) 1)
+                           ((= (car d) day) (cdr d))
+                           ((= (car d) (- day 1)) (+ 1 (cdr d)))
+                           (else 1))))
+        (cons (bests s)
+              (alist-set (dailies s) table (cons day streak) eq?))))
+
+    ;; --- the datum ---------------------------------------------------------------
+
+    (define (scores->datum s)
+      (append (list 'crash-scores 1)
+              (map (lambda (e)
+                     (list 'best (car (car e)) (cdr (car e)) (car (cdr e)) (cadr (cdr e)) (caddr (cdr e))))
+                   (bests s))
+              (map (lambda (e) (list 'daily (car e) (car (cdr e)) (cdr (cdr e))))
+                   (dailies s))))
+
+    (define (nat? x) (and (integer? x) (exact? x) (>= x 0)))
+
+    (define (datum->scores d)
+      (if (and (pair? d) (eq? (car d) 'crash-scores) (pair? (cdr d)) (eqv? (cadr d) 1) (list? (cddr d)))
+          (let loop ((rows (cddr d)) (b '()) (dl '()))
+            (cond ((null? rows) (cons (reverse b) (reverse dl)))
+                  ((let ((r (car rows)))
+                     (and (list? r) (= (length r) 6) (eq? (car r) 'best)
+                          (memq (cadr r) TABLES) (memq (caddr r) VERSIONS)
+                          (nat? (list-ref r 3)) (nat? (list-ref r 4)) (nat? (list-ref r 5))))
+                   (let ((r (car rows)))
+                     (loop (cdr rows)
+                           (cons (cons (key (cadr r) (caddr r)) (list (list-ref r 3) (list-ref r 4) (list-ref r 5))) b)
+                           dl)))
+                  ((let ((r (car rows)))
+                     (and (list? r) (= (length r) 4) (eq? (car r) 'daily)
+                          (memq (cadr r) TABLES) (nat? (caddr r)) (nat? (cadddr r))))
+                   (let ((r (car rows)))
+                     (loop (cdr rows) b (cons (cons (cadr r) (cons (caddr r) (cadddr r))) dl))))
+                  (else (loop (cdr rows) b dl))))   ; an unknown row is skipped, the rest kept
+          (scores-empty)))
+
+    (define (scores-load)
+      (datum->scores (store-read-datum SCORES-KEY)))
+
+    (define (scores-save! s)
+      (store-write-datum! SCORES-KEY (scores->datum s)))))

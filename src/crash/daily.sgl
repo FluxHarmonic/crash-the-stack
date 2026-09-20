@@ -1,0 +1,61 @@
+;;; (crash daily) - The daily seed, from the UTC date.
+;;;
+;;; One deal per table per day, the same for everyone: the day number is
+;;; the epoch second divided by 86400 (epoch seconds are UTC by
+;;; construction; no zone is ever consulted, so a player in Tokyo and one
+;;; in Lima get the same board until 00:00 UTC), and the seeds are a
+;;; hash of it: the stack's is the hash itself (never 0: prng-seed folds
+;;; 0 onto 1, so 0 and 1 would deal alike), DEFRAG's is the hash's pick
+;;; from WINNABLE-SEEDS (every daily dump is winnable). Two adjacent days
+;;; never share a seed (test/test-daily pins the fixture date and its
+;;; neighbours; the pinned values are the gate: a change here is a
+;;; different daily for everyone and must be meant).
+;;;
+;;; The shell hands the epoch second in: the web page's clock at boot
+;;; plus the frames since, natively (current-second). Rules family: no
+;;; platform.
+
+(define-library (crash daily)
+  (import (sigil math)
+          (crash cards seeds))
+
+  (export daily-day daily-date daily-stack-seed daily-cards-seed daily-hash
+          SECONDS-PER-DAY)
+
+  (begin
+    (define SECONDS-PER-DAY 86400)
+    (define TWO31 (expt 2 31))
+
+    ;; The day number of an epoch second (UTC).
+    (define (daily-day seconds)
+      (quotient (exact (floor seconds)) SECONDS-PER-DAY))
+
+    ;; (year month day) of a day number, proleptic Gregorian (the civil
+    ;; date under the daily's line and in the scoreboard).
+    (define (daily-date day)
+      ;; days since 1970-01-01 -> civil, Howard Hinnant's algorithm
+      (let* ((z (+ day 719468))
+             (era (quotient (if (>= z 0) z (- z 146096)) 146097))
+             (doe (- z (* era 146097)))
+             (yoe (quotient (- doe (quotient doe 1460) (- (quotient doe 36524)) (quotient doe 146096)) 365))
+             (y (+ yoe (* era 400)))
+             (doy (- doe (- (+ (* 365 yoe) (quotient yoe 4)) (quotient yoe 100))))
+             (mp (quotient (+ (* 5 doy) 2) 153))
+             (d (+ (- doy (quotient (+ (* 153 mp) 2) 5)) 1))
+             (m (if (< mp 10) (+ mp 3) (- mp 9))))
+        (list (if (<= m 2) (+ y 1) y) m d)))
+
+    ;; A 31-bit hash of the day: two rounds of a linear congruence with
+    ;; the golden-ratio constant, then a mix, so adjacent days land far
+    ;; apart.
+    (define (daily-hash day)
+      (let* ((s (modulo (+ (* day 2654435761) 1597334677) TWO31))
+             (s (modulo (+ (* s 1103515245) 12345) TWO31))
+             (s (modulo (+ (* (quotient s 65536) 2654435761) (modulo s 65536)) TWO31)))
+        s))
+
+    (define (daily-stack-seed day)
+      (max 1 (daily-hash day)))
+
+    (define (daily-cards-seed day)
+      (vector-ref WINNABLE-SEEDS (modulo (daily-hash day) (vector-length WINNABLE-SEEDS))))))

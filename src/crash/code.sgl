@@ -1,0 +1,185 @@
+;;; (crash code) - Share codes: a board as a short string, and back.
+;;;
+;;; A spec names everything a deal needs to come back structurally equal:
+;;; the table (stack, cards, or a JACK IN run), the version (original or
+;;; hacker: the trace mode at deal), the draw count and the scoring (the
+;;; card table's settings; the stack ignores them), the layout (the
+;;; Turtle is 0; reserved) and the seed. encode gives ten characters of
+;;; Crockford base-32 (0-9 A-Z without I L O U, every one in the block
+;;; alphabet), shown XXXXX-XXXXX; decode reads them back, case-free, with
+;;; dashes and spaces ignored, and answers #f for anything else.
+;;;
+;;; The payload is 40 bits in eight digits, most significant first:
+;;;   format 2 (0; a nonzero format is refused), table 2 (0 stack, 1 cards,
+;;;   2 run, 3 refused), version 1 (0 original, 1 hacker), draw 1 (0 one,
+;;;   1 three), scoring 1 (0 standard, 1 vegas), layout 2 (0 turtle; else
+;;;   refused), seed 31.
+;;; The check is two digits: c = sum over i of (i + 1) * d_i, mod 1021, c
+;;; < 1024 in two base-32 digits. A single substituted payload digit
+;;; changes the sum by (i + 1) * delta with |delta| <= 31 and i + 1 <= 8,
+;;; so by at most 248, never a multiple of 1021: every single substitution
+;;; is refused, deterministically (the positive control of the gate); an
+;;; adjacent transposition changes it by d_i - d_(i+1), likewise never 0
+;;; mod 1021 unless the digits are equal (when the code is the same code);
+;;; a substituted check digit misses its own value. A corruption of
+;;; several characters slips through with probability about 1 in 1021.
+;;; Rules family: no platform.
+
+(define-library (crash code)
+  (import (sigil struct)
+          (sigil math)
+          (sigil string))
+
+  (export spec spec? spec-table spec-version spec-draw spec-scoring spec-layout spec-seed
+          spec-new spec-equal?
+          encode decode code-display code-valid?
+          ALPHABET CODE-LENGTH SEED-MAX CHECK-MODULUS)
+
+  (begin
+    (define ALPHABET "0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+    (define CODE-LENGTH 10)
+    (define PAYLOAD-DIGITS 8)
+    (define CHECK-MODULUS 1021)
+    (define SEED-MAX (- (expt 2 31) 1))
+
+    (define TABLES '(stack cards run))
+    (define VERSIONS '(original hacker))
+    (define SCORINGS '(standard vegas))
+    (define LAYOUTS '(turtle))
+
+    (define-struct spec
+      (table default: 'stack)
+      (version default: 'hacker)
+      (draw default: 1)
+      (scoring default: 'vegas)
+      (layout default: 'turtle)
+      (seed default: 1))
+
+    ;; A spec from its parts, or #f when a part is out of range.
+    (define (spec-new table version draw scoring layout seed)
+      (and (memq table TABLES)
+           (memq version VERSIONS)
+           (memv draw '(1 3))
+           (memq scoring SCORINGS)
+           (memq layout LAYOUTS)
+           (integer? seed)
+           (exact? seed)
+           (>= seed 0)
+           (<= seed SEED-MAX)
+           (spec table: table version: version draw: draw scoring: scoring layout: layout seed: seed)))
+
+    (define (spec-equal? a b)
+      (and (eq? (spec-table a) (spec-table b))
+           (eq? (spec-version a) (spec-version b))
+           (= (spec-draw a) (spec-draw b))
+           (eq? (spec-scoring a) (spec-scoring b))
+           (eq? (spec-layout a) (spec-layout b))
+           (= (spec-seed a) (spec-seed b))))
+
+    (define (index-of x lst)
+      (let loop ((l lst) (i 0))
+        (cond ((null? l) #f)
+              ((eq? (car l) x) i)
+              (else (loop (cdr l) (+ i 1))))))
+
+    ;; --- bits <-> digits ---------------------------------------------------------
+
+    ;; The 40-bit payload as one integer.
+    (define (spec->payload s)
+      (let* ((v (index-of (spec-table s) TABLES))
+             (v (+ (* v 2) (index-of (spec-version s) VERSIONS)))
+             (v (+ (* v 2) (if (= (spec-draw s) 3) 1 0)))
+             (v (+ (* v 2) (index-of (spec-scoring s) SCORINGS)))
+             (v (+ (* v 4) (index-of (spec-layout s) LAYOUTS)))
+             (v (+ (* v (expt 2 31)) (spec-seed s))))
+        v))   ; the format's two bits are 0: no shift needed at the top
+
+    ;; The spec of a payload, or #f when a field is out of range.
+    (define (payload->spec p)
+      (let* ((seed (modulo p (expt 2 31)))
+             (p (quotient p (expt 2 31)))
+             (layout (modulo p 4)) (p (quotient p 4))
+             (scoring (modulo p 2)) (p (quotient p 2))
+             (draw (modulo p 2)) (p (quotient p 2))
+             (version (modulo p 2)) (p (quotient p 2))
+             (table (modulo p 4)) (p (quotient p 4))
+             (format p))
+        (and (= format 0)
+             (< table (length TABLES))
+             (< layout (length LAYOUTS))
+             (spec-new (list-ref TABLES table)
+                       (list-ref VERSIONS version)
+                       (if (= draw 1) 3 1)
+                       (list-ref SCORINGS scoring)
+                       (list-ref LAYOUTS layout)
+                       seed))))
+
+    ;; n as count base-32 digits, most significant first.
+    (define (number->digits n count)
+      (let loop ((n n) (k count) (acc '()))
+        (if (= k 0)
+            acc
+            (loop (quotient n 32) (- k 1) (cons (modulo n 32) acc)))))
+
+    (define (digits->number ds)
+      (let loop ((ds ds) (n 0))
+        (if (null? ds) n (loop (cdr ds) (+ (* n 32) (car ds))))))
+
+    (define (check-of digits)
+      (let loop ((ds digits) (i 1) (sum 0))
+        (if (null? ds)
+            (modulo sum CHECK-MODULUS)
+            (loop (cdr ds) (+ i 1) (+ sum (* i (car ds)))))))
+
+    (define (digit->char d) (string-ref ALPHABET d))
+
+    ;; The digit of a character, or #f: upper and lower case alike, and
+    ;; nothing outside the alphabet (I, L, O and U included: no aliasing).
+    (define (char->digit c)
+      (let ((c (char-upcase c)))
+        (let loop ((i 0))
+          (cond ((= i 32) #f)
+                ((char=? (string-ref ALPHABET i) c) i)
+                (else (loop (+ i 1)))))))
+
+    ;; --- the two doors -----------------------------------------------------------
+
+    ;; The ten characters of a spec, no dash.
+    (define (encode s)
+      (let* ((payload (number->digits (spec->payload s) PAYLOAD-DIGITS))
+             (check (number->digits (check-of payload) 2)))
+        (list->string (map digit->char (append payload check)))))
+
+    ;; XXXXX-XXXXX for the menu and the URL.
+    (define (code-display code)
+      (if (= (string-length code) CODE-LENGTH)
+          (string-append (substring code 0 5) "-" (substring code 5 10))
+          code))
+
+    ;; The characters that count: dashes and spaces dropped.
+    (define (strip text)
+      (filter (lambda (c) (not (or (char=? c #\-) (char=? c #\space))))
+              (string->list text)))
+
+    ;; The spec of a code, or #f: wrong length, a character outside the
+    ;; alphabet, a check that does not match, or a payload with a field
+    ;; out of range. Never a different board.
+    (define (decode text)
+      (and (string? text)
+           (let ((cs (strip text)))
+             (and (= (length cs) CODE-LENGTH)
+                  (let ((ds (map char->digit cs)))
+                    (and (every (lambda (d) d) ds)
+                         (let* ((payload (list-head ds PAYLOAD-DIGITS))
+                                (check (digits->number (list-from ds PAYLOAD-DIGITS))))
+                           (and (= check (check-of payload))
+                                (payload->spec (digits->number payload))))))))))
+
+    (define (list-from l n)
+      (if (= n 0) l (list-from (cdr l) (- n 1))))
+
+    (define (list-head l n)
+      (if (= n 0) '() (cons (car l) (list-head (cdr l) (- n 1)))))
+
+    (define (code-valid? text)
+      (and (decode text) #t))))

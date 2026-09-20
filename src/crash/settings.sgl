@@ -1,0 +1,120 @@
+;;; (crash settings) - The SETTINGS screen's rows, and where they live.
+;;;
+;;; Nine settings (P4, ruled 2026-09-20), each a row of the screen with
+;;; a name on the left and its value on the right, stepped by Enter, a
+;;; tap, or left/right: the card table's PULL (draw one or three) and
+;;; SCORING (BOUNTY is Vegas, AUDIT is Standard; the scoring is the
+;;; setting in both versions of the game, the trace and the timer stay
+;;; the version's), the bar's HUD layout (D33/D34), the living FIELD's
+;;; rule (D46: reaction by default; life; off is the phone's lever),
+;;; MUSIC (the ambient) and SFX (the cues) with VOLUME the master (David,
+;;; 2026-09-20), and the two D36 cosmetics SCANLINES and
+;;; VEIL, off by default.
+;;;
+;;; Every setting is its own store key holding a plain datum (the shape
+;;; the hud key has had since P3; ?hud= and --hud still write it):
+;;; "draw" 1|3, "scoring" vegas|standard, "hud" zones|strip, "field"
+;;; reaction|life|off, "music" on|off, "sfx" on|off, "volume" 0..10, "scanlines" on|off,
+;;; "veil" on|off (symbols, not booleans: a missing key reads as #f from
+;;; the store, which a boolean row could not tell from OFF). A missing or
+;;; unreadable key is the default. The
+;;; settings in force are an alist of (id . value); the shells load it
+;;; at boot and write one key when a row steps.
+
+(define-library (crash settings)
+  (import (sigil struct)
+          (crash store))
+
+  (export setting setting? setting-id setting-name setting-values setting-default setting-key
+          SETTINGS SETTING-IDS setting-ref setting-value-label setting-value?
+          settings-load settings-defaults settings-value settings-with settings-step settings-save!
+          VOLUME-MAX)
+
+  (begin
+    (define VOLUME-MAX 10)
+
+    (define-struct setting
+      (id default: #f)
+      (name default: "")           ; the row's label, in the block alphabet
+      (values default: '())        ; the values in stepping order
+      (default default: #f)
+      (key default: ""))           ; the store key
+
+    (define (volume-values)
+      (let loop ((v VOLUME-MAX) (acc '()))
+        (if (< v 0) acc (loop (- v 1) (cons v acc)))))
+
+    ;; Built with list, not quoted (the wasm literal hazard, see (crash menu)).
+    (define SETTINGS
+      (list (setting id: 'draw name: "PULL" values: (list 1 3) default: 1 key: "draw")
+            (setting id: 'scoring name: "SCORING" values: (list 'vegas 'standard) default: 'vegas key: "scoring")
+            (setting id: 'hud name: "HUD" values: (list 'zones 'strip) default: 'zones key: "hud")
+            (setting id: 'field name: "FIELD" values: (list 'reaction 'life 'off) default: 'reaction key: "field")
+            (setting id: 'music name: "MUSIC" values: (list 'on 'off) default: 'on key: "music")
+            (setting id: 'sfx name: "SFX" values: (list 'on 'off) default: 'on key: "sfx")
+            (setting id: 'volume name: "VOLUME" values: (volume-values) default: VOLUME-MAX key: "volume")
+            (setting id: 'scanlines name: "SCANLINES" values: (list 'off 'on) default: 'off key: "scanlines")
+            (setting id: 'veil name: "VEIL" values: (list 'off 'on) default: 'off key: "veil")))
+
+    (define SETTING-IDS (map setting-id SETTINGS))
+
+    (define (setting-ref id)
+      (let loop ((ss SETTINGS))
+        (cond ((null? ss) #f)
+              ((eq? (setting-id (car ss)) id) (car ss))
+              (else (loop (cdr ss))))))
+
+    (define (setting-value? st v)
+      (and (member v (setting-values st)) #t))
+
+    ;; The value as the row shows it.
+    (define (setting-value-label id v)
+      (case id
+        ((scoring) (if (eq? v 'vegas) "BOUNTY" "AUDIT"))
+        ((draw volume) (number->string v))
+        (else (string-upcase-symbol v))))
+
+    (define (string-upcase-symbol v)
+      (list->string (map char-upcase (string->list (symbol->string v)))))
+
+    ;; --- the settings in force -----------------------------------------------
+
+    (define (settings-defaults)
+      (map (lambda (st) (cons (setting-id st) (setting-default st))) SETTINGS))
+
+    ;; Every setting from the store, the default where the key is missing
+    ;; or holds something outside the row's values.
+    (define (settings-load)
+      (map (lambda (st)
+             (let ((d (store-read-datum (setting-key st))))
+               (cons (setting-id st) (if (setting-value? st d) d (setting-default st)))))
+           SETTINGS))
+
+    (define (settings-value s id)
+      (let ((e (assq id s)))
+        (if e (cdr e) (let ((st (setting-ref id))) (and st (setting-default st))))))
+
+    ;; s with id at v (v must be one of the row's values; else s).
+    (define (settings-with s id v)
+      (let ((st (setting-ref id)))
+        (if (and st (setting-value? st v))
+            (map (lambda (e) (if (eq? (car e) id) (cons id v) e)) s)
+            s)))
+
+    ;; s with id stepped by delta (+1 forward, -1 back), wrapping.
+    (define (settings-step s id delta)
+      (let ((st (setting-ref id)))
+        (if (not st)
+            s
+            (let* ((vs (setting-values st))
+                   (n (length vs))
+                   (at (let loop ((l vs) (i 0))
+                         (cond ((null? l) 0)
+                               ((equal? (car l) (settings-value s id)) i)
+                               (else (loop (cdr l) (+ i 1)))))))
+              (settings-with s id (list-ref vs (modulo (+ at delta) n)))))))
+
+    ;; One setting to the store. Answers what the store said.
+    (define (settings-save! s id)
+      (let ((st (setting-ref id)))
+        (and st (store-write-datum! (setting-key st) (settings-value s id)))))))
