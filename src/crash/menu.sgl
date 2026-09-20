@@ -1,14 +1,27 @@
-;;; (crash menu) - The first screen: which table, and the update.
+;;; (crash menu) - The menu: its screens, their rows, and what a choice is.
 ;;;
-;;; A menu is a list of entries, each an id and its label, with one
-;;; highlighted. The shell decides which entries are shown (CONTINUE only
-;;; when a saved game exists, UPDATE only when the page says one is
-;;; waiting) and what a choice does; this module holds the entries as
-;;; data, moves the highlight on keys, picks on Enter, Space or a tap, and
-;;; says where each entry is drawn so (crash render) and the tap agree.
-;;; Plain primitives look; P4 restyles it into the DOOM/Quake-style menu
-;;; (ruling D14) without changing this shape. Nothing here reads a
-;;; platform.
+;;; The real menu (P4, rulings D14 and D19): a DOOM-style list of items
+;;; set in the block alphabet, one highlighted, on a stack of screens.
+;;; The top screen is JACK IN / FREE PLAY / SETTINGS / CREDITS, with
+;;; CONTINUE first when a board or a run is live and UPDATE last when
+;;; the page says a version is waiting. FREE PLAY picks the table, the
+;;; daily, a share code, the scoreboard, and the version to deal
+;;; (HACKER, the trace on; ORIGINAL, the classic with its timer);
+;;; SETTINGS holds (crash settings)' rows; CREDITS and SCORES are
+;;; screens the draw fills; CODE takes a share code from the keyboard
+;;; or a keypad.
+;;;
+;;; The shell decides which top entries are shown and what a choice does;
+;;; this module holds every screen's entries as data, moves the
+;;; highlight on keys, steps a value row on left/right, Enter or a tap,
+;;; picks on Enter, Space or a tap, opens and closes the sub-screens,
+;;; and says where each row and keypad cell is drawn so (crash title
+;;; draw) and the tap agree. A frame answers (cons menu choice); a
+;;; choice is a symbol the shell acts on (continue, jack-in, stack,
+;;; cards, daily-stack, daily-cards, update, copy, code-refused),
+;;; (set ID . VALUE) when a setting stepped (the shell stores and
+;;; applies it), or (code . SPEC) when a share code was entered and
+;;; read. Nothing here reads a platform.
 ;;;
 ;;; The title (P3d, ruling D38) lives here too: the menu carries a
 ;;; (crash title) state, steps it once per frame, and while its reveal
@@ -20,92 +33,228 @@
 (define-library (crash menu)
   (import (sigil struct)
           (sigil math)
+          (sigil string)
           (crash input)
-          (crash title))
+          (crash title)
+          (crash settings)
+          (crash code))
 
-  (export menu menu? menu-new menu-entries menu-highlight menu-frames
-          menu-title menu-with-title
+  (export menu menu? menu-new menu-screen menu-entries menu-highlight menu-frames
+          menu-title menu-with-title menu-settings menu-with-settings
+          menu-version menu-code-line menu-with-code-line menu-code menu-page
+          menu-scores menu-with-scores
           menu-step menu-entry-rect menu-hit menu-cues menu-live?
-          menu-label MENU-ENTRIES MENU-TITLE
-          ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y)
+          menu-label menu-row-value menu-row-kind menu-heading menu-code-display
+          code-line-rect keypad-cells keypad-rect keypad-hit
+          MENU-ENTRIES MENU-TITLE SCREENS
+          ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y SUB-ENTRIES-Y HEADING-Y CODE-LINE-Y VALUE-ROW-W TEXT-ROWS-Y
+          CREDITS-PAGES)
 
   (begin
     (define MENU-TITLE "CRASH THE STACK")
 
-    ;; Every entry the menu can show, in order, with its label: the
-    ;; tables and UPDATE when the page says a version is waiting. P4's
-    ;; menu (rulings D19, D14) extends this list; the prototype entries
-    ;; that stepped a setting without leaving the menu (LOOK, HUD, DEPTH)
-    ;; went once their rulings landed (D32, D34, D48).
-    ;; Built with list, not quoted: on the web build (2026-09-19, S8) the
-    ;; quoted literal came out of module load with its first four entries
-    ;; overwritten by symbol-table garbage ("kept-length", "game-won?",
-    ;; ...) while a list built at init was intact: a sigil wasm runtime
-    ;; bug in how literal constants are rooted, reported to the leader.
+    ;; Every entry any screen can show, with its label. Built with list,
+    ;; not quoted: on the web build (2026-09-19, S8) a quoted literal came
+    ;; out of module load with its first four entries overwritten by
+    ;; symbol-table garbage while a list built at init was intact (a
+    ;; sigil wasm runtime bug in how literal constants are rooted).
     (define MENU-ENTRIES
       (list (list 'continue "CONTINUE")
+            (list 'jack-in "JACK IN")
+            (list 'free-play "FREE PLAY")
+            (list 'settings "SETTINGS")
+            (list 'credits "CREDITS")
+            (list 'update "UPDATE")
             (list 'stack "STACK")
             (list 'cards "DEFRAG")
-            (list 'update "UPDATE")))
+            (list 'daily-stack "DAILY STACK")
+            (list 'daily-cards "DAILY DEFRAG")
+            (list 'code "CODE")
+            (list 'scores "SCORES")
+            (list 'version "VERSION")
+            (list 'back "BACK")))
+
+    ;; The screens: each with its entries in order and its heading (the
+    ;; top screen has the logo instead).
+    (define SCREENS
+      (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update)
+            (list 'free "FREE PLAY" 'stack 'cards 'daily-stack 'daily-cards 'code 'scores 'version 'back)
+            (list 'settings "SETTINGS" 'draw 'scoring 'hud 'field 'music 'sfx 'volume 'scanlines 'veil 'back)
+            (list 'credits "CREDITS" 'back)
+            (list 'scores "SCORES" 'back)
+            (list 'code "ENTER CODE" 'back)))
+
+    (define CREDITS-PAGES 2)
+
+    (define (screen-entries screen)
+      (let ((e (assq screen SCREENS)))
+        (if e (cddr e) '())))
+
+    (define (menu-heading m)
+      (let ((e (assq (menu-screen m) SCREENS)))
+        (and e (cadr e))))
 
     ;; The entries sit under the logo (TITLE-Y + TITLE-H is 120 on the
     ;; 14-row grid) with the backdrop's tower showing between (ruling D39:
     ;; no boxes, plain text, the selected one in the hero ramp with a
     ;; blinking cursor at its left; D41: set in the block alphabet at 4 px
-    ;; cells, 24 px tall plus the shadow): five of them at 28 + 4 from y 168 reach
-    ;; 324, above the footer. The rects are the tap targets; 440 wide fits
-    ;; the longest label (CONNECTING 0/6 is 14 glyphs, 444 px, so it overhangs by 2).
+    ;; cells, 24 px tall plus the shadow): six of them at 28 + 4 from y 168
+    ;; end at 356, above the bottom band (376). A sub-screen replaces the
+    ;; logo with its heading at HEADING-Y and starts its rows at
+    ;; SUB-ENTRIES-Y: ten rows end at 372. The rects are the tap targets;
+    ;; 440 wide fits the longest centered label (CONNECTING 0/6 is 14
+    ;; glyphs, 444 px, so it overhangs by 2); a value row spans the width
+    ;; less the gutters, its name left and its value right.
     (define ENTRY-W 440)
     (define ENTRY-H 28)
     (define ENTRY-GAP 4)
     (define ENTRIES-Y 168)
+    (define SUB-ENTRIES-Y 56)
+    (define HEADING-Y 16)
+    (define VALUE-ROW-W 600)
+    ;; the live board's share code under the top screen's items
+    (define CODE-LINE-Y 360)
+    ;; the text screens (CREDITS, SCORES, CODE) keep their rows at the bottom, under their content
+    (define TEXT-ROWS-Y 340)
+    (define TEXT-SCREENS (list 'credits 'scores 'code))
 
     (define-struct menu
+      (screen default: 'top)     ; top | free | settings | credits | scores | code
       (entries default: '())     ; the ids shown, in order
       (highlight default: 0)     ; index into entries
+      (top-entries default: '()) ; the top screen's ids, kept while a sub-screen is up
+      (settings default: '())    ; the settings in force, (crash settings)' alist
+      (version default: 'hacker) ; FREE PLAY's version to deal: hacker | original
+      (code-line default: #f)    ; the live board's share code (ten characters), or #f
+      (code default: "")         ; the CODE screen's typed characters
+      (page default: 0)          ; the CREDITS screen's page
+      (scores default: #f)       ; the scoreboard for the SCORES screen, or #f
       (title default: #f)        ; the title's reveal state, (crash title)
       (frames default: 0))       ; menu frames so far, for the cursor's blink
 
-    (define (menu-with-title m t)
-      (menu m title: t))
+    (define (menu-with-title m t) (menu m title: t))
+    (define (menu-with-settings m s) (menu m settings: s))
+    (define (menu-with-code-line m code) (menu m code-line: code))
+    (define (menu-with-scores m s) (menu m scores: s))
 
     (define (menu-label id)
       (let ((entry (assq id MENU-ENTRIES)))
-        (if entry (cadr entry) "?")))
+        (cond (entry (cadr entry))
+              ((setting-ref id) (setting-name (setting-ref id)))
+              (else "?"))))
 
-    ;; The menu over the ids that are shown (unknown ids dropped, the
-    ;; canonical order kept), highlighting the first of them, or the id
-    ;; asked for when it is shown. seed: a number opens the title with its
-    ;; reveal running from that seed; none (or #f) opens it settled.
+    ;; item (a choice) or value (a row that steps).
+    (define (menu-row-kind m id)
+      (if (or (eq? id 'version) (setting-ref id)) 'value 'item))
+
+    ;; The value a row shows, as text, or #f for an item.
+    (define (menu-row-value m id)
+      (cond ((eq? id 'version) (if (eq? (menu-version m) 'original) "ORIGINAL" "HACKER"))
+            ((setting-ref id) (setting-value-label id (settings-value (menu-settings m) id)))
+            (else #f)))
+
+    ;; The CODE screen's text as shown: the typed characters with a dash
+    ;; after the fifth.
+    (define (menu-code-display m)
+      (let* ((code (menu-code m))
+             (n (string-length code)))
+        (if (> n 5)
+            (string-append (substring code 0 5) "-" (substring code 5 n))
+            code)))
+
+    ;; The top screen over the ids that are shown (unknown ids dropped,
+    ;; the canonical order kept), highlighting the first of them, or the
+    ;; id asked for when it is shown. seed: a number opens the title with
+    ;; its reveal running from that seed; none (or #f) opens it settled.
     (define (menu-new shown . rest)
-      (let* ((ids (filter (lambda (e) (memq (car e) shown)) MENU-ENTRIES))
-             (ids (map car ids))
+      (let* ((ids (filter (lambda (id) (memq id shown)) (screen-entries 'top)))
              (want (and (pair? rest) (car rest)))
              (seed (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-             (at (let loop ((ids ids) (i 0))
-                   (cond ((null? ids) 0)
-                         ((eq? (car ids) want) i)
-                         (else (loop (cdr ids) (+ i 1))))))
+             (at (index-of want ids))
              (t (title-new (or seed 1) (title-default-baud) (not seed))))
-        (menu entries: ids highlight: at title: t)))
+        (menu entries: ids
+              top-entries: ids
+              highlight: at
+              settings: (settings-defaults)
+              title: t)))
 
-    ;; (x y w h) of the index-th entry, centered on the viewport.
-    (define (menu-entry-rect index vw vh)
-      (list (quotient (- vw ENTRY-W) 2)
-            (+ ENTRIES-Y (* index (+ ENTRY-H ENTRY-GAP)))
-            ENTRY-W
-            ENTRY-H))
+    (define (index-of want ids)
+      (let loop ((ids ids) (i 0))
+        (cond ((null? ids) 0)
+              ((eq? (car ids) want) i)
+              (else (loop (cdr ids) (+ i 1))))))
+
+    ;; --- geometry ------------------------------------------------------------------
+
+    ;; (x y w h) of the index-th row of the menu's screen.
+    (define (menu-entry-rect m index vw vh)
+      (let* ((top? (eq? (menu-screen m) 'top))
+             (ids (menu-entries m))
+             (id (and (< index (length ids)) (list-ref ids index)))
+             (value? (and id (eq? (menu-row-kind m id) 'value)))
+             (w (if value? VALUE-ROW-W ENTRY-W)))
+        (list (quotient (- vw w) 2)
+              (+ (cond (top? ENTRIES-Y)
+                       ((memq (menu-screen m) TEXT-SCREENS) TEXT-ROWS-Y)
+                       (else SUB-ENTRIES-Y))
+                 (* index (+ ENTRY-H ENTRY-GAP)))
+              w
+              ENTRY-H)))
 
     (define (rect-contains? r x y)
       (and (>= x (car r)) (< x (+ (car r) (caddr r)))
            (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
 
-    ;; The index of the entry under a point, or #f.
+    ;; The index of the row under a point, or #f.
     (define (menu-hit m vw vh x y)
       (let loop ((i 0))
         (cond ((= i (length (menu-entries m))) #f)
-              ((rect-contains? (menu-entry-rect i vw vh) x y) i)
+              ((rect-contains? (menu-entry-rect m i vw vh) x y) i)
               (else (loop (+ i 1))))))
+
+    ;; The live board's code line: (x y w h) under the items, or #f.
+    (define (code-line-rect m vw vh)
+      (and (menu-code-line m)
+           (eq? (menu-screen m) 'top)
+           (list (quotient (- vw 400) 2) (- CODE-LINE-Y 4) 400 16)))
+
+    ;; The CODE screen's keypad: the alphabet in four rows of eight under
+    ;; the typed line, then DEL and GO. Cells 56 wide at a 64 pitch (the
+    ;; row is 8 * 64 - 8 = 504), 28 tall at a 32 pitch, from y 168.
+    (define KEYPAD-X 68)
+    (define KEYPAD-Y 168)
+    (define KEYPAD-CELL-W 56)
+    (define KEYPAD-CELL-H 28)
+    (define KEYPAD-PITCH-X 64)
+    (define KEYPAD-PITCH-Y 32)
+
+    ;; ((label x y w h) ...): one per character of the alphabet, then DEL and GO.
+    (define (keypad-cells vw vh)
+      (let loop ((i 0) (acc '()))
+        (if (= i 32)
+            (reverse (cons (list "GO" (+ KEYPAD-X (* 4 KEYPAD-PITCH-X)) (+ KEYPAD-Y (* 4 KEYPAD-PITCH-Y)) (- (* 4 KEYPAD-PITCH-X) 8) KEYPAD-CELL-H)
+                           (cons (list "DEL" KEYPAD-X (+ KEYPAD-Y (* 4 KEYPAD-PITCH-Y)) (- (* 4 KEYPAD-PITCH-X) 8) KEYPAD-CELL-H)
+                                 acc)))
+            (loop (+ i 1)
+                  (cons (list (string (string-ref ALPHABET i))
+                              (+ KEYPAD-X (* (modulo i 8) KEYPAD-PITCH-X))
+                              (+ KEYPAD-Y (* (quotient i 8) KEYPAD-PITCH-Y))
+                              KEYPAD-CELL-W
+                              KEYPAD-CELL-H)
+                        acc)))))
+
+    (define (keypad-rect label vw vh)
+      (let ((cell (assoc label (keypad-cells vw vh))))
+        (and cell (cdr cell))))
+
+    ;; The keypad label under a point, or #f.
+    (define (keypad-hit vw vh x y)
+      (let loop ((cells (keypad-cells vw vh)))
+        (cond ((null? cells) #f)
+              ((rect-contains? (cdr (car cells)) x y) (car (car cells)))
+              (else (loop (cdr cells))))))
+
+    ;; --- stepping ----------------------------------------------------------------
 
     (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
 
@@ -127,18 +276,123 @@
         (and (or (not t) (title-settled? t))
              (boot-done?))))
 
-    ;; One frame: (cons menu choice), choice the chosen id or #f. The
-    ;; title ticks first; while its reveal runs, a tap or any key skips it
-    ;; and the frame ends there (a tap meant to skip must not start a
-    ;; game); while the boot's steps are still running, input reaches
-    ;; nothing. Then up/down (or k/j) move, Enter or Space pick the
-    ;; highlight, a tap on an entry picks it at once.
+    ;; A sub-screen opened over the top screen, its first row highlighted.
+    (define (open-screen m screen)
+      (menu m screen: screen entries: (screen-entries screen) highlight: 0 code: "" page: 0))
+
+    ;; Back to the top screen, the item that opened the sub-screen highlighted.
+    (define (close-screen m)
+      (let ((opener (case (menu-screen m)
+                      ((free) 'free-play)
+                      ((settings) 'settings)
+                      ((credits) 'credits)
+                      ((scores code) 'free-play)
+                      (else #f))))
+        (menu m screen: 'top
+              entries: (menu-top-entries m)
+              highlight: (index-of opener (menu-top-entries m)))))
+
+    ;; A value row stepped by delta: the version flips; a setting steps
+    ;; and the choice says so.
+    (define (step-value m id delta)
+      (cond ((eq? id 'version)
+             (cons (menu m version: (if (eq? (menu-version m) 'hacker) 'original 'hacker)) #f))
+            ((setting-ref id)
+             (let ((s (settings-step (menu-settings m) id delta)))
+               (cons (menu m settings: s) (cons 'set (cons id (settings-value s id))))))
+            (else (cons m #f))))
+
+    ;; The highlighted row picked (Enter, Space, a tap): an item is the
+    ;; choice, a screen opener opens it, BACK closes, a value row steps.
+    (define (pick m)
+      (let ((id (highlighted m)))
+        (cond ((not id) (cons m #f))
+              ((eq? (menu-row-kind m id) 'value) (step-value m id 1))
+              ((eq? id 'free-play) (cons (open-screen m 'free) #f))
+              ((eq? id 'settings) (cons (open-screen m 'settings) #f))
+              ((eq? id 'credits) (cons (open-screen m 'credits) #f))
+              ((eq? id 'scores) (cons (open-screen m 'scores) #f))
+              ((eq? id 'code) (cons (open-screen m 'code) #f))
+              ((eq? id 'back) (cons (close-screen m) #f))
+              (else (cons m id)))))
+
+    ;; The CODE screen's own keys: a character of the alphabet appends
+    ;; (ten at most), Backspace deletes, Enter reads the code (a valid
+    ;; one is the choice; an invalid one is refused: the text stays, the
+    ;; shell may say so), Escape closes. Keys are sigil-app's names:
+    ;; a..z and 0..9 as one-character symbols.
+    (define (code-key m f)
+      (let ((code (menu-code m)))
+        (cond ((pressed? f 'escape) (cons (close-screen m) #f))
+              ((pressed? f 'backspace)
+               (cons (menu m code: (if (> (string-length code) 0) (substring code 0 (- (string-length code) 1)) code)) #f))
+              ((pressed? f 'return) (code-go m))
+              (else
+               (let ((typed (find-typed (input-frame-pressed f))))
+                 (if (and typed (< (string-length code) CODE-LENGTH))
+                     (cons (menu m code: (string-append code typed)) #f)
+                     (cons m #f)))))))
+
+    ;; The first pressed key that is a character of the alphabet, as an
+    ;; upper-case string, or #f.
+    (define (find-typed pressed)
+      (let loop ((ks pressed))
+        (cond ((null? ks) #f)
+              ((symbol? (car ks))
+               (let ((text (symbol->string (car ks))))
+                 (if (and (= (string-length text) 1)
+                          (alphabet-char? (char-upcase (string-ref text 0))))
+                     (string (char-upcase (string-ref text 0)))
+                     (loop (cdr ks)))))
+              (else (loop (cdr ks))))))
+
+    (define (alphabet-char? c)
+      (let loop ((i 0))
+        (cond ((= i (string-length ALPHABET)) #f)
+              ((char=? (string-ref ALPHABET i) c) #t)
+              (else (loop (+ i 1))))))
+
+    ;; GO: the typed code read; a valid one is the choice.
+    (define (code-go m)
+      (let ((spec (decode (menu-code m))))
+        (if spec
+            (cons m (cons 'code spec))
+            (cons m 'code-refused))))
+
+    ;; A tap on the CODE screen: the keypad first, then the rows.
+    (define (code-tap m vw vh x y)
+      (let ((label (keypad-hit vw vh x y)))
+        (cond ((not label) (tap-rows m vw vh x y))
+              ((string=? label "DEL") (code-key m (make-input-frame '(backspace) '() #f)))
+              ((string=? label "GO") (code-go m))
+              ((< (string-length (menu-code m)) CODE-LENGTH)
+               (cons (menu m code: (string-append (menu-code m) label)) #f))
+              (else (cons m #f)))))
+
+    ;; A tap on a row picks it (a value row steps forward); on the live
+    ;; board's code line, COPY; elsewhere nothing.
+    (define (tap-rows m vw vh x y)
+      (let ((i (menu-hit m vw vh x y))
+            (line (code-line-rect m vw vh)))
+        (cond (i (pick (menu m highlight: i)))
+              ((and line (rect-contains? line x y)) (cons m 'copy))
+              (else (cons m #f)))))
+
+    ;; One frame: (cons menu choice). The title ticks first; while its
+    ;; reveal runs, a tap or any key skips it and the frame ends there (a
+    ;; tap meant to skip must not start a game); while the boot's steps
+    ;; are still running, input reaches nothing. Then the CODE screen
+    ;; takes its keys; else up/down (or k/j) move, left/right (or h/l)
+    ;; step a value row, Enter or Space pick, Escape or Backspace close a
+    ;; sub-screen (on the top screen Escape is CONTINUE when a board is
+    ;; live: the pause menu closes), a tap on a row picks it at once.
     (define (menu-step m f vw vh)
       (let* ((t (menu-title m))
              (running? (and t (title-running? t)))
              (t (and t (title-step t)))
              (m (menu m title: t frames: (+ 1 (menu-frames m))))
-             (click (input-frame-click f)))
+             (click (input-frame-click f))
+             (top? (eq? (menu-screen m) 'top)))
         (cond ((and t (title-gated? t) (or click (pair? (input-frame-pressed f))))
                ;; the gate (D42): the first tap or key opens the line, nothing else
                (cons (menu m title: (title-ungate t)) #f))
@@ -150,14 +404,32 @@
               ((and running? (or click (pair? (input-frame-pressed f))))
                (cons (menu m title: (title-skip t)) #f))
               ((not (menu-live? m)) (cons m #f))
-              ((and click (menu-hit m vw vh (car click) (cdr click)))
-               => (lambda (i)
-                    (let ((m (menu m highlight: i)))
-                      (cons m (highlighted m)))))
+              ((eq? (menu-screen m) 'code)
+               (if click (code-tap m vw vh (car click) (cdr click)) (code-key m f)))
+              (click (tap-rows m vw vh (car click) (cdr click)))
               ((or (pressed? f 'up) (pressed? f 'k)) (cons (move m -1) #f))
               ((or (pressed? f 'down) (pressed? f 'j)) (cons (move m 1) #f))
-              ((or (pressed? f 'return) (pressed? f 'space)) (cons m (highlighted m)))
+              ((or (pressed? f 'left) (pressed? f 'h))
+               (if (eq? (menu-screen m) 'credits)
+                   (cons (menu m page: (modulo (- (menu-page m) 1) CREDITS-PAGES)) #f)
+                   (step-highlighted m -1)))
+              ((or (pressed? f 'right) (pressed? f 'l))
+               (if (eq? (menu-screen m) 'credits)
+                   (cons (menu m page: (modulo (+ (menu-page m) 1) CREDITS-PAGES)) #f)
+                   (step-highlighted m 1)))
+              ((or (pressed? f 'return) (pressed? f 'space)) (pick m))
+              ((or (pressed? f 'escape) (and (pressed? f 'backspace) (not top?)))
+               (cond ((not top?) (cons (close-screen m) #f))
+                     ((memq 'continue (menu-entries m)) (cons m 'continue))
+                     (else (cons m #f))))
               (else (cons m #f)))))
+
+    ;; left/right on a value row steps it; on an item, nothing.
+    (define (step-highlighted m delta)
+      (let ((id (highlighted m)))
+        (if (and id (eq? (menu-row-kind m id) 'value))
+            (step-value m id delta)
+            (cons m #f))))
 
     ;; The title's cues between two menu frames (a line began, a glitch
     ;; came on, the reveal settled) as the bank's cue names, for the shell

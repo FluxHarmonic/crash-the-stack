@@ -24,9 +24,14 @@
           (crash title alphabet)
           (crash title card)
           (crash atlas)
-          (crash menu))
+          (crash menu)
+          (crash settings)
+          (crash credits)
+          (crash scores)
+          (crash code))
 
-  (export title-draw draw-title draw-menu-item draw-menu-items title-covers? title-bake! title-diag! title-diag-dial!
+  (export title-draw draw-title draw-menu-item draw-menu-items draw-bottom-band title-stamp!
+          title-covers? title-bake! title-diag! title-diag-dial!
           TITLE-CELL TITLE-X TITLE-Y TITLE-H
           BACKDROP-W BACKDROP-H)
 
@@ -387,56 +392,252 @@
     ;; step done); while the reveal runs, nothing (it is the cover); once
     ;; it has settled with steps still running, CONNECTING with the boot's
     ;; progress and the blinking cursor where the first item will be.
+    ;; A sub-screen (P4) draws its heading where the logo was, its rows
+    ;; under it (a value row's name left and value right), and its own
+    ;; content: the credits' pages, the scoreboard, the code entry.
     (define (draw-menu-items m vw vh)
       (draw-menu-items* m vw vh)
       (when *diag* (draw-diag *last-backdrop* *last-card* vw vh)))
     (define (draw-menu-items* m vw vh)
       (cond ((menu-live? m)
-             (draw-title-line vw vh)
-             (let ((labels (map (lambda (id) (entry-label m id)) (menu-entries m))))
-               (when *bake* (items-bake! labels))
-               (let loop ((ls labels) (i 0))
-                 (unless (null? ls)
-                   (draw-menu-item (car ls)
-                                   (menu-entry-rect i vw vh)
-                                   (= i (menu-highlight m))
-                                   (menu-frames m)
-                                   i)
-                   (loop (cdr ls) (+ i 1))))))
+             (if (eq? (menu-screen m) 'top)
+                 (draw-top-screen m vw vh)
+                 (draw-sub-screen m vw vh)))
             ((and (menu-title m) (title-settled? (menu-title m)))
              (let* ((p (boot-progress))
                     (label (string-append "CONNECTING "
                                           (number->string (car p))
                                           "/"
                                           (number->string (cdr p)))))
-               (draw-menu-item label (menu-entry-rect 0 vw vh) #t (menu-frames m))))
+               (draw-menu-item label (menu-entry-rect m 0 vw vh) #t (menu-frames m))))
             (else #f)))
 
-    ;; The title's bottom line (ruling D44): the copyright, centered in the
-    ;; 5x7 at scale 1, C-LABEL-LIT, one cell above the footer's line; with
-    ;; the items, once the menu is live. No licence text on the title.
-    (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
+    ;; The index of a label on the baked sheet, or #f (drawn directly then).
+    (define (label-index label)
+      (and *items-key*
+           (let loop ((ls *items-key*) (i 0))
+             (cond ((null? ls) #f)
+                   ((string=? (car ls) label) i)
+                   (else (loop (cdr ls) (+ i 1)))))))
+
+    (define (draw-top-screen m vw vh)
+      (let ((labels (map menu-label (menu-entries m))))
+        (when *bake* (items-bake! labels))
+        (let loop ((ls labels) (i 0))
+          (unless (null? ls)
+            (draw-menu-item (car ls)
+                            (menu-entry-rect m i vw vh)
+                            (= i (menu-highlight m))
+                            (menu-frames m)
+                            (label-index (car ls)))
+            (loop (cdr ls) (+ i 1))))
+        ;; the live board's share code (P4), with COPY on the web
+        (let ((r (code-line-rect m vw vh)))
+          (when r
+            (let* ((line (string-append "CODE " (code-display (menu-code-line m)) "  [COPY]"))
+                   (x (quotient (- vw (text-width line 1)) 2)))
+              (color! C-STATIC-B)
+              (text! line (+ x 1) (+ (cadr r) 5) 1)
+              (color! C-LABEL-LIT)
+              (text! line x (+ (cadr r) 4) 1))))))
+
+    ;; The labels a sub-screen's sheet holds: the heading, every row's
+    ;; name, and every value a row can show, so stepping a value never
+    ;; re-bakes (a bake is a 300 ms frame on the phone).
+    (define (screen-labels m)
+      (let ((ids (menu-entries m)))
+        (append (list (or (menu-heading m) ""))
+                (map menu-label ids)
+                (apply append
+                       (map (lambda (id)
+                              (cond ((eq? id 'version) (list "HACKER" "ORIGINAL"))
+                                    ((setting-ref id)
+                                     (map (lambda (v) (setting-value-label id v))
+                                          (setting-values (setting-ref id))))
+                                    (else '())))
+                            ids)))))
+
+    (define (draw-sub-screen m vw vh)
+      (when *bake* (items-bake! (screen-labels m)))
+      ;; the heading, in the ramp, where the logo was
+      (let* ((heading (or (menu-heading m) ""))
+             (tw (* ITEM-CELL (block-text-width heading)))
+             (tx (quotient (- vw tw) 2)))
+        (if (and *bake* *items-tex* (label-index heading))
+            (draw-item-row (label-index heading) 'ramp tx HEADING-Y tw)
+            (draw-block-text heading tx HEADING-Y ITEM-CELL 'ramp)))
+      ;; the rows
+      (let loop ((ids (menu-entries m)) (i 0))
+        (unless (null? ids)
+          (let* ((id (car ids))
+                 (rect (menu-entry-rect m i vw vh))
+                 (lit? (= i (menu-highlight m)))
+                 (value (menu-row-value m id)))
+            (if value
+                (draw-value-row (menu-label id) value rect lit? (menu-frames m))
+                (draw-menu-item (menu-label id) rect lit? (menu-frames m) (label-index (menu-label id)))))
+          (loop (cdr ids) (+ i 1))))
+      ;; the screen's content
+      (case (menu-screen m)
+        ((credits) (draw-credits m vw vh))
+        ((scores) (draw-scores m vw vh))
+        ((code) (draw-code-entry m vw vh))
+        (else #f)))
+
+    ;; A value row: the name at the row's left, the value right-aligned
+    ;; at its right, both in the ramp when highlighted, the cursor at the
+    ;; name's left.
+    (define (draw-value-row name value rect lit? frames)
+      (let* ((x (car rect)) (y (cadr rect)) (w (caddr rect)) (h (cadddr rect))
+             (th (* ITEM-CELL ALPHABET-H))
+             (ty (+ y (quotient (- h th ITEM-CELL) 2)))
+             (nw (* ITEM-CELL (block-text-width name)))
+             (vw* (* ITEM-CELL (block-text-width value)))
+             (nx (+ x (* 4 ITEM-CELL)))
+             (vx (- (+ x w) vw*))
+             (style (if lit? 'ramp 'flat))
+             (draw (lambda (label tx tw)
+                     (let ((i (label-index label)))
+                       (if (and *bake* i *items-tex*)
+                           (draw-item-row i style tx ty tw)
+                           (draw-block-text label tx ty ITEM-CELL style))))))
+        (draw name nx nw)
+        (draw value vx vw*)
+        (when (and lit? (cursor-on? frames))
+          (color! C-SELECTED)
+          (draw-filled-rect (- nx (* 3 ITEM-CELL) (* ALPHABET-W ITEM-CELL)) ty
+                            (* ALPHABET-W ITEM-CELL) th))))
+
+    ;; --- the text screens ------------------------------------------------------------
+
+    ;; Text at scale 2 fits 50 characters in the 600 px between the gutters.
+    (define TEXT-SCALE 2)
+    (define TEXT-WIDTH 50)
+    (define TEXT-X 20)
+    (define TEXT-Y 56)
+    (define TEXT-PITCH 16)
+
+    ;; The credits (D44): the page's lines, headings lit; the page
+    ;; indicator under them.
+    (define (draw-credits m vw vh)
+      (let loop ((lines (credits-lines (menu-page m) TEXT-WIDTH *stamp*)) (y TEXT-Y))
+        (unless (null? lines)
+          (let ((style (car (car lines))) (text (cdr (car lines))))
+            (unless (eq? style 'gap)
+              (color! (if (eq? style 'heading) C-LABEL-LIT C-TEXT))
+              (text! text TEXT-X y TEXT-SCALE)))
+          (loop (cdr lines) (+ y TEXT-PITCH))))
+      (let ((line (string-append "PAGE " (number->string (+ 1 (menu-page m))) "/" (number->string CREDITS-PAGES) "  LEFT/RIGHT TURNS")))
+        (color! C-TEXT-DIM)
+        (text! line (- vw TEXT-X (text-width line 1)) (- TEXT-ROWS-Y 12) 1)))
+
+    ;; The build's commit for the version line: the shells set it.
+    (define *stamp* "unversioned")
+    (define (title-stamp! text) (set! *stamp* text))
+
+    ;; m:ss of a tick count at 60 a second.
+    (define (clock-text ticks)
+      (let* ((s (quotient ticks 60))
+             (m (quotient s 60))
+             (r (modulo s 60)))
+        (string-append (number->string m) ":" (if (< r 10) "0" "") (number->string r))))
+
+    ;; The scoreboard: one row per table x version with the best time,
+    ;; the fewest moves and the clears, then each table's daily streak.
+    (define (draw-scores m vw vh)
+      (let ((s (menu-scores m))
+            (col (lambda (i) (+ TEXT-X (* i 12 10)))))   ; five columns of ten characters
+        (color! C-LABEL-LIT)
+        (text! "TABLE" (col 0) TEXT-Y TEXT-SCALE)
+        (text! "VERSION" (col 1) TEXT-Y TEXT-SCALE)
+        (text! "TIME" (col 2) TEXT-Y TEXT-SCALE)
+        (text! "MOVES" (col 3) TEXT-Y TEXT-SCALE)
+        (text! "CLEARS" (col 4) TEXT-Y TEXT-SCALE)
+        (let loop ((cells (list (list 'stack 'hacker "STACK" "HACKER")
+                                (list 'stack 'original "STACK" "ORIGINAL")
+                                (list 'cards 'hacker "DEFRAG" "HACKER")
+                                (list 'cards 'original "DEFRAG" "ORIGINAL")))
+                   (y (+ TEXT-Y (* 2 TEXT-PITCH))))
+          (unless (null? cells)
+            (let* ((c (car cells))
+                   (best (and s (scores-best s (car c) (cadr c)))))
+              (color! C-TEXT)
+              (text! (caddr c) (col 0) y TEXT-SCALE)
+              (text! (cadddr c) (col 1) y TEXT-SCALE)
+              (color! (if best C-TEXT C-TEXT-DIM))
+              (text! (if best (clock-text (car best)) "-") (col 2) y TEXT-SCALE)
+              (text! (if best (number->string (cadr best)) "-") (col 3) y TEXT-SCALE)
+              (text! (if best (number->string (caddr best)) "0") (col 4) y TEXT-SCALE))
+            (loop (cdr cells) (+ y TEXT-PITCH))))
+        (let ((y (+ TEXT-Y (* 7 TEXT-PITCH))))
+          (color! C-LABEL-LIT)
+          (text! "DAILY STREAK" (col 0) y TEXT-SCALE)
+          (color! C-TEXT)
+          (text! (string-append "STACK " (number->string (if s (scores-streak s 'stack) 0)))
+                 (col 0) (+ y TEXT-PITCH) TEXT-SCALE)
+          (text! (string-append "DEFRAG " (number->string (if s (scores-streak s 'cards) 0)))
+                 (col 2) (+ y TEXT-PITCH) TEXT-SCALE))))
+
+    ;; The code entry: the typed characters at scale 3 with a blinking
+    ;; cursor block, the keypad (the alphabet, DEL, GO) as boxes with
+    ;; their labels at scale 2, the refusal line when the last GO was
+    ;; refused.
+    (define (draw-code-entry m vw vh)
+      (let* ((shown (menu-code-display m))
+             (scale 3)
+             (tw (text-width shown scale))
+             (full (text-width "XXXXX-XXXXX" scale))
+             (x (quotient (- vw full) 2))
+             (y 72))
+        (color! C-TEXT-DIM)
+        (draw-filled-rect (- x 8) (- y 6) (+ full 16) (+ (* GLYPH-H scale) 12))
+        (color! C-BG)
+        (draw-filled-rect (- x 6) (- y 4) (+ full 12) (+ (* GLYPH-H scale) 8))
+        (color! C-LABEL-LIT)
+        (text! shown x y scale)
+        (when (and (< (string-length (menu-code m)) CODE-LENGTH) (cursor-on? (menu-frames m)))
+          (color! C-SELECTED)
+          (draw-filled-rect (+ x tw (if (> tw 0) scale 0)) y (* GLYPH-W scale) (* GLYPH-H scale)))
+        (color! C-TEXT-DIM)
+        (let ((hint "TYPE OR TAP A CODE. ENTER OR GO DEALS IT."))
+          (text! hint (quotient (- vw (text-width hint 1)) 2) (+ y (* GLYPH-H scale) 14) 1))
+        (for-each (lambda (cell)
+                    (let* ((label (car cell))
+                           (r (cdr cell))
+                           (cx (car r)) (cy (cadr r)) (cw (caddr r)) (ch (cadddr r))
+                           (lw (text-width label TEXT-SCALE)))
+                      (color! C-BAR-C)
+                      (draw-filled-rect cx cy cw ch)
+                      (color! C-TEXT)
+                      (text! label (+ cx (quotient (- cw lw) 2)) (+ cy (quotient (- ch (* GLYPH-H TEXT-SCALE)) 2)) TEXT-SCALE)))
+                  (keypad-cells vw vh))))
+
     (define PRESENTS-LINE "PRESENTS")   ; under the publisher card's mark, with the resolve
 
-    (define (draw-title-line vw vh)
-      (let ((x (quotient (- vw (text-width TITLE-LINE 1)) 2))
-            (y (- vh 14 (+ GLYPH-H 3))))
-        ;; the one-cell shadow the items cast, in their static dark (David
-        ;; on 410e39e: the line was lost in the backdrop's orange band)
-        (color! C-STATIC-B)
-        (text! TITLE-LINE (+ x 1) (+ y 1) 1)
+    ;; The bottom band (P4, [[t-1c53b6]]): a C-BG strip over the
+    ;; backdrop's last rows holding the key hint, the copyright (ruling
+    ;; D44: the holder is David, the brand publishes, nothing else on the
+    ;; title) and the build stamp, all in the 5x7 at scale 1. Off the
+    ;; image, so no orange band swallows it (David's read of abdce9f).
+    (define BAND-H 24)
+    (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
+    (define (draw-bottom-band vw vh hint version)
+      (let ((top (- vh BAND-H))
+            (y (- vh 14)))
+        (color! C-BG)
+        (draw-filled-rect 0 top vw BAND-H)
+        (color! C-TEXT-DIM)
+        (text! hint 8 y 1)
+        (when version
+          (text! version (- vw 8 (text-width version 1)) y 1))
         (color! C-LABEL-LIT)
-        (text! TITLE-LINE x y 1)))
+        (text! TITLE-LINE (quotient (- vw (text-width TITLE-LINE 1)) 2) y 1)))
 
     ;; text through P3c's atlas when it is on (one textured rectangle a
     ;; glyph), else (crash font)'s rectangles, the oracle the atlas leg
     ;; holds it to (the same switch as render.sgl's)
     (define (text! text x y scale)
       (if (atlas-on?) (atlas-text text x y scale) (draw-text text x y scale)))
-
-    (define (entry-label m id)
-      (menu-label id))
-
 
     ;; Is the title's own screen up (the gate or the card), covering the
     ;; menu's chrome? The footer stays off it.
