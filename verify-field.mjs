@@ -303,12 +303,35 @@ async function waitForWorker() {
   console.log(`note: service worker ${ok}`);
 }
 let mark = 0;
+// A page that never booted at all (no "crash:" line of any kind, and the
+// loader's "Failed to fetch" / ERR_FAILED in the console) is the loader's
+// own fetch failing under the arm's back-to-back Chrome instances (the
+// P3c one-off: the CPU page's navigation right after a run on the same
+// port, three times in a day, green on rerun), not the field: SETUP-FAILED,
+// said as a note, and the navigation is tried once more. A page that
+// booted and then said nothing of the field stays a red.
+let setupRetries = 0;
 async function readField(rule, steps) {
-  mark = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&bg=${rule}&bghold=${steps}&bgonly` });
-  const said = await waitLine(/^crash: bg (gpu|cpu) (\w+)$/, mark, 20000);
-  await waitForWorker();
-  if (!said) return `no "crash: bg gpu|cpu" boot line within 20 s`;
+  for (let attempt = 0; ; attempt++) {
+    mark = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&bg=${rule}&bghold=${steps}&bgonly` });
+    const said = await waitLine(/^crash: bg (gpu|cpu) (\w+)$/, mark, 20000);
+    await waitForWorker();
+    if (said) return await readHeld(said, steps);
+    const anyBoot = consoleLines.slice(mark).some((l) => /^crash: /.test(l));
+    const fetchFailed = consoleLines.slice(mark).concat(consoleErrors).some((l) => /Failed to fetch|net::ERR_FAILED/.test(l));
+    if (!anyBoot && fetchFailed && attempt === 0) {
+      setupRetries++;
+      console.log(`note: SETUP-FAILED bg=${rule}: the page never booted (no "crash:" line) and the loader's fetch failed; navigating once more`);
+      await sleep(1000);
+      continue;
+    }
+    return anyBoot
+      ? `no "crash: bg gpu|cpu" boot line within 20 s`
+      : `SETUP-FAILED: the page never booted (no "crash:" line within 20 s${fetchFailed ? ", the loader's fetch failed" : ""})`;
+  }
+}
+async function readHeld(said, steps) {
   const held = await waitLine(/^crash: bg held (\d+)$/, mark, 30000);
   if (!held) return `no "crash: bg held ${steps}" line within 30 s (the field never reached the hold)`;
   if (held.m[1] !== String(steps)) return `held at ${held.m[1]}, asked for ${steps}`;
@@ -597,7 +620,7 @@ const ABORTED = /image fetch failed: TypeError: Failed to fetch|Failed to load r
 const abortedFetches = consoleErrors.filter((l) => ABORTED.test(l));
 const realErrors = consoleErrors.filter((l) => !ABORTED.test(l));
 if (realErrors.length) { fail("console", `${realErrors.length} error(s): ${JSON.stringify(realErrors.slice(0, 5))}`); dump(); }
-else pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) cut by a navigation` : ""}`);
+else pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) cut by a navigation` : ""}${setupRetries ? `, ${setupRetries} SETUP-FAILED page(s) navigated again` : ""}`);
 
 const failed = results.filter((r) => r[1] === "FAIL").length;
 console.log(`${results.length - failed} passed, ${failed} failed of ${results.length}${PHONE ? " (phone)" : " (desktop)"}`);

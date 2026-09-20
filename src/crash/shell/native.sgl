@@ -9,6 +9,7 @@
 ;;;   crash-the-stack [--seed N] [--keys hint|cursor] [--log-keys] [--fresh]
 ;;;                   [--hud zones|strip]  the bar's layout (stored, like ?hud= on the web;
 ;;;                                       the door until P4's settings screen, ruling D34)
+;;;                   [--depth none|a|b|ab|abc|abd]  the depth cue (stored, like ?depth=; ruling D48)
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;                   [--mute]            no sound (the context still opens)
@@ -74,6 +75,7 @@
           (crash menu)
           (crash title)
           (crash hud)
+          (crash depth)
           (crash bg)
           (crash gpu bg)
           (crash gpu phosphor)
@@ -357,7 +359,19 @@
                    (open-stack a lay seed fresh? model resume?))
           ((cards) (set-active-game! 'cards)
                    (open-cards a seed fresh? resume?))
+          ;; DEPTH (D48): steps the candidate and stays; the geometry follows
+          ((depth) (let ((next (step-depth!)))
+                     (depth-set! next)
+                     (ensure-geometry! lay)
+                     (stage a menu: (menu-with-depth (stage-menu a) next))))
           (else a))))
+
+    ;; The stack's geometry, following the depth cue in force (D's offset).
+    (define *geom* #f)
+    (define (ensure-geometry! lay)
+      (let ((offset (depth-offset (depth-ref (depth-in-force)))))
+        (unless (and *geom* (= (geometry-side *geom*) offset))
+          (set! *geom* (make-geometry lay VW VH offset)))))
 
     (define (step-stack a f dt geom log-keys?)
       (let* ((s (stage-session a))
@@ -440,11 +454,12 @@
         (open-audio! mute?)
         (boot-steps!)   ; D40: what the menu waits for
         (title-card! #t)   ; the publisher card (D43) opens the process; no gate on native
+        (depth-set! (stored-depth))   ; D48: the store, --depth having landed there
         (let* ((lay (turtle-layout))
-               (geom (make-geometry lay VW VH))
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? model))))
+          (ensure-geometry! lay)
           (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose bg-mode 1 bg-hold)))
                                                  (and b (bg b
                                                            stride: (or *bg-stride* (bg-stride b))
@@ -474,11 +489,11 @@
                                (stage a menu: (car r)))))
                         ((stack)
                          (cond ((menu-frame? f) (open-menu a))
-                               ((jack-out? (stage-session a) f VW VH (geometry-hud-h geom))
+                               ((jack-out? (stage-session a) f VW VH (geometry-hud-h *geom*))
                                 (open-menu a))
                                (else
                                 ;; the MENU tool: the session asks, the shell answers
-                                (let* ((a (step-stack a f dt geom log-keys?))
+                                (let* ((a (step-stack a f dt *geom* log-keys?))
                                        (s (stage-session a)))
                                   (if (session-request s)
                                       (open-menu (stage a session: (session-clear-request s)))
@@ -495,7 +510,7 @@
               (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
                         (lambda ()
                           (when (eq? (stage-screen a) 'stack)
-                            (tiles-ensure! geom)))
+                            (tiles-ensure! *geom*)))
                         (case (stage-screen a)
                           ((stack) (and (fx-cleared (stage-fx a)) #t))
                           ((cards) (card-fx-cascading? (stage-card-fx a)))
@@ -506,8 +521,8 @@
                             ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
                             ((stack)
                              (if *bg-only*
-                                 (draw-board-background VW VH (- VH (geometry-hud-h geom)) 0.0 (stage-background a) *copper*)
-                                 (draw-session (stage-session a) geom (stage-fx a) (stage-background a) *copper*)))
+                                 (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (stage-background a) *copper*)
+                                 (draw-session (stage-session a) *geom* (stage-fx a) (stage-background a) *copper*)))
                             (else
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (card-geometry-hud-h card-geom)) 0.0 (stage-background a) *copper*)
@@ -671,6 +686,10 @@
         ;; web's ?hud= door; any other word leaves the store alone)
         (when (and hud-arg (layout-name? (string->symbol hud-arg)))
           (set-stored-hud! (string->symbol hud-arg)))
+        ;; --depth NAME: the depth cue for this boot, stored (D48)
+        (let ((d (arg-value args "--depth" #f)))
+          (when (and d (depth-name? (string->symbol d)))
+            (set-stored-depth! (string->symbol d))))
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))

@@ -74,24 +74,20 @@
     ;; colors made the game harder to read than two, and the amber was
     ;; unreadable on a small screen); the three-letter tag and the suit
     ;; mark tell the two subsystems of a class apart.
+    ;; Strings by suit and rank, built once: a literal or a case clause
+    ;; allocates per evaluation in the native codegen, and the table draws
+    ;; ~30 faces a frame (2026-09-20, the card table's allocation pass).
+    (define SUBSYSTEM-TAGS (vector "MEM" "PWR" "TX" "DSK"))
     (define (subsystem-tag c)
-      (case (card-suit c)
-        ((0) "MEM")
-        ((1) "PWR")
-        ((2) "TX")
-        (else "DSK")))
+      (vector-ref SUBSYSTEM-TAGS (card-suit c)))
 
     (define (suit-color c)
       (if (card-red? c) C-HOT C-COLD))
 
     ;; The court's in-world names, under the big suit mark.
+    (define RANK-WORDS (vector #f "BOOT" #f #f #f #f #f #f #f #f #f "DAEMON" "SYSOP" "ROOT"))
     (define (rank-word c)
-      (case (card-rank c)
-        ((1) "BOOT")
-        ((11) "DAEMON")
-        ((12) "SYSOP")
-        ((13) "ROOT")
-        (else #f)))
+      (vector-ref RANK-WORDS (card-rank c)))
 
     ;; Text, class marks and glyphs through (crash atlas) (P3c), or (crash
     ;; font)'s rects with ?atlas=off, the oracle; (crash render) does the same.
@@ -180,24 +176,32 @@
         (draw-filled-rect x y 1 h)
         (draw-filled-rect (+ x w -1) y 1 h)
         (color! C-STATIC-B)
-        (let rows ((py (+ y 8))
-                   (rng (prng-seed (+ 101 (* 7 x) (* 13 y)))))
-          (when (< py (+ y h -8))
-            (let chars ((k 0)
-                        (rng rng))
-              (if (< k BACK-COLUMNS)
-                  (let ((rng (prng-next rng)))
-                    (text-mini! (vector-ref HEX-STRINGS (prng-index rng 16))
-                                    (+ x 10 (* k 14))
-                                    py
-                                    1)
-                    (chars (+ k 1) rng))
-                  (rows (+ py BACK-ROW-STEP) rng)))))))
+        (back-rows! x (+ y 8) (+ y h -8) (prng-seed (+ 101 (* 7 x) (* 13 y))))))
+
+    (define (back-rows! x py end rng)
+      (when (< py end)
+        (back-rows! x (+ py BACK-ROW-STEP) end (back-chars! x py 0 rng))))
+
+    (define (back-chars! x py k rng)
+      (if (< k BACK-COLUMNS)
+          (let ((rng (prng-next rng)))
+            (text-mini! (vector-ref HEX-STRINGS (prng-index rng 16))
+                            (+ x 10 (* k 14))
+                            py
+                            1)
+            (back-chars! x py (+ k 1) rng))
+          rng))
 
     ;; --- the face: the index band, the pips, the courts ------------------------
 
+    ;; The rank's text, one string per rank kept (the 13 built on first use).
+    (define RANK-TEXTS (make-vector 14 #f))
     (define (rank-text c)
-      (if (= (card-rank c) 10) "10" (string (rank-char c))))
+      (let ((r (card-rank c)))
+        (or (vector-ref RANK-TEXTS r)
+            (let ((text (if (= r 10) "10" (string (rank-char c)))))
+              (vector-set! RANK-TEXTS r text)
+              text))))
 
     ;; Pips of the class mark in the classic arrangement, in the body
     ;; under the band. Three columns sit at the body's left, middle and
@@ -205,35 +209,39 @@
     ;; quarters; a column of n spreads its marks evenly over the body's
     ;; height (four of 16 px in 72 with 2 px between), the lone middle
     ;; pip of a seven at a third.
+    ;; (top-level procedures with explicit arguments, not lambdas and named
+    ;; lets inside: each of those is a closure per card per frame)
+    (define PIP-W (* PIP-SCALE MARK-W))
+    (define PIP-H (* PIP-SCALE MARK-H))
+
+    (define (pip-column-x columns i x w)
+      (cond ((= columns 1) (+ x (half (- w PIP-W))))
+            ((= columns 2) (+ x (if (= i 0) (- (quotient w 4) (half PIP-W)) (- (* 3 (quotient w 4)) (half PIP-W)))))
+            (else (+ x (* i (+ PIP-W (quotient (- w (* 3 PIP-W)) 2)))))))
+
+    (define (pip-row-y y h frac)
+      (+ y (exact (round (- (* h frac) (/ PIP-H 2))))))
+
     (define (draw-pips c x y w h)
-      (let* ((pattern (vector-ref PIP-PATTERNS (- (card-rank c) 2)))
-             (columns (length pattern))
-             (mw (* PIP-SCALE MARK-W))
-             (mh (* PIP-SCALE MARK-H))
-             (col-x (lambda (i)
-                      (case columns
-                        ((1) (+ x (half (- w mw))))
-                        ((2) (+ x (if (= i 0) (- (quotient w 4) (half mw)) (- (* 3 (quotient w 4)) (half mw)))))
-                        (else (+ x (* i (+ mw (quotient (- w (* 3 mw)) 2))))))))
-             (row-y (lambda (frac) (+ y (exact (round (- (* h frac) (/ mh 2))))))))
-        (let loop ((ps pattern) (i 0))
-          (unless (null? ps)
-            (let ((n (car ps))
-                  (cx (col-x i)))
-              (cond ((= n 1)
-                     (mark! (card-suit c)
-                            cx
-                            (row-y (if (and (= columns 3) (= i 1) (= (car pattern) 3)) (/ 1.0 3) 0.5))
-                            PIP-SCALE))
-                    (else
-                     (let pips ((k 0))
-                       (when (< k n)
-                         (mark! (card-suit c)
-                                cx
-                                (row-y (/ (+ 1 (* 2 k)) (* 2.0 n)))
-                                PIP-SCALE)
-                         (pips (+ k 1)))))))
-            (loop (cdr ps) (+ i 1))))))
+      (let ((pattern (vector-ref PIP-PATTERNS (- (card-rank c) 2))))
+        (draw-pip-columns! c pattern pattern (length pattern) 0 x y w h)))
+
+    (define (draw-pip-columns! c pattern ps columns i x y w h)
+      (unless (null? ps)
+        (let ((n (car ps))
+              (cx (pip-column-x columns i x w)))
+          (if (= n 1)
+              (mark! (card-suit c)
+                     cx
+                     (pip-row-y y h (if (and (= columns 3) (= i 1) (= (car pattern) 3)) (/ 1.0 3) 0.5))
+                     PIP-SCALE)
+              (draw-pip-column! c cx y h n 0)))
+        (draw-pip-columns! c pattern (cdr ps) columns (+ i 1) x y w h)))
+
+    (define (draw-pip-column! c cx y h n k)
+      (when (< k n)
+        (mark! (card-suit c) cx (pip-row-y y h (/ (+ 1 (* 2 k)) (* 2.0 n))) PIP-SCALE)
+        (draw-pip-column! c cx y h n (+ k 1))))
 
     ;; The court's portrait from the strip (DAEMON SYSOP ROOT = frames
     ;; 0 1 2), a white mask tinted in the class color; the large class
@@ -386,7 +394,7 @@
               (loop (+ k 1) r3))))))
 
     (define (draw-top-row g game x)
-      (let ((skip (card-fx-moving-cards x)))
+      (begin
         ;; the stock: a back when it has cards, the ring when it is empty
         (if (pair? (game-stock game))
             (draw-back (stock-rect g))
@@ -398,7 +406,7 @@
               (draw-slot (waste-rect g) #f)
               (let loop ((depth (- shown 1)))
                 (when (>= depth 0)
-                  (unless (memv (list-ref waste depth) skip)
+                  (unless (card-fx-moving? x (list-ref waste depth))
                     (let* ((hit (and (= depth 0) (card-fx-hit x '(waste 0))))
                            (r (shaken (waste-card-rect g game depth) hit)))
                       (draw-face r
@@ -415,7 +423,7 @@
                    (r (foundation-rect g i))
                    (gone (if (card-fx-idle? x) 0 (vector-ref (card-fx-launched x) i)))
                    (f (if (> gone 0) (drop-n f (min gone (length f))) f))
-                   (f (let drop-moving ((f f)) (if (and (pair? f) (memv (car f) skip)) (drop-moving (cdr f)) f))))
+                   (f (drop-moving f x)))
               (if (null? f)
                   (draw-slot r #f)
                   (draw-face r (car f) (selected-place? game (list 'foundation i)))))
@@ -480,29 +488,35 @@
                               2)
             (loop (cdr t) (+ k 1))))))
 
+    ;; The foundation's cards with the sliding ones dropped off its top.
+    (define (drop-moving f x)
+      (if (and (pair? f) (card-fx-moving? x (car f))) (drop-moving (cdr f) x) f))
+
     (define (draw-tableau g game x now)
-      (let ((skip (card-fx-moving-cards x)))
-        (let loop ((i 0))
-          (when (< i PILES)
-            (let* ((pile (game-pile game i))
-                   (n (length pile)))
-              (if (= n 0)
-                  (draw-slot (pile-slot-rect g i) #f)
-                  ;; bottom card first, so each card covers the one under it
-                  (let draw ((depth (- n 1)))
-                    (when (>= depth 0)
-                      (let ((entry (list-ref pile depth)))
-                        (unless (memv (pile-card entry) skip)
-                          (let* ((hit (card-fx-hit x (list 'pile i depth)))
-                                 (r (shaken (pile-card-rect g game i depth) hit)))
-                            (draw-card r
-                                       (pile-card entry)
-                                       (cdr entry)
-                                       (in-selected-run? game i depth)
-                                       now)
-                            (draw-hit-flash r hit))))
-                      (draw (- depth 1))))))
-            (loop (+ i 1))))))
+      (draw-piles! g game x now 0))
+
+    (define (draw-piles! g game x now i)
+      (when (< i PILES)
+        (let ((pile (game-pile game i)))
+          (if (null? pile)
+              (draw-slot (pile-slot-rect g i) #f)
+              ;; bottom card first, so each card covers the one under it
+              (draw-pile! g game x now i pile (- (length pile) 1))))
+        (draw-piles! g game x now (+ i 1))))
+
+    (define (draw-pile! g game x now i pile depth)
+      (when (>= depth 0)
+        (let ((entry (list-ref pile depth)))
+          (unless (card-fx-moving? x (pile-card entry))
+            (let* ((hit (card-fx-hit-pile x i depth))
+                   (r (shaken (pile-card-rect g game i depth) hit)))
+              (draw-card r
+                         (pile-card entry)
+                         (cdr entry)
+                         (in-selected-run? game i depth)
+                         now)
+              (draw-hit-flash r hit))))
+        (draw-pile! g game x now i pile (- depth 1))))
 
     ;; --- the key overlays ---------------------------------------------------------
     ;;
@@ -513,16 +527,16 @@
     ;; The rect a place shows: a pile card's own rect (its top strip is
     ;; what the fan leaves visible), else the place's rect.
     (define (place-rect g game p)
-      (case (car p)
-        ((stock) (stock-rect g))
-        ((waste) (waste-card-rect g game 0))
-        ((foundation) (foundation-rect g (cadr p)))
-        ((pile)
-         (let ((depth (if (pair? (cddr p)) (caddr p) 0)))
-           (if (>= depth (length (game-pile game (cadr p))))
-               (pile-slot-rect g (cadr p))
-               (pile-card-rect g game (cadr p) depth))))
-        (else (list 0 0 0 0))))
+      (let ((kind (car p)))
+        (cond ((eq? kind 'stock) (stock-rect g))
+              ((eq? kind 'waste) (waste-card-rect g game 0))
+              ((eq? kind 'foundation) (foundation-rect g (cadr p)))
+              ((eq? kind 'pile)
+               (let ((depth (if (pair? (cddr p)) (caddr p) 0)))
+                 (if (>= depth (length (game-pile game (cadr p))))
+                     (pile-slot-rect g (cadr p))
+                     (pile-card-rect g game (cadr p) depth))))
+              (else (list 0 0 0 0)))))
 
     (define (draw-tag-box x y w h)
       (color! C-BG)
@@ -558,42 +572,49 @@
                 (color! C-BG)
                 (text! label (+ (car src-rect) (half (- (caddr src-rect) w)) 3) (+ (cadr src-rect) 43) 2)))))))
 
+    ;; (the fixed keys' places and labels are built once; the walk over
+    ;; the labels is a top-level procedure with the typed prefix compared
+    ;; in place: a lambda, a substring and a list per tag per frame
+    ;; otherwise, 2026-09-20)
+    (define STOCK-PLACE (list 'stock))
+    (define WASTE-PLACE (list 'waste))
+    (define STOCK-LABEL (symbol->string STOCK-KEY))
+    (define WASTE-LABEL (symbol->string WASTE-KEY))
+
     (define (draw-tags d g)
-      (let ((game (deal-game d))
-            (typed (deal-typed d)))
+      (let ((game (deal-game d)))
         ;; the fixed keys on the stock and the waste, in the tags' own
         ;; small set and size (David, 2026-09-18: drawn larger, the J read
         ;; as a jack)
-        (for-each
-          (lambda (entry)
-            (let* ((r (place-rect g game (car entry)))
-                   (label (cdr entry))
-                   (tw (text-width-mini label 2))
-                   (w (+ 4 tw))
-                   (x (+ (car r) (caddr r) -3 (- w)))
-                   (y (+ (cadr r) 2)))
-              (draw-tag-box x y w 14)
-              (color! C-LABEL-LIT)
-              (text-mini! label (+ x 2) (+ y 2) 2)))
-          (append (list (cons '(stock) (symbol->string STOCK-KEY)))
-                  (if (pair? (game-waste game))
-                      (list (cons '(waste) (symbol->string WASTE-KEY)))
-                      '())))
-        (for-each
-          (lambda (entry)
-            (let* ((r (place-rect g game (car entry)))
-                   (label (cdr entry))
-                   (tw (text-width-mini label 2))
-                   (w (+ 4 tw))
-                   (x (+ (car r) (caddr r) -3 (- w)))
-                   (y (+ (cadr r) 2))
-                   (prefix? (and (> (string-length typed) 0)
-                                 (<= (string-length typed) (string-length label))
-                                 (string=? typed (substring label 0 (string-length typed))))))
-              (draw-tag-box x y w 14)
-              (color! (if prefix? C-HIGHLIGHT C-LABEL-LIT))
-              (text-mini! label (+ x 2) (+ y 2) 2)))
-          (deal-labels d))))
+        (draw-tag! (place-rect g game STOCK-PLACE) STOCK-LABEL #f)
+        (when (pair? (game-waste game))
+          (draw-tag! (place-rect g game WASTE-PLACE) WASTE-LABEL #f))
+        (draw-place-tags! g game (deal-labels d) (deal-typed d))))
+
+    (define (draw-place-tags! g game labels typed)
+      (unless (null? labels)
+        (let ((entry (car labels)))
+          (draw-tag! (place-rect g game (car entry)) (cdr entry) (typed-prefix? typed (cdr entry))))
+        (draw-place-tags! g game (cdr labels) typed)))
+
+    ;; Is typed a non-empty prefix of label? (no substring made)
+    (define (typed-prefix? typed label)
+      (let ((n (string-length typed)))
+        (and (> n 0)
+             (<= n (string-length label))
+             (let loop ((i 0))
+               (cond ((= i n) #t)
+                     ((char=? (string-ref typed i) (string-ref label i)) (loop (+ i 1)))
+                     (else #f))))))
+
+    (define (draw-tag! r label lit?)
+      (let* ((tw (text-width-mini label 2))
+             (w (+ 4 tw))
+             (x (+ (car r) (caddr r) -3 (- w)))
+             (y (+ (cadr r) 2)))
+        (draw-tag-box x y w 14)
+        (color! (if lit? C-HIGHLIGHT C-LABEL-LIT))
+        (text-mini! label (+ x 2) (+ y 2) 2)))
 
     ;; --- HUD ----------------------------------------------------------------------
 
@@ -616,19 +637,33 @@
 
     ;; The score as Windows shows it: the timed Standard total on the
     ;; clean face, the bankroll on the twist face.
+    ;; (the strings are kept by the number they show, (crash render)'s
+    ;; cache: a readout rebuilt every frame is two or three allocations)
+    (define *bounty-text* (text-cache))
+    (define *audit-text* (text-cache))
+    (define *bounty-line* (text-cache))
+    (define *audit-line* (text-cache))
+    (define (bounty-text n) (string-append "$" (number->string n)))
+    (define (audit-text n) (number->string n))
     (define (score-text d)
       (let ((game (deal-game d)))
         (if (eq? (game-scoring game) 'vegas)
-            (string-append "$" (number->string (game-score game)))
-            (number->string (timed-score game (deal-trace d) (deal-won? d))))))
+            (cached-text *bounty-text* (game-score game) bounty-text)
+            (cached-text *audit-text* (timed-score game (deal-trace d) (deal-won? d)) audit-text))))
 
-    ;; Row 2's right end: the scoring's name, the bankroll, the dump.
+    ;; Row 2's right end: the scoring's name, the bankroll, the dump. The
+    ;; bounty line's key is (bank . seed), one pair a frame (the bankroll
+    ;; can be negative, so no folding into one number).
+    (define (bounty-line key)
+      (string-append "BOUNTY  BANK " (number->string (car key))
+                     "  DUMP " (number->string (cdr key))))
+    (define (audit-line seed)
+      (string-append "AUDIT  DUMP " (number->string seed)))
     (define (score-line d)
       (let ((game (deal-game d)))
         (if (eq? (game-scoring game) 'vegas)
-            (string-append "BOUNTY  BANK " (number->string (deal-bank d))
-                           "  DUMP " (number->string (deal-seed d)))
-            (string-append "AUDIT  DUMP " (number->string (deal-seed d))))))
+            (cached-text *bounty-line* (cons (deal-bank d) (deal-seed d)) bounty-line)
+            (cached-text *audit-line* (deal-seed d) audit-line))))
 
     ;; Row 2 under the ICE and after the sever, in place of the keys line.
     (define (phase-line tr game)

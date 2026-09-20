@@ -1,0 +1,95 @@
+;;; (crash depth) - Depth cues for the stack, as switchable candidates.
+;;;
+;;; Ruling D48 (2026-09-20): a friend of David's "has a hard time seeing
+;;; the depth of the tiles in stack mode". The cues are built as
+;;; candidates behind a DEPTH menu entry (LOOK's vacated slot), a
+;;; prototype toggle on purpose so the friend can try them on the host;
+;;; David rules on a letter afterwards, the winner becomes the default
+;;; and the switch goes the way LOOK went. The parts:
+;;;
+;;;   A  taller side faces, deeper the higher the layer: the drawn side of
+;;;      a tile on layer L is offset + min(L, 3) px (3..6 on the stock
+;;;      offset) instead of the flat 3; the hit test keeps the flat
+;;;      extent, so nothing tappable moves.
+;;;   B  a per-layer face shade: the base layer keeps the ruled charcoal
+;;;      (it holds most of the tiles), each layer up is a step lighter
+;;;      toward the side gray, and the light top-left edge is drawn only
+;;;      on a tile with nothing on top of it (a covered tile has no edge
+;;;      to catch the light).
+;;;   C  a Bayer-dithered drop shadow in C-BAR-A under each raised tile
+;;;      (layer 1 up), falling down-left by 2 + 2L px: opaque pattern
+;;;      pixels or nothing, no alpha, so the frame's color count holds.
+;;;   D  a larger per-layer x/y offset, 5 px instead of 3: the geometry's
+;;;      side, so the faces of the upper layers move (and their tap
+;;;      targets with them: the hit test follows the draw).
+;;;
+;;; The entries: NONE (today's look, the default), A, B, AB, ABC, ABD.
+;;; Data only: (crash geometry) reads the offset, (crash render) the
+;;; rest; the shells store the choice under its own key ("depth") and
+;;; open ?depth=NAME (web) and --depth NAME (native) as doors.
+
+(define-library (crash depth)
+  (import (sigil struct))
+
+  (export depth depth? depth-name depth-label
+          depth-grow depth-shade depth-shadow depth-offset
+          DEPTHS DEPTH-NAMES DEFAULT-DEPTH
+          depth-ref depth-name? depth-after
+          depth-side depth-shadow-fall MAX-SIDE-GROWTH MAX-SHADOW)
+
+  (begin
+    (define-struct depth
+      (name default: 'none)
+      (label default: "NONE")
+      (grow default: #f)        ; A: the drawn side deepens with the layer
+      (shade default: #f)       ; B: lighter faces up the stack, edge on the top tile only
+      (shadow default: #f)      ; C: the dithered drop shadow under raised tiles
+      (offset default: 3))      ; D: the per-layer offset (the geometry's side)
+
+    (define DEPTHS
+      (list (depth name: 'none label: "NONE")
+            (depth name: 'a label: "A" grow: #t)
+            (depth name: 'b label: "B" shade: #t)
+            (depth name: 'ab label: "AB" grow: #t shade: #t)
+            (depth name: 'abc label: "ABC" grow: #t shade: #t shadow: #t)
+            (depth name: 'abd label: "ABD" grow: #t shade: #t offset: 5)))
+
+    (define DEPTH-NAMES (map depth-name DEPTHS))
+    (define DEFAULT-DEPTH (depth-name (car DEPTHS)))
+
+    ;; A's cap: the side never grows more than this past the offset.
+    (define MAX-SIDE-GROWTH 3)
+    ;; C's cap: the shadow's fall on the highest layer it is drawn for.
+    (define MAX-SHADOW 10)
+
+    (define (depth-name? x)
+      (and (memq x DEPTH-NAMES) #t))
+
+    ;; The depth of that name; an unknown name is the default.
+    (define (depth-ref name)
+      (let loop ((ds DEPTHS))
+        (cond ((null? ds) (car DEPTHS))
+              ((eq? (depth-name (car ds)) name) (car ds))
+              (else (loop (cdr ds))))))
+
+    ;; The name after this one, wrapping (the menu entry steps through).
+    (define (depth-after name)
+      (let loop ((names DEPTH-NAMES))
+        (cond ((null? names) DEFAULT-DEPTH)
+              ((eq? (car names) name)
+               (if (null? (cdr names)) DEFAULT-DEPTH (cadr names)))
+              (else (loop (cdr names))))))
+
+    ;; The drawn side depth of a tile on this layer, in px.
+    (define (depth-side d layer)
+      (if (depth-grow d)
+          (+ (depth-offset d) (if (< layer MAX-SIDE-GROWTH) layer MAX-SIDE-GROWTH))
+          (depth-offset d)))
+
+    ;; How far C's shadow falls (down and left) for a tile on this layer,
+    ;; or 0 for the base layer and when C is off.
+    (define (depth-shadow-fall d layer)
+      (if (and (depth-shadow d) (> layer 0))
+          (let ((s (+ 2 (* 2 layer))))
+            (if (> s MAX-SHADOW) MAX-SHADOW s))
+          0))))

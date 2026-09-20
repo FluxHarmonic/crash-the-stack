@@ -33,7 +33,7 @@
           card-fx-frame card-fx-observe card-fx-idle?
           card-fx-flying card-fx-launched card-fx-cascading? card-fx-ticks
           card-fx-glitch card-fx-sever card-fx-toast SEVER-TICKS
-          card-fx-movers card-fx-moving-cards card-fx-hit
+          card-fx-movers card-fx-moving-cards card-fx-moving? card-fx-hit card-fx-hit-pile
           GLITCH-TICKS TOAST-TICKS TOAST-HOLD MOVE-TICKS MOVE-MAX HIT-TICKS HIT-SHAKE
           flyer flyer-card flyer-x flyer-y flyer-trail
           CASCADE-GAP GRAVITY BOUNCE TRAIL LAUNCH-VX-MIN LAUNCH-VX-MAX)
@@ -119,13 +119,31 @@
     ;; (dx . flash) for a place the ICE hit, or #f: a 6 Hz sideways shake
     ;; and a flash fading over the hit's life.
     (define (card-fx-hit x p)
-      (let ((entry (find (lambda (h) (equal? (car h) p)) (card-fx-hits x))))
-        (and entry
-             (let* ((left (cdr entry))
-                    (age (- HIT-TICKS left))
-                    (life (/ left HIT-TICKS)))
-               (cons (* HIT-SHAKE life (sin (* 6.283185307179586 6.0 (/ age 60.0))))
-                     life)))))
+      (hit-from (find (lambda (h) (equal? (car h) p)) (card-fx-hits x))))
+
+    ;; The same for a pile card, with no place list built and no closure
+    ;; made: the table draws ~30 cards a frame (2026-09-20, the card
+    ;; table's allocation pass).
+    (define (card-fx-hit-pile x i depth)
+      (hit-from (pile-hit (card-fx-hits x) i depth)))
+
+    (define (pile-hit hits i depth)
+      (cond ((null? hits) #f)
+            ((let ((p (car (car hits))))
+               (and (eq? (car p) 'pile)
+                    (eqv? (cadr p) i)
+                    (pair? (cddr p))
+                    (eqv? (caddr p) depth)))
+             (car hits))
+            (else (pile-hit (cdr hits) i depth))))
+
+    (define (hit-from entry)
+      (and entry
+           (let* ((left (cdr entry))
+                  (age (- HIT-TICKS left))
+                  (life (/ left HIT-TICKS)))
+             (cons (* HIT-SHAKE life (sin (* 6.283185307179586 6.0 (/ age 60.0))))
+                   life))))
 
     ;; --- card moves ------------------------------------------------------------
     ;;
@@ -227,6 +245,12 @@
     ;; The cards the renderer must not draw in their slots this frame.
     (define (card-fx-moving-cards x)
       (map car (card-fx-moving x)))
+
+    ;; Is this card sliding (drawn by the move, not in its place)? The
+    ;; moving list's entries start with the card, so no list of cards is
+    ;; built per frame.
+    (define (card-fx-moving? x c)
+      (and (assv c (card-fx-moving x)) #t))
 
     ;; The glitch's progress 0..1, or #f.
     (define (card-fx-glitch x)

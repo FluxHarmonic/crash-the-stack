@@ -14,8 +14,8 @@
 //               and D34) with the title reveal running (P3d: the first
 //               key or tap skips it and reaches no entry, so the arm skips
 //               and waits for "crash: title settled" before navigating);
-//               a tap where LOOK used to sit (the row under DEFRAG) is a tap
-//               on nothing: the menu stays, no line; a tap at CARDS' center
+//               a tap on the row under DEPTH (D48's entry, in LOOK's slot)
+//               is a tap on nothing: the menu stays, no line; a tap at CARDS' center
 //               -> "crash: menu chose cards" and the card table's boot line
 //   boot        with ?cards: "crash: cards seed S moves 0 draw 1" and the first legal
 //               move's centers, "crash: cards first SX SY DX DY"
@@ -331,13 +331,14 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       let lookDetail = lookDetail0;
       const shown = Object.keys(entries2);
       if (shown.some((id) => id === "look" || id === "hud")) lookDetail = `the menu still shows ${shown.join(" ")}`;
-      else if (shown.join(" ") !== "stack cards") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not stack cards`;
+      else if (shown.join(" ") !== "stack cards depth") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not stack cards depth`;
       else {
-        // 32 px per entry: the row under DEFRAG
-        await tap(entries2.cards[0], parseFloat(entries2.cards[1]) + 32);
+        // 32 px per entry: the row under DEPTH (where UPDATE sits when a
+        // version waits; nothing waits on a fresh origin)
+        await tap(entries2.depth[0], parseFloat(entries2.depth[1]) + 32);
         await sleep(600);
-        const stray = consoleLines.slice(m0).filter((l) => /^crash: (look|menu chose|cards seed|seed) /.test(l));
-        if (stray.length) lookDetail = `a tap on the empty row under DEFRAG did something: ${stray[0]}`;
+        const stray = consoleLines.slice(m0).filter((l) => /^crash: (look|depth|menu chose|cards seed|seed) /.test(l));
+        if (stray.length) lookDetail = `a tap on the empty row under DEPTH did something: ${stray[0]}`;
       }
       m0 = consoleLines.length;
       if (lookDetail) fail("menu", lookDetail);
@@ -349,7 +350,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
         else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
         else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
-        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); the row under DEFRAG is empty (no LOOK, no HUD); tap on CARDS -> ${chose.m[0]}, table booted`);
+        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); the row under DEPTH is empty (no LOOK, no HUD); tap on CARDS -> ${chose.m[0]}, table booted`);
       }
     }
   }
