@@ -31,6 +31,7 @@
   (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
           audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
+          audio-volume audio-set-volume! audio-music? audio-set-music! audio-sfx? audio-set-sfx!
           audio-set-depth! audio-depth
           audio-voices audio-ambient-frames audio-ambient-play! audio-ambient-playing? audio-underruns
           mix-cached-into audio-cache-reset! audio-cache-rendered
@@ -64,6 +65,9 @@
     (define *ambient-pos* 0.0)     ; frame position in the ambient, fractional
     (define *ambient-on* #f)       ; the loop is playing: from the menu live on (David, 2026-09-20: nothing under the reveal)
     (define *muted* #f)
+    (define *volume* 1.0)          ; the master, 0..1: folded into the gains (the settings' VOLUME row)
+    (define *music-on* #t)         ; the ambient (MUSIC): off keeps its position, silent
+    (define *sfx-on* #t)           ; the cues (SFX)
     (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
 
     (define (audio-open?) (and *stream* #t))
@@ -81,6 +85,21 @@
     (define (audio-rate) *rate*)
     (define (audio-muted?) *muted*)
     (define (audio-set-muted! m) (set! *muted* m))
+    (define (audio-volume) *volume*)
+    (define (audio-music?) *music-on*)
+    (define (audio-set-music! on?) (set! *music-on* (and on? #t)))
+    (define (audio-sfx?) *sfx-on*)
+    (define (audio-set-sfx! on?) (set! *sfx-on* (and on? #t)))
+    ;; The master volume, 0..1, a factor on both gains. The ambient cache
+    ;; carries its gain baked in, so a change re-renders it from its top
+    ;; (the loop restarts; a render from the play position would render
+    ;; the whole prefix at once, a stall of the loop's length); the cues take
+    ;; the factor as they are added, so the bank stays.
+    (define (audio-set-volume! v)
+      (let ((v (max 0.0 (min 1.0 (* 1.0 v)))))
+        (unless (= v *volume*)
+          (set! *volume* v)
+          (cache-reset!))))
     (define (audio-voices) *voices*)
     (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
     ;; Start the loop from its top; it is held (preloaded, silent) until
@@ -143,7 +162,7 @@
       (when (and *ctx* (memq name CUES) (not (assq name *bank*)))
         (set! *bank* (cons (cons name (render-cue name *rate*)) *bank*)))
       (let ((entry (assq name *bank*)))
-        (when (and entry (not *muted*))
+        (when (and entry (not *muted*) *sfx-on*)
           (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
 
     ;; The ambient loop: s16le mono PCM at rate, looping; #f clears it.
@@ -185,7 +204,7 @@
                    (frac (- pos k))
                    (a (bytes-ref *ambient* (modulo k frames)))
                    (b (bytes-ref *ambient* (modulo (+ k 1) frames)))
-                   (v (* AMBIENT-GAIN (+ a (* frac (- b a))))))
+                   (v (* AMBIENT-GAIN *volume* (+ a (* frac (- b a))))))
               (bytevector-ieee-single-set! *cache* (* 8 i) v 'little)
               (bytevector-ieee-single-set! *cache* (+ 4 (* 8 i)) v 'little))
             (loop (+ i 1))))
@@ -232,7 +251,7 @@
                 (when (< i take)
                   (let* ((o (* 8 i))
                          (v (max -1.0 (min 1.0 (+ (bytevector-ieee-single-ref out o 'little)
-                                                   (* CUE-GAIN (cue-ref cue (+ at i))))))))
+                                                   (* CUE-GAIN *volume* (cue-ref cue (+ at i))))))))
                     (bytevector-ieee-single-set! out o v 'little)
                     (bytevector-ieee-single-set! out (+ o 4) v 'little))
                   (add (+ i 1))))
@@ -304,5 +323,5 @@
             (if (<= n 0)
                 0
                 (begin
-                  (set! *voices* (mix-cached-into *out* n (and (not *muted*) *ambient-on* *ambient* #t) *voices*))
+                  (set! *voices* (mix-cached-into *out* n (and (not *muted*) *music-on* *ambient-on* *ambient* #t) *voices*))
                   (push-audio-samples *stream* *out* n))))))))

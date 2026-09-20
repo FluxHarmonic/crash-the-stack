@@ -59,7 +59,7 @@
           deal-labels deal-labels-shown deal-typed deal-auto deal-bank
           deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
           deal-step deal-advance deal-undo deal-next deal-toggle-draw
-          deal-toggle-scoring deal-with-bank deal-toggle-mode deal-with-mode
+          deal-with-bank deal-with-mode deal-with-scoring
           deal-scrambles deal-with-scrambles deal-scramble
           deal-level deal-recent deal-with-progress
           deal-probe deal-probe-step deal-probe-running? deal-hint hint-move
@@ -274,13 +274,18 @@
                          (deal d auto: #f auto-acc: 0 message: MSG-STUCK)
                          (loop (with-game d g) (- acc AUTO-TICKS)))))))))
 
-    ;; A fresh deal is a twist game (Vegas, the ICE running); the flip to
-    ;; the clean face (timed Standard) is a tap on the meter or the score
-    ;; before the first move.
-    (define (deal-new seed draw)
-      (deal (with-game (deal seed: seed trace: (trace-new 'twist) scrambles: SCRAMBLE-START)
-                       (game-with-scoring (game-new seed draw) 'vegas))
-            message: MSG-DEALT))
+    ;; A fresh deal: the version (mode: twist, the hacker version with the
+    ;; ICE running, or clean, the original with the timer) and the scoring
+    ;; (vegas, BOUNTY, or standard, AUDIT) are chosen at deal from the
+    ;; settings and the menu (P4: the two are independent; before it, Vegas
+    ;; was twist and Standard clean, flipped by a tap on the meter). rest:
+    ;; the scoring, then the mode; vegas and twist when not given.
+    (define (deal-new seed draw . rest)
+      (let ((scoring (if (pair? rest) (car rest) 'vegas))
+            (mode (if (and (pair? rest) (pair? (cdr rest))) (cadr rest) 'twist)))
+        (deal (with-game (deal seed: seed trace: (trace-new mode) scrambles: SCRAMBLE-START)
+                         (game-with-scoring (game-new seed draw) scoring))
+              message: MSG-DEALT)))
 
     (define (deal-with-scrambles d n)
       (deal d scrambles: (max 0 (min SCRAMBLE-MAX n))))
@@ -414,17 +419,20 @@
       (or (deal-auto d) (deal-won? d) (deal-severed? d)))
 
     ;; The same seed again (a severed deal's first choice, ctrl+r any
-    ;; time): a fresh deal of this seed, settings and mode kept.
+    ;; time): a fresh deal of this seed, settings, scoring and mode kept.
     (define (deal-retry d)
-      (let ((fresh (deal-new (deal-seed d) (game-draw (deal-game d)))))
-        (deal-with-mode (deal fresh
-                              labels-shown: (deal-labels-shown d)
-                              bank: (deal-bank d)
-                              scrambles: (max SCRAMBLE-START (deal-scrambles d)))
-                        (trace-mode (deal-trace d)))))
+      (let ((fresh (deal-new (deal-seed d)
+                             (game-draw (deal-game d))
+                             (game-scoring (deal-game d))
+                             (trace-mode (deal-trace d)))))
+        (deal fresh
+              labels-shown: (deal-labels-shown d)
+              bank: (deal-bank d)
+              scrambles: (max SCRAMBLE-START (deal-scrambles d)))))
 
-    ;; Twist (Vegas, the ICE) or clean (timed Standard, no ICE). The two
-    ;; move together, so only while no move has been made.
+    ;; The version: twist (the hacker version, the ICE) or clean (the
+    ;; original, timed), only while no move has been made. The scoring is
+    ;; its own setting (deal-with-scoring) since P4.
     (define (deal-with-mode d mode)
       (let* ((g (deal-game d))
              (tr (trace-with-mode (deal-trace d) mode)))
@@ -432,15 +440,12 @@
                 (not (memq mode MODES))
                 (not (eq? (trace-mode tr) mode)))   ; the trace refused the flip: nothing moves
             d
-            (deal d
-                  trace: tr
-                  game: (game-with-scoring g (if (eq? mode 'twist) 'vegas 'standard))))))
+            (deal d trace: tr))))
 
-    (define (deal-toggle-mode d)
-      (cond ((busy? d) d)
-            ((> (game-moves (deal-game d)) 0) (deal d message: MSG-TOO-LATE))
-            (else
-             (deal-with-mode d (if (eq? (trace-mode (deal-trace d)) 'twist) 'clean 'twist)))))
+    ;; The scoring, vegas (BOUNTY) or standard (AUDIT), only before the
+    ;; first move (game-with-scoring refuses after).
+    (define (deal-with-scoring d scoring)
+      (with-game d (game-with-scoring (deal-game d) scoring)))
 
     (define (deal-with-trace d tr)
       (deal d trace: tr))
@@ -480,19 +485,14 @@
                       (* 7919 (game-moves g))))
              (picked (pick-seed level (deal-recent d) (prng-seed salt)))
              (seed (car picked))
-             (fresh (deal-new seed (game-draw g))))
-        (deal-with-mode (deal fresh
-                              labels-shown: (deal-labels-shown d)
-                              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d))
-                              scrambles: (max SCRAMBLE-START (deal-scrambles d))
-                              level: level
-                              recent: (take (cons seed (deal-recent d))
-                                            (min RECENT-MAX (+ 1 (length (deal-recent d))))))
-                        (trace-mode (deal-trace d)))))
-
-    ;; Standard <-> Vegas is the clean <-> twist flip.
-    (define (deal-toggle-scoring d)
-      (deal-toggle-mode d))
+             (fresh (deal-new seed (game-draw g) (game-scoring g) (trace-mode (deal-trace d)))))
+        (deal fresh
+              labels-shown: (deal-labels-shown d)
+              bank: (if vegas? (+ (deal-bank d) (game-score g)) (deal-bank d))
+              scrambles: (max SCRAMBLE-START (deal-scrambles d))
+              level: level
+              recent: (take (cons seed (deal-recent d))
+                            (min RECENT-MAX (+ 1 (length (deal-recent d))))))))
 
     (define (deal-with-bank d bank)
       (deal d bank: bank))
@@ -545,7 +545,6 @@
               ((and (pressed? f 'backspace) (not (typing? d))) (deal-undo d))
               ((and ctrl (pressed? f 'r)) (deal-retry d))
               ((and ctrl (pressed? f 'n)) (deal-next d))
-              ((and ctrl (pressed? f 'm)) (deal-toggle-mode d))
               ((and ctrl (pressed? f 's)) (deal-scramble d))
               (else #f))))
 
@@ -582,7 +581,7 @@
         ((undo) (deal-undo d))
         ((draw) (deal-toggle-draw d))
         ((next) (deal-next d))
-        ((score mode) (deal-toggle-mode d))
+        ((score mode) d)   ; drawn, not controls, since P4 (the scoring is a setting)
         ((scram) (deal-scramble d))
         ((probe) (deal-probe d))
         ((keys) (deal d keys-shown: (not (deal-keys-shown d))))
