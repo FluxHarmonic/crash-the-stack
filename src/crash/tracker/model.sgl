@@ -19,7 +19,7 @@
 ;;;   order-pattern-down
 ;;;   insert-row delete-row
 ;;;   (mark DIR) copy cut paste
-;;;   zoom save open share new
+;;;   zoom save open share new undo redo
 ;;; A movement in edit mode after a note entry advances one row (FT2's
 ;;; edit skip of 1).
 
@@ -32,6 +32,7 @@
   (export tstate tstate? tstate-tune tstate-pos tstate-row tstate-ch tstate-col
           tstate-octave tstate-inst tstate-edit tstate-zoom tstate-view-ch
           tstate-mark tstate-clip tstate-message tstate-dirty tstate-request
+          tstate-past tstate-future
           tstate-playing tstate-name
           tracker-new tracker-apply tracker-take-request tracker-with-playing
           tracker-with-tune tracker-with-message tracker-with-name
@@ -61,7 +62,11 @@
       (message default: #f)
       (dirty default: #f)
       (request default: #f)        ; play-row | play-loop | stop | save | open | share | #f
-      (playing default: #f))       ; #f or (pos . row) under the audio, set by the mode
+      (playing default: #f)        ; #f or (pos . row) under the audio, set by the mode
+      ;; undo/redo: the tune is an immutable value, so these are two
+      ;; stacks of tune values (David, 2026-09-20), unbounded in the session
+      (past default: '())
+      (future default: '()))
 
     ;; ------------------------------------------------------------
     ;; Lookups
@@ -372,7 +377,35 @@
     ;; The dispatcher
     ;; ------------------------------------------------------------
 
+    (define (undo s)
+      (if (null? (tstate-past s))
+          (tstate s message: "NOTHING TO UNDO")
+          (tstate s tune: (car (tstate-past s))
+                  past: (cdr (tstate-past s))
+                  future: (cons (tstate-tune s) (tstate-future s))
+                  dirty: #t mark: #f message: "UNDO")))
+
+    (define (redo s)
+      (if (null? (tstate-future s))
+          (tstate s message: "NOTHING TO REDO")
+          (tstate s tune: (car (tstate-future s))
+                  future: (cdr (tstate-future s))
+                  past: (cons (tstate-tune s) (tstate-past s))
+                  dirty: #t mark: #f message: "REDO")))
+
+    ;; Every action goes through here: when it changed the tune, the
+    ;; previous value is pushed and the redo stack cleared.
     (define (tracker-apply s a)
+      (cond
+        ((eq? a 'undo) (undo s))
+        ((eq? a 'redo) (redo s))
+        (else
+         (let ((s2 (apply-action s a)))
+           (if (eq? (tstate-tune s2) (tstate-tune s))
+               s2
+               (tstate s2 past: (cons (tstate-tune s) (tstate-past s)) future: '()))))))
+
+    (define (apply-action s a)
       (let ((s (tstate s message: #f)))
         (cond
           ((pair? a)

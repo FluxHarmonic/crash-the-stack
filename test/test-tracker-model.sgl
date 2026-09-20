@@ -102,3 +102,22 @@
   (test "C on the effect column is a hex digit, not a note" (assert-equal '((hex 12)) (tracker-actions '(c) '() 5 #t 4)))
   (test "Ctrl-3 is octave 3 (the fallback)" (assert-equal '((octave 3)) (tracker-actions (list (string->symbol "3")) '(ctrl) 0 #t 4))))
 
+
+(test-group "tracker model: undo and redo are stacks of tune values"
+  (let* ((s (drive (fresh) (list (key 'space) (key 'z) (key 'x))))
+         (t2 (tstate-tune s))
+         (s1 (drive s (list (key 'z 'ctrl))))
+         (s0 (drive s1 (list (key 'z 'ctrl))))
+         (s0b (drive s0 (list (key 'z 'ctrl))))
+         (s1r (drive s0 (list (key 'y 'ctrl))))
+         (s2r (drive s1r (list (key 'y 'ctrl)))))
+    (test "two edits leave two past values" (assert-equal 2 (length (tstate-past s))))
+    (test "undo once: the second note is gone, the first stays"
+      (assert-true (and (tracker-cell s1 0 1) (not (tracker-cell s1 1 1)))))
+    (test "undo twice: back to the blank pattern" (assert-false (tracker-cell s0 0 1)))
+    (test "a third undo says so and changes nothing"
+      (assert-true (and (equal? (tstate-message s0b) "NOTHING TO UNDO") (eq? (tstate-tune s0b) (tstate-tune s0)))))
+    (test "redo twice restores the exact tune value" (assert-true (eq? (tstate-tune s2r) t2)))
+    (test "a new edit after an undo clears the redo stack"
+      (assert-equal '() (tstate-future (drive s1 (list (key 'c))))))
+    (test "moving the cursor pushes nothing" (assert-equal 2 (length (tstate-past (drive s (list (key 'down)))))))))
