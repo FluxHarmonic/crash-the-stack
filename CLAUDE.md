@@ -42,7 +42,7 @@ suggestions.
   `(crash input)`, import only `(sigil struct)`, `(sigil math)`,
   `(sigil list)` and each other. `test/test-imports.sgl` enforces it.
 - `(crash render)` draws; the shells under `(crash shell ...)` are the only
-  modules that read a platform (`native` sigil-app, `web` the browser bridges);
+  modules that read a platform (`native` sigil-desktop, `web` the browser bridges);
   `(crash shell)` holds what they share and `(crash main)` picks one.
 
 ## Building
