@@ -268,21 +268,33 @@ async function waitForWorker() {
 }
 
 // ---- menu -------------------------------------------------------------------
+// The real menu (P4, D14/D19): the top screen is JACK IN / FREE PLAY /
+// SETTINGS / CREDITS (no CONTINUE on a fresh origin); DEFRAG lives under
+// FREE PLAY. The menu's line is "crash: menu SCREEN ID X Y ...", once
+// per screen shown.
+function parseMenu(text) {
+  const parts = text.split(" ");
+  const entries = {};
+  for (let i = 1; i + 2 < parts.length; i += 3) entries[parts[i]] = [parts[i + 1], parts[i + 2]];
+  return { screen: parts[0], entries };
+}
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
 const menu = await waitLine(/^crash: menu (.+)$/, 0, 20000);
 if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu"); await new Promise(() => {}); }
 {
-  const parts = menu.m[1].split(" ");
-  const entries = {};
-  for (let i = 0; i + 2 < parts.length; i += 3) entries[parts[i]] = [parts[i + 1], parts[i + 2]];
+  const top = parseMenu(menu.m[1]);
+  const entries = top.entries;
   const ids = Object.keys(entries).join(",");
-  if (!entries.cards || !entries.stack) fail("menu", `expected stack and cards entries, got ${ids}`);
+  if (top.screen !== "top") fail("menu", `the first menu line is for screen ${top.screen}, not top`);
+  else if (!entries["free-play"] || !entries["jack-in"] || !entries.settings || !entries.credits) fail("menu", `expected jack-in, free-play, settings and credits entries, got ${ids}`);
   else if (entries.continue) fail("menu", `a fresh origin has nothing to CONTINUE, got ${ids}`);
+  else if (entries.stack || entries.cards) fail("menu", `the tables are under FREE PLAY, not on the top screen: ${ids}`);
   else {
     await sleep(800);
     // By keys first (David, 2026-09-17: Enter on CARDS threw on a build in
-    // progress): ArrowDown moves the highlight from STACK to CARDS, Enter
-    // picks it; the table must boot and draw a frame with no error.
+    // progress): ArrowDown to FREE PLAY, Enter opens it, ArrowDown to
+    // DEFRAG, Enter picks it; the table must boot and draw a frame with
+    // no error.
     async function menuKey(k) {
       await evalJS(`document.dispatchEvent(new KeyboardEvent("keydown", { key: ${JSON.stringify(k)}, bubbles: true, cancelable: true }))`);
       await sleep(40);
@@ -296,7 +308,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     // the gate first (D42): one key opens it, the next skips the reveal
     if (await waitLine(/^crash: title gate /, 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title connect$/, 0, 3000); }
     // then the publisher card (D43): a key skips it once its strip is up
-    if (await waitLine(/^crash: title card tick /, 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, 0, 3000); }   // D45: the card waits for the boot
+    if (await waitLine(/^crash: title card tick /, 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title card done /, 0, 3000); }   // D45: the card waits for the boot under the meter
     await menuKey("ArrowUp");
     // and the boot's steps must be done before the menu is live (D40)
     if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
@@ -304,23 +316,24 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     if (!settledT) fail("menu", "a key during the title reveal did not settle it");
     m0 = consoleLines.length;
     await menuKey("ArrowDown"); await menuKey("Enter");
+    const freeK = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
+    await menuKey("ArrowDown"); await menuKey("Enter");
     const choseK = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
     const bootedK = choseK && await waitLine(/^crash: cards seed /, m0, 5000);
     await sleep(600);
     const errorsAfterKeys = consoleErrors.length + consoleLines.slice(m0).filter((l) => /^Error:/.test(l)).length;
-    if (!choseK) fail("menu", "no \"crash: menu chose\" line after ArrowDown, Enter");
+    if (!freeK) fail("menu", "ArrowDown, Enter did not open FREE PLAY (no \"crash: menu free\" line)");
+    else if (!choseK) fail("menu", "no \"crash: menu chose\" line after ArrowDown, Enter on FREE PLAY");
     else if (choseK.m[1] !== "cards") fail("menu", `keys: expected chose cards, got ${choseK.m[0]}`);
     else if (!bootedK) fail("menu", "keys chose cards but no card-table boot line followed");
     else if (errorsAfterKeys > 0) fail("menu", `keys booted the table with ${errorsAfterKeys} error line(s) in the console`);
     else {
-      // then by tap, from the menu again (?fresh so the CONTINUE entry does not shift CARDS)
+      // then by tap, from the menu again (?fresh so the CONTINUE entry does not shift the rows)
       await waitForWorker();
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh` });
       const menu2 = await waitLine(/^crash: menu (.+)$/, consoleLines.length, 20000);
-      const parts2 = menu2 ? menu2.m[1].split(" ") : [];
       let lookDetail0 = "";
-      const entries2 = {};
-      for (let i = 0; i + 2 < parts2.length; i += 3) entries2[parts2[i]] = [parts2[i + 1], parts2[i + 2]];
+      const top2 = menu2 ? parseMenu(menu2.m[1]) : { screen: "", entries: {} };
       await sleep(800);
       // the reveal again (a fresh process): a key skips it before the taps
       if (await waitLine(/^crash: title gate /, menu2 ? menu2.index : 0, 20000)) { await menuKey("ArrowUp"); await waitLine(/^crash: title connect$/, menu2 ? menu2.index : 0, 3000); }
@@ -329,31 +342,42 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       if (!(await waitLine(/^crash: boot done /, menu2 ? menu2.index : 0, 20000))) lookDetail0 = "no boot done line on the second boot";
       if (!(await waitLine(/^crash: title settled /, menu2 ? menu2.index : 0, 5000))) lookDetail0 = "a key during the second reveal did not settle it";
       m0 = consoleLines.length;
-      // the entries are STACK and DEFRAG only (the polish row): a tap on
-      // the row under DEFRAG, where LOOK sat, reaches nothing
       let lookDetail = lookDetail0;
-      const shown = Object.keys(entries2);
+      const shown = Object.keys(top2.entries);
+      let free2 = null;
       if (shown.some((id) => id === "look" || id === "hud" || id === "depth")) lookDetail = `the menu still shows ${shown.join(" ")}`;
-      else if (shown.join(" ") !== "stack cards") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not stack cards`;
+      else if (shown.join(" ") !== "jack-in free-play settings credits") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not jack-in free-play settings credits`;
       else {
-        // 32 px per entry: the row under DEFRAG (where UPDATE sits when a
-        // version waits; nothing waits on a fresh origin)
-        await tap(entries2.cards[0], parseFloat(entries2.cards[1]) + 32);
-        await sleep(600);
-        const stray = consoleLines.slice(m0).filter((l) => /^crash: (look|depth|menu chose|cards seed|seed) /.test(l));
-        if (stray.length) lookDetail = `a tap on the empty row under DEFRAG did something: ${stray[0]}`;
+        // a tap on FREE PLAY opens it: its rows are said once
+        await tap(top2.entries["free-play"][0], top2.entries["free-play"][1]);
+        const freeLine = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
+        if (!freeLine) lookDetail = "a tap on FREE PLAY opened no FREE PLAY screen";
+        else {
+          free2 = parseMenu(freeLine.m[1]).entries;
+          const rows = Object.keys(free2).map((k) => k.split("=")[0]);
+          if (rows.join(" ") !== "stack cards daily-stack daily-cards code scores version back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;
+          else {
+            // 32 px per row: the row under BACK is empty (above the band)
+            await sleep(300);
+            m0 = consoleLines.length;
+            await tap(free2.back[0], parseFloat(free2.back[1]) + 32);
+            await sleep(600);
+            const stray = consoleLines.slice(m0).filter((l) => /^crash: (look|depth|menu chose|menu top|cards seed|seed) /.test(l));
+            if (stray.length) lookDetail = `a tap on the empty row under BACK did something: ${stray[0]}`;
+          }
+        }
       }
       m0 = consoleLines.length;
       if (lookDetail) fail("menu", lookDetail);
-      else if (!entries2.cards) fail("menu", "no CARDS entry on the second menu");
+      else if (!free2.cards) fail("menu", "no DEFRAG row on FREE PLAY");
       else {
-        await tap(entries2.cards[0], entries2.cards[1]);
+        await tap(free2.cards[0], free2.cards[1]);
         const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
         const booted = chose && await waitLine(/^crash: cards seed /, m0, 5000);
-        if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on CARDS");
+        if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on DEFRAG");
         else if (chose.m[1] !== "cards") fail("menu", `expected chose cards, got ${chose.m[0]}`);
         else if (!booted) fail("menu", "chose cards but no card-table boot line followed");
-        else pass("menu", `entries ${ids}; ArrowDown+Enter -> ${choseK.m[0]} (no errors); the row under DEPTH is empty (no LOOK, no HUD); tap on CARDS -> ${chose.m[0]}, table booted`);
+        else pass("menu", `top ${ids}; ArrowDown+Enter twice -> ${choseK.m[0]} (no errors); FREE PLAY's rows as ruled, the row under BACK empty; tap on DEFRAG -> ${chose.m[0]}, the table booted`);
       }
     }
   }

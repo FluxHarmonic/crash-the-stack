@@ -1,14 +1,19 @@
-;;; P2 - the menu.
+;;; The menu (P2's list, P4's screens: rulings D14, D19).
 ;;;
-;;; The first screen's entries are data; this checks the shown set keeps
-;;; the canonical order and drops unknown ids, the highlight lands where
-;;; asked, up/down wrap, Enter and Space pick the highlight, a tap on an
-;;; entry's rect picks that entry at once and a tap elsewhere picks
-;;; nothing.
+;;; The top screen's entries are data; the shown set keeps the canonical
+;;; order and drops unknown ids, the highlight lands where asked, up/down
+;;; wrap, Enter and Space pick the highlight, a tap on an entry's rect
+;;; picks that entry at once and a tap elsewhere picks nothing. The
+;;; sub-screens: FREE PLAY, SETTINGS (a value row steps on left/right,
+;;; Enter and a tap, and the choice names the setting), CREDITS (pages),
+;;; SCORES, CODE (typed and tapped, GO reads it, a bad code is refused),
+;;; BACK and Escape close them; Escape on the pause menu is CONTINUE.
 
 (import (sigil test)
         (sigil math)
         (crash input)
+        (crash code)
+        (crash settings)
         (crash menu))
 
 (define VW 640)
@@ -16,62 +21,241 @@
 
 (define (frame pressed) (make-input-frame pressed '() #f))
 (define (click-frame xy) (make-input-frame '() '() xy))
+(define (step m pressed) (menu-step m (frame pressed) VW VH))
+(define (step* m . keys) (let loop ((m m) (ks keys)) (if (null? ks) m (loop (car (step m (list (car ks)))) (cdr ks)))))
 
-(define (center i)
-  (let ((r (menu-entry-rect i VW VH)))
+(define (center m i)
+  (let ((r (menu-entry-rect m i VW VH)))
     (cons (+ (car r) (quotient (caddr r) 2))
           (+ (cadr r) (quotient (cadddr r) 2)))))
 
-(test-group "the entries shown"
+(define TOP '(continue jack-in free-play settings credits update))
+
+(test-group "the top screen"
   (test "the canonical order is kept whatever order the ids come in"
-    (assert-equal '(continue stack cards update)
-                  (menu-entries (menu-new '(update cards stack continue)))))
-  (test "unknown ids are dropped"
-    (assert-equal '(stack cards) (menu-entries (menu-new '(stack bogus cards)))))
+    (assert-equal TOP (menu-entries (menu-new '(update credits settings free-play jack-in continue)))))
+  (test "unknown ids and the sub-screens' ids are dropped from the top screen"
+    (assert-equal '(jack-in free-play) (menu-entries (menu-new '(free-play bogus stack cards jack-in)))))
   (test "the highlight starts on the entry asked for when it is shown, else the first"
-    (assert-equal 1 (menu-highlight (menu-new '(stack cards) 'cards)))
-    (assert-equal 0 (menu-highlight (menu-new '(stack cards) 'continue)))
-    (assert-equal 0 (menu-highlight (menu-new '(continue stack cards) 'continue))))
-  (test "labels"
+    (assert-equal 1 (menu-highlight (menu-new '(jack-in free-play) 'free-play)))
+    (assert-equal 0 (menu-highlight (menu-new '(jack-in free-play) 'continue)))
+    (assert-equal 0 (menu-highlight (menu-new '(continue jack-in free-play) 'continue))))
+  (test "labels, in the block alphabet's characters"
     (assert-equal "CONTINUE" (menu-label 'continue))
+    (assert-equal "JACK IN" (menu-label 'jack-in))
+    (assert-equal "FREE PLAY" (menu-label 'free-play))
     (assert-equal "DEFRAG" (menu-label 'cards))
-    (assert-equal "?" (menu-label 'look)))
-  (test "the canonical order: CONTINUE, the tables, UPDATE last"
-    (assert-equal '(continue stack cards update)
-                  (menu-entries (menu-new '(update cards stack continue)))))
+    (assert-equal "PULL" (menu-label 'draw))
+    (assert-equal "?" (menu-label 'look))
+    (for-each (lambda (e)
+                (for-each (lambda (c) (assert-true (or (char-upper-case? c) (char-numeric? c) (char=? c #\space))))
+                          (string->list (cadr e))))
+              MENU-ENTRIES))
   (test "the removed prototype entries are not entries any more (rulings D32, D34, D48)"
-    (assert-equal '(stack cards) (menu-entries (menu-new '(stack look hud depth cards))))
-    (assert-equal 4 (length MENU-ENTRIES))))
+    (assert-equal '(jack-in) (menu-entries (menu-new '(look hud depth jack-in))))
+    (assert-equal 14 (length MENU-ENTRIES)))
+  (test "the top screen opens with no code line and the settings' defaults"
+    (let ((m (menu-new TOP)))
+      (assert-equal 'top (menu-screen m))
+      (assert-false (menu-code-line m))
+      (assert-false (menu-heading m))
+      (assert-equal (settings-defaults) (menu-settings m))
+      (assert-equal 'hacker (menu-version m)))))
 
 (test-group "keys"
-  (let ((m (menu-new '(stack cards update))))
+  (let ((m (menu-new '(jack-in free-play settings))))
     (test "down moves, up moves back, both wrap"
-      (assert-equal 1 (menu-highlight (car (menu-step m (frame '(down)) VW VH))))
-      (assert-equal 2 (menu-highlight (car (menu-step m (frame '(up)) VW VH))))
-      (assert-equal 0 (menu-highlight
-                        (car (menu-step (car (menu-step (car (menu-step m (frame '(j)) VW VH))
-                                                        (frame '(j)) VW VH))
-                                        (frame '(j)) VW VH)))))
+      (assert-equal 1 (menu-highlight (car (step m '(down)))))
+      (assert-equal 2 (menu-highlight (car (step m '(up)))))
+      (assert-equal 0 (menu-highlight (step* m 'j 'j 'j))))
     (test "a move picks nothing"
-      (assert-false (cdr (menu-step m (frame '(down)) VW VH))))
+      (assert-false (cdr (step m '(down)))))
     (test "Enter picks the highlight; Space too"
-      (assert-equal 'stack (cdr (menu-step m (frame '(return)) VW VH)))
-      (assert-equal 'cards (cdr (menu-step (car (menu-step m (frame '(down)) VW VH))
-                                           (frame '(space)) VW VH))))
+      (assert-equal 'jack-in (cdr (step m '(return))))
+      (assert-equal 'jack-in (cdr (step m '(space)))))
     (test "a frame with nothing relevant changes nothing"
-      (let ((r (menu-step m (frame '(x)) VW VH)))
+      (let ((r (step m '(x))))
         (assert-false (cdr r))
-        (assert-equal 0 (menu-highlight (car r)))))))
+        (assert-equal 0 (menu-highlight (car r)))))
+    (test "Escape on the top screen with no board live picks nothing; with CONTINUE shown it is CONTINUE"
+      (assert-false (cdr (step m '(escape))))
+      (assert-equal 'continue (cdr (step (menu-new '(continue jack-in)) '(escape)))))))
 
 (test-group "taps"
-  (let ((m (menu-new '(continue stack cards))))
+  (let ((m (menu-new '(continue jack-in free-play))))
     (test "a tap on an entry picks it and moves the highlight there"
-      (let ((r (menu-step m (click-frame (center 2)) VW VH)))
-        (assert-equal 'cards (cdr r))
-        (assert-equal 2 (menu-highlight (car r)))))
+      (let ((r (menu-step m (click-frame (center m 1)) VW VH)))
+        (assert-equal 'jack-in (cdr r))
+        (assert-equal 1 (menu-highlight (car r)))))
     (test "the hit-test agrees with the rects"
-      (assert-equal 0 (menu-hit m VW VH (car (center 0)) (cdr (center 0))))
-      (assert-equal 1 (menu-hit m VW VH (car (center 1)) (cdr (center 1)))))
+      (assert-equal 0 (menu-hit m VW VH (car (center m 0)) (cdr (center m 0))))
+      (assert-equal 1 (menu-hit m VW VH (car (center m 1)) (cdr (center m 1)))))
     (test "a tap between entries or off to the side picks nothing"
       (assert-false (menu-hit m VW VH 320 (+ ENTRIES-Y ENTRY-H 2)))
-      (assert-false (cdr (menu-step m (click-frame (cons 10 10)) VW VH))))))
+      (assert-false (cdr (menu-step m (click-frame (cons 10 10)) VW VH))))
+    (test "the pause menu's code line: a tap on it is COPY, and it is only there with a code"
+      (let ((p (menu-with-code-line m "0123456789")))
+        (assert-true (and (code-line-rect p VW VH) #t))
+        (assert-false (code-line-rect m VW VH))
+        (let* ((r (code-line-rect p VW VH))
+               (xy (cons (+ (car r) 10) (+ (cadr r) 4))))
+          (assert-equal 'copy (cdr (menu-step p (click-frame xy) VW VH)))
+          (assert-false (cdr (menu-step m (click-frame xy) VW VH))))))))
+
+(test-group "FREE PLAY"
+  (let* ((m (menu-new TOP 'free-play))
+         (f (car (step m '(return)))))
+    (test "opens with its rows, its heading, the first row highlighted; the rows sit under the heading"
+      (assert-equal 'free (menu-screen f))
+      (assert-equal "FREE PLAY" (menu-heading f))
+      (assert-equal '(stack cards daily-stack daily-cards code scores version back) (menu-entries f))
+      (assert-equal 0 (menu-highlight f))
+      (assert-equal SUB-ENTRIES-Y (cadr (menu-entry-rect f 0 VW VH)))
+      (assert-true (<= (+ (cadr (menu-entry-rect f 7 VW VH)) ENTRY-H) 376)))
+    (test "STACK, DEFRAG and the dailies are choices"
+      (assert-equal 'stack (cdr (step f '(return))))
+      (assert-equal 'cards (cdr (step (step* f 'down) '(return))))
+      (assert-equal 'daily-stack (cdr (step (step* f 'down 'down) '(return))))
+      (assert-equal 'daily-cards (cdr (step (step* f 'down 'down 'down) '(return)))))
+    (test "VERSION is a value row: HACKER by default, ORIGINAL after a step, back after another; left steps too; no choice"
+      (let* ((v (step* f 'up 'up))   ; wraps to version
+             (r1 (step v '(return)))
+             (r2 (step (car r1) '(left))))
+        (assert-equal 'version (list-ref (menu-entries v) (menu-highlight v)))
+        (assert-equal "HACKER" (menu-row-value v 'version))
+        (assert-equal 'value (menu-row-kind v 'version))
+        (assert-false (cdr r1))
+        (assert-equal 'original (menu-version (car r1)))
+        (assert-equal "ORIGINAL" (menu-row-value (car r1) 'version))
+        (assert-equal 'hacker (menu-version (car r2)))
+        (assert-true (> (caddr (menu-entry-rect v (menu-highlight v) VW VH)) ENTRY-W))))
+    (test "BACK closes to the top screen with FREE PLAY highlighted; Escape and Backspace too"
+      (let ((b (step (step* f 'up) '(return))))
+        (assert-false (cdr b))
+        (assert-equal 'top (menu-screen (car b)))
+        (assert-equal 'free-play (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
+      (assert-equal 'top (menu-screen (car (step f '(escape)))))
+      (assert-equal 'top (menu-screen (car (step f '(backspace))))))
+    (test "a tap on a row picks it; on the version row it steps it"
+      (assert-equal 'cards (cdr (menu-step f (click-frame (center f 1)) VW VH)))
+      (let ((r (menu-step f (click-frame (center f 6)) VW VH)))
+        (assert-false (cdr r))
+        (assert-equal 'original (menu-version (car r)))))))
+
+(test-group "SETTINGS"
+  (let* ((m (menu-new TOP 'settings))
+         (s (car (step m '(return)))))
+    (test "ten rows under the heading, every setting a value row showing its default, BACK last; the last row ends above the band"
+      (assert-equal 'settings (menu-screen s))
+      (assert-equal (append SETTING-IDS '(back)) (menu-entries s))
+      (for-each (lambda (id)
+                  (assert-equal 'value (menu-row-kind s id))
+                  (assert-equal (setting-value-label id (settings-value (settings-defaults) id)) (menu-row-value s id)))
+                SETTING-IDS)
+      (assert-equal 'item (menu-row-kind s 'back))
+      (assert-true (<= (+ (cadr (menu-entry-rect s 9 VW VH)) ENTRY-H) 376)))
+    (test "Enter on PULL steps it and the choice is (set draw . 3); right steps, left steps back; the row shows the value"
+      (let* ((r1 (step s '(return)))
+             (r2 (step (car r1) '(right)))
+             (r3 (step (car r2) '(left))))
+        (assert-equal '(set draw . 3) (cdr r1))
+        (assert-equal "3" (menu-row-value (car r1) 'draw))
+        (assert-equal '(set draw . 1) (cdr r2))
+        (assert-equal '(set draw . 3) (cdr r3))))
+    (test "SCORING steps BOUNTY -> AUDIT; VOLUME steps down and wraps; the cosmetics step OFF -> ON"
+      (let ((sc (step* s 'down))
+            (vol (step* s 'down 'down 'down 'down 'down 'down))
+            (scan (step* s 'up 'up 'up)))
+        (assert-equal '(set scoring . standard) (cdr (step sc '(return))))
+        (assert-equal "AUDIT" (menu-row-value (car (step sc '(return))) 'scoring))
+        (assert-equal 'volume (list-ref (menu-entries vol) (menu-highlight vol)))
+        (assert-equal '(set volume . 9) (cdr (step vol '(left))))
+        (assert-equal '(set volume . 0) (cdr (step vol '(right))))
+        (assert-equal 'scanlines (list-ref (menu-entries scan) (menu-highlight scan)))
+        (assert-equal '(set scanlines . on) (cdr (step scan '(return))))))
+    (test "a tap on a value row steps it forward"
+      (let ((r (menu-step s (click-frame (center s 1)) VW VH)))
+        (assert-equal '(set scoring . standard) (cdr r))))
+    (test "BACK closes to the top screen with SETTINGS highlighted"
+      (let ((b (step (step* s 'up) '(return))))
+        (assert-equal 'top (menu-screen (car b)))
+        (assert-equal 'settings (list-ref (menu-entries (car b)) (menu-highlight (car b))))))))
+
+(test-group "CREDITS and SCORES"
+  (let* ((c (car (step (menu-new TOP 'credits) '(return)))))
+    (test "CREDITS: two pages turned by left/right, BACK its only row at the bottom"
+      (assert-equal 'credits (menu-screen c))
+      (assert-equal '(back) (menu-entries c))
+      (assert-equal TEXT-ROWS-Y (cadr (menu-entry-rect c 0 VW VH)))
+      (assert-equal 0 (menu-page c))
+      (assert-equal 1 (menu-page (car (step c '(right)))))
+      (assert-equal 0 (menu-page (car (step (car (step c '(right))) '(right)))))
+      (assert-equal 1 (menu-page (car (step c '(left)))))
+      (assert-equal 'top (menu-screen (car (step c '(return))))))
+    (test "SCORES opens from FREE PLAY, BACK returns to the top screen"
+      (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down 'down 'down) '(return)))))
+        (assert-equal 'scores (menu-screen sc))
+        (assert-equal "SCORES" (menu-heading sc))
+        (assert-equal 'top (menu-screen (car (step sc '(escape)))))))))
+
+(test-group "CODE"
+  (let* ((f (car (step (menu-new TOP 'free-play) '(return))))
+         (c (car (step (step* f 'down 'down 'down 'down) '(return))))
+         (code (encode (spec-new 'cards 'original 3 'standard 'turtle 280))))
+    (test "opens empty; typed letters and digits append in upper case, up to ten; the display dashes after five"
+      (assert-equal 'code (menu-screen c))
+      (assert-equal "" (menu-code c))
+      (let ((typed (let loop ((m c) (cs (string->list (string-downcase code))))
+                     (if (null? cs) m (loop (car (step m (list (string->symbol (string (car cs)))))) (cdr cs))))))
+        (assert-equal code (menu-code typed))
+        (assert-equal (code-display code) (menu-code-display typed))
+        (assert-equal code (menu-code (car (step typed '(a)))))   ; full: nothing more
+        (assert-equal (substring code 0 9) (menu-code (car (step typed '(backspace)))))
+        ;; GO reads it
+        (let ((r (step typed '(return))))
+          (assert-true (pair? (cdr r)))
+          (assert-equal 'code (car (cdr r)))
+          (assert-true (spec-equal? (spec-new 'cards 'original 3 'standard 'turtle 280) (cdr (cdr r)))))))
+    (test "a letter outside the alphabet (I, L, O, U) and the navigation keys type nothing"
+      (assert-equal "" (menu-code (car (step c '(i)))))
+      (assert-equal "" (menu-code (car (step c '(o)))))
+      (assert-equal "" (menu-code (car (step c '(down)))))
+      (assert-equal "" (menu-code (car (step c '(space))))))
+    (test "a corrupted code is refused: the choice is code-refused and the text stays"
+      (let* ((bad (string-append (substring code 0 9) (if (char=? (string-ref code 9) #\0) "1" "0")))
+             (typed (let loop ((m c) (cs (string->list bad)))
+                      (if (null? cs) m (loop (car (step m (list (string->symbol (string (char-downcase (car cs))))))) (cdr cs)))))
+             (r (step typed '(return))))
+        (assert-equal 'code-refused (cdr r))
+        (assert-equal bad (menu-code (car r)))))
+    (test "the keypad: 34 cells (the alphabet, DEL, GO) inside the screen, none overlapping; a tap types, DEL deletes, GO reads"
+      (let ((cells (keypad-cells VW VH)))
+        (assert-equal 34 (length cells))
+        (for-each (lambda (cell)
+                    (let ((r (cdr cell)))
+                      (assert-true (>= (car r) 0))
+                      (assert-true (<= (+ (car r) (caddr r)) VW))
+                      (assert-true (<= (+ (cadr r) (cadddr r)) TEXT-ROWS-Y))))
+                  cells)
+        (let loop ((cs cells))
+          (unless (null? cs)
+            (for-each (lambda (o)
+                        (let ((a (cdr (car cs))) (b (cdr o)))
+                          (assert-true (or (>= (car b) (+ (car a) (caddr a))) (>= (car a) (+ (car b) (caddr b)))
+                                           (>= (cadr b) (+ (cadr a) (cadddr a))) (>= (cadr a) (+ (cadr b) (cadddr b)))))))
+                      (cdr cs))
+            (loop (cdr cs))))
+        (let* ((tap (lambda (m label)
+                      (let ((r (keypad-rect label VW VH)))
+                        (menu-step m (click-frame (cons (+ (car r) 3) (+ (cadr r) 3))) VW VH))))
+               (m1 (car (tap c "7")))
+               (m2 (car (tap m1 "Z")))
+               (m3 (car (tap m2 "DEL"))))
+          (assert-equal "7Z" (menu-code m2))
+          (assert-equal "7" (menu-code m3))
+          (assert-equal 'code-refused (cdr (tap m3 "GO")))
+          (let ((full (let loop ((m c) (cs (string->list code)))
+                        (if (null? cs) m (loop (car (tap m (string (car cs)))) (cdr cs))))))
+            (assert-equal 'code (car (cdr (tap full "GO"))))))))
+    (test "Escape closes the CODE screen to the top screen"
+      (assert-equal 'top (menu-screen (car (step c '(escape))))))))

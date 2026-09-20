@@ -49,13 +49,13 @@
           AMBIENT-PATH AMBIENT-RATE play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
           stored-hud set-stored-hud!
-          settings-in-force setting set-setting! apply-audio-settings!
+          settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code
           set-clock-source! now-second today
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
           daily-session? daily-deal?
-          boot-session save-after-frame!
+          boot-session save-after-frame! run-after-frame! deal-run-after-frame!
           boot-deal save-deal-after-frame!
           active-game set-active-game! saved-game?
           launch-menu menu-frame? jack-out?)
@@ -169,6 +169,19 @@
     ;; (crash settings)). The hud key keeps its P3 shape: ?hud= and --hud
     ;; still write it through set-stored-hud!.
     (define *settings* #f)
+    ;; Every setting from the store, the default where the key is missing
+    ;; or holds something outside the row's values.
+    (define (settings-load)
+      (map (lambda (st)
+             (let ((d (store-read-datum (setting-key st))))
+               (cons (setting-id st) (if (setting-value? st d) d (setting-default st)))))
+           SETTINGS))
+
+    ;; One setting to the store. Answers what the store said.
+    (define (settings-save! s id)
+      (let ((st (setting-ref id)))
+        (and st (store-write-datum! (setting-key st) (settings-value s id)))))
+
     (define (settings-in-force)
       (or *settings*
           (begin (set! *settings* (settings-load)) *settings*)))
@@ -327,7 +340,7 @@
                                                  (trace-ticks (session-trace after))
                                                  (session-moves after)
                                                  (daily-session? after))))
-                          (if line (session after message: line) after))
+                          (if line (session after message: line note: line) after))
                         after)))
         (when (save-due? before after)
           (store-write-datum! BOARD-KEY (session->datum after)))
@@ -335,19 +348,40 @@
 
     ;; A clear: the scoreboard, the run, and the line to show for it (or #f).
     (define (clear-line! table version ticks moves daily?)
-      (let* ((news (record-clear! table version ticks moves (and daily? (today))))
-             (r (run-in-force)))
-        (cond ((and r (not (run-done? r)) (eq? (run-layer-table r) table))
-               (let ((r (run-cleared r ticks moves)))
-                 (set-run! r)
-                 (if (run-done? r)
-                     "STACK CRASHED. RUN COMPLETE. NEXT SHOWS THE LEDGER."
-                     (string-append "LAYER " (number->string (run-layer r))   ; the layer just cleared, 1-based, is the next's index
-                                    "/" (number->string (run-layer-count))
-                                    " CRASHED. NEXT PULLS LAYER "
-                                    (number->string (run-layer-number r)) "."))))
-              (else (news-line news)))))
+      (let ((news (record-clear! table version ticks moves (and daily? (today)))))
+        (or (run-clear-line! table ticks moves)
+            (news-line news))))
 
+    ;; The run's part of a clear: the layer done, the next one named (or the
+    ;; ledger), or #f when no run is on this table. Also what a demo clear
+    ;; (the arm's door, which keeps the scoreboard clean) advances.
+    (define (run-clear-line! table ticks moves)
+      (let ((r (run-in-force)))
+        (and r (not (run-done? r)) (eq? (run-layer-table r) table)
+             (let ((r (run-cleared r ticks moves)))
+               (set-run! r)
+               (if (run-done? r)
+                   "STACK CRASHED. RUN COMPLETE. NEXT SHOWS THE LEDGER."
+                   (string-append "LAYER " (number->string (run-layer r))   ; the layer just cleared, 1-based, is the next's index
+                                  "/" (number->string (run-layer-count))
+                                  " CRASHED. NEXT PULLS LAYER "
+                                  (number->string (run-layer-number r)) "."))))))
+
+    ;; A demo board's frame (the cleared sequence on demand): nothing
+    ;; reaches the store's board, best or scores, but a run still advances.
+    (define (run-after-frame! before after)
+      (let ((b0 (session-board before))
+            (b1 (session-board after)))
+        (if (and (board-cleared? b1) (not (board-cleared? b0)))
+            (let ((line (run-clear-line! 'stack (trace-ticks (session-trace after)) (session-moves after))))
+              (if line (session after message: line note: line) after))
+            after)))
+
+    (define (deal-run-after-frame! before after)
+      (if (and (deal-won? after) (not (deal-won? before)))
+          (let ((line (run-clear-line! 'cards (trace-ticks (deal-trace after)) (game-moves (deal-game after)))))
+            (if line (deal after message: line note: line) after))
+          after))
     ;; (cons deal restored?): the saved deal if there is one and fresh? is
     ;; #f, else a new deal of seed with draw one.
     (define (boot-deal seed fresh?)
@@ -389,7 +423,7 @@
                                                 (trace-ticks (deal-trace after))
                                                 (game-moves (deal-game after))
                                                 (daily-deal? after))))
-                         (if line (deal after message: line) after))
+                         (if line (deal after message: line note: line) after))
                        after)))
         (when (deal-save-due? before after)
           (store-write-datum! CARDS-KEY (deal->datum after)))
@@ -475,12 +509,15 @@
     ;; each boot's glitches differ (P3d). The reveal plays once per
     ;; process and only when the process opens on the menu (a ?stack boot
     ;; forfeits it): later menus open settled.
-    (define (launch-menu update-waiting? held? . rest)
-      (let ((continue? (or held? (saved-game? (active-game))))
+    (define (launch-menu update-waiting? held? . rest)   ; rest: seed, code-line, copy?, fresh? (a fresh boot ignores the saved board: no CONTINUE unless held)
+      (let ((continue? (or held?
+                           (and (not (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (pair? (cdddr rest)) (cadddr rest)))
+                                (saved-game? (active-game)))))
             (seed (and (not *title-shown*)
                        (or (and (pair? rest) (car rest))
                            (now-second))))
-            (code-line (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+            (code-line (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
+            (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest))))
         (set! *title-shown* #t)
         (menu-with-scores
          (menu-with-code-line
@@ -491,7 +528,8 @@
                      (if continue? 'continue 'jack-in)
                      seed)
            (settings-in-force))
-          code-line)
+          code-line
+          copy?)
          (scores-in-force))))
 
     ;; Does this frame ask for the menu by key: ctrl+e? (The MENU tool

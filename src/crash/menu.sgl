@@ -33,7 +33,6 @@
 (define-library (crash menu)
   (import (sigil struct)
           (sigil math)
-          (sigil string)
           (crash input)
           (crash title)
           (crash settings)
@@ -41,8 +40,8 @@
 
   (export menu menu? menu-new menu-screen menu-entries menu-highlight menu-frames
           menu-title menu-with-title menu-settings menu-with-settings
-          menu-version menu-code-line menu-with-code-line menu-code menu-page
-          menu-scores menu-with-scores
+          menu-version menu-code-line menu-with-code-line menu-copy menu-code menu-page
+          menu-scores menu-with-scores menu-run menu-open-run-done
           menu-step menu-entry-rect menu-hit menu-cues menu-live?
           menu-label menu-row-value menu-row-kind menu-heading menu-code-display
           code-line-rect keypad-cells keypad-rect keypad-hit
@@ -82,7 +81,8 @@
             (list 'settings "SETTINGS" 'draw 'scoring 'hud 'field 'music 'sfx 'volume 'scanlines 'veil 'back)
             (list 'credits "CREDITS" 'back)
             (list 'scores "SCORES" 'back)
-            (list 'code "ENTER CODE" 'back)))
+            (list 'code "ENTER CODE" 'back)
+            (list 'run-done "RUN COMPLETE" 'back)))
 
     (define CREDITS-PAGES 2)
 
@@ -116,7 +116,7 @@
     (define CODE-LINE-Y 360)
     ;; the text screens (CREDITS, SCORES, CODE) keep their rows at the bottom, under their content
     (define TEXT-ROWS-Y 340)
-    (define TEXT-SCREENS (list 'credits 'scores 'code))
+    (define TEXT-SCREENS (list 'credits 'scores 'code 'run-done))
 
     (define-struct menu
       (screen default: 'top)     ; top | free | settings | credits | scores | code
@@ -126,16 +126,24 @@
       (settings default: '())    ; the settings in force, (crash settings)' alist
       (version default: 'hacker) ; FREE PLAY's version to deal: hacker | original
       (code-line default: #f)    ; the live board's share code (ten characters), or #f
+      (copy default: #f)         ; the code line offers COPY (the web: the page writes the clipboard)
       (code default: "")         ; the CODE screen's typed characters
       (page default: 0)          ; the CREDITS screen's page
       (scores default: #f)       ; the scoreboard for the SCORES screen, or #f
+      (run default: #f)          ; the finished run for the RUN COMPLETE screen (ledger, seed), or #f
       (title default: #f)        ; the title's reveal state, (crash title)
       (frames default: 0))       ; menu frames so far, for the cursor's blink
 
     (define (menu-with-title m t) (menu m title: t))
     (define (menu-with-settings m s) (menu m settings: s))
-    (define (menu-with-code-line m code) (menu m code-line: code))
+    (define (menu-with-code-line m code . rest)
+      (menu m code-line: code copy: (and (pair? rest) (car rest) #t)))
     (define (menu-with-scores m s) (menu m scores: s))
+
+    ;; The RUN COMPLETE screen over the top screen, showing r (the shell
+    ;; opens it when the last layer is cleared and NEXT is asked for).
+    (define (menu-open-run-done m r)
+      (menu (open-screen m (quote run-done)) run: r))
 
     (define (menu-label id)
       (let ((entry (assq id MENU-ENTRIES)))
@@ -220,9 +228,9 @@
 
     ;; The CODE screen's keypad: the alphabet in four rows of eight under
     ;; the typed line, then DEL and GO. Cells 56 wide at a 64 pitch (the
-    ;; row is 8 * 64 - 8 = 504), 28 tall at a 32 pitch, from y 168.
+    ;; row is 8 * 64 - 8 = 504), 28 tall at a 32 pitch, from y 124.
     (define KEYPAD-X 68)
-    (define KEYPAD-Y 168)
+    (define KEYPAD-Y 124)
     (define KEYPAD-CELL-W 56)
     (define KEYPAD-CELL-H 28)
     (define KEYPAD-PITCH-X 64)
@@ -287,6 +295,7 @@
                       ((settings) 'settings)
                       ((credits) 'credits)
                       ((scores code) 'free-play)
+                      ((run-done) 'jack-in)
                       (else #f))))
         (menu m screen: 'top
               entries: (menu-top-entries m)

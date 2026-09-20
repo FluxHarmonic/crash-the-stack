@@ -613,14 +613,15 @@ else fail("keys-match", keysDetail);
   // first visit's boot can outlast these sub-arms under load
   if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
   await press("Escape");
-  const menu = await waitLine(/^crash: menu (continue) /, mark, 3000);
-  if (!menu) detail = "Escape did not open the menu (no \"crash: menu continue ...\" line)";
+  const menu = await waitLine(/^crash: menu top (continue) /, mark, 3000);
+  if (!menu) detail = "Escape did not open the menu (no \"crash: menu top continue ...\" line)";
   else {
-    // the entries (the polish row): CONTINUE, STACK, DEFRAG, and UPDATE
-    // only while a version waits; LOOK and HUD are gone (rulings D32, D34)
-    const ids = consoleLines[menu.index].split(" ").slice(2).filter((w) => /^[a-z]+$/.test(w));
-    if (ids.some((id) => !["continue", "stack", "cards", "update"].includes(id))) detail = `the menu shows an entry the polish row removed: ${ids.join(" ")}`;
-    else if (ids.join(" ") !== "continue stack cards") detail = `the menu's entries are ${ids.join(" ")}, not continue stack cards`;
+    // the entries (P4, D14 and D19): CONTINUE, JACK IN, FREE PLAY, SETTINGS,
+    // CREDITS, and UPDATE only while a version waits; the prototype rows
+    // (LOOK, HUD, DEPTH) and the bare tables are gone
+    const ids = consoleLines[menu.index].split(" ").slice(3).filter((w) => /^[a-z-]+$/.test(w));
+    if (ids.some((id) => !["continue", "jack-in", "free-play", "settings", "credits", "update"].includes(id))) detail = `the menu shows an entry that is not the top screen's: ${ids.join(" ")}`;
+    else if (ids.join(" ") !== "continue jack-in free-play settings credits") detail = `the menu's entries are ${ids.join(" ")}, not continue jack-in free-play settings credits`;
     else detail = await back("Escape");
   }
   if (!detail && !EXPECT_NO_SELECTION) {
@@ -629,7 +630,7 @@ else fail("keys-match", keysDetail);
     else {
       mark = consoleLines.length;
       await tap(btn.m[1], btn.m[2]);
-      const menu2 = await waitLine(/^crash: menu (continue) /, mark, 3000);
+      const menu2 = await waitLine(/^crash: menu top (continue) /, mark, 3000);
       if (!menu2) detail = "the MENU button opened no menu";
       else detail = await back("the MENU button");
     }
@@ -1374,7 +1375,7 @@ let iceLock = null;
     else {
       await sleep(300);
       // the menu's boot line names each entry's center; the tap lands on the first
-      const ml = await waitLine(/^crash: menu (\w+) (-?[\d.]+) (-?[\d.]+)/, from, 3000);
+      const ml = await waitLine(/^crash: menu top ([\w-]+) (-?[\d.]+) (-?[\d.]+)/, from, 3000);
       const r = ml ? { x: parseFloat(ml.m[2]), y: parseFloat(ml.m[3]) } : null;
       const entry = r || {};
       await tap(entry.x || 320, entry.y || 150);
@@ -1408,7 +1409,7 @@ let iceLock = null;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
-  const menuLine = await waitLine(/^crash: menu .*\bstack (-?[\d.]+) (-?[\d.]+)/, from, 20000);
+  const menuLine = await waitLine(/^crash: menu top .*\bjack-in (-?[\d.]+) (-?[\d.]+)/, from, 20000);
   const gateP = await waitLine(/^crash: title gate /, from, 20000);
   let connect = null;
   if (gateP) { await tap(320, 200); connect = await waitLine(/^crash: title connect$/, gateP.index, 3000); }
@@ -1455,10 +1456,10 @@ let iceLock = null;
       await sleep(300);
       const m0 = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
-      const chose = await waitLine(/^crash: menu chose stack$/, m0, 3000);
+      const chose = await waitLine(/^crash: menu chose jack-in$/, m0, 3000);
       const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
-      if (!chose) detail = "after the settle, a tap on STACK chose nothing (the menu was not live at once)";
-      else if (!booted) detail = "after the settle, STACK chosen but no board booted";
+      if (!chose) detail = "after the settle, a tap on JACK IN chose nothing (the menu was not live at once)";
+      else if (!booted) detail = "after the settle, JACK IN chosen but no board booted (the run's first layer)";
     }
   }
   delete slowPaths["/assets/audio/ambient.pcm"];
@@ -1572,7 +1573,7 @@ let iceLock = null;
   if (!detail) {
     const m0 = consoleLines.length;
     await press("Escape");
-    const menu = await waitLine(/^crash: menu (continue) /, m0, 5000);
+    const menu = await waitLine(/^crash: menu top (continue) /, m0, 5000);
     if (!menu) detail = "Escape did not open the menu";
     else {
       // nothing re-runs on the return: no new boot step line, no new title seed line

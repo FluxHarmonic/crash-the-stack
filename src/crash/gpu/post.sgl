@@ -1,0 +1,110 @@
+;;; (crash gpu post) - The D36 cosmetics behind the settings (P4, t-de1dac).
+;;;
+;;; Two effects that keep the Amiga vibe, both off by default:
+;;;   SCANLINES  the presented frame drawn into a render target the size
+;;;              of the virtual viewport and presented through a shader
+;;;              that darkens alternate device rows by SCANLINE-DARK and
+;;;              smears each texel half a texel to the right (the CRT's
+;;;              beam), at the device pixel ratio: the phosphor path's
+;;;              shape ((crash gpu phosphor)), one pass, no readback.
+;;;   VEIL       a palette-cycling veil on the OBFUSCATED tiles and the
+;;;              ICE'd cards: the draw asks veil-color for the cell's
+;;;              color this frame and gets the next entry of a four-color
+;;;              ramp by a time counter; no alpha, so the frame's color
+;;;              count holds.
+;;; The shells set both from the settings at boot and when a row steps.
+
+(define-library (crash gpu post)
+  (import (sigil math)
+          (sigil graphics)
+          (crash palette)
+          (crash gpu glsl))
+
+  (export post-set-scanlines! post-set-veil! post-scanlines? post-veil?
+          post-frame! post-reset! post-tick!
+          veil-color VEIL-RAMP SCANLINE-DARK)
+
+  (begin
+    (define SCANLINE-DARK 0.15)     ; alternate rows this much darker
+    (define *scanlines* #f)
+    (define *veil* #f)
+    (define *tick* 0)
+
+    (define (post-set-scanlines! on?) (set! *scanlines* (and on? #t)))
+    (define (post-set-veil! on?) (set! *veil* (and on? #t)))
+    (define (post-scanlines?) *scanlines*)
+    (define (post-veil?) *veil*)
+
+    ;; One tick a frame: the veil's clock.
+    (define (post-tick!) (set! *tick* (+ 1 *tick*)))
+
+    ;; The veil's ramp: four palette colors the cells cycle through.
+    (define VEIL-RAMP (list C-ICE C-HOT C-LOCK-WEAK C-HIGHLIGHT))
+
+    ;; The veil's color for a cell this frame (cells offset by their id so
+    ;; the ramp rolls across them), or plain when the veil is off.
+    (define (veil-color id plain)
+      (if *veil*
+          (list-ref VEIL-RAMP (modulo (+ id (quotient *tick* 6)) (length VEIL-RAMP)))
+          plain))
+
+    ;; --- the scanline pass ---------------------------------------------------------
+
+    (define *rt* #f)
+    (define *w* 0)
+    (define *h* 0)
+    (define *shader* #f)
+
+    ;; The presented target sampled at the texel and half a texel right
+    ;; (the smear), then darkened on alternate device rows. gl_FragCoord
+    ;; is in device pixels, so the rows are device rows whatever the
+    ;; viewport's scale; they are grouped by u_pitch (the device pixel
+    ;; ratio, rounded) so a phone at dpr 3 sees one dark line in every
+    ;; two CSS rows, not a 50 % gray.
+    (define FRAGMENT
+      (string-append
+       GLSL-PREFIX
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_texel;\n"
+       "uniform float u_pitch;\n"
+       "uniform float u_dark;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       "void main() {\n"
+       "    vec4 a = texture(iTexChannel0_iSmpChannel0, texUV);\n"
+       "    vec4 b = texture(iTexChannel0_iSmpChannel0, texUV + vec2(0.5 * u_texel.x, 0.0));\n"
+       "    vec4 c = 0.5 * (a + b);\n"
+       "    float row = floor(gl_FragCoord.y / max(u_pitch, 1.0));\n"
+       "    float dark = (mod(row, 2.0) < 1.0) ? 1.0 : (1.0 - u_dark);\n"
+       "    fragColor = vec4(c.rgb * dark, c.a);\n"
+       "}\n"))
+
+    (define (ensure! w h)
+      (unless (and *rt* (= w *w*) (= h *h*))
+        (when *rt* (render-target-free! *rt*))
+        (set! *rt* (make-render-target w h 'nearest))
+        (set! *w* w)
+        (set! *h* h))
+      (unless *shader*
+        (set! *shader* (load-shader VERT-SOURCE FRAGMENT 'none))
+        (set-shader-uniform *shader* 'u_dark SCANLINE-DARK)))
+
+    ;; Draw the frame (draw: a thunk in virtual coordinates over w x h)
+    ;; through the scanline pass and present it; pitch: the device pixel
+    ;; ratio (device rows per CSS row), 1 natively.
+    (define (post-frame! w h pitch draw)
+      (ensure! w h)
+      (with-render-target *rt*
+        (set-blend-mode 'normal)
+        (draw))
+      (set-shader-uniform *shader* 'u_texel (list (/ 1.0 w) (/ 1.0 h)))
+      (set-shader-uniform *shader* 'u_pitch (* 1.0 pitch))
+      (set-blend-mode 'normal)
+      (set-color 1.0 1.0 1.0 1.0)
+      (with-shader *shader*
+        (draw-render-target *rt* 0.0 0.0 (inexact w) (inexact h))))
+
+    (define (post-reset!)
+      (when *rt* (render-target-free! *rt*))
+      (set! *rt* #f))))

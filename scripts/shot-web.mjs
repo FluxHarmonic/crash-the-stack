@@ -12,7 +12,7 @@
 //   line:REGEX         wait up to 30 s for a "crash:" console line, printed
 //   tap:NAME           tap a HUD control at the center the game printed
 //                      ("crash: control NAME X Y")
-//   menu:ID            tap a menu entry ("crash: menu ID X Y ...")
+//   menu:ID            tap a menu row on the screen shown ("crash: menu SCREEN ID X Y ...")
 //   tool:NAME          fire a tool through the stack (the corner button, then the entry)
 //   at:VX,VY           tap a virtual point
 //   key:K              a keydown/keyup pair (DOM key name)
@@ -159,12 +159,16 @@ for (const action of actions) {
     await sleep(350);
     await tap(entry.m[1], entry.m[2]); await sleep(400);
   } else if (kind === "menu") {
-    const menu = await waitLine(/^crash: menu (.+)$/, 0, 3000);
+    // the newest menu line (one per screen shown: "crash: menu SCREEN ID X Y ...",
+    // a value row as ID=VALUE), the named row tapped
+    let menu = null;
+    for (let i = lines.length - 1; i >= 0 && !menu; i--) { const m = lines[i].match(/^crash: menu (\w+) (.+)$/); if (m) menu = m; }
+    if (!menu) menu = await waitLine(/^crash: menu (\w+) (.+)$/, 0, 3000);
     if (!menu) { console.log("SETUP-FAILED: no menu line"); shutdown(2); }
-    const parts = menu.m[1].split(" "); let found = null;
-    for (let i = 0; i + 2 < parts.length; i += 3) if (parts[i] === rest) found = [parts[i + 1], parts[i + 2]];
-    if (!found) { console.log(`SETUP-FAILED: no menu entry ${rest} in ${menu.m[1]}`); shutdown(2); }
-    await tap(found[0], found[1]); await sleep(400);
+    const parts = menu.m[2].split(" "); let found = null;
+    for (let i = 0; i + 2 < parts.length; i += 3) if (parts[i].split("=")[0] === rest) found = [parts[i + 1], parts[i + 2]];
+    if (!found) { console.log(`SETUP-FAILED: no menu row ${rest} on screen ${menu.m[1]}: ${menu.m[2]}`); shutdown(2); }
+    await tap(found[0], found[1]); await sleep(600);
   } else if (kind === "at") { const [x, y] = rest.split(",").map(Number); await tap(x, y); await sleep(400); }
   else if (kind === "key") { await key(rest); }
   else { console.log(`SETUP-FAILED: unknown action ${action}`); shutdown(2); }

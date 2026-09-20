@@ -134,7 +134,13 @@
           (crash stats)
           (crash sfx)
           (crash audio)
-          (crash shell))
+          (crash shell)
+          (crash code)
+          (crash run)
+          (crash store)
+          (crash cards save)
+          (crash cards seeds)
+          (crash gpu post))
 
   (export web-main web-dispatch)
 
@@ -168,6 +174,8 @@
     (define *stack* #f)      ; ?stack: straight to the stack
     (define *seed* #f)       ; ?seed=N: the raw seed a fresh deal or board starts from; none given: the tables' own first ones
     (define *clock* #f)      ; the page's clock at boot (ms): the title reveal's seed when ?seed is not given (P3d)
+    (define *clock-at* 0.0)  ; now-ms when the clock landed (the epoch second is the clock plus the time since)
+    (define *code* #f)       ; ?code=: a share code to deal at boot (P4)
     (define *sw-ready* #f)   ; the page said its service worker is active (or there is none): fetches are safe (P3d, D40)
     (define *ambient-ready* #f) ; the ambient landed, or the page gave it up: the boot's audio step (D40)
     (define *deal* #f)       ; the card table's deal, (crash cards input)
@@ -175,10 +183,13 @@
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
     (define *bg* #f)         ; the living background, (crash bg), stepped by whichever table is up
     (define *bg-mode* 'reaction) ; the default rule (David, 2026-09-20: "we should have made reaction the default"); ?bg=life the other; ?bg=life-cpu|reaction-cpu the CPU field; ?bg=off none
+    (define *bg-asked* #f)   ; ?bg= was given: it wins over the FIELD setting for this boot
     (define *bg-hold* #f)    ; ?bghold=N: the field stops after N steps (the field leg's door)
     (define *bg-stride* #f)  ; ?bgstride=N: ticks between field steps (STRIDE by default; David's comparison door)
     (define *bg-rsteps* #f)  ; ?rsteps=N: Gray-Scott iterations per field step (REACT-STEPS by default)
     (define *dpr* "?")       ; the page's effective device pixel ratio, for the stats header
+    ;; the scanline pass's pitch: the device pixel ratio rounded, 1 when unknown
+    (define (dpr-pitch) (let ((n (string->number *dpr*))) (if (and n (> n 0)) (max 1 (exact (round n))) 1)))
     (define *gc-frame* #f)   ; the GC snapshot at the last frame (the ring's per-frame pause and count)
     ;; The readout's tap target (the three lines at the top right, (crash
     ;; render) draw-frame-ms): a tap here copies the stats, selects nothing.
@@ -195,10 +206,10 @@
     ;; The saves, unless the demo door opened this table (its board or
     ;; deal, and the fake BEST a demo clear would set, never reach the store).
     (define (save-session-after-frame! before after)
-      (if *no-save* after (save-after-frame! before after)))
+      (if *no-save* (run-after-frame! before after) (save-after-frame! before after)))
 
     (define (save-deal-after-frame-unless-demo! before after)
-      (if *no-save* after (save-deal-after-frame! before after)))
+      (if *no-save* (deal-run-after-frame! before after) (save-deal-after-frame! before after)))
     (define *frame-n* 0)     ; frames presented (the probe alternates on it)
     (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
     (define *frame-ms* 0.0)   ; the frame's wall dt, ms
@@ -978,18 +989,38 @@
               (loop (cdr ts) (+ i 1)))))))
 
     ;; The menu's boot line: each shown entry with its center.
+    ;; The menu's rows for the arm, once per screen shown:
+    ;;   crash: menu SCREEN ID X Y ...      each row's id and center (a value row's value follows its id: ID=VALUE)
+    ;;   crash: menu-code CODE              the pause menu's share code line, when a board is live
+    ;;   crash: keypad LABEL X Y ...        the CODE screen's keypad cells
+    (define *menu-said* #f)
     (define (say-menu m)
-      (apply say "menu"
-             (let loop ((ids (menu-entries m)) (i 0) (acc '()))
-               (if (null? ids)
-                   (reverse acc)
-                   (let ((r (menu-entry-rect i VW VH)))
-                     (loop (cdr ids)
-                           (+ i 1)
-                           (cons (+ (cadr r) (half (cadddr r)))
-                                 (cons (+ (car r) (half (caddr r)))
-                                       (cons (car ids) acc)))))))))
-
+      (let ((key (list (menu-screen m) (menu-entries m) (menu-code-line m))))
+        (unless (equal? key *menu-said*)
+          (set! *menu-said* key)
+          (apply say "menu" (menu-screen m)
+                 (let loop ((ids (menu-entries m)) (i 0) (acc '()))
+                   (if (null? ids)
+                       (reverse acc)
+                       (let* ((r (menu-entry-rect m i VW VH))
+                              (value (menu-row-value m (car ids)))
+                              (id (if value (string-append (symbol->string (car ids)) "=" value) (car ids))))
+                         (loop (cdr ids)
+                               (+ i 1)
+                               (cons (+ (cadr r) (half (cadddr r)))
+                                     (cons (+ (car r) (half (caddr r)))
+                                           (cons id acc))))))))
+          (when (and (eq? (menu-screen m) 'top) (menu-code-line m))
+            (let ((r (code-line-rect m VW VH)))
+              (say "menu-code" (code-display (menu-code-line m)) (+ (car r) (half (caddr r))) (+ (cadr r) (half (cadddr r))))))
+          (when (eq? (menu-screen m) 'code)
+            (apply say "keypad"
+                   (apply append
+                          (map (lambda (cell)
+                                 (list (car cell)
+                                       (+ (cadr cell) (half (cadddr cell)))
+                                       (+ (caddr cell) (half (list-ref cell 4)))))
+                               (keypad-cells VW VH))))))))
     ;; --- the boot (ruling D40) --------------------------------------------------
     ;;
     ;; The steps the menu and the first board need, registered at boot in
@@ -1160,9 +1191,7 @@
     ;; A choice opens its table and draws it this same frame (with an
     ;; empty input frame), so no frame goes undrawn.
     (define (menu-tick f dt)
-      (when (and *trace* (not *announced*))
-        (say-menu *menu*)
-        (set! *announced* #t))
+      (when *trace* (say-menu *menu*))   ; once per screen shown (the arm reads the rows)
       ;; the publisher card (D43) waits for its strip: ready when the fetch
       ;; landed, skipped when it was given up (a black card is no card)
       (let ((t (menu-title *menu*)))
@@ -1260,19 +1289,28 @@
                   (open-menu!))
                  (else
                   (stack-tick f dt)
-                  ;; the MENU tool: the session asks, the shell answers
-                  (when (session-request *session*)
-                    (set! *session* (session-clear-request *session*))
-                    (open-menu!)))))
+                  ;; the session's request: the MENU tool, or NEXT / RETRY
+                  ;; inside a run (the dealt board is replaced by the run's)
+                  (let ((request (session-request *session*)))
+                    (when request
+                      (set! *session* (session-clear-request *session*))
+                      (case request
+                        ((menu) (open-menu!))
+                        ((next retry) (run-request! request 'stack))
+                        (else #f)))))))
           (else
            (if (or (menu-frame? f)
                    (jack-out-tap? *deal* f *card-geom*))
                (open-menu!)
                (begin
                  (cards-tick f dt)
-                 (when (deal-request *deal*)
-                   (set! *deal* (deal-clear-request *deal*))
-                   (open-menu!))))))))
+                 (let ((request (deal-request *deal*)))
+                   (when request
+                     (set! *deal* (deal-clear-request *deal*))
+                     (case request
+                       ((menu) (open-menu!))
+                       ((next retry) (run-request! request 'cards))
+                       (else #f))))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -1282,6 +1320,13 @@
     ;; state) are dispatched once the loader is up, which is after web-main
     ;; returns (sigil_wasm_start) and before the first frame, so booting
     ;; here sees every one of them.
+    ;; The live board's share code for the pause menu, or #f.
+    (define (live-code)
+      (case (active-game)
+        ((stack) (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
+        ((cards) (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
+        (else #f)))
+
     (define (open-menu!)
       (set! *screen* 'menu)
       (phosphor-reset!)          ; a cascade left behind blends with nothing on return
@@ -1293,18 +1338,56 @@
                                        ((cards) *deal*)
                                        (else #f))
                                      #t)
-                                (or *seed* *clock*))))   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
-                     (if *menu* (menu-with-title m (menu-title *menu*)) m))))
+                                (or *seed* *clock*)   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
+                                (live-code)
+                                #t      ; COPY: the page writes the clipboard
+                                *fresh*)))   ; ?fresh: the saved board is not offered
+                     (if *menu* (menu-with-title m (menu-title *menu*)) m)))
+      )
 
-    ;; The stack. CONTINUE (resume?) returns to the table in memory, or
-    ;; the saved one; STACK deals a NEW board: the next seed after the
-    ;; one in memory or in the store, else ?seed (David, 2026-09-18:
-    ;; going "fresh" into a game put him back in the previous one, trace
-    ;; and all).
+    ;; The stack's geometry, made once.
     (define (ensure-geometry! lay)
       (unless *geom*
         (set! *geom* (make-geometry lay VW VH))))
 
+    ;; A fresh stack from a spec (P4: a FREE PLAY deal in a version, the
+    ;; daily, a share code, a run's layer).
+    (define (open-stack-spec! sp)
+      (set! *screen* 'stack)
+      (set! *announced* #f)
+      (set-active-game! 'stack)
+      (let ((lay (turtle-layout)))
+        (ensure-geometry! lay)
+        (let ((s (session-from-spec sp lay)))
+          (set! *session* (session-with-tools-touch (if *touch* (session s labels-shown: #f) s) *touch*))
+          (set! *restored* #f)
+          (set! *fx* (fx-new))
+          ;; ?demo=cleared on a spec'd stack too: the arm's run leg clears a
+          ;; layer with one match (the board is not saved, as on the other door)
+          (when (eq? *demo* 'cleared)
+            (set! *session* (session-demo-near-cleared *session*))
+            (set! *demo-armed* #t)
+            (set! *no-save* #t)
+            (set! *demo* #f)
+            (say "demo" "cleared" "stack"))
+          (say "spec" (spec-table sp) (spec-version sp) (spec-seed sp) (encode sp)))))
+
+    (define (open-cards-spec! sp)
+      (set! *screen* 'cards)
+      (set! *announced* #f)
+      (set-active-game! 'cards)
+      (unless *card-geom* (set! *card-geom* (make-card-geometry VW VH)))
+      (let ((d (deal-from-spec sp)))
+        (set! *deal* (deal-with-tools-touch (if *touch* (deal d labels-shown: #f) d) *touch*))
+        (set! *restored* #f)
+        (set! *card-fx* (card-fx-new))
+        (say "spec" (spec-table sp) (spec-version sp) (spec-seed sp) (encode sp))))
+
+    (define (open-spec! sp)
+      (if (eq? (spec-table sp) 'cards) (open-cards-spec! sp) (open-stack-spec! sp)))
+
+    ;; The stack, CONTINUE (resume?): the table in memory, or the saved
+    ;; one, or a fresh deal of ?seed (the arms' and a bookmark's boot).
     (define (open-stack! resume?)
       (set! *screen* 'stack)
       (set! *announced* #f)
@@ -1312,10 +1395,7 @@
         (ensure-geometry! lay)
         (unless (and resume? *session*)
           (let* ((booted (boot-session lay *seed* (or *fresh* (eq? *demo* 'cleared))))
-                 (s (cond (resume? (car booted))
-                          (*session* (session-next *session*))
-                          ((cdr booted) (session-next (car booted)))
-                          (else (car booted)))))
+                 (s (car booted)))
             (set! *session* (session-with-tools-touch (if *touch* (session s labels-shown: #f) s) *touch*))
             (when (eq? *demo* 'cleared)
               (set! *session* (session-demo-near-cleared *session*))
@@ -1323,7 +1403,7 @@
               (set! *no-save* #t)
               (set! *demo* #f)
               (say "demo" "cleared" "stack"))
-            (set! *restored* (and resume? (cdr booted)))
+            (set! *restored* (cdr booted))
             (set! *fx* (fx-new))))))
 
     (define (open-cards! resume?)
@@ -1338,13 +1418,61 @@
                              (say "demo" "cleared" (if won "cards" "FAILED: the won deal did not parse"))
                              (if won (cons won #f) (boot-deal *seed* *fresh*)))
                            (boot-deal *seed* *fresh*)))
-               (d (cond (resume? (car booted))
-                        (*deal* (deal-next *deal*))
-                        ((cdr booted) (deal-next (car booted)))
-                        (else (car booted)))))
+               (d (car booted)))
           (set! *deal* (deal-with-tools-touch (if *touch* (deal d labels-shown: #f) d) *touch*))
-          (set! *restored* (and resume? (cdr booted)))
+          (set! *restored* (cdr booted))
           (set! *card-fx* (card-fx-new)))))
+
+    ;; FREE PLAY's next board on a table: the seed after the one in
+    ;; memory or in the store (David, 2026-09-18: going "fresh" into a
+    ;; game put him back in the previous one), else ?seed, else the
+    ;; table's first; DEFRAG's next comes through its progression window.
+    (define (free-play! table)
+      (set-run! #f)   ; a free board ends a run
+      (case table
+        ((stack)
+         (let* ((held (or *session* (and (not *fresh*) (datum->session (store-read-datum BOARD-KEY)))))
+                (seed (cond (held (+ 1 (session-seed held)))
+                            (*seed* *seed*)
+                            (else 1))))
+           (open-stack-spec! (free-spec 'stack (menu-version *menu*) seed))))
+        (else
+         (let* ((held (or *deal* (and (not *fresh*) (datum->deal (store-read-datum CARDS-KEY)))))
+                (seed (cond (held (deal-seed (deal-next held)))
+                            (*seed* *seed*)
+                            (else (first-seed)))))
+           (open-cards-spec! (free-spec 'cards (menu-version *menu*) seed))))))
+
+    ;; JACK IN: a new run from a seed (the clock's, or a run code's),
+    ;; its first layer dealt.
+    (define (jack-in! seed)
+      (let ((r (run-new seed)))
+        (set-run! r)
+        (say "run" "start" (run-seed r) (run-code r))
+        (open-spec! (run-spec r))))
+
+    ;; NEXT or RETRY came out of a table (its own next or retry board is
+    ;; dealt already): inside a run, replace it with the run's next layer
+    ;; (after a clear), a new attempt of the layer (RECONNECT after a
+    ;; sever), or the ledger when the run is done; outside, the dealt
+    ;; board stands.
+    (define (run-request! request table)
+      (let ((r (run-in-force)))
+        (cond ((not r) #f)
+              ((run-done? r)
+               (say "run" "done" (run-seed r))
+               (open-menu!)
+               (set! *menu* (menu-open-run-done *menu* (cons r (run-code r))))
+               (set-run! #f))
+              ((eq? request 'retry)
+               ;; a sever counted by the table's step: the layer's next attempt
+               (let ((r (run-severed r)))
+                 (set-run! r)
+                 (say "run" "reconnect" (run-layer-number r) (run-attempt r))
+                 (open-spec! (run-spec r))))
+              (else
+               (say "run" "layer" (run-layer-number r))
+               (open-spec! (run-spec r))))))
 
     ;; The update's state reaches the stack's session (the game draws it
     ;; and takes the choice, (crash input) step-update) and the menu (its
@@ -1364,16 +1492,62 @@
     (define (update-chosen!)
       (set! *update-chosen* #t))
 
-    ;; A menu choice. UPDATE applies the waiting version the same way the
-    ;; in-game prompt does.
+    ;; A setting stepped on the SETTINGS screen: stored and applied
+    ;; (the mixer at once, the HUD on the live board, the field rebuilt).
+    (define (apply-setting! id v)
+      (set-setting! id v)
+      (say "setting" id v)
+      (case id
+        ((hud)
+         (when *session* (set! *session* (session-with-hud *session* v)))
+         (when *deal* (set! *deal* (deal-with-hud *deal* v))))
+        ((field)
+         (set! *bg-mode* v)
+         (set! *bg* (bg-choose v 1 *bg-hold*)))
+        ((scanlines) (post-set-scanlines! (eq? v 'on)))
+        ((veil) (post-set-veil! (eq? v 'on)))
+        (else #f)))
+
+    ;; A menu choice (P4). UPDATE applies the waiting version the same
+    ;; way the in-game prompt does; COPY hands the live board's code to
+    ;; the page (it reads the store's "code" key and writes the
+    ;; clipboard on its next poll).
     (define (choose! choice)
-      (let* ((resume? (eq? choice 'continue))
-             (id (if resume? (active-game) choice)))
-        (case id
-          ((stack) (set-active-game! 'stack) (open-stack! resume?))
-          ((cards) (set-active-game! 'cards) (open-cards! resume?))
-          ((update) (update-chosen!))
-          (else #f))))
+      (cond ((pair? choice)
+             (case (car choice)
+               ((set) (apply-setting! (cadr choice) (cddr choice)))
+               ((code)
+                (let ((sp (cdr choice)))
+                  (say "code" "read" (encode sp) (spec-table sp))
+                  (if (eq? (spec-table sp) 'run)
+                      (jack-in! (spec-seed sp))
+                      (begin (set-run! #f) (open-spec! sp)))))
+               (else #f)))
+            (else
+             (case choice
+               ((continue)
+                (case (active-game)
+                  ((cards) (open-cards! #t))
+                  (else (open-stack! #t))))
+               ((jack-in) (jack-in! (now-second)))
+               ((stack) (free-play! 'stack))
+               ((cards) (free-play! 'cards))
+               ((daily-stack) (set-run! #f) (open-spec! (daily-spec 'stack)))
+               ((daily-cards) (set-run! #f) (open-spec! (daily-spec 'cards)))
+               ((update) (update-chosen!))
+               ((copy)
+                (let ((code (live-code)))
+                  (when code
+                    (store-set! "code" (code-display code))
+                    (set! *copy-asked* #t)
+                    (say "copy" (code-display code)))))
+               ((code-refused) (say "code" "refused" (menu-code *menu*)))
+               (else #f)))))
+
+    ;; The page's poll for a COPY: 1 once, then 0.
+    (define *copy-asked* #f)
+    (define (copy-asked?)
+      (if *copy-asked* (begin (set! *copy-asked* #f) 1) 0))
 
     ;; ?stack and ?cards open their table as CONTINUE would (the saved
     ;; game, or a fresh one), which is what the arms and a bookmark want.
@@ -1408,14 +1582,24 @@
         (when (and (eq? *screen* 'stack) *session* *geom*)
           (tiles-ensure! *geom*))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
-        (cond ((eq? *phosphor* 'probe)
-               (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
-              ((and cascading? (eq? *phosphor* 'on))
-               (unless (phosphor-active?) (say "phosphor" "cascade"))   ; the play path engaged (the arm reads it)
-               (phosphor-frame! VW VH PHOSPHOR draw))
-              (else
-               (phosphor-reset!)
-               (draw)))
+        ;; the phosphor's compose pass first, then the frame (or the composed
+        ;; target) to the swap chain, through the scanline pass when that
+        ;; setting is on (P4; a pass cannot nest in a pass, so the passes
+        ;; run one after another)
+        (let ((show (cond ((eq? *phosphor* 'probe)
+                           (phosphor-compose! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*)))
+                           (lambda () (phosphor-present! VW VH)))
+                          ((and cascading? (eq? *phosphor* 'on))
+                           (unless (phosphor-active?) (say "phosphor" "cascade"))   ; the play path engaged (the arm reads it)
+                           (phosphor-compose! VW VH PHOSPHOR draw)
+                           (lambda () (phosphor-present! VW VH)))
+                          (else
+                           (phosphor-reset!)
+                           draw))))
+          (post-tick!)
+          (if (post-scanlines?)
+              (post-frame! VW VH (dpr-pitch) show)
+              (show)))
         (draw-diag!)
         (when *ms*
           (let ((gpu (gpu-bg-ms)))
@@ -1429,7 +1613,12 @@
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
+      ;; the field: ?bg= for this boot when given, else the FIELD setting (P4)
+      (unless *bg-asked* (set! *bg-mode* (setting 'field)))
       (set! *bg* (bg-choose *bg-mode* 1 *bg-hold*))
+      (apply-audio-settings!)
+      (post-set-scanlines! (eq? (setting 'scanlines) 'on))
+      (post-set-veil! (eq? (setting 'veil) 'on))
       (when (and *bg* (or *bg-stride* *bg-rsteps*))
         (set! *bg* (bg *bg*
                        stride: (or *bg-stride* (bg-stride *bg*))
@@ -1449,7 +1638,12 @@
         (if (null? bad)
             (say "literal-check" "ok")
             (apply say "literal-check" "FAILED" bad)))
-      (cond (*cards* (open-cards! #t))
+      (cond ((and *code* (decode *code*))
+             (let ((sp (decode *code*)))
+               (say "code" "read" (encode sp) (spec-table sp))
+               (if (eq? (spec-table sp) (quote run)) (jack-in! (spec-seed sp)) (open-spec! sp))))
+            (*code* (say "code" "refused" *code*) (open-menu!))
+            (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
             ;; a boot that throws says why (the loader prints only the
             ;; message, and a menu that never opened is a struct-ref
@@ -1499,7 +1693,7 @@
                          (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* n))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ;; ?bg=life|reaction|life-cpu|reaction-cpu|off (a name outside the rule table is off)
-            ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)))))
+            ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)) (set! *bg-asked* #t))))
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
             ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
             ((string=? type "rsteps") (param! (lambda () (set! *bg-rsteps* (let ((n (string->number payload))) (and n (>= n 1) n))))))
@@ -1513,7 +1707,7 @@
             ((string=? type "dpr") (param! (lambda () (set! *dpr* payload))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
-            ((string=? type "version") (set! *version* (string-append "WEB " payload)) 0)
+            ((string=? type "version") (set! *version* (string-append "WEB " payload)) (title-stamp! payload) 0)
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             ;; ?baud=N: the title reveal's pace (P3d)
             ((string=? type "baud") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (title-baud! n))))))
@@ -1528,7 +1722,11 @@
             ((string=? type "dial") (param! (lambda () (let ((n (string->number payload))) (when (and n (number? n) (= n n) (<= 0 n 60000)) (title-dial-min! (exact (round (/ (* n 60) 1000)))))))))
             ((string=? type "diag") (param! (lambda () (title-diag! #t) (set! *diag* #t))))   ; the title's overlay and the shell's landing lines, one door
             ;; the page's clock at boot: the title reveal's seed when none is asked for
-            ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n))))))
+            ((string=? type "clock") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n)) (set! *clock* n) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ (quotient *clock* 1000) (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))
+            ;; ?code=XXXXX-XXXXX: the board of a share code, dealt at boot (P4)
+            ((string=? type "code") (param! (lambda () (set! *code* payload))))
+            ;; the page polls for a COPY (1 once): it reads the store's "code" key then
+            ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)

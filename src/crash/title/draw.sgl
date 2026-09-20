@@ -28,7 +28,8 @@
           (crash settings)
           (crash credits)
           (crash scores)
-          (crash code))
+          (crash run)
+          (only (crash code) code-display CODE-LENGTH))   ; (crash code) has an ALPHABET too, the string; the title's is the glyph vector
 
   (export title-draw draw-title draw-menu-item draw-menu-items draw-bottom-band title-stamp!
           title-covers? title-bake! title-diag! title-diag-dial!
@@ -92,7 +93,7 @@
         (diag-line! (tex-desc "TEX CARD" card) x (+ y 20))
         (diag-line! (string-append "RT LOGO " (if *logo-rt* (string-append (number->string (render-target-width *logo-rt*)) "X" (number->string (render-target-height *logo-rt*))) "NONE")
                                    " BAKES " (number->string *logo-bakes*)) x (+ y 30))
-        (diag-line! (string-append "RT ITEMS " (if *items-rt* (string-append (number->string (render-target-width *items-rt*)) "X" (number->string (render-target-height *items-rt*))) "NONE")
+        (diag-line! (string-append "RT ITEMS " (number->string (length *items-sheets*)) " SHEETS"
                                    " BAKES " (number->string *items-bakes*) " ROWS " (number->string *row-bakes*)) x (+ y 40))
         (diag-line! (string-append "BACKDROP DRAWN " (number->string *backdrop-draws*) " FRAMES") x (+ y 50))
         (diag-line! (string-append "DIAL UNDERRUNS " (number->string (car *diag-dial*)) " WORST " (number->string (cdr *diag-dial*)) " MS") x (+ y 60))))
@@ -338,38 +339,59 @@
     ;; measured 2026-09-20 on the return's slowdown). A label the sheet
     ;; does not hold (CONNECTING n/m, which changes) draws directly.
     (define ITEM-H (* ITEM-CELL (+ ALPHABET-H 1)))   ; a row of the sheet: the letters and the shadow's cell
-    (define *items-rt* #f)
-    (define *items-tex* #f)
-    (define *items-key* #f)                           ; the labels the sheet holds, in order
-    (define *items-h* 0)                              ; the sheet's height in virtual px
+    ;; The labels are baked in sheets of SHEET-LABELS each (a flat and a
+    ;; ramp row per label), ONE SHEET PER FRAME: a label drawn cell by cell
+    ;; is ~200 rectangles a style, sgp's vertex buffer is 65,536 vertices
+    ;; a frame across every pass, and a SETTINGS screen's 31 labels in one
+    ;; frame overran it (sg_append_buffer, 2026-09-20); a render target's
+    ;; pass clears on entry, so a sheet cannot be filled over several
+    ;; frames either. A label whose sheet is not baked yet draws directly
+    ;; for those frames. One sheet also stays under the 4096 px a target
+    ;; may have.
+    (define SHEET-LABELS 8)
+    (define *items-sheets* '())                       ; ((rt . tex) ...), one per SHEET-LABELS labels, in order
+    (define *items-tex* #f)                           ; the first sheet's texture (draw-menu-item's "anything baked" test)
+    (define *items-key* #f)                           ; the labels the sheets are for, in order
+    (define *items-h* 0)                              ; a sheet's height in virtual px
+    (define *items-w* 0)                              ; a sheet's width in virtual px
     (define (items-bake! labels)
       (unless (equal? labels *items-key*)
-        (when *items-rt* (render-target-free! *items-rt*))
-        (let* ((w (+ ITEM-CELL (* ITEM-CELL (fold (lambda (m l) (max m (block-text-width l))) 0 labels))))
-               (h (* ITEM-H 2 (length labels)))
-               (rt (make-render-target (* BAKE-SCALE w) (* BAKE-SCALE h) 'linear)))
-          (with-render-target rt
-            (set-blend-mode 'none)
-            (let loop ((ls labels) (i 0))
-              (unless (null? ls)
-                (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H 2 i) (* BAKE-SCALE ITEM-CELL) 'flat)
-                (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H (+ 1 (* 2 i))) (* BAKE-SCALE ITEM-CELL) 'ramp)
-                (loop (cdr ls) (+ i 1)))))
-          (set-blend-mode 'normal)
-          (set! *items-rt* rt)
-          (set! *items-bakes* (+ 1 *items-bakes*))
-          (set! *items-tex* (render-target->texture rt))
-          (set! *items-h* h)
-          (set! *items-key* labels))))
+        (for-each (lambda (s) (render-target-free! (car s))) *items-sheets*)
+        (set! *items-sheets* '())
+        (set! *items-tex* #f)
+        (set! *items-w* (+ ITEM-CELL (* ITEM-CELL (fold (lambda (m l) (max m (block-text-width l))) 0 labels))))
+        (set! *items-h* (* ITEM-H 2 SHEET-LABELS))
+        (set! *items-key* labels))
+      ;; the next sheet, when one is missing
+      (let* ((baked (length *items-sheets*))
+             (ls (list-tail* labels (* baked SHEET-LABELS))))
+        (when (pair? ls)
+          (let ((rt (make-render-target (* BAKE-SCALE *items-w*) (* BAKE-SCALE *items-h*) 'linear)))
+            (with-render-target rt
+              (set-blend-mode 'none)
+              (let loop ((ls ls) (i 0))
+                (unless (or (null? ls) (= i SHEET-LABELS))
+                  (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H 2 i) (* BAKE-SCALE ITEM-CELL) 'flat)
+                  (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H (+ 1 (* 2 i))) (* BAKE-SCALE ITEM-CELL) 'ramp)
+                  (loop (cdr ls) (+ i 1)))))
+            (set-blend-mode 'normal)
+            (set! *items-bakes* (+ 1 *items-bakes*))
+            (set! *items-sheets* (append *items-sheets* (list (cons rt (render-target->texture rt)))))
+            (set! *items-tex* (cdr (car *items-sheets*)))))))
+
+    (define (list-tail* l n)
+      (if (or (= n 0) (null? l)) l (list-tail* (cdr l) (- n 1))))
 
     ;; The item's sheet row (index, or #f to draw it directly) at (tx, ty):
     ;; the region flipped on read, the target being bottom-up (the same
     ;; flip (crash atlas) and the tiles' sheet make).
     (define (draw-item-row index style tx ty tw)
-      (let ((cy (* ITEM-H (+ (* 2 index) (if (eq? style 'ramp) 1 0))))
-            (cw (+ tw ITEM-CELL)))
+      (let* ((sheet (list-ref *items-sheets* (quotient index SHEET-LABELS)))
+             (row (modulo index SHEET-LABELS))
+             (cy (* ITEM-H (+ (* 2 row) (if (eq? style 'ramp) 1 0))))
+             (cw (+ tw ITEM-CELL)))
         (color! C-TEX-PLAIN)
-        (draw-texture-region *items-tex* tx ty cw ITEM-H
+        (draw-texture-region (cdr sheet) tx ty cw ITEM-H
                              0 (* BAKE-SCALE (- *items-h* cy)) (* BAKE-SCALE cw) (- (* BAKE-SCALE ITEM-H)))))
 
     (define (draw-menu-item label rect lit? frames . rest)
@@ -412,11 +434,13 @@
                (draw-menu-item label (menu-entry-rect m 0 vw vh) #t (menu-frames m))))
             (else #f)))
 
-    ;; The index of a label on the baked sheet, or #f (drawn directly then).
+    ;; The index of a label on the baked sheets, or #f when it is not
+    ;; there yet (drawn directly then).
     (define (label-index label)
       (and *items-key*
            (let loop ((ls *items-key*) (i 0))
              (cond ((null? ls) #f)
+                   ((>= i (* SHEET-LABELS (length *items-sheets*))) #f)
                    ((string=? (car ls) label) i)
                    (else (loop (cdr ls) (+ i 1)))))))
 
@@ -434,7 +458,7 @@
         ;; the live board's share code (P4), with COPY on the web
         (let ((r (code-line-rect m vw vh)))
           (when r
-            (let* ((line (string-append "CODE " (code-display (menu-code-line m)) "  [COPY]"))
+            (let* ((line (string-append "CODE " (code-display (menu-code-line m)) (if (menu-copy m) "  [COPY]" "")))
                    (x (quotient (- vw (text-width line 1)) 2)))
               (color! C-STATIC-B)
               (text! line (+ x 1) (+ (cadr r) 5) 1)
@@ -477,11 +501,19 @@
                 (draw-value-row (menu-label id) value rect lit? (menu-frames m))
                 (draw-menu-item (menu-label id) rect lit? (menu-frames m) (label-index (menu-label id)))))
           (loop (cdr ids) (+ i 1))))
-      ;; the screen's content
+      ;; the screen's content, on a panel in the band's style where it is text
+      ;; (solid C-BG with a C-BAR-C rule: the backdrop is busy under the
+      ;; credits' lines, and the bible keeps alpha for the glow and the veil)
+      (when (memq (menu-screen m) (list 'credits 'scores 'code 'run-done))
+        (color! C-BAR-C)
+        (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- TEXT-ROWS-Y TEXT-Y 2))
+        (color! C-BG)
+        (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- TEXT-ROWS-Y TEXT-Y 4)))
       (case (menu-screen m)
         ((credits) (draw-credits m vw vh))
         ((scores) (draw-scores m vw vh))
         ((code) (draw-code-entry m vw vh))
+        ((run-done) (draw-run-done m vw vh))
         (else #f)))
 
     ;; A value row: the name at the row's left, the value right-aligned
@@ -493,7 +525,7 @@
              (ty (+ y (quotient (- h th ITEM-CELL) 2)))
              (nw (* ITEM-CELL (block-text-width name)))
              (vw* (* ITEM-CELL (block-text-width value)))
-             (nx (+ x (* 4 ITEM-CELL)))
+             (nx (+ x (* 11 ITEM-CELL)))   ; room for the cursor block (7 cells) and its gap (3) at the left
              (vx (- (+ x w) vw*))
              (style (if lit? 'ramp 'flat))
              (draw (lambda (label tx tw)
@@ -612,26 +644,50 @@
                       (text! label (+ cx (quotient (- cw lw) 2)) (+ cy (quotient (- ch (* GLYPH-H TEXT-SCALE)) 2)) TEXT-SCALE)))
                   (keypad-cells vw vh))))
 
+    ;; RUN COMPLETE (JACK IN, P4): the ledger and the run's share code.
+    ;; (menu-run m) is (run . code).
+    (define (draw-run-done m vw vh)
+      (let* ((entry (menu-run m))
+             (r (and entry (car entry)))
+             (code (and entry (cdr entry)))
+             (l (and r (run-ledger r)))
+             (row (lambda (i label value)
+                    (let ((y (+ TEXT-Y (* i TEXT-PITCH))))
+                      (color! C-TEXT-DIM)
+                      (text! label (+ TEXT-X 60) y TEXT-SCALE)
+                      (color! C-TEXT)
+                      (text! value (+ TEXT-X 300) y TEXT-SCALE)))))
+        (when l
+          (color! C-LABEL-LIT)
+          (text! "THE STACK IS DOWN. LINK CLOSED." TEXT-X TEXT-Y TEXT-SCALE)
+          (row 2 "LAYERS" (string-append (number->string (ledger-cleared l)) "/" (number->string (run-layer-count))))
+          (row 3 "TIME" (clock-text (ledger-ticks l)))
+          (row 4 "MOVES" (number->string (ledger-moves l)))
+          (row 5 "RECONNECTS" (number->string (ledger-reconnects l)))
+          (row 7 "RUN CODE" (if code (code-display code) "-")))))
+
     (define PRESENTS-LINE "PRESENTS")   ; under the publisher card's mark, with the resolve
 
     ;; The bottom band (P4, [[t-1c53b6]]): a C-BG strip over the
-    ;; backdrop's last rows holding the key hint, the copyright (ruling
-    ;; D44: the holder is David, the brand publishes, nothing else on the
-    ;; title) and the build stamp, all in the 5x7 at scale 1. Off the
-    ;; image, so no orange band swallows it (David's read of abdce9f).
+    ;; backdrop's last rows holding the copyright (ruling D44: the holder
+    ;; is David, the brand publishes, nothing else on the title), the key
+    ;; hint and the build stamp, all in the 5x7 at scale 1 on two rows: the
+    ;; copyright above, the hint and the stamp below. Off the image, so no
+    ;; orange band swallows it (David's read of abdce9f).
     (define BAND-H 24)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)
       (let ((top (- vh BAND-H))
-            (y (- vh 14)))
+            (y1 (- vh 22))
+            (y2 (- vh 11)))
         (color! C-BG)
         (draw-filled-rect 0 top vw BAND-H)
-        (color! C-TEXT-DIM)
-        (text! hint 8 y 1)
-        (when version
-          (text! version (- vw 8 (text-width version 1)) y 1))
         (color! C-LABEL-LIT)
-        (text! TITLE-LINE (quotient (- vw (text-width TITLE-LINE 1)) 2) y 1)))
+        (text! TITLE-LINE (quotient (- vw (text-width TITLE-LINE 1)) 2) y1 1)
+        (color! C-TEXT-DIM)
+        (text! hint 8 y2 1)
+        (when version
+          (text! version (- vw 8 (text-width version 1)) y2 1))))
 
     ;; text through P3c's atlas when it is on (one textured rectangle a
     ;; glyph), else (crash font)'s rectangles, the oracle the atlas leg

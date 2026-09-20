@@ -53,6 +53,7 @@
           (sigil process)
           (sigil fs)
           (sigil io)
+          (sigil string)
           (sigil desktop)
           (sigil graphics)
           (crash stack layout)
@@ -73,6 +74,7 @@
           (crash cards solve)
           (crash menu)
           (crash title)
+          (crash title draw)
           (crash hud)
           (crash bg)
           (crash gpu bg)
@@ -81,7 +83,13 @@
           (crash stats)
           (crash sfx)
           (crash audio)
-          (crash shell))
+          (crash shell)
+          (crash code)
+          (crash run)
+          (crash store)
+          (crash save)
+          (crash cards save)
+          (crash gpu post))
 
   (export native-main load-editor)
 
@@ -166,14 +174,16 @@
     (define *demo* #f)          ; --demo cleared: the cleared sequence on demand (the web shell's ?demo=)
     (define *demo-armed* #f)
     (define *no-save* #f)       ; the demo's board or deal never reaches the store (nor a fake BEST record)
+    (define *code* #f)          ; --code: a share code to deal at boot (P4)
+    (define *fresh* #f)         ; --fresh: the saved board is neither restored nor offered as CONTINUE
 
     ;; The saves, unless the demo door opened this table (its board or
     ;; deal, and the fake BEST a demo clear would set, never reach the store).
     (define (save-session-after-frame! before after)
-      (if *no-save* after (save-after-frame! before after)))
+      (if *no-save* (run-after-frame! before after) (save-after-frame! before after)))
 
     (define (save-deal-after-frame-unless-demo! before after)
-      (if *no-save* after (save-deal-after-frame! before after)))
+      (if *no-save* (deal-run-after-frame! before after) (save-deal-after-frame! before after)))
     (define *bg-said* #f)       ; the hold's line was said
     ;; With --log-keys, a line every MS-EVERY frames on stdout (the web
     ;; shell's, for the desktop numbers beside the phone's):
@@ -235,13 +245,22 @@
       (atlas-ensure!)
       (prep)
       (when (and bg (bg-gpu? bg)) (gpu-bg-prepare! bg))
-      (cond ((eq? *phosphor* 'probe)
-             (phosphor-frame! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*))))
-            ((and cascading? (eq? *phosphor* 'on))
-             (phosphor-frame! VW VH PHOSPHOR draw))
-            (else
-             (phosphor-reset!)
-             (draw)))
+      ;; the phosphor's compose pass, then the frame (or the composed target)
+      ;; to the swap chain, through the scanline pass when that setting is
+      ;; on (P4; a pass cannot nest in a pass)
+      (let ((show (cond ((eq? *phosphor* 'probe)
+                         (phosphor-compose! VW VH PHOSPHOR (lambda () (draw) (draw-phosphor-probe *frame-n*)))
+                         (lambda () (phosphor-present! VW VH)))
+                        ((and cascading? (eq? *phosphor* 'on))
+                         (phosphor-compose! VW VH PHOSPHOR draw)
+                         (lambda () (phosphor-present! VW VH)))
+                        (else
+                         (phosphor-reset!)
+                         draw))))
+        (post-tick!)
+        (if (post-scanlines?)
+            (post-frame! VW VH 1 show)
+            (show)))
       (when log-keys?
         (when (and (key-down? 'alt) (key-pressed? 'm)) (print-stats! bg))
         (count-frame!)
@@ -283,18 +302,14 @@
       (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
-    ;; the saved one; STACK deals a NEW board: the next seed after the
-    ;; one in memory or in the store, else the flags' (David, 2026-09-18:
-    ;; going "fresh" into a game put him back in the previous one).
+    ;; the saved one, else a fresh deal of the flags' seed (a --stack or
+    ;; --cards boot, and the arms).
     (define (open-stack a lay seed fresh? model resume?)
       (let* ((held (stage-session a))
              (s (cond ((and resume? held) held)
                       (else
                        (let ((booted (boot-session lay seed (or fresh? (eq? *demo* 'cleared)))))
-                         (cond (resume? (car booted))
-                               (held (session-next held))
-                               ((cdr booted) (session-next (car booted)))
-                               (else (car booted)))))))
+                         (car booted)))))
              (s (if (or (eq? s held) (not model))
                     s
                     (session-with-model s model))))
@@ -321,14 +336,45 @@
                                            (newline)
                                            (if won (cons won #f) (boot-deal seed fresh?)))
                                          (boot-deal seed fresh?))))
-                         (cond (resume? (car booted))
-                               (held (deal-next held))
-                               ((cdr booted) (deal-next (car booted)))
-                               (else (car booted))))))))
+                         (car booted))))))
         (stage a
                screen: 'cards
                deal: d
                card-fx: (if (eq? d held) (stage-card-fx a) (card-fx-new)))))
+
+    ;; A fresh board from a spec (P4: a FREE PLAY deal in a version, the
+    ;; daily, a share code, a run's layer).
+    (define (say-spec sp)
+      (display "crash: spec ") (display (spec-table sp)) (display " ") (display (spec-version sp))
+      (display " ") (display (spec-seed sp)) (display " ") (display (encode sp)) (newline))
+
+    (define (open-spec a sp lay model)
+      (say-spec sp)
+      (if (eq? (spec-table sp) 'cards)
+          (begin
+            (set-active-game! 'cards)
+            (stage a screen: 'cards deal: (deal-from-spec sp) card-fx: (card-fx-new)))
+          (let* ((s (session-from-spec sp lay))
+                 (s (if model (session-with-model s model) s))
+                 ;; --demo cleared on a spec'd stack too: a run's layer clears
+                 ;; with one match (the board never reaches the store)
+                 (s (if (eq? *demo* 'cleared)
+                        (begin
+                          (set! *demo* #f)
+                          (set! *demo-armed* #t)
+                          (set! *no-save* #t)
+                          (display "crash: demo cleared stack") (newline)
+                          (session-demo-near-cleared s))
+                        s)))
+            (set-active-game! 'stack)
+            (stage a screen: 'stack session: s fx: (fx-new)))))
+
+    ;; The live board's share code for the pause menu, or #f.
+    (define (live-code a)
+      (case (active-game)
+        ((stack) (let ((s (stage-session a))) (and s (not (board-cleared? (session-board s))) (encode (session-spec s)))))
+        ((cards) (let ((d (stage-deal a))) (and d (not (deal-won? d)) (encode (deal-spec d)))))
+        (else #f)))
 
     (define (open-menu a)
       (stage a
@@ -338,7 +384,11 @@
                                        ((stack) (stage-session a))
                                        ((cards) (stage-deal a))
                                        (else #f))
-                                     #t))))
+                                     #t)
+                                #f
+                                (live-code a)
+                                #f          ; no COPY natively (no clipboard)
+                                *fresh*)))  ; --fresh: the saved board is not offered
                      ;; a menu rebuilt mid-reveal keeps the reveal (P3d); a fresh one
                      ;; starts on the publisher card (D43), whose strip loads here at
                      ;; once (no gate on native: the card opens the process)
@@ -347,17 +397,99 @@
                            ((texture-path CARD-PATH) (menu-with-title m (title-card-ready! (menu-title m))))
                            (else (menu-with-title m (title-skip-card (menu-title m))))))))
 
-    ;; A menu choice: CONTINUE resumes the active table; STACK and DEFRAG
-    ;; start a new game of theirs.
+    ;; FREE PLAY's next board on a table: the seed after the one in memory
+    ;; or in the store (David, 2026-09-18), else the flags', else the
+    ;; table's first; DEFRAG's through its progression window.
+    (define (free-play a table lay seed fresh? model)
+      (set-run! #f)
+      (case table
+        ((stack)
+         (let* ((held (or (stage-session a) (and (not fresh?) (datum->session (store-read-datum BOARD-KEY)))))
+                (next (cond (held (+ 1 (session-seed held))) (seed seed) (else 1))))
+           (open-spec a (free-spec 'stack (menu-version (stage-menu a)) next) lay model)))
+        (else
+         (let* ((held (or (stage-deal a) (and (not fresh?) (datum->deal (store-read-datum CARDS-KEY)))))
+                (next (cond (held (deal-seed (deal-next held))) (seed seed) (else (first-seed)))))
+           (open-spec a (free-spec 'cards (menu-version (stage-menu a)) next) lay model)))))
+
+    ;; JACK IN: a new run from a seed, its first layer dealt.
+    (define (jack-in a seed lay model)
+      (let ((r (run-new seed)))
+        (set-run! r)
+        (display "crash: run start ") (display (run-seed r)) (display " ") (display (run-code r)) (newline)
+        (open-spec a (run-spec r) lay model)))
+
+    ;; NEXT or RETRY came out of a table (its own next or retry board is
+    ;; dealt already): inside a run, the run's next layer, a new attempt
+    ;; (RECONNECT), or the ledger when the run is done; outside, the
+    ;; dealt board stands.
+    (define (run-request a request lay model)
+      (let ((r (run-in-force)))
+        (cond ((not r) a)
+              ((run-done? r)
+               (display "crash: run done ") (display (run-seed r)) (newline)
+               (let ((a (open-menu a)))
+                 (set-run! #f)
+                 (stage a menu: (menu-open-run-done (stage-menu a) (cons r (run-code r))))))
+              ((eq? request 'retry)
+               (let ((r (run-severed r)))
+                 (set-run! r)
+                 (display "crash: run reconnect ") (display (run-layer-number r)) (display " ") (display (run-attempt r)) (newline)
+                 (open-spec a (run-spec r) lay model)))
+              (else
+               (display "crash: run layer ") (display (run-layer-number r)) (newline)
+               (open-spec a (run-spec r) lay model)))))
+
+    ;; A setting stepped: stored and applied (the mixer at once, the HUD
+    ;; on the live boards, the field rebuilt, the cosmetics).
+    (define (apply-setting a id v)
+      (set-setting! id v)
+      (display "crash: setting ") (display id) (display " ") (display v) (newline)
+      (case id
+        ((hud)
+         (stage a
+                session: (and (stage-session a) (session-with-hud (stage-session a) v))
+                deal: (and (stage-deal a) (deal-with-hud (stage-deal a) v))))
+        ((field)
+         (stage a bg: (bg-choose v 1 #f)))
+        ((scanlines) (post-set-scanlines! (eq? v 'on)) a)
+        ((veil) (post-set-veil! (eq? v 'on)) a)
+        (else a)))
+
+    ;; A menu choice (P4): CONTINUE resumes the active table; JACK IN
+    ;; starts a run; STACK and DEFRAG deal free boards in the menu's
+    ;; version; the dailies and a code deal their boards; a setting is
+    ;; applied; COPY prints the code (no clipboard natively).
     (define (choose a choice lay seed fresh? model)
-      (let* ((resume? (eq? choice 'continue))
-             (id (if resume? (active-game) choice)))
-        (case id
-          ((stack) (set-active-game! 'stack)
-                   (open-stack a lay seed fresh? model resume?))
-          ((cards) (set-active-game! 'cards)
-                   (open-cards a seed fresh? resume?))
-          (else a))))
+      (cond ((pair? choice)
+             (case (car choice)
+               ((set) (apply-setting a (cadr choice) (cddr choice)))
+               ((code)
+                (let ((sp (cdr choice)))
+                  (display "crash: code read ") (display (encode sp)) (display " ") (display (spec-table sp)) (newline)
+                  (if (eq? (spec-table sp) 'run)
+                      (jack-in a (spec-seed sp) lay model)
+                      (begin (set-run! #f) (open-spec a sp lay model)))))
+               (else a)))
+            (else
+             (case choice
+               ((continue)
+                (case (active-game)
+                  ((cards) (open-cards a seed fresh? #t))
+                  (else (open-stack a lay seed fresh? model #t))))
+               ((jack-in) (jack-in a (now-second) lay model))
+               ((stack) (free-play a 'stack lay seed fresh? model))
+               ((cards) (free-play a 'cards lay seed fresh? model))
+               ((daily-stack) (set-run! #f) (open-spec a (daily-spec 'stack) lay model))
+               ((daily-cards) (set-run! #f) (open-spec a (daily-spec 'cards) lay model))
+               ((copy)
+                (let ((code (live-code a)))
+                  (when code (display "crash: copy ") (display (code-display code)) (newline)))
+                a)
+               ((code-refused)
+                (display "crash: code refused ") (display (menu-code (stage-menu a))) (newline)
+                a)
+               (else a)))))
 
     ;; The stack's geometry, made once.
     (define *geom* #f)
@@ -446,18 +578,29 @@
         (open-audio! mute?)
         (boot-steps!)   ; D40: what the menu waits for
         (title-card! #t)   ; the publisher card (D43) opens the process; no gate on native
+        ;; P4: the settings at boot: the mixer, the cosmetics; the field's rule is
+        ;; --bg when given, else the FIELD setting
+        (apply-audio-settings!)
+        (post-set-scanlines! (eq? (setting 'scanlines) 'on))
+        (post-set-veil! (eq? (setting 'veil) 'on))
         (let* ((lay (turtle-layout))
                (card-geom (make-card-geometry VW VH))
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? model))))
           (ensure-geometry! lay)
-          (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose bg-mode 1 bg-hold)))
+          (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose (or bg-mode (setting 'field)) 1 bg-hold)))
                                                  (and b (bg b
                                                            stride: (or *bg-stride* (bg-stride b))
                                                            react-steps: (or *bg-rsteps* (bg-react-steps b))))))))
-                          (if cards?
-                              (open-cards (open-menu fresh) seed fresh? #t)
-                              (open-menu fresh)))))
+                          (cond ((and *code* (decode *code*))
+                                 (let ((sp (decode *code*)))
+                                   (if (eq? (spec-table sp) (quote run))
+                                       (jack-in (open-menu fresh) (spec-seed sp) lay model)
+                                       (open-spec (open-menu fresh) sp lay model))))
+                                (*code* (display "crash: code refused ") (display *code*) (newline) (open-menu fresh))
+                                (cards?
+                                 (open-cards (open-menu fresh) seed fresh? #t))
+                                (else (open-menu fresh))))))
             ;; wait-frame's dt feeds the fixed clock the effects run on
             (let* ((dt (wait-frame))
                    (dt (begin (set! *frame-ms* (* 1000.0 dt)) dt))
@@ -469,8 +612,15 @@
                    (_ (when (and (not (audio-ambient-playing?)) *reveal-over* (boot-done?)) (audio-ambient-play!)))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
-                   ;; Escape on the menu quits
+                   ;; Escape on the menu's top screen quits when nothing is
+                   ;; live (with a board live it is CONTINUE, the menu's
+                   ;; answer; on a sub-screen it is BACK, the menu's too)
                    (on-menu? (eq? (stage-screen a) 'menu))
+                   (quit? (and on-menu?
+                               (key-pressed? 'escape)
+                               (menu-live? (stage-menu a))
+                               (eq? (menu-screen (stage-menu a)) 'top)
+                               (not (memq 'continue (menu-entries (stage-menu a))))))
                    (a (case (stage-screen a)
                         ((menu)
                          (let ((r (menu-step (stage-menu a) f VW VH)))
@@ -483,20 +633,31 @@
                                ((jack-out? (stage-session a) f VW VH (geometry-hud-h *geom*))
                                 (open-menu a))
                                (else
-                                ;; the MENU tool: the session asks, the shell answers
+                                ;; the session's request: the MENU tool, or NEXT /
+                                ;; RETRY inside a run (P4)
                                 (let* ((a (step-stack a f dt *geom* log-keys?))
-                                       (s (stage-session a)))
-                                  (if (session-request s)
-                                      (open-menu (stage a session: (session-clear-request s)))
+                                       (s (stage-session a))
+                                       (request (session-request s)))
+                                  (if request
+                                      (let ((a (stage a session: (session-clear-request s))))
+                                        (case request
+                                          ((menu) (open-menu a))
+                                          ((next retry) (run-request a request lay model))
+                                          (else a)))
                                       a)))))
                         (else
                          (if (or (menu-frame? f)
                                  (jack-out-tap? (stage-deal a) f card-geom))
                              (open-menu a)
                              (let* ((a (step-cards a f dt card-geom))
-                                    (d (stage-deal a)))
-                               (if (deal-request d)
-                                   (open-menu (stage a deal: (deal-clear-request d)))
+                                    (d (stage-deal a))
+                                    (request (deal-request d)))
+                               (if request
+                                   (let ((a (stage a deal: (deal-clear-request d))))
+                                     (case request
+                                       ((menu) (open-menu a))
+                                       ((next retry) (run-request a request lay model))
+                                       (else a)))
                                    a)))))))
               (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
                         (lambda ()
@@ -520,7 +681,7 @@
                                  (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a) *copper*))))))
               (say-held! (stage-bg a))
               (audio-pump!)
-              (cond ((and on-menu? (key-pressed? 'escape)) (request-quit))
+              (cond (quit? (request-quit))
                     ((quit-requested?) #t)
                     (else (loop a))))))
         (gfx-shutdown)))
@@ -656,11 +817,12 @@
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
              (cards? (and (member "--cards" args) #t))
-             ;; --bg life|reaction|life-cpu|reaction-cpu|off
-             (bg-mode (string->symbol (arg-value args "--bg" "reaction")))
+             ;; --bg life|reaction|life-cpu|reaction-cpu|off; none given: the FIELD setting (P4)
+             (bg-mode (let ((b (arg-value args "--bg" #f))) (and b (string->symbol b))))
              (bg-hold (let ((h (arg-value args "--bg-hold" #f))) (and h (string->number h))))
              (mute? (and (member "--mute" args) #t))
              (edit-path (arg-value args "--edit" #f))
+             (code-arg (arg-value args "--code" #f))
              (bench-arg (arg-value args "--bench-probe" #f)))
         (set! *copper* (let ((r (arg-value args "--raster" #f)))
                          (if r
@@ -670,13 +832,21 @@
         (set! *bg-only* (and (member "--bg-only" args) #t))
         (set! *bg-stride* (let ((n (arg-value args "--bg-stride" #f))) (and n (string->number n))))
         (set! *bg-rsteps* (let ((n (arg-value args "--react-steps" #f))) (and n (string->number n))))
-        (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") 'cleared))
+        (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") (quote cleared)))
+        (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
+        (set! *fresh* fresh?)
         (atlas-set! (not (equal? (arg-value args "--atlas" "on") "off")))
         (let ((d (arg-value args "--audio-depth" #f))) (when (and d (string->number d)) (audio-set-depth! (string->number d))))
         ;; --hud zones|strip: the bar's layout for this boot, stored (the
         ;; web's ?hud= door; any other word leaves the store alone)
         (when (and hud-arg (layout-name? (string->symbol hud-arg)))
           (set-stored-hud! (string->symbol hud-arg)))
+        ;; the build's commit for the credits (P4): assets/VERSION when a release
+        ;; artifact ships one, else git's word in a checkout, else unversioned
+        (title-stamp! (let ((file (guard (e (#t #f)) (read-file-string "assets/VERSION" missing: #f))))
+                        (cond ((and file (> (string-length (string-trim file)) 0)) (string-trim file))
+                              (else (let ((sha (guard (e (#t "")) (string-trim (process-output->string "git" "rev-parse" "--short=12" "HEAD")))))
+                                      (if (string=? sha "") "unversioned" sha))))))
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))
