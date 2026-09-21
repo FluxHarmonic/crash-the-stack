@@ -40,8 +40,8 @@ share URL (there is no file to save to on the web).
 ## The screen
 
 The header's first line: `MOTIF TRACKER`, the tune's name, `096BPM` the
-tempo, `SPD06` the speed (ticks per row), `MTR4X4` the meter (beats per
-bar x rows per beat), `ORD00/17` the order position and the order's
+tempo, `SPD06` the speed (ticks per row), `4/4 4 ROWS/BEAT` the meter (the
+time signature, then the rows a beat gets), `ORD00/17` the order position and the order's
 length, `PAT00` the pattern at that position, `OCT4` the octave the piano
 keys play, `INS01 BASS` the instrument a new note gets. The right end says
 `EDIT` while edit mode is on, `PLAY` while the tune plays, or a message
@@ -87,7 +87,7 @@ digits as shown (instrument 01..99, volume 00..64); on the effect column
 | `PgUp` / `PgDn` | 16 rows (`Alt-Up` / `Alt-Down` too) |
 | `Home` / `End` | first / last row |
 | `Tab` / `Shift-Tab` | next / previous channel |
-| mouse wheel | scrolls three rows a notch (web; native once sigil-desktop reports the wheel) |
+| mouse wheel | scrolls three rows a notch (both targets; natively sigil-desktop 0.10.2) |
 | click on the order list | that order position |
 | `Space` | edit mode on / off |
 | `Enter` | play from the cursor row |
@@ -107,11 +107,15 @@ digits as shown (instrument 01..99, volume 00..64); on the effect column
 | `Alt-9` / `Alt-0` | solo the cursor's channel / unmute all |
 | `Ctrl-I` | the instrument panel |
 | `Ctrl-B` | the bus page (meter, reverb, compressor) |
-| `Ctrl-M` | the next common meter: 4/4, 3/4, 6/8, 7/8, 5/4 |
+| `Ctrl-M` | the next signature: 4/4, 3/4, 6/8 (2 rows a beat), 7/8, 5/4 |
 | `Alt-S` | the spectrum strip |
 | `Ctrl-S` / `Ctrl-O` / `Ctrl-E` / `Ctrl-N` | save / open the next tune / share / new |
 
-The web page forwards these chords itself (the browser's own `Ctrl-S`,
+The web page owns the keyboard while the tracker is up: every key in
+this table is kept from the browser (Tab no longer moves its focus, Space
+no longer scrolls), the canvas takes focus on load and on any click, and
+only the browser's reserved chords pass (`Ctrl-W/T/Q/L`, `Ctrl-Shift-I/J/C`,
+`F5`, `F11`, `F12`). The page forwards the chords itself (the browser's own `Ctrl-S`,
 `Ctrl-O`, `Ctrl-N` and `Alt-digit` bindings are prevented while the
 tracker is up).
 
@@ -132,8 +136,9 @@ then `Enter` sets a value outright; `Backspace` edits it; `Escape` drops
 it. Every change plays live, so hold a note (or let the tune run) while
 you turn a knob. `Ctrl-I` again closes the panel.
 
-`Ctrl-B` opens the bus page instead: first the meter's two lines
-(rows per beat, beats per bar, each 1..16: type any pair for an odd
+`Ctrl-B` opens the bus page instead: first the meter's three lines
+(`BEATS` per bar 1..16, `DENOM` the beat's note value 1/2/4/8/16/32,
+`ROWS/BEAT` 1..16: type any values for an odd
 meter), then the reverb (`REVERB` zitarev or revsc, `SIZE`, `DAMP`,
 `MIX`) and the mix-bus compressor (`COMP` on or off, `THRESHOLD` dBFS,
 `RATIO`, `ATTACK` and `RELEASE` in ms, `MAKEUP` dB). The same keys as the
@@ -146,14 +151,18 @@ was a setting; `COMP` off is a 1:1 ratio with no makeup.
 
 ## The meter
 
-`MTR4X4` in the header is beats per bar x rows per beat. The grid tints
-every beat row and, more, every bar row; a new pattern is one bar of
-beats times four (64 rows at 4x4, 48 at 3x4, 48 at 6x2). Ticks and
-effects do not read the meter: `SPD` is still ticks per row and BPM is
-XM's (a tick is 2.5/BPM seconds, so 4 rows at speed 6 are one beat of
-24 ticks); the meter only says how the rows group. In the file it is
-`meter: (4 3)` (rows per beat, beats per bar) after `channels:`, and 4/4
-is not written.
+The header shows the meter as a time signature and a resolution:
+`3/4 4 ROWS/BEAT` is three quarter-note beats to the bar, four rows to
+each beat. The grid tints every beat row and, more, every bar row: at
+3/4 with 4 rows a beat, beats on rows 0, 4, 8 and bars on 0, 12, 24. A
+new pattern is one bar of beats times four (64 rows at 4/4, 48 at 3/4,
+48 at 6/8 with 2 rows a beat). Ticks and effects do not read the meter:
+`SPD` is still ticks per row and BPM is XM's (a tick is 2.5/BPM seconds,
+so 4 rows at speed 6 are one beat of 24 ticks); the meter only says how
+the rows group, and the denominator is a label. In the file it is
+`meter: (4 3)` (rows per beat, beats per bar) after `channels:`, with a
+third number for the denominator when it is not 4 (`(2 6 8)` is 6/8);
+4/4 is not written.
 
 ## Sharing
 

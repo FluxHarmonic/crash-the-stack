@@ -17,6 +17,8 @@
 //   play       Enter: "crash: tracker play 0 0"; the AnalyserNode tap on the
 //              destination reads a positive RMS within 3 s (sound on the web);
 //              Escape: "crash: tracker stop P R" with R > 0 (the audio clock moved)
+//   focus      Tab moves the cursor channel, Shift-Tab back, and the canvas keeps
+//              the focus through both (the page owns the keyboard)
 //   edit       Space, z (C-4 on channel 1 row R), then the share: the text
 //              carries the cell
 //   share      Ctrl-E: the game's "crash: tune-share spy N chars", the page's
@@ -59,7 +61,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
 const results = [];
-const planned = ["imports", "sizes", "open", "render", "play", "edit", "share", "fragment", "door", "menu", "worker", "bar", "console"];
+const planned = ["imports", "sizes", "open", "render", "play", "focus", "edit", "share", "fragment", "door", "menu", "worker", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -279,6 +281,28 @@ await sleep(800);
     if (rms >= 0.01 && stopped && row > 0) pass("play", `play ${started.m[1]} ${started.m[2]}; rms ${rms.toFixed(3)}; stop at row ${row}`);
     else fail("play", `rms ${rms.toFixed(4)} (want >= 0.01), stop line ${stopped ? stopped.m[0] : "missing"} (want row > 0)`);
   }
+}
+
+// ---- focus --------------------------------------------------------------------
+// The page owns the keyboard (David, 2026-09-21: Shift-Tab moved the
+// browser's focus): Tab moves the cursor channel, Shift-Tab moves it back,
+// and document.activeElement stays the canvas through both.
+{
+  const active = () => evalJS("document.activeElement && document.activeElement.id");
+  const before = await active();
+  let from = consoleLines.length;
+  await press("Tab");
+  const fwd = await waitLine(/^crash: tracker channel (\d+)$/, from, 3000);
+  const mid = await active();
+  from = consoleLines.length;
+  await keyEvent("keyDown", "Shift", "ShiftLeft", 8); await sleep(40);
+  await keyEvent("keyDown", "Tab", "Tab", 8); await sleep(40); await keyEvent("keyUp", "Tab", "Tab", 8); await sleep(40);
+  await keyEvent("keyUp", "Shift", "ShiftLeft", 0); await sleep(150);
+  const back = await waitLine(/^crash: tracker channel (\d+)$/, from, 3000);
+  const after = await active();
+  if (before === "stage" && mid === "stage" && after === "stage" && fwd && back && fwd.m[1] === "2" && back.m[1] === "1")
+    pass("focus", `Tab -> channel 2, Shift-Tab -> channel 1; the canvas kept focus (${before}/${mid}/${after})`);
+  else fail("focus", `focus ${before}/${mid}/${after}, Tab ${fwd ? fwd.m[0] : "no line"}, Shift-Tab ${back ? back.m[0] : "no line"}`);
 }
 
 // ---- edit + share -------------------------------------------------------------

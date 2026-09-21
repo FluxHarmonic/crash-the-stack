@@ -42,7 +42,7 @@
           tracker-with-tune tracker-with-message tracker-with-name
           tracker-pattern tracker-pattern-id tracker-rows tracker-channels
           tracker-cell tracker-block tracker-muted? tstate-mutes tstate-solo tstate-panel
-          tracker-panel-lines tstate-panel-page tstate-spectrum
+          tracker-panel-lines tstate-panel-page tstate-spectrum meter-signature meter-row-kind
           COLUMNS ZOOM-CHANNELS PAGE-ROWS)
 
   (begin
@@ -406,37 +406,57 @@
           (bus-lines (tstate-tune s))
           (instrument-lines s)))
 
-    ;; The meter (David, 2026-09-21): (rows-per-beat . beats-per-bar), the
-    ;; tune's; Ctrl-M cycles these, the bus page takes any 1..16 x 1..16.
-    (define METER-PRESETS '((4 . 4) (4 . 3) (2 . 6) (2 . 7) (4 . 5)))
+    ;; The meter (David, 2026-09-21): the tune's (rows-per-beat . beats-per-bar)
+    ;; and its denominator (the beat's note value), shown as a time signature
+    ;; with the resolution ("3/4  4 ROWS/BEAT"). Ctrl-M cycles these five
+    ;; signatures; the bus page takes any BEATS 1..16, DENOM 1..32, ROWS/BEAT
+    ;; 1..16 typed or stepped. Each preset: (rows beats denominator).
+    (define METER-PRESETS '((4 4 4) (4 3 4) (2 6 8) (2 7 8) (4 5 4)))
+
+    (define (meter-signature t)
+      (list (car (tune-meter t)) (cdr (tune-meter t)) (tune-meter-denominator t)))
+
+    ;; What a row is under the meter: bar (its first row), beat, or #f. The
+    ;; draw tints by this; pinned by test-tracker-model with two meters.
+    (define (meter-row-kind t row)
+      (let* ((m (tune-meter t))
+             (rpb (car m))
+             (bar (* rpb (cdr m))))
+        (cond ((= 0 (modulo row bar)) 'bar)
+              ((= 0 (modulo row rpb)) 'beat)
+              (else #f))))
 
     ;; rows of a new pattern: a bar of beats, four bars
     (define (meter-rows t)
       (let ((m (tune-meter t)))
         (* (car m) (cdr m) 4)))
 
-    (define (put-meter s rows beats)
-      (let* ((t2 (tune (tstate-tune s) meter: (cons rows beats)))
+    (define (put-meter s rows beats denom)
+      (let* ((t2 (tune (tstate-tune s) meter: (cons rows beats) meter-denominator: denom))
              (errs (tune-errors t2)))
         (if (null? errs)
             (tracker-with-tune s t2)
             (tstate s message: "OUT OF RANGE"))))
 
-    ;; The bus page: the meter's two rows first, then every bus key with the
-    ;; defaults filled in. A tune without a bus section starts from mix 0,
-    ;; so opening the page and changing the compressor does not switch a
-    ;; reverb on.
+    ;; The bus page: the meter's three rows first (BEATS, DENOM, ROWS/BEAT),
+    ;; then every bus key with the defaults filled in. A tune without a bus
+    ;; section starts from mix 0, so opening the page and changing the
+    ;; compressor does not switch a reverb on.
     (define (bus-lines t)
-      (append (list (cons 'rows-per-beat (car (tune-meter t)))
-                    (cons 'beats-per-bar (cdr (tune-meter t))))
+      (append (list (cons 'beats (cdr (tune-meter t)))
+                    (cons 'denom (tune-meter-denominator t))
+                    (cons 'rows/beat (car (tune-meter t))))
               (bus-canonical (or (tune-bus t) '((mix . 0.0))))))
 
-    (define (meter-key? key) (memq key '(rows-per-beat beats-per-bar)))
+    (define (meter-key? key) (memq key '(beats denom rows/beat)))
 
     (define (put-meter-key s key value)
-      (let ((m (tune-meter (tstate-tune s))))
+      (let ((m (meter-signature (tstate-tune s))))
         (if (and (integer? value) (exact? value))
-            (if (eq? key 'rows-per-beat) (put-meter s value (cdr m)) (put-meter s (car m) value))
+            (case key
+              ((beats) (put-meter s (car m) value (caddr m)))
+              ((denom) (put-meter s (car m) (cadr m) value))
+              (else (put-meter s value (cadr m) (caddr m))))
             (tstate s message: "OUT OF RANGE"))))
 
     ;; the symbol-valued bus keys and what they cycle through
@@ -670,12 +690,12 @@
                                     s))
              ((panel-close) (tstate s panel: #f))
              ((spectrum) (tstate s spectrum: (not (tstate-spectrum s))))
-             ;; Ctrl-M: the next common meter (4/4 3/4 6/8 7/8 5/4); a typed one is the bus page's
+             ;; Ctrl-M: the next of the five signatures (4/4 3/4 6/8 7/8 5/4); any meter is typed on the bus page
              ((meter-next)
-              (let* ((m (tune-meter (tstate-tune s)))
+              (let* ((m (meter-signature (tstate-tune s)))
                      (rest (member m METER-PRESETS))
                      (next (cond ((and rest (pair? (cdr rest))) (cadr rest)) (else (car METER-PRESETS)))))
-                (put-meter s (car next) (cdr next))))
+                (put-meter s (car next) (cadr next) (caddr next))))
              (else s))))))
 
     ))
