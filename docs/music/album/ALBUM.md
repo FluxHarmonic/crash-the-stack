@@ -19,8 +19,8 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 | 8 | Sector Drift | Air pair I ready for listening | 3:36 actual |
 | 9 | Dirty Cache | Pocket pair I ready for listening | 3:43 actual |
 | 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
-| 11 | Dead Sector | Planned | 3:00 |
-| 12 | Obsidian Index | Planned | 4:00 |
+| 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
+| 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
 | 13 | Breach Vector | Planned | 3:30 |
 | 14 | Clock Edge | Planned | 3:30 |
 | 15 | Glass Current | Planned | 4:00 |

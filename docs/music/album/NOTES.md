@@ -96,3 +96,14 @@ and acid accents. The native clocks, slides and intentional fills are retained.
 No game backport is proposed. Dirty Cache's already strong native render calls
 for attenuation, while Basement's native level fits the provisional sequence
 without added gain. Keep per-title decisions rather than a universal target.
+
+## Stone pair I
+
+David asked to continue after the pocket-pair delivery. Dead Sector and Obsidian
+Index fill positions 11/12, bringing the album to twelve full arrangements.
+Feedback on the recent air and pocket pairs remains open. See STONE-PAIR-I.md
+for the compact mystery arc and the pedal-led entrance, reprise and ending.
+Obsidian uses the selected Waves IV patches and side-pad accents, retaining the
+accepted Pedal II identity. The audit now checks paired-pad harmony and release
+spacing across boundaries. No game backport is proposed. Breach Vector, Clock
+Edge and the confirmed closer Glass Current remain to be arranged.

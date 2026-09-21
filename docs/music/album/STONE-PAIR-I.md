@@ -79,3 +79,24 @@ Audio and raw evidence live in
 ~/Ops/artifacts/crash-the-stack-album/stone-pair-i/, including native sources,
 canonical snapshots, exact command manifests and hashes. Native WAV precision
 remains 16-bit. These are provisional album auditions, not release masters.
+
+## Provisional mastering and full render results
+
+| Track | Native LUFS-I | Gain | WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Dead Sector | -22.9 | +3 dB | -19.9 | -19.9 | -2.7 dBTP | 6.8 LU |
+| Obsidian Index | -23.7 | +5 dB | -18.7 | -18.7 | -1.6 dBTP | 3.1 LU |
+
+Dead Sector remains near Blind Spot's quiet album level. Obsidian sits closer
+to Quiet Array, preserving its fuller harmonic role without matching the heavy
+openers. Both retain native loudness range at reported precision (6.8/3.1 LU).
+The pilot oversampled limiter recipe stays in the chain, but neither piece is
+pushed past its nominal ceiling to obtain extra loudness. No EQ, new reverb or
+stereo processing is added.
+
+Native/master WAV, FLAC and OGG durations all match their maps within one sample.
+Master WAV and decoded FLAC PCM match exactly. Both final master seconds peak
+at -90.3 dBFS, and WAV/decoded OGG true peaks pass the -1 dBTP delivery ceiling.
+The full natural tails remain. These checks establish technical consistency,
+not musical acceptance. Twelve of fifteen album arrangements now exist, with
+Breach Vector, Clock Edge and Glass Current still planned.

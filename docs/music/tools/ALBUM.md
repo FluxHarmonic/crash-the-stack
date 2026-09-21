@@ -160,3 +160,26 @@ check. Dirty Cache's on-beat plucks receive that check on channel 7.
 See [POCKET-PAIR-I.md](../album/POCKET-PAIR-I.md) for full section landmarks and
 measurements. Both scores/maps regenerate exactly, and both banks/buses match
 the accepted game sources. No new Sigil shell or synth feature was required.
+
+## Stone pair: Dead Sector and Obsidian Index
+
+```sh
+sigil docs/music/tools/album-compose-stone.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track dead-sector --track obsidian-index --output /absolute/external/stone-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track dead-sector --track obsidian-index --output /absolute/external/stone-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track dead-sector --gain 3 --output /absolute/external/stone-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track obsidian-index --gain 5 --output /absolute/external/stone-pair-i
+```
+
+Set MOTIF_BIN or supply --motif for compilation/synthesis. Explicitly select the
+pair; batch defaults remain Cold Boot and Relay Ghost. Both use the speed-3 grid
+with no thirty-second attacks. The probe/glass and answering voices stay on
+eighths. Obsidian's additional audit requires main/side pad roots, voicings and
+gates to agree, and at least six rows of release before the next chord, including
+section boundaries. Missing releases are rejected even if the earlier gap was
+long enough. Negative controls cover missing release, short gap, wrong voicing
+and wrong root; the raw check script/result accompanies the external renders.
+
+See [STONE-PAIR-I.md](../album/STONE-PAIR-I.md) for arrangement landmarks and
+measurements. Scores/maps reproduce exactly; instrument banks and buses match
+the game references, including the accepted Waves IV pad and pedal balance.
