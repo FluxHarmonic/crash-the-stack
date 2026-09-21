@@ -44,8 +44,11 @@
 //                  for 3 s; the page activated again: "crash: page visible
 //                  after N s", "crash: visibility visible", frames run again,
 //                  the context is running, and a tap on the pair's other tile
-//                  removes it ("crash: removed A B tiles 142"); no sokol line
-//                  and no error over the whole leg
+//                  removes it ("crash: removed A B tiles 142"); no sokol
+//                  refusal (a "sokol[level=0|1]" line: since BG1 the six GPU
+//                  rules' shaders log level-2/3 warnings at load, the driver
+//                  pruning uniforms a rule never reads) and no error over
+//                  the whole leg
 //   context-lost   ?trace&stack&fresh; WEBGL_lose_context.loseContext() on the
 //                  stage's context: "crash: page dead webgl context lost", no
 //                  FATAL (the instance is alive but unusable), frames stopped,
@@ -55,7 +58,7 @@
 //                  game's own day read before and after (("day", ""): 20716
 //                  then 20717, the oracle that the clock crossed under the
 //                  live board): no error,
-//                  no "car: expected pair", no sokol line, and the first pair
+//                  no "car: expected pair", no sokol refusal, and the first pair
 //                  still removes
 //   console        over the four non-trap legs: zero error-level entries and
 //                  zero exceptions (the trap legs account for their one)
@@ -391,7 +394,7 @@ await trapLeg("trap-dispatch", "now");
     mark = consoleLines.length;
     await tap(b.BX, b.BY);
     const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 5000);
-    const sokol = countLines(/sokol\[/, b.mark);
+    const sokol = countLines(/sokol\[level=[01]\]/, b.mark);
     const errors = consoleErrors.slice(errorsBefore);
     const problems = [];
     if (!hid) problems.push("no \"crash: visibility hidden\" from the game");
@@ -405,7 +408,7 @@ await trapLeg("trap-dispatch", "now");
     if (audio2 !== "running") problems.push(`audio context after showing ${audio2}, want running`);
     if (!rem) problems.push("no \"crash: removed\" after the tap on the pair's other tile");
     else if (rem.m[3] !== "142") problems.push(`removed line: ${rem.m[0]}`);
-    if (sokol) problems.push(`${sokol} sokol line(s) over the leg`);
+    if (sokol) problems.push(`${sokol} sokol refusal line(s) over the leg`);
     if (errors.length) problems.push(`errors: ${errors.join(" | ")}`);
     if (problems.length) fail(name, problems.join("; "));
     else pass(name, `hidden ${pageShown.m[1]} s: game and page said so, no frame, audio ${audio0} -> ${audio1} -> ${audio2}; back: frames run, ${rem.m[0]}`);
@@ -452,7 +455,7 @@ await trapLeg("trap-dispatch", "now");
 // the boot lands 75 s before day 20717 begins, the daily is dealt from the
 // menu (Escape, the exit row, FREE PLAY, DAILY STACK), the page waits the
 // rollover out, and the board must still play (its first pair removed), with
-// no error, no "car: expected pair" and no sokol line over the two minutes.
+// no error, no "car: expected pair" and no sokol refusal over the two minutes.
 {
   const name = "rollover";
   const errorsBefore = consoleErrors.length;
@@ -510,7 +513,7 @@ await trapLeg("trap-dispatch", "now");
             await sleep(95000);
             const dayAfter = await evalJS(`globalThis.SigilWebApp.dispatch("day", "")`);
             const cars = countLines(/car: expected pair/, linesBefore);
-            const sokol = countLines(/sokol\[/, linesBefore);
+            const sokol = countLines(/sokol\[level=[01]\]/, linesBefore);
             const errors = consoleErrors.slice(errorsBefore);
             const frames = await frameWithin(1500);
             const mark = consoleLines.length;
@@ -522,7 +525,7 @@ await trapLeg("trap-dispatch", "now");
             if (dayBefore !== 20716) problems.push(`the game read day ${dayBefore} before the wait, want 20716`);
             if (dayAfter !== 20717) problems.push(`the game read day ${dayAfter} after the wait, want 20717 (the rollover did not happen under the board)`);
             if (cars) problems.push(`${cars} "car: expected pair" line(s)`);
-            if (sokol) problems.push(`${sokol} sokol line(s)`);
+            if (sokol) problems.push(`${sokol} sokol refusal line(s)`);
             if (errors.length) problems.push(`errors: ${errors.join(" | ")}`);
             if (!frames) problems.push("no animation frame after the rollover");
             if (!sel || sel.m[1] !== dealt.m[3]) problems.push(`the first tap after the rollover selected ${sel ? sel.m[1] : "nothing"}, want ${dealt.m[3]}`);
