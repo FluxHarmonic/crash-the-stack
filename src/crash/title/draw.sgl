@@ -715,16 +715,15 @@
                      (let* ((cell (* BAKE-SCALE ITEM-CELL))
                             (tw (* cell (block-text-width text)))
                             (cx (quotient (- (* BAKE-SCALE w) tw) 2))
-                            ;; the slide begins once the row is wholly inside the box
+                            ;; the reveal begins once the row is wholly inside the box:
+                            ;; the letters resolve out of the scramble left to right
+                            ;; (David's idea, 2026-09-21: the SCRAMBLED tile's look)
                             (inside (- (* BAKE-SCALE h) (+ y rh)))
                             (t (max 0.0 (min 1.0 (/ inside (* BAKE-SCALE SLIDE-PX)))))
-                            (ease (- 1.0 (* (- 1.0 t) (- 1.0 t))))
-                            (x (+ cx (exact (round (* (- 1.0 ease) (- (* BAKE-SCALE w) cx))))))
-                            (style (if (< t 1.0) 'flat 'ramp))
                             (i (label-index text)))
                        (if (and *bake* i *items-tex*)
-                           (draw-item-row-scaled i style x (+ y (* BAKE-SCALE 4)) (* ITEM-CELL (block-text-width text)) BAKE-SCALE)
-                           (draw-block-text text x (+ y (* BAKE-SCALE 4)) cell style)))
+                           (draw-item-letters-scrambled i cx (+ y (* BAKE-SCALE 4)) text BAKE-SCALE t (+ (caddr row) (exact (floor (/ (menu-ms m) 66.0)))))
+                           (draw-block-text text cx (+ y (* BAKE-SCALE 4)) cell (if (< t 1.0) 'flat 'ramp))))
                      (begin
                        (color! C-TEXT)
                        (text! text
@@ -743,6 +742,47 @@
         (color! C-TEX-PLAIN)
         (draw-texture-region (cdr sheet) tx ty (* scale cw) (* scale ITEM-H)
                              0 (* BAKE-SCALE (- *items-h* cy)) (* BAKE-SCALE cw) (- (* BAKE-SCALE ITEM-H)))))
+
+    ;; A baked title drawn letter by letter from its sheet row: the letters
+    ;; left of the resolve front (t of the width) straight in the ramp; the
+    ;; rest scrambled the way a SCRAMBLED tile is (each cell row of the
+    ;; letter sheared sideways by up to two cells from a hash of the
+    ;; letter, the row and the moment, one row dropped), in the flat style
+    ;; until it resolves. key changes every few frames so the scramble
+    ;; moves. scale: the target's scale over the virtual px.
+    (define (draw-item-letters-scrambled index tx ty text scale t key)
+      (let* ((sheet (list-ref *items-sheets* (quotient index SHEET-LABELS)))
+             (row (modulo index SHEET-LABELS))
+             (tex (cdr sheet))
+             (n (string-length text))
+             (front (* t n))
+             (cy-of (lambda (style) (* ROW-PITCH (+ (* 2 row) (if (eq? style 'ramp) 1 0))))))
+        (color! C-TEX-PLAIN)
+        (let loop ((k 0) (x-cells 0))
+          (when (< k n)
+            (let* ((c (string-ref text k))
+                   (adv (if (char=? c #\space) 4 8))
+                   (lw (* ITEM-CELL adv))
+                   (dx (+ tx (* scale ITEM-CELL x-cells)))
+                   (resolved? (< k front)))
+              (unless (char=? c #\space)
+                (if resolved?
+                    (draw-texture-region tex dx ty (* scale lw) (* scale ITEM-H)
+                                         (* BAKE-SCALE ITEM-CELL x-cells) (* BAKE-SCALE (- *items-h* (cy-of 'ramp)))
+                                         (* BAKE-SCALE lw) (- (* BAKE-SCALE ITEM-H)))
+                    (let rows ((r 0))
+                      (when (< r (+ ALPHABET-H 1))
+                        (let* ((h31 (modulo (+ (* 7919 (+ k 1)) (* 104729 (+ r 1)) (* 1103 key)) 2147483647))
+                               (shear (- (modulo h31 5) 2))
+                               (drop? (= (modulo (quotient h31 5) 9) 0)))
+                          (unless drop?
+                            (draw-texture-region tex (+ dx (* scale ITEM-CELL shear)) (+ ty (* scale ITEM-CELL r))
+                                                 (* scale lw) (* scale ITEM-CELL)
+                                                 (* BAKE-SCALE ITEM-CELL x-cells)
+                                                 (* BAKE-SCALE (- *items-h* (cy-of 'flat) (* ITEM-CELL r)))
+                                                 (* BAKE-SCALE lw) (- (* BAKE-SCALE ITEM-CELL)))))
+                        (rows (+ r 1))))))
+              (loop (+ k 1) (+ x-cells adv)))))))
 
     (define (draw-credits m vw vh)
       (let ((w (- vw (* 2 CRAWL-X)))
@@ -897,7 +937,7 @@
     ;; one translucency for the band, the crawl's box and the overlay's
     ;; panel: David's read of 2026-09-21 wanted the backdrop visible
     ;; through them (at 0.8 over the dark art it read as opaque)
-    (define PANEL-ALPHA 0.55)
+    (define PANEL-ALPHA 0.7)   ; David on 0.55: a little too translucent
     (define BAND-ALPHA PANEL-ALPHA)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)
