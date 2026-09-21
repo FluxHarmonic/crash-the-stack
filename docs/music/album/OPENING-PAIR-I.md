@@ -116,3 +116,8 @@ was exercised without changing prior artifacts.
 These exports bring the album to four full arrangements out of fifteen. The
 remaining eleven are still planned; this pair awaits listening feedback. The
 user's ongoing detailed review of the first two tracks remains open.
+
+Telegram acknowledged Cold Boot album I as message 1116 and Relay Ghost album I
+as message 1117. Both are complete album-level OGGs. While listening, David asked
+to begin the next pair, Closed Loop and Shadow Protocol; feedback on this pair
+remains open.
