@@ -11,28 +11,47 @@ went, and what nobody has tested yet.
 
     scripts/dev sigil build --config windows-amd64
 
-Output: `build/windows-amd64/bin/crash-the-stack.exe` (44 MB, `PE32+
-executable for MS Windows 6.00 (console), x86-64`). A `motif.exe` (37 MB,
-the tracker package's own entry) lands beside it, as `motif` does beside
-the Linux binary in `build/*/bin/`, because motif declares an entry point;
-it is not part of the game and a release can leave it out.
+Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,849,607 bytes,
+`PE32+ executable for MS Windows 6.00 (console), x86-64`).
 
 The config in `package.sgl` mirrors `release` (native backend, optimize 2,
-bundle) with `toolchain: 'zig`, `target: "x86_64-windows-gnu"` and
-`features: '(release cross windows)`, and the sigil-desktop dependency's
-config gate includes it. Every package in the dependency graph is compiled
-with the root config's target (a dependency's `configs:` gate is matched by
-the root config's name), so motif, which has no `windows-amd64` config of its
-own, cross-compiles too.
+bundle) with `toolchain: 'zig`, `target: "x86_64-windows-gnu"`, `static?:
+#t` (as the monorepo's and the sigil-desktop/graphics/audio `windows-amd64`
+configs: `-static` at the link, no `-s` strip) and `features: '(release
+cross windows)`, and the sigil-desktop dependency's config gate includes
+it. Nothing in the game's or its dependencies' source branches on
+`release`, `cross` or `windows` today (every `cond-expand` in the tree is on
+`wasm`, `test` or `else`), so the Windows build compiles the same Sigil as
+`release`; the features are there for a future branch. One thing to know
+before writing one: the compiler's built-in feature list is the HOST's
+(`linux`, `posix`, `unix` are true while cross-compiling), and `windows` is
+true only because this config lists it.
+
+Every package in the dependency graph is compiled with the root config's
+target; a dependency's `configs:` gate is matched by the root config's
+NAME. That is why motif, which has no `windows-amd64` config of its own,
+cross-compiles, and also why the graph is not exactly `release`'s: motif
+gates its own sigil-mcp and sigil-audio dependencies to `(dev release)`, so
+sigil-mcp is not built for Windows (sigil-audio is, because the game
+depends on it directly). The game imports nothing from sigil-mcp. The
+`motif.exe` (36.8 MB) that lands beside the game, as `motif` does beside
+the Linux binary, is bundled against that missing module: `motif --help`
+runs under Wine, `motif mcp` dies with `unbound variable 'mcp-server'`. It
+is not part of the game; a release ships `crash-the-stack.exe` alone. The
+fix, if a Windows motif is ever wanted, is motif's gate reading `(dev
+release windows-amd64)`.
 
 Nothing in `manifest.scm` is needed beyond what the Linux build uses: the
 Win32 GLFW files, miniaudio's WASAPI backend, stb_vorbis, motif's `render.c`
 and the game's `src/c/crash-native.c` compile against the Windows headers
-zig ships.
+zig ships. No fix was needed in sigil-desktop, sigil-graphics, sigil-audio
+or the toolchain for the first link: the Windows link flags those packages
+carry (sigil-desktop `-lkernel32 -luser32 -lshell32 -lgdi32`; the others
+none, everything loaded at run time) were enough.
 
 ### What the binary needs at run time
 
-`objdump -p` (`guix shell binutils -- objdump -p build/windows-amd64/bin/crash-the-stack.exe | grep 'DLL Name'`):
+`guix shell binutils -- objdump -p build/windows-amd64/bin/crash-the-stack.exe | grep 'DLL Name'`:
 
     KERNEL32.dll  USER32.dll  GDI32.dll  SHELL32.dll  WS2_32.dll
     api-ms-win-crt-{environment,heap,runtime,stdio,string,private,convert,
@@ -46,59 +65,70 @@ code, not the game. OpenGL (`opengl32.dll`) and the audio stack
 sigil-graphics' GL loader and miniaudio, so they do not appear as imports.
 
 The game reads its assets relative to the current directory (`assets/`),
-as on Linux: run it from the build directory or from a directory that
-holds `assets/`. Saves: `(crash store)` resolves its directory from
-`XDG_DATA_HOME`, then `$HOME/.local/share`, then `.`; real Windows sets
-neither variable, so saves land in `.\crash-the-stack\` under the current
-directory, and `store-set!` swallows the error when that is not writable
-(the game runs, nothing persists). Wine passes the Unix `HOME` through
-and hides this. A Windows branch on `%APPDATA%` (or `%LOCALAPPDATA%`)
-in `default-root` is the fix; not made here (the brief keeps this task
-to the config and new files).
+as on Linux, and `link-assets` puts them at `build/windows-amd64/assets/`:
+run it from that directory. Double-clicking `bin\crash-the-stack.exe` in
+Explorer starts it with `bin\` as the current directory and no assets; a
+release layout or a launcher has to account for that.
+
+Saves: `(crash store)` resolves its directory from `XDG_DATA_HOME`, then
+`APPDATA`, then `$HOME/.local/share`, then `.`; `(crash tracker files)`
+resolves the tunes directory the same way. The `APPDATA` step is from this
+work (David's ruling: `%APPDATA%`, the Roaming profile). Before it, a stock
+Windows launch, which sets neither `XDG_DATA_HOME` nor `HOME`, saved into
+`.\crash-the-stack\` under the current directory, and `store-set!`'s
+`guard` hid a failed write. `test/test-store-root.sgl` covers the chain,
+and the Windows binary was run under Wine with `XDG_DATA_HOME` unset: the
+save appeared under `drive_c/users/<user>/AppData/Roaming/crash-the-stack/`.
 
 ## Running under Wine on the Guix box
 
-Wine 10.0 from Guix (`guix shell wine64`), a fresh prefix (17 s to create),
-Gecko and Mono prompts skipped with `WINEDLLOVERRIDES=mscoree,mshtml=`:
+Wine 10.0 from Guix (`guix shell wine64`), a fresh prefix, Gecko and Mono
+prompts skipped with `WINEDLLOVERRIDES=mscoree,mshtml=`:
 
     export WINEPREFIX=/tmp/crash-wine WINEDLLOVERRIDES=mscoree,mshtml=
     guix shell wine64 -- wine64 wineboot --init          # once
+    unset DISPLAY                                        # see below
     cd build/windows-amd64
     guix shell wine64 -- wine64 bin/crash-the-stack.exe --fresh --seed 3
 
 **Use Wine's Wayland driver on sway: `unset DISPLAY` with `WAYLAND_DISPLAY`
 set.** With `DISPLAY` set Wine uses its X11 driver through XWayland, and on
-this box's layout (both outputs start at x=1920, nothing at the origin) that
-driver delivers mouse events at the wrong place or not at all: the window
-looks right, keys work, clicks land elsewhere. Under the Wayland driver the
-window is a native xdg_shell client and clicks map exactly. Diagnosed with a
-60-line Win32 probe, not GLFW: Wine's X11 driver shifts the monitors so the
-primary sits at (0,0) but keeps the window at (0,0) too and the pointer in
-raw X root coordinates. On a layout with an output at (0,0) the X11 driver
-is fine (Xvfb, and a headless sway with one output at the origin, both
-measured).
+this box's layout (`output DP-2 pos 1920 0`, `output eDP-1 pos 1920 1080`,
+nothing at the origin) mouse input goes wrong: David saw clicks landing
+away from where he clicked; a 60-line Win32 probe (a bare `CreateWindowA`
+window that prints every mouse message) on a headless sway reshaped to
+that layout received no click at all, reported its window at (0,0) while X
+had it at (2240,140), and `GetCursorPos` in raw X root coordinates. The
+same probe with the outputs moved to the origin printed
+`CLICK msg=(640,364)` for a click at the window's (640,364), and the game's
+own X11-driver runs on Xvfb and on an origin layout each started a run
+from one click at the STACK entry. So it is Wine's X11 driver on a layout
+with no output at the origin, not GLFW and not the game. Under the Wayland
+driver the window is a native xdg_shell client, the probe prints exact
+coordinates on the real layout, and David: "Audio works, clicks work."
 
-Useful environment: `WINEDEBUG=-all` once it runs (Wine's HID thread prints
-`dropping short report` lines for one of the USB devices on the box, and
-GLFW's joystick enumeration triggers them); `SIGIL_DESKTOP_VERBOSE=1` prints
-the window, framebuffer, content scale and GL version at start;
-`PULSE_SINK=worker-null` routes the audio for a silent drive.
+Useful environment: `WINEDEBUG=-all` once it runs (Wine's HID thread
+prints `dropping short report` lines for one of the USB devices on the
+box); `SIGIL_DESKTOP_VERBOSE=1` prints the window, framebuffer, content
+scale and GL version at start; `PULSE_SINK=worker-null` routes the audio
+for a silent drive; `XDG_DATA_HOME=<scratch>` keeps a drive's save out of
+the real one (Wine passes the Unix environment to the program).
 
 ### What was measured (2026-09-21, sigil 0.22.2, Wine 10.0, Mesa)
 
 - Window and GL context: `platform=win32 window=1280x800
-  framebuffer=1280x800 content-scale=1.00x1.00`, GL 4.5 through WGL on
-  XWayland/Xvfb, GL 4.6 through EGL under the Wayland driver. sigil-desktop
+  framebuffer=1280x800 content-scale=1.00x1.00`, `gl=4.5` on llvmpipe
+  (Xvfb, the headless sway) and `gl=4.6` on David's GPU, the same number
+  under the X11 and the Wayland driver on the same renderer. sigil-desktop
   asks for a 4.3 core context on Windows as on Linux; nothing had to change.
-- Audio: miniaudio picks WASAPI, Wine maps it to PulseAudio (`winepulse`),
-  and `pactl list sink-inputs` shows `application.name =
-  "crash-the-stack.exe"`, uncorked, on the session's sink. Two
-  `miniaudio WARNING: [WASAPI] Failed to find suitable device format for
-  device info retrieval` lines at start are device enumeration only; the
-  device opens and plays. David heard the soundtrack and the cues on his
-  session. With `PULSE_SINK` pointed at a suspended null sink the same
-  lines read `ERROR: Failed to retrieve mix format` and the game runs on
-  regardless.
+- Audio: miniaudio picks WASAPI, Wine maps it to PulseAudio (`winepulse`);
+  `pactl list sink-inputs` showed `application.name =
+  "crash-the-stack.exe"`, uncorked, on the session's sink, and David heard
+  the soundtrack and the cues. Two `miniaudio WARNING: [WASAPI] Failed to
+  find suitable device format for device info retrieval` lines at start are
+  device enumeration only; the device opens and plays. With `PULSE_SINK`
+  pointed at a suspended null sink the lines read `ERROR: Failed to
+  retrieve mix format` and the game runs on regardless.
 - The three OGG tracks decode (`crash: track spy 3748500`, `groove
   3656291`, `breaker 3628800`): stb_vorbis through sigil-audio's linked
   copy works on Windows.
@@ -108,7 +138,8 @@ the window, framebuffer, content scale and GL version at start;
   mouse. Tracker (`--tune assets/refs/audio/breaker.cts`): motif's
   `render.c` runs. `--bench-probe 5`: 5 deals in 547 ms, 1709 us per
   position (native codegen, no window). Screenshots from the headless
-  sway drive are in this directory (`wine-*.png`).
+  sway drive (Wayland driver, first build) are in this directory
+  (`wine-*.png`).
 - `[sg][warning] ... GL_UNIFORMBLOCK_NAME_NOT_FOUND_IN_SHADER` for `u_key`
   and `u_rate` at shader creation: `(crash gpu rules)` declares both for
   every field rule and only some rules read them, so the driver's GLSL
@@ -116,21 +147,18 @@ the window, framebuffer, content scale and GL version at start;
 
 ## What is untested
 
-- Real Windows. Everything above is Wine on Linux with Mesa; a Windows GPU
-  driver's GLSL compiler, WASAPI on real hardware, the save directory
-  (see above), DPI scaling (`content-scale` above 1: GLFW's
-  `GLFW_SCALE_FRAMEBUFFER` is on; the framebuffer size equals the client
-  size on Win32 and the cursor is scaled the same way), and the console
-  subsystem's extra window (the exe is a console app: a console window
-  opens beside the game on real Windows; a `-Wl,--subsystem,windows` link
-  flag or `FreeConsole()` would hide it) are all unverified.
+- Real Windows. Everything above is Wine on Linux with Mesa. Unverified: a
+  Windows GPU driver's GLSL compiler, WASAPI on real hardware, `%APPDATA%`
+  resolution outside Wine, DPI scaling (`content-scale` above 1: GLFW's
+  `GLFW_SCALE_FRAMEBUFFER` is on; on Win32 the framebuffer size equals the
+  client size and the cursor is scaled the same way), and the console
+  window: the exe is a console-subsystem program, so launching it from
+  Explorer opens a console beside the game. Linking with
+  `-Wl,--subsystem,windows` removes it and also loses everything the game
+  prints to stdout (`crash: ...` lines, the sigil-desktop and miniaudio
+  diagnostics) unless the program attaches to the parent console
+  (`AttachConsole(ATTACH_PARENT_PROCESS)`) or output is redirected;
+  `FreeConsole()` closes the console after the loader has already opened
+  it. Neither is done here.
 - Windows 7/8.1 (UCRT api-sets, see above).
 - A code-signing story: none. SmartScreen will warn on an unsigned exe.
-
-## Nothing changed outside the game
-
-No fix was needed in sigil-desktop, sigil-graphics, sigil-audio, motif or
-the monorepo toolchain for this build to link and run: the Windows link
-flags and configs those packages carry (sigil-desktop `-lkernel32 -luser32
--lshell32 -lgdi32`; sigil-graphics and sigil-audio none, everything loaded
-at run time) were enough on the first link.
