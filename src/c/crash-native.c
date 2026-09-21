@@ -49,6 +49,7 @@ extern void sigil__gc_push_temp_root(SigilVM *vm, Value v);
 extern void sigil__gc_pop_temp_root(SigilVM *vm);
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 
 #ifdef _WIN32
@@ -178,6 +179,20 @@ static Value native_upsample(SigilVM *vm, int argc, Value *args)
     }
     return sigil_flonum(pos);
 }
+
+/* (%cpu-ms) -> flonum: this process's CPU time in milliseconds (the
+ * bench's clock: a wall clock on a shared box measures the neighbours;
+ * bench/bench-music.sgl). -1.0 where the clock is not there. */
+static Value native_cpu_ms(SigilVM *vm, int argc, Value *args)
+{
+    (void)vm; (void)argc; (void)args;
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0)
+        return sigil_flonum((double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6);
+#endif
+    return sigil_flonum(-1.0);
+}
 static Value native_b64_decode(SigilVM *vm, int argc, Value *args)
 {
     if (argc < 1 || !sigil_is_string(args[0])) {
@@ -289,5 +304,8 @@ void sigil__init_crash_native_module(SigilVM *vm)
     sigil_module_register_native(vm, "%upsample!", native_upsample, SIGIL_ARITY_EXACT(7),
                                  "Write n stereo f32 frames at the device rate from a lower-rate stereo f32 source, 4-tap cubic");
     sigil_module_export(vm, "%upsample!");
+    sigil_module_register_native(vm, "%cpu-ms", native_cpu_ms, SIGIL_ARITY_EXACT(0),
+                                 "This process's CPU time in ms, or -1.0");
+    sigil_module_export(vm, "%cpu-ms");
     sigil_end_module(vm);
 }

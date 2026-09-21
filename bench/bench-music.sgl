@@ -17,12 +17,13 @@
         (sigil list)
         (sigil struct)
         (motif tune)
-        (motif tune player))
+        (motif tune player)
+        (only (crash native) %cpu-ms))
 
 (define TUNES '("black-glass-title" "breach-vector"))
-(define RATES '(32000 48000))
+(define RATES '(32000))
 (define SECONDS 8)          ; of audio rendered per measurement, after a second of warm-up
-(define REPEATS 3)          ; the least of the repeats is the number (the box is shared)
+(define REPEATS 4)          ; every repeat printed: the spread is the noise floor
 
 (define (tune-of name) (read-tune-string (read-file-string (string-append "assets/tunes/" name ".cts"))))
 
@@ -43,15 +44,16 @@
                            (tune-pattern p cells: (filter (lambda (c) (= (cell-channel c) ch)) (tune-pattern-cells p))))
                          (tune-patterns t))))
 
-;; ms per 1024 frames over SECONDS of audio from the calm mark (the first second discarded)
+;; CPU ms per 1024 frames over SECONDS of audio from the calm mark (the first
+;; second discarded); the process clock, so the box's other work does not count
 (define (cost t rate)
   (let* ((p (open-tune-player t rate start: (cons (or (tune-mark t 'calm) 0) 0) loop: #t))
          (chunk 1024)
          (bv (make-bytevector (* 8 chunk) 0)))
     (let warm ((n 0)) (when (< n rate) (player-pull! p bv 0 chunk) (warm (+ n chunk))))
-    (let ((t0 (current-milliseconds)))
+    (let ((t0 (%cpu-ms)))
       (let loop ((n 0)) (when (< n (* SECONDS rate)) (player-pull! p bv 0 chunk) (loop (+ n chunk))))
-      (let ((ms (- (current-milliseconds) t0)))
+      (let ((ms (- (%cpu-ms) t0)))
         (player-close! p)
         (/ (* 1024.0 ms) (* SECONDS rate))))))
 
@@ -62,6 +64,13 @@
           (loop (- k 1) (if (or (not best) (< c best)) c best))))))
 
 (define (tenth x) (/ (round (* 10 x)) 10.0))
+;; every channel's cells dropped: the fixed cost (the layers' loops, the bus, the master chain)
+(define (empty t) (tune t patterns: (map (lambda (p) (tune-pattern p cells: '())) (tune-patterns t))))
+
+(define (costs t rate)   ; every repeat, as a string
+  (let loop ((k REPEATS) (acc '()))
+    (if (= k 0) (apply string-append (map (lambda (c) (string-append (number->string (tenth c)) " ")) (reverse acc)))
+        (loop (- k 1) (cons (cost t rate) acc)))))
 
 (define (line . parts) (for-each display parts) (newline))
 
@@ -71,12 +80,14 @@
      (let ((t (tune-of name)))
        (for-each
         (lambda (rate)
-          (line "== " name " at " rate " (ms per 1024 frames, least of " REPEATS ")")
-          (let ((full (least-cost t rate)))
-            (line "  full            " (tenth full))
-            (line "  no reverb       " (tenth (least-cost (no-reverb t) rate)))
-            (line "  comp off        " (tenth (least-cost (comp-off t) rate)))
-            (line "  neither         " (tenth (least-cost (comp-off (no-reverb t)) rate)))
+          (line "== " name " at " rate " (CPU ms per 1024 frames, " REPEATS " repeats)")
+          (let ((full (costs t rate)))
+            (line "  full            " full)
+            (line "  empty           " (costs (empty t) rate) "  (no cells: the layers, the bus, the master)")
+            (line "  empty, no bus   " (costs (comp-off (no-reverb (empty t))) rate))
+            (line "  no reverb       " (costs (no-reverb t) rate))
+            (line "  comp off        " (costs (comp-off t) rate))
+            (line "  neither         " (costs (comp-off (no-reverb t)) rate))
             (let loop ((ch 1))
               (when (<= ch (tune-channels t))
                 (let* ((alone (channel-alone t ch))
@@ -85,8 +96,13 @@
                                      ((> (cell-inst (car cells)) 0) (let ((id (cell-inst (car cells)))) (let f ((is (tune-instruments t))) (cond ((null? is) #f) ((= (tune-instrument-id (car is)) id) (car is)) (else (f (cdr is)))))))
                                      (else (find (cdr cells))))))
                        (kind (if inst (symbol->string (tune-instrument-kind inst)) "-")))
-                  (line "  channel " ch " alone  " (tenth (least-cost (no-reverb (comp-off alone)) rate)) "   (" kind ", no bus)"))
+                  (line "  channel " ch " alone  " (costs (no-reverb (comp-off alone)) rate) "  (" kind ", no bus)"))
                 (loop (+ ch 1))))))
         RATES)))
    TUNES)
   (test "printed" (assert-true #t)))
+
+;; The work counted, not timed — voice graphs computed per 1024 frames
+;; (%render-voice-computes, motif 0.6.5's counter) — comes back here with
+;; that release: on the title theme the idle-voice skip read 11721 -> 5245
+;; per 1024 frames (2026-09-22), on Breach Vector 5736 -> 5644.
