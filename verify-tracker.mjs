@@ -330,7 +330,10 @@ let firstURL = null;
       var bin = atob(s), bytes = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
       var buf = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer();
       return new TextDecoder().decode(buf); })()`);
-    const hasCell = new RegExp("\\(row " + stopRow + " \\(1 \"C-4\" 1 \\d+ \"[0-9A-F]{3}\"\\)").test(text);   // at the row the cursor stopped on; it may already carry a volume or an effect
+    // stop line (the audio clock) and the cursor (the frame before); the row
+    // may already carry a volume or an effect
+    const rows = [0, 1, 2, 3].map((d) => stopRow + d).join("|");
+    const hasCell = new RegExp("\\(row (?:" + rows + ") \\(1 \"C-4\" 1 \\d+ \"[0-9A-F]{3}\"\\)").test(text);
     if (hasCell && /^\(tune version: 1 name: "spy"/.test(text)) pass("edit", `the shared text carries (row ${stopRow} (1 "C-4" 1 ...); ${text.length} bytes of tune text`);
     else fail("edit", `the shared text ${text.length ? "lacks the C-4 cell at row " + stopRow : "did not decode"} (${text.length} bytes)`);
     if (s.url && s.chars <= TUNE_URL_MAX && s.chars === s.url.length) { pass("share", `${s.name}: url ${s.chars} chars (budget ${TUNE_URL_MAX})`); firstURL = s.url; }
