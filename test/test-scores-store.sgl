@@ -1,0 +1,65 @@
+;;; Gate leg 4 (P4, native half): the scoreboard persists through the
+;;; shell's own write path.
+;;;
+;;; test-scores holds the pure model and test-store the verbs; this file
+;;; drives the path a real clear takes, (crash shell)'s record-clear!,
+;;; and reads the board back with scores-load alone, past the shell's
+;;; in-memory copy, so a record-clear! that keeps the board in memory
+;;; and never writes it (the reviewer's plant: scores-save! removed)
+;;; reads empty here and nowhere else.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil math)
+        (sigil time)
+        (sigil process)
+        (crash scores)
+        (crash shell)
+        (crash store))
+
+(define ROOT (string-append "/tmp/crash-scores-store-test-" (number->string (exact (floor (current-second))))))
+(set-store-root! ROOT)
+(when (directory-exists? ROOT) (process-run "rm" "-rf" ROOT))
+
+(test-group "scores: the shell's write path reaches the store"
+  (test "a fresh root holds no board: every cell empty, no scores key"
+    (let ((s (scores-load)))
+      (assert-false (scores-best s 'stack 'hacker))
+      (assert-false (scores-best s 'cards 'original))
+      (assert-equal 0 (scores-streak s 'stack)))
+    (assert-false (store-read-datum "scores")))
+  (test "record-clear! writes the first clear, and a fresh load reads it back"
+    (assert-equal '(first time moves) (record-clear! 'stack 'hacker 1234 72 #f))
+    (let ((s (scores-load)))
+      (assert-equal '(1234 72 1) (scores-best s 'stack 'hacker))
+      (assert-false (scores-best s 'stack 'original))
+      (assert-equal 1 (scores-clears s 'stack 'hacker))))
+  (test "the key holds one datum in (crash scores)'s shape"
+    (let ((d (store-read-datum "scores")))
+      (assert-true (pair? d))
+      (assert-equal 'crash-scores (car d))
+      (assert-equal 1 (cadr d))
+      (assert-true (member '(best stack hacker 1234 72 1) (cddr d)))))
+  (test "a better time and a worse one: the store keeps the best and counts both clears"
+    (record-clear! 'stack 'hacker 900 80 #f)
+    (record-clear! 'stack 'hacker 2000 60 #f)
+    (let ((s (scores-load)))
+      (assert-equal '(900 60 3) (scores-best s 'stack 'hacker))))
+  (test "the other cells are their own: DEFRAG original does not touch the stack's"
+    (record-clear! 'cards 'original 500 110 #f)
+    (let ((s (scores-load)))
+      (assert-equal '(500 110 1) (scores-best s 'cards 'original))
+      (assert-equal '(900 60 3) (scores-best s 'stack 'hacker))))
+  (test "a daily clear writes the streak: day 20716 then 20717 reads 2, the same day again stays 2"
+    (record-clear! 'stack 'hacker 1000 70 20716)
+    (assert-equal 1 (scores-streak (scores-load) 'stack))
+    (record-clear! 'stack 'hacker 1000 70 20717)
+    (assert-equal 2 (scores-streak (scores-load) 'stack))
+    (record-clear! 'stack 'hacker 1000 70 20717)
+    (assert-equal 2 (scores-streak (scores-load) 'stack))
+    (assert-equal 20717 (scores-last-daily (scores-load) 'stack))
+    (assert-equal 0 (scores-streak (scores-load) 'cards)))
+  (test "the file is under the root the shell was pointed at"
+    (assert-true (file-exists? (string-append ROOT "/scores.sgl")))))
+
+(process-run "rm" "-rf" ROOT)
