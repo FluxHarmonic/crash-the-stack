@@ -36,6 +36,12 @@
 
 #include "sigil/sigil.h"
 #include <stdint.h>
+
+/* the VM's temporary roots (sigil-internal.h; sigil's own wasm packages
+ * declare them the same way): a Value held in a C local across an
+ * allocation is not a root otherwise */
+extern void sigil__gc_push_temp_root(SigilVM *vm, Value v);
+extern void sigil__gc_pop_temp_root(SigilVM *vm);
 #include <stdlib.h>
 #include <string.h>
 
@@ -82,7 +88,7 @@ static Value native_mix_track(SigilVM *vm, int argc, Value *args)
         out[2 * i + 1] += v;
         g += step;
         pos += ratio;
-        if (pos >= (double)frames) pos -= (double)frames;
+        while (pos >= (double)frames) pos -= (double)frames;   /* a ratio past the loop's length wraps twice */
     }
     return sigil_flonum(pos);
 }
@@ -145,9 +151,15 @@ static Value native_decode_ogg(SigilVM *vm, int argc, Value *args)
     Value bv = sigil_make_bytevector(vm, bytes);
     memcpy(sigil_bytevector_data(bv), samples, bytes);
     free(samples);
-    Value result = sigil_cons(vm, sigil_fixnum(rate),
-                              sigil_cons(vm, sigil_fixnum(channels),
-                                         sigil_cons(vm, bv, SIGIL_NIL)));
+    sigil__gc_push_temp_root(vm, bv);
+    Value tail = sigil_cons(vm, bv, SIGIL_NIL);
+    sigil__gc_push_temp_root(vm, tail);
+    Value mid = sigil_cons(vm, sigil_fixnum(channels), tail);
+    sigil__gc_push_temp_root(vm, mid);
+    Value result = sigil_cons(vm, sigil_fixnum(rate), mid);
+    sigil__gc_pop_temp_root(vm);
+    sigil__gc_pop_temp_root(vm);
+    sigil__gc_pop_temp_root(vm);
     return result;
 #endif
 }

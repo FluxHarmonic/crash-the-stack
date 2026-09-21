@@ -305,8 +305,11 @@
            (= (deal-seed d) (daily-cards-seed (today)))))
 
     ;; A run's share code: the run seed, hacker, the settings.
+    ;; One code per run: the seed alone, with the default PULL and scoring
+    ;; (a run replays from its seed; the player's own settings apply on
+    ;; the receiving side, so the sender's are not carried).
     (define (run-code r)
-      (encode (free-spec 'run 'hacker (run-seed r))))
+      (encode (spec-new 'run 'hacker 1 'vegas 'turtle (run-seed r))))
 
 
     ;; (cons session restored?): the saved session if there is one and
@@ -447,15 +450,26 @@
     (define (music-fresh!) (set! *music-fresh* #t))
     (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0))
 
+    ;; A track wanted before it has landed (the web hands the tunes over
+    ;; one after another; only the theme gates the boot) is not committed:
+    ;; the players fade and the want is asked again next frame, so DEFRAG
+    ;; opened before groove arrives gets its track when it does (the
+    ;; review, 2026-09-21) rather than the theme over the table for good.
     (define (music-frame! screen phase)
       (unless *music-off*
         (let ((want (music-track-for screen phase *music-fresh*)))
-          (set! *music-fresh* #f)
           (unless (equal? want *music-want*)
-            (set! *music-want* want)
-            (if want
-                (audio-play! (car want) (cdr want))
-                (audio-fade-out! 800))))))
+            (cond ((not want)
+                   (set! *music-fresh* #f)
+                   (set! *music-want* #f)
+                   (audio-fade-out! 800))
+                  ((audio-track? (car want))
+                   (set! *music-fresh* #f)
+                   (set! *music-want* want)
+                   (audio-play! (car want) (cdr want)))
+                  ((not (eq? *music-want* 'pending))
+                   (set! *music-want* 'pending)
+                   (audio-fade-out! 800)))))))
 
     ;; --- the sound (P3) ---------------------------------------------------------
 
@@ -551,9 +565,9 @@
         (menu-with-scores
          (menu-with-code-line
           (menu-with-settings
-           (menu-new (append (if continue? '(continue) '())
-                             '(jack-in free-play settings credits)
-                             (if update-waiting? '(update) '()))
+           (menu-new (append (if continue? (list 'continue) '())
+                             (list 'jack-in 'free-play 'settings 'credits)   ; built with list, not quoted (the wasm literal hazard)
+                             (if update-waiting? (list 'update) '()))
                      (if continue? 'continue 'jack-in)
                      seed)
            (settings-in-force))
