@@ -86,6 +86,16 @@ shown value above stationary grain, eased by 35% per step and capped at
 system, with sparse hot pockets near the base rather than an orange wash.
 Its cadence stays steady under ICE.
 
+David found the first flame version mostly confined to the lower third.
+The final cooling is `0.004 + 0.002 * noise`, down from
+`0.014 + 0.007 * noise`. The source, rise speed, grain, squared display,
+easing, and cap are unchanged. A fixed step-200 comparison counts the highest row with at least
+four of its 80 half-cell pixels in palette slots 3 or higher (the visible
+midtones). The original reaches 36.4% of the field height; an intermediate
+cooling setting reached 63.6%, and the final setting reaches 68.2%. This
+comparison uses a fixed frame; heights still vary with the fuel. Fainter
+flame tones reach farther upward.
+
 These offer six distinct motion patterns alongside Gray–Scott. Another
 chemical reaction would overlap REACTION's look; Brian's Brain would make a
 sparser spark field. All six candidates use the existing eight palette
@@ -157,7 +167,7 @@ Each final rule replays its held step-200 map exactly and passes the
 step-6000 palette/dither checkpoint. Cyclic also matches the integer oracle
 in all 3520 half cells. At step 200 bright accents occupy 0% of cyclic,
 0.09% of flow, 3.41% of signal, 0% of echo, 0.11% of synapse, and
-0.03% of flame.
+0.14% of the taller flame.
 
 Five-minute live runs at the normal stride sample 20 frames, including ICE
 and burst agitation:
@@ -169,7 +179,7 @@ and burst agitation:
 | signal (`9855446`) | 50.2% | 599 | pass |
 | echo (`c68e427`) | 41.8% | 2005 | pass |
 | synapse (`be2c3d3`) | 55.7% | 38 | pass |
-| flame (`9f6a1fc`) | 46.4% | 1032 | pass |
+| flame (`a72e554`) | 55.8% | 2111 | pass |
 
 The browser regression run at `124b77c` passed all eight existing arms.
 LIFE and REACTION each matched all 3520 half cells of their CPU reference
@@ -202,7 +212,7 @@ Final 640×400 nearest-neighbor captures: cyclic from application commit
 `985544674f81`: [cyclic](cyclic.png), [flow](flow.png), [signal](signal.png).
 The extensions: [echo](echo.png) from `c68e4273e1d7` and
 [synapse](synapse.png) from `be2c3d341a50`.
-The [flame capture](flame.png) is from `9f6a1fcd62bf`.
+The taller [flame capture](flame.png) is from `a72e554edbea`.
 Setup: landscape phone emulation at DPR 3, board seed 7, background seed 1,
 held at step 200, from the committed hosted snapshot.
 
@@ -236,7 +246,9 @@ Measurements of each final rule implementation:
 These are observations, not a phone speedup claim. Shared host load and
 software rendering dominate the timings, and the runs happened at different
 times. All six additions use one field step pass. Every previously measured
-mode is unchanged in the flame application build `9f6a1fc`.
+mode except flame is unchanged in the taller-flame build `a72e554`.
+The flame timing predates its cooling-only height adjustment; the shader
+structure, resolution, and number of passes are unchanged.
 
 ## Integration and review
 
@@ -262,5 +274,5 @@ worktree and therefore returns failure. That process was left alone; our
 host's PID, cwd, exact WireGuard listener, and HTTP version are checked
 independently. No wildcard or LAN listener was created. The host is
 detached so it remains available after the session. The served application
-is `9f6a1fcd62bf`; the following documentation commit adds the report and
+is `a72e554edbea`; the following documentation commit adds the report and
 captures without changing the application source.
