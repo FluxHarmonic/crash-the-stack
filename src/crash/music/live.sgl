@@ -36,12 +36,14 @@
           (motif tune)
           (motif tune player)
           (crash music)
-          (crash audio))
+          (crash audio)
+          (only (crash native) %upsample!))
 
   (export live-music-frame! live-music-fresh! live-music-off! live-music-stop! live-music-provide!
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
           live-music-section live-music-pending? live-music-name
+          live-music-rate live-music-rate-set? live-music-set-rate! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
   (begin
@@ -80,20 +82,153 @@
     (define (live-music-set-loader! proc) (set! *loader* proc))
     (define (live-music-set-say! proc) (set! *say* proc))
     (define (live-music-position)
-      (and *player* (player-position *player* (audio-source-depth))))
+      (and *player*
+           (player-position *player*
+                            (if (resampling?)
+                                ;; the sink's frames in the player's rate, plus what the upsampler holds unread
+                                (exact (round (+ (* (audio-source-depth) (rs-ratio)) (- *rs-have* *rs-pos*))))
+                                (audio-source-depth)))))
 
     ;; MUSIC / VOLUME: a factor applied at once
     (define (live-music-set-gain! g)
       (set! *gain* (max 0.0 (min 1.0 g)))
       (apply-gain! (current-fade-gain)))
 
+    ;; --- the music's rate (D59, David's rulings during the row) ---------------------
+    ;; The synth's cost scales with the rate: David's phone at 48 kHz spent
+    ;; ~46 % of real time in it (PULL 9.8 ms per 1024 frames, 2026-09-21)
+    ;; and stuttered; the whole context at 22050 ran clean but dulled the
+    ;; cues and delayed them (their ring's depth in ms doubled). So the
+    ;; cues stay at the device's rate and the MUSIC renders at its own rate,
+    ;; upsampled into its sink by (crash native)'s %upsample! (4-tap cubic).
+    ;; The rate is chosen per device by a ladder: the music starts at the
+    ;; device's rate (or the rate remembered in the store, or 24000 when the
+    ;; page's hints say a weak device), and after LADDER-PULLS pulls at a
+    ;; rate the mean cost per 60 fps frame over MUSIC-BUDGET-MS steps down
+    ;; to the next of RATES (the player reopens at the audible position, the
+    ;; section kept); it never steps up (a step is a reopen, heard as a
+    ;; short gap). MUSIC-FLOOR is David's phone's setting: the floor, not the
+    ;; ceiling. ?music-rate=N / --music-rate N pin a rate (no ladder).
+    ;;   crash: music rate N per-frame-ms M     the ladder stepped (or the pin, at open)
+    (define RATES '(32000 24000 22050))   ; below the device's rate, in order
+    (define MUSIC-FLOOR 22050)
+    (define MUSIC-BUDGET-MS 4.0)          ; the steady pull cost per 60 fps frame a device may spend
+    (define LADDER-PULLS 60)              ; pulls measured at a rate before a step (about a second)
+    (define LADDER-SKIP 30)               ; pulls after an open not measured (the boot's own work around them)
+    (define *ladder-skip* LADDER-SKIP)
+    (define *rate* #f)                    ; the music's render rate; #f = the device's
+    (define *rate-pinned* #f)
+    (define *ladder-pulls* 0)
+    (define *ladder-ms* 0.0)              ; the sum of ms per 1024 device frames over those pulls
+    (define *rs-buf* #f)                  ; the render at *rate*: stereo f32, RS-FRAMES frames
+    (define *rs-have* 0)                  ; frames valid in *rs-buf*
+    (define *rs-pos* 0.0)                 ; the upsampler's read position in it, fractional frames
+    (define RS-FRAMES (+ SOURCE-PUSH-MAX 16))
+    (define *rate-said* #f)
+
+    ;; never above the device's rate: the upsampler only goes up
+    (define (live-music-rate) (if *rate* (min *rate* (audio-rate)) (audio-rate)))
+    (define (live-music-rate-set?) (and *rate* #t))
+    ;; rate: a number (pinned when pinned? is true: the door; a pin is never
+    ;; overridden by the store's or the hints' setting), 'weak (the page's
+    ;; hints: start one step down, the ladder may go lower), or #f (the
+    ;; device's rate, the ladder).
+    (define (live-music-set-rate! rate . rest)
+      (let ((pin? (and (pair? rest) (car rest) #t)))
+        (cond ((and *rate-pinned* (not pin?)) #f)
+              ((eq? rate 'weak) (unless *rate* (set! *rate* 24000)))
+              ((and (number? rate) (> rate 0)) (set! *rate* rate) (set! *rate-pinned* pin?))
+              (else (set! *rate* #f)))))
+    (define (rate-below r)
+      (let loop ((rs RATES))
+        (cond ((null? rs) #f)
+              ((< (car rs) r) (car rs))
+              (else (loop (cdr rs))))))
+    (define (resampling?) (and *rate* (< (live-music-rate) (audio-rate))))
+    (define (rs-ratio) (/ (* 1.0 (live-music-rate)) (audio-rate)))
+    (define (rs-reset!)
+      (unless *rs-buf* (set! *rs-buf* (make-bytevector (* 8 RS-FRAMES) 0)))
+      ;; one silent frame of history before the first rendered one
+      (let loop ((i 0)) (when (< i 8) (bytevector-u8-set! *rs-buf* i 0) (loop (+ i 1))))
+      (set! *rs-have* 1)
+      (set! *rs-pos* 1.0))
+    (define (open-player t start)
+      (set! *ladder-skip* LADDER-SKIP)
+      (set! *ladder-pulls* 0)
+      (set! *ladder-ms* 0.0)
+      (rs-reset!)
+      (open-tune-player t (live-music-rate) start: start loop: #t))
+
+    ;; The ladder, once a frame: after LADDER-PULLS pulls at this rate, the
+    ;; mean cost per 60 fps frame (ms per 1024 device frames x device
+    ;; frames per 60 fps frame / 1024) against the budget.
+    (define (ladder!)
+      (when (and *player* (>= *ladder-pulls* LADDER-PULLS))
+        (let* ((per-1024 (/ *ladder-ms* *ladder-pulls*))
+               (per-frame (* per-1024 (/ (audio-rate) 61440.0)))
+               (next (rate-below (live-music-rate))))
+          (set! *ladder-pulls* 0)
+          (set! *ladder-ms* 0.0)
+          (when (and (not *rate-pinned*) (> per-frame MUSIC-BUDGET-MS) next)
+            (set! *rate* next)
+            (*say* "music" "rate" next "per-frame-ms" (/ (round (* 10 per-frame)) 10.0))
+            (when *remember* (*remember* next))
+            (reopen!)))))
+    (define *remember* #f)   ; (proc rate): the shell keeps the ladder's choice for the next boot
+    (define (live-music-set-remember! proc) (set! *remember* proc))
+
+    ;; The same track, from its audible position, at the rate now in force;
+    ;; the section and its region kept; the source's sink stays open.
+    (define (reopen!)
+      (let* ((pos (or (live-music-position) (cons 0 0)))
+             (p (open-player *tune* pos))
+             (r (assq *section* (tune-mark-regions *tune*))))
+        (player-close! *player*)
+        (set! *player* p)
+        (when r (player-set-region! p (cadr r) (cddr r)))
+        (set! *landed-seen* #f)
+        (set! *opened-at* #f)
+        (apply-gain! (current-fade-gain))))
+
     ;; --- the source ----------------------------------------------------------------
+    ;; n stereo f32 frames at the device's rate into out from byte-offset:
+    ;; the player's own output at the device's rate, or its render at
+    ;; *rate* upsampled. The upsampler reads from one frame before its
+    ;; position to two past the last one it needs, so the buffer keeps that
+    ;; window and the player fills the rest.
     (define (pull! out byte-offset n)
       (let* ((t0 (current-milliseconds))
-             (on (and *player* (player-pull! *player* out byte-offset n))))
+             (on (and *player*
+                      (if (resampling?)
+                          (pull-resampled! out byte-offset n)
+                          (player-pull! *player* out byte-offset n)))))
         (let ((ms (- (current-milliseconds) t0)))
-          (when (> n 0) (set! *chunk-ms* (/ (* 1024.0 ms) n))))
+          (when (> n 0)
+            (let ((per-1024 (/ (* 1024.0 ms) n)))
+              ;; smoothed over the last ~20 pulls (one pull is noise), and summed for the ladder
+              (set! *chunk-ms* (+ (* 0.95 *chunk-ms*) (* 0.05 per-1024)))
+              (if (> *ladder-skip* 0)
+                  (set! *ladder-skip* (- *ladder-skip* 1))
+                  (begin
+                    (set! *ladder-pulls* (+ *ladder-pulls* 1))
+                    (set! *ladder-ms* (+ *ladder-ms* per-1024)))))))
         (if on #t (begin (close-player!) #f))))
+
+    (define (pull-resampled! out byte-offset n)
+      (let* ((ratio (rs-ratio))
+             (keep-from (max 0 (- (exact (floor *rs-pos*)) 1))))
+        (when (> keep-from 0)
+          (bytevector-copy! *rs-buf* 0 *rs-buf* (* 8 keep-from) (* 8 *rs-have*))
+          (set! *rs-have* (- *rs-have* keep-from))
+          (set! *rs-pos* (- *rs-pos* keep-from)))
+        (let* ((want (+ (exact (ceiling (+ *rs-pos* (* n ratio)))) 3))
+               (need (min (- want *rs-have*) (- RS-FRAMES *rs-have*))))
+          (if (and (> need 0) (not (player-pull! *player* *rs-buf* (* 8 *rs-have*) need)))
+              #f
+              (begin
+                (when (> need 0) (set! *rs-have* (+ *rs-have* need)))
+                (set! *rs-pos* (%upsample! out byte-offset n *rs-buf* *rs-have* *rs-pos* ratio))
+                #t)))))
 
     (define (apply-gain! fade-gain)
       (when *player* (audio-set-source! pull! (* LIVE-GAIN *gain* fade-gain))))
@@ -165,7 +300,7 @@
                    (calm (or (tune-mark t 'calm) 0))
                    (left (assq name *positions*))
                    (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
-                   (p (open-tune-player t (audio-rate) start: start loop: #t)))
+                   (p (open-player t start)))
               (set! *player* p)
               (set! *name* name)
               (set! *tune* t)
@@ -184,6 +319,7 @@
     ;; fresh?: a new deal (its pick from the top).
     (define (live-music-frame! screen phase table seed)
       (fade-frame!)
+      (ladder!)
       (let* ((fresh? (and *fresh* (not (eq? screen 'menu)) (not (memq phase '(cleared severed)))))
              (want (cond ((eq? screen 'menu) MENU-THEME)
                          ((memq phase '(cleared severed)) #f)

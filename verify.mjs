@@ -66,6 +66,10 @@
 //               reveal: a tap after the settle chooses nothing and boots no board,
 //               "crash: boot done" then arrives with the audio step last, and the
 //               tap then chooses STACK
+//   music       the soundtrack live from .cts (M1): a seeded pick repeated on the
+//               reload leg's second boot, the track heard, the ICE crossing landing
+//               on a bar row at or past the fill mark (read from the served .cts),
+//               NOW PLAYING = the tune's name:, the menu theme opened
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -121,7 +125,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "code", "daily", "scores", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "code", "daily", "scores", "music", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -920,6 +924,8 @@ let iceLock = null;
 }
 
 // ---- 8b. audio: the match cue reaches the output (gate leg 3, web) ---------
+// RMS is the loudest of the tapped sinks: since M1 the music has a sink of
+// its own beside the cues' (two AudioWorkletNodes on the destination).
 // After the reload the page is controlled by the service worker, which adds
 // COOP/COEP, so this navigation is cross-origin isolated and the bridge takes
 // its AudioWorklet path; the arm asserts both, taps a fresh pair (a match
@@ -960,7 +966,7 @@ let iceLock = null;
           // the 0.02 floor on the first run with the tunes, D50); then the
           // music is dropped so the cue is measured by itself (over the
           // ambient a muted cue hid inside the music's own swings)
-          const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+          const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; let best = 0; for (const a of t.analysers) { const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; best = Math.max(best, Math.sqrt(s / d.length)); } return best; })()`;
           let ambientPeak = -1;
           for (let i = 0; i < 20; i++) {
             const r = await evalJS(rms);
@@ -1130,7 +1136,7 @@ let iceLock = null;
   // the gate (ruling D42): a menu boot opens on the boot screen and the
   // reveal waits for a tap; the first boot also checks that nothing sounds
   // before the tap and that the dial and the first beep sound after it
-  const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+  const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; let best = 0; for (const a of t.analysers) { const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; best = Math.max(best, Math.sqrt(s / d.length)); } return best; })()`;
   // the publisher card (ruling D43) between the gate and the reveal: on a
   // "read" the arm waits for the card's first resolved tick, reads the
   // canvas at CARD-SAMPLES (src/crash/title/card.sgl: the resolved frame's
@@ -2301,6 +2307,60 @@ async function downTo(order, id, at = 0) {
   await evalJS(`localStorage.removeItem("scores")`);
   if (detail) fail("scores", detail);
   else pass("scores", "a fresh origin reads every cell empty; a stored board (stack hacker 1234/72/3, cards original 900/110/1, stack streak 4) reads back on the SCORES screen after a reload");
+}
+
+// ---- 9f. music: the soundtrack live from .cts (M1, D59) ---------------------
+// Read from the whole run's console lines: the boot's pick is seeded
+// ("crash: music pick NAME seed N", and the reload leg's second boot of the
+// same board picks the same NAME), the track was heard ("crash: music
+// playing NAME P R": the sink pulled past the open position), the ICE
+// crossing in the traced leg asked for the tense section and landed on a
+// bar row at or past the fill mark ("section tense asked at P R" then
+// "section tense at P2 R2" with R2 a multiple of rows-per-beat x
+// beats-per-bar and P2 >= fill, both read from the served
+// assets/tunes/NAME.cts), the pause panel said NOW PLAYING with the tune's
+// name: ("crash: menu-playing TITLE"), and the main menu opened its theme
+// ("crash: music open black-glass-title ..."). The return to calm has no
+// path in today's trace model (the counter phase never falls back), so it
+// is not asserted.
+{
+  let detail = "";
+  const pickRe = /^crash: music pick ([a-z0-9-]+) seed (\d+)$/;
+  const picks = consoleLines.map((l) => l.match(pickRe)).filter(Boolean);
+  const pick = picks[0];
+  let tune = null;
+  if (!pick) detail = "no \"crash: music pick NAME seed N\" line in the run";
+  else {
+    try {
+      const text = await (await fetch(`http://127.0.0.1:${PORT}/assets/tunes/${pick[1]}.cts`)).text();
+      const meter = text.match(/meter: \((\d+) (\d+)/);
+      const marks = text.match(/\(marks ([^)]*)\)/);
+      const mark = (k) => { const m = marks && marks[1].match(new RegExp(`${k}: (\\d+)`)); return m ? Number(m[1]) : null; };
+      tune = { name: (text.match(/name: "([^"]*)"/) || [])[1], barRows: meter ? Number(meter[1]) * Number(meter[2]) : 16, fill: mark("fill"), tense: mark("tense"), calm: mark("calm") };
+    } catch (e) { detail = `cannot read assets/tunes/${pick[1]}.cts: ${e.message}`; }
+  }
+  if (!detail) {
+    const playing = consoleLines.find((l) => l.startsWith(`crash: music playing ${pick[1]} `));
+    const asked = consoleLines.map((l) => l.match(/^crash: music section tense asked at (\d+) (\d+)$/)).filter(Boolean)[0];
+    const landed = consoleLines.map((l) => l.match(/^crash: music section tense at (\d+) (\d+)$/)).filter(Boolean)[0];
+    const other = picks.find((p) => p[1] !== pick[1] && p[2] === pick[2]);
+    const again = picks.find((p) => p[2] === pick[2] && p !== pick);
+    const np = consoleLines.map((l) => l.match(/^crash: menu-playing (.*)$/)).filter(Boolean)[0];
+    const theme = consoleLines.find((l) => /^crash: music open black-glass-title /.test(l));
+    const want = tune.fill ?? tune.tense;
+    if (!playing) detail = `no "crash: music playing ${pick[1]} ..." line: the track opened but the sink never pulled past the open position`;
+    else if (other) detail = `seed ${pick[2]} picked ${pick[1]} and then ${other[1]}`;
+    else if (!again) detail = `the board's second boot (the reload leg) printed no pick for seed ${pick[2]}`;
+    else if (!asked) detail = "no \"crash: music section tense asked at P R\" line after the ICE crossing";
+    else if (!landed) detail = `tense asked at ${asked[1]} ${asked[2]} but no "crash: music section tense at P R" landing line`;
+    else if (Number(landed[2]) % tune.barRows !== 0) detail = `the tense section landed at row ${landed[2]}, not a bar row (${tune.barRows} rows a bar)`;
+    else if (want !== null && Number(landed[1]) < want) detail = `the tense section landed at order position ${landed[1]}, before the ${tune.fill !== null ? "fill" : "tense"} mark ${want}`;
+    else if (!np) detail = "no \"crash: menu-playing TITLE\" line: the pause panel showed no NOW PLAYING";
+    else if (tune.name && np[1] !== tune.name) detail = `NOW PLAYING said "${np[1]}", the tune's name: is "${tune.name}"`;
+    else if (!theme) detail = "the main menu never opened its theme (no \"crash: music open black-glass-title\" line)";
+    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; ICE asked at ${asked[1]}:${asked[2]}, landed at ${landed[1]}:${landed[2]} (bar ${tune.barRows}, fill ${tune.fill}); NOW PLAYING "${np[1]}"; menu theme opened`);
+  }
+  if (detail) fail("music", detail);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------

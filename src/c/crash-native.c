@@ -131,6 +131,53 @@ static Value native_mix_track(SigilVM *vm, int argc, Value *args)
     return sigil_flonum(pos);
 }
 
+
+/* (%upsample! out out-offset n src have pos ratio) -> pos'
+ *
+ * The live soundtrack rendered below the device's rate (M1, D59: the
+ * synth's cost scales with the rate; David's phone at 48 kHz spent 46 % of
+ * real time in it). src holds `have` stereo f32 frames at the music's
+ * rate; n stereo f32 frames at the device's rate are WRITTEN (not added)
+ * to out from out-offset bytes, reading src from the fractional frame
+ * `pos` on, `ratio` = music rate / device rate per output frame. A 4-tap
+ * cubic Hermite over frames i-1..i+2 (linear lost the top end to David's
+ * ear at 22050); the caller keeps one frame before pos and two past the
+ * last read valid, and answers with the new pos (frames, fractional). */
+static Value native_upsample(SigilVM *vm, int argc, Value *args)
+{
+    if (argc < 7 || !sigil_is_bytevector(args[0]) || !sigil_is_bytevector(args[3])) {
+        sigil__vm_set_error(vm, SIGIL_ERR_TYPE, "%upsample!: expected (out offset n src have pos ratio)");
+        return sigil_flonum(0.0);
+    }
+    float *out = (float *)sigil_bytevector_data(args[0]);
+    size_t out_bytes = sigil_bytevector_length(args[0]);
+    int64_t off = sigil_as_fixnum(args[1]);
+    int64_t n = sigil_as_fixnum(args[2]);
+    const float *src = (const float *)sigil_bytevector_data(args[3]);
+    size_t src_bytes = sigil_bytevector_length(args[3]);
+    int64_t have = sigil_as_fixnum(args[4]);
+    double pos = sigil_as_flonum(args[5]);
+    double ratio = sigil_as_flonum(args[6]);
+    if (off < 0 || n < 0 || (size_t)off + (size_t)n * 2 * sizeof(float) > out_bytes) return sigil_flonum(pos);
+    if (have < 4 || (size_t)have * 2 * sizeof(float) > src_bytes) return sigil_flonum(pos);
+    out = (float *)((char *)out + off);
+    for (int64_t k = 0; k < n; k++) {
+        int64_t i = (int64_t)pos;
+        double f = pos - (double)i;
+        if (i < 1) { i = 1; f = 0.0; }
+        if (i + 2 >= have) { i = have - 3; f = 1.0; }
+        const float *p0 = src + 2 * (i - 1), *p1 = src + 2 * i, *p2 = src + 2 * (i + 1), *p3 = src + 2 * (i + 2);
+        for (int c = 0; c < 2; c++) {
+            double y0 = p0[c], y1 = p1[c], y2 = p2[c], y3 = p3[c];
+            double a = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
+            double b = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+            double cc = -0.5 * y0 + 0.5 * y2;
+            out[2 * k + c] = (float)(((a * f + b) * f + cc) * f + y1);
+        }
+        pos += ratio;
+    }
+    return sigil_flonum(pos);
+}
 static Value native_b64_decode(SigilVM *vm, int argc, Value *args)
 {
     if (argc < 1 || !sigil_is_string(args[0])) {
@@ -239,5 +286,8 @@ void sigil__init_crash_native_module(SigilVM *vm)
     sigil_module_export(vm, "%decode-ogg");
     sigil_module_export(vm, "%b64-decode");
     sigil_module_export(vm, "%fatal!");
+    sigil_module_register_native(vm, "%upsample!", native_upsample, SIGIL_ARITY_EXACT(7),
+                                 "Write n stereo f32 frames at the device rate from a lower-rate stereo f32 source, 4-tap cubic");
+    sigil_module_export(vm, "%upsample!");
     sigil_end_module(vm);
 }

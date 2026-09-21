@@ -230,6 +230,7 @@
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
     (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
+    (define *device-hint* #f)  ; (cores memory) from the page, or #f
     (define *tune-chunks* '())
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
@@ -1061,6 +1062,9 @@
           (when (and (eq? (menu-screen m) 'pause) (menu-code-line m))
             (let ((r (code-line-rect m VW VH)))
               (say "menu-code" (code-display (menu-code-line m)) (+ (car r) (half (caddr r))) (+ (cadr r) (half (cadddr r))))))
+          ;;   crash: menu-playing TITLE          the NOW PLAYING line (M1)
+          (when (and (eq? (menu-screen m) 'pause) (menu-now-playing m))
+            (say "menu-playing" (menu-now-playing m)))
           (when (eq? (menu-screen m) 'scores)
             (let ((s (menu-scores m)))
               (apply say "scores"
@@ -1449,7 +1453,7 @@
       (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
         (when (and *session* (eq? table 'stack))
           (set-board-selected! (session-board *session*) #f))   ; nothing to come back to
-        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t))
+        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t (music-title)))
         (set! *menu-said* #f)
         (say "pause" "on" (table-ticks))))
 
@@ -1848,6 +1852,11 @@
       ;; "crash: tune-fetch NAME" line per name; the text lands as tune-chunk/done)
       (live-music-set-loader! (lambda (name) (println "~a" (string-append "crash: tune-fetch " (symbol->string name))) #f))
       (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
+      ;; the music's render rate (M1): the ladder's last choice on this device
+      ;; from the store, kept for the next boot when the ladder steps
+      (let ((r (store-get "music-rate")))
+        (when (and r (string->number r)) (live-music-set-rate! (string->number r))))
+      (live-music-set-remember! (lambda (rate) (store-set! "music-rate" (number->string rate))))
       (set! *session* #f)
       (set! *deal* #f)
       ;; the field: ?bg= pins a rule for this boot (the dev door); else each
@@ -1953,6 +1962,20 @@
             ((string=? type "demo") (param! (lambda () (set! *demo* (and (string=? payload "cleared") 'cleared)))))
             ((string=? type "atlas") (param! (lambda () (atlas-set! (not (string=? payload "off"))))))
             ((string=? type "adepth") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n)) (audio-set-depth! n))))))
+            ;; M1: ?music-rate=N pins the music's render rate (no ladder); the
+            ;; page's device hints "cores,memory" start the ladder one step down
+            ;; on a weak device (4 cores or fewer, or 2 GB or less), unless a
+            ;; rate is remembered from an earlier boot's ladder
+            ((string=? type "music-rate") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n) (> n 0)) (live-music-set-rate! n #t))))))
+            ((string=? type "device")
+             (param! (lambda ()
+                       (let* ((c (string-find payload ","))
+                              (cores (and c (string->number (substring payload 0 c))))
+                              (mem (and c (string->number (substring payload (+ c 1) (string-length payload))))))
+                         (set! *device-hint* (list cores mem))
+                         (when (and (or (and cores (> cores 0) (<= cores 4)) (and mem (> mem 0) (<= mem 2)))
+                                    (not (live-music-rate-set?)))
+                           (live-music-set-rate! 'weak))))))
             ((string=? type "dpr") (param! (lambda () (set! *dpr* payload))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) (title-stamp! payload) 0)
