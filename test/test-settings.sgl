@@ -12,6 +12,7 @@
         (sigil math)
         (sigil time)
         (sigil process)
+        (crash bg)
         (crash settings)
         (crash shell)
         (crash store))
@@ -144,5 +145,38 @@
     (store-write-datum! "scanlines" 'off)
     (assert-equal 'on (settings-value (settings-load) 'scanlines))
     (assert-equal SETTINGS-VERSION (store-read-datum SETTINGS-VERSION-KEY))))
+
+(test-group "background selection: seven active modes"
+  (test "all seven GPU backgrounds are selectable"
+    (for-each (lambda (mode)
+                (let ((b (bg-choose mode 7 #f)))
+                  (assert-true (bg-gpu? b))
+                  (assert-equal mode (bg-mode b))))
+              '(reaction cyclic flow signal echo synapse flame)))
+  (test "REACTION retains its CPU reference; retired and unsupported names select no field"
+    (assert-false (bg-gpu? (bg-choose 'reaction-cpu 7 #f)))
+    (for-each (lambda (mode) (assert-false (bg-choose mode 7 #f)))
+              '(life life-cpu cyclic-cpu flow-cpu signal-cpu echo-cpu synapse-cpu flame-cpu off))))
+
+;; The LIVE pool (BG1, D55): REACTION and the six GPU rules, picked at deal
+;; by the board's seed, never the last deal's rule when the seed's pick
+;; repeats it; STILL is the setting's, not the pool's, and ?bg=still is a door.
+(test-group "the field pool"
+  (test "the pool is REACTION and GPU-MODES, in that order; STILL is not in it"
+    (assert-equal (cons 'reaction GPU-MODES) FIELD-POOL)
+    (assert-equal 7 (length FIELD-POOL))
+    (assert-false (memq 'still FIELD-POOL))
+    (assert-false (memq 'life FIELD-POOL)))
+  (test "seeds walk the pool by seed mod 7, and a repeat of the last deal's rule takes the next"
+    (assert-equal 'reaction (field-pick! 0))
+    (assert-equal 'cyclic (field-pick! 7))     ; 7 mod 7 is REACTION again: the next one
+    (assert-equal 'flow (field-pick! 1))       ; 1 is CYCLIC, just played: the next one
+    (assert-equal 'flame (field-pick! 6))
+    (assert-equal 'reaction (field-pick! 13))  ; 13 mod 7 is FLAME, just played: wraps to REACTION
+    (assert-equal 'signal (field-pick! 3)))
+  (test "?bg=still and --bg still pin the seeded gradient on the GPU path"
+    (let ((b (bg-choose 'still 280 #f)))
+      (assert-true (bg-gpu? b))
+      (assert-equal 'still (bg-mode b)))))
 
 (process-run "rm" "-rf" ROOT)

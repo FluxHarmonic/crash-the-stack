@@ -2,22 +2,19 @@
 ;;;
 ;;; Determinism from a seed: two runs of one seed over 600 ticks are the
 ;;; same field, cell for cell, and different seeds differ. A live, bounded
-;;; field, for every rule in the pool (REACTION alone since 2026-09-21,
-;;; when the voter model LIFE left it with its flow test) over 3600
-;;; ticks (a minute) on seeds 1..8: the field never freezes (it changes
-;;; between ticks), the tones the runs draw are spread (at least four
-;;; of the ramp's seven present at the end: a field gone one flat color
-;;; is dead) and no tone ever holds more than DOMINANT-CAP of the half
-;;; cells (sampled every 60 ticks: the runs are the renderer's cost).
-;;; The phase inputs take effect: the ICE runs more Gray-Scott iterations
-;;; a step than calm, so its step lands the field somewhere else (every
-;;; step of the reaction touches every cell: the diffusion reaches them
-;;; all, so a changed-cell count tells the phases apart no better than
-;;; 880 = 880), a burst runs the cap (REACT-STEPS-MAX, which the ICE
-;;; reaches too at 2.5 x 2) and passes, severed collapses every value
-;;; and changes nothing else. bg-runs answers rectangles on the
-;;; half-cell grid inside the board area, and under 3000 of them
-;;; (sokol_gp's frame budget shared with the tiles).
+;;; field, for every live CPU rule (REACTION; STILL is frozen by design,
+;;; and the six GPU rules have no CPU reference: test-bg-gpu covers
+;;; their seeds) over 3600 ticks (a minute) on seeds 1..8: the field
+;;; never freezes (it changes between ticks), the tones the runs draw
+;;; are spread (at least four of the ramp's eight present at the end:
+;;; a field gone one flat color is dead) and no tone ever holds more
+;;; than DOMINANT-CAP of the half cells (sampled every 60 ticks: the
+;;; runs are the renderer's cost). The phase inputs take effect: the ICE
+;;; increases REACTION iterations, a burst reaches the cap and passes,
+;;; severed collapses every value and changes nothing else. bg-runs
+;;; answers rectangles on the half-cell grid inside the board area,
+;;; and under 3000 of them (sokol_gp's frame budget shared with the
+;;; tiles).
 
 (import (sigil test)
         (sigil list)
@@ -89,15 +86,17 @@
             LIVE-MODES))
 
 (test-group "bg: the phase inputs"
-  (test "the ICE runs more iterations a step than calm, and its step lands elsewhere; a burst runs the cap, and it passes"
-    (let* ((b (bg-tick (bg-new 3 'reaction) 60))
-           (calm (bg-with-phase b 'trace))
+  (test "ICE and burst increase REACTION iterations up to the cap, then the burst passes"
+    (let* ((b (bg (bg-new 3 'reaction) react-steps: 1))
            (ice (bg-with-phase b 'counter))
            (burst (bg-with-burst ice)))
-      (assert-true (> (bg-iterations ice) (bg-iterations calm)))
-      (assert-true (> (cells-changed (bg-tick calm STRIDE) (bg-tick ice STRIDE)) 0))
+      (assert-equal 1 (bg-iterations b))
+      (assert-equal 2 (bg-iterations ice))
       (assert-equal REACT-STEPS-MAX (bg-iterations burst))
-      (assert-true (>= (bg-iterations burst) (bg-iterations ice)))
+      (assert-false (equal? (bg-canonical (bg-tick b STRIDE))
+                            (bg-canonical (bg-tick ice STRIDE))))
+      (assert-false (equal? (bg-canonical (bg-tick ice STRIDE))
+                            (bg-canonical (bg-tick burst STRIDE))))
       (assert-equal BURST-TICKS (bg-burst burst))
       (assert-equal 0 (bg-burst (bg-tick burst BURST-TICKS)))))
   (test "severed: every value falls toward the ground, and keeps falling"

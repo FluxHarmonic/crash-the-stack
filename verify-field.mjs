@@ -9,23 +9,13 @@
 // (--phone). Each sub-arm prints PASS / FAIL <name>: <detail>; any FAIL
 // exits 1; a wait that runs out prints TIMED-OUT and exits 2.
 //
-//   field-reaction  the page with ?bg=reaction&bghold=N&bgonly is read at
-//                   every half-cell center of the board area (80x44 samples)
-//                   once the game says "crash: bg held N"; then the same
-//                   page with ?bg=reaction-cpu, the CPU field, the oracle.
-//                   Every sample must be one of the ramp's eight palette
-//                   colors and the field must be alive (at least four
-//                   tones, no tone over 90 % of the samples). The reaction's
-//                   arithmetic is float32 on the GPU and double on the CPU
-//                   between 16-bit quantizations, so the maps are compared
-//                   as dither levels (base tone x 4 + quarter, 32 per ring):
-//                   at least 97 % of the cells at the same level and every
-//                   cell within one (a wrong neighbor, wrap, orientation,
-//                   feed rate or laplacian weight moves most cells by whole
-//                   levels within the held steps; the plants in the evidence
-//                   note show it). The pool is REACTION alone: the voter
-//                   model LIFE and its field-life leg (an exact match, integer
-//                   arithmetic on both sides) left on 2026-09-21
+//   field-reaction  ?bg=reaction&bghold=N&bgonly is read at all 80x44
+//                   half-cell centers, then compared with ?bg=reaction-cpu.
+//                   Both must use palette colors and remain alive (at least
+//                   four tones, none over 90%). GPU float32 and CPU double
+//                   arithmetic between 16-bit quantizations may differ:
+//                   at least 97% of cells must have the same dither level,
+//                   with every remaining cell within one level.
 //   copper          ?bg=off&copper=bitmap (the painted bars, the reference)
 //                   and ?bg=off (the raster) read down one column of the
 //                   board area at every scanline: identical; then
@@ -209,6 +199,13 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
+// SCANLINES and VEIL are on by default since P4c and both post passes
+// change the composed pixels this arm reads cell by cell, so the store
+// carries them off for every boot here, with the settings' schema version
+// (a store without it is reset at boot, which would put the defaults back).
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+  try { localStorage.setItem("settings-version", "2"); localStorage.setItem("scanlines", "off"); localStorage.setItem("veil", "off"); } catch (e) {}
+` });
 if (PHONE) {
   await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
   await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
@@ -578,8 +575,7 @@ field: {
 // ---- default: the rule a page gets without ?bg= ---------------------------------------------
 // David (2026-09-20, after the merge): "We should have made the other bg
 // mode 'reaction' the default." A stack boot with no bg= door must say
-// the reaction rule on the GPU; a boot that says any other rule or the
-// CPU field is red.
+// the reaction rule on the GPU; any other rule or the CPU path fails.
 {
   mark = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh` });
