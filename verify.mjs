@@ -1064,6 +1064,12 @@ let iceLock = null;
 // picked nothing).
 {
   const TITLE_SEED = 7, OTHER_SEED = 8, TITLE_BAUD = 9600;
+  // the leg reads the reveal and the card pixel for pixel against the module;
+  // SCANLINES (on by default, on every screen since P4c) darken alternate
+  // rows of the composed frame, so the leg turns the setting off in the
+  // store for its boots and puts it back after (the settings leg reads the
+  // default on a fresh store; this store already carries the version key)
+  await evalJS(`localStorage.setItem("scanlines", "off")`);
   // the slant: row r of a letter line sits (5 - r) x the slant the game reports
   // (thousandths of a cell per row) cells right, rounded to a pixel
   const stairOf = (r) => (r < 0 || r > 5) ? 0 : 5 - r;
@@ -1388,6 +1394,7 @@ let iceLock = null;
     }
   }
   delete substitutePaths["/assets/title/backdrop.png"];
+  await evalJS(`localStorage.removeItem("scanlines")`);
   if (detail) fail("title", detail);
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
 }
