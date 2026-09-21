@@ -372,3 +372,10 @@ detached so it remains available after the session. The served application
 is `addc03a5f78c`; the following documentation commit records validation
 without changing the application source. The existing captures remain
 representative: all six added modes match their approved frames exactly.
+
+## Music hitch and measurement follow-up
+
+David subsequently requested investigation of the Pixel 2 XL music-start
+hitch. [PERFORMANCE.md](PERFORMANCE.md) records the audio delivery changes,
+fresh measurement windows, browser evidence, remaining startup cost, and
+phone instructions. The current preview is application `a20578e20985`.
