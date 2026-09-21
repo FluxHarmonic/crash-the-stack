@@ -1,0 +1,62 @@
+;;; (crash music live) - The soundtrack live from .cts on motif's player (M1, D59)
+;;;
+;;; The M1 spike (2026-09-21): one player on one track, mixed into the sink
+;;; through (crash audio)'s source hook the tracker uses, so the phone can
+;;; measure the frame cost and the wasm size of live playback against the
+;;; OGG build before the model is built on it. The model (pools, sections,
+;;; the trace's transitions) comes after the leader's ruling on the proposal.
+;;;
+;;;   (live-music-open! text sr)      the tune text; opens the player looping
+;;;   (live-music-jump! pos)          an immediate jump to an order position
+;;;   (live-music-stop!)
+;;;   (live-music-position)           (pos . row) under the listener, or #f
+;;;   (live-music-chunk-ms)           the last pull's wall time per 1024 frames
+
+(define-library (crash music live)
+  (import (sigil time)
+          (motif tune)
+          (motif tune player)
+          (crash audio))
+
+  (export live-music-open! live-music-jump! live-music-stop! live-music-position
+          live-music-playing? live-music-chunk-ms live-music-title LIVE-GAIN)
+
+  (begin
+    (define LIVE-GAIN 0.55)      ; TRACK-GAIN's value: the tracks' level under the cues
+
+    (define *player* #f)
+    (define *title* #f)
+    (define *chunk-ms* 0.0)
+
+    (define (live-music-playing?) (and *player* #t))
+    (define (live-music-chunk-ms) *chunk-ms*)
+    (define (live-music-title) *title*)
+
+    (define (pull! out byte-offset n)
+      (let* ((t0 (current-milliseconds))
+             (on (and *player* (player-pull! *player* out byte-offset n))))
+        (let ((ms (- (current-milliseconds) t0)))
+          (when (> n 0) (set! *chunk-ms* (/ (* 1024.0 ms) n))))
+        (if on
+            #t
+            (begin (live-music-stop!) #f))))
+
+    (define (live-music-open! text sr)
+      (live-music-stop!)
+      (let ((t (read-tune-string text)))
+        (set! *title* (tune-name t))
+        (set! *player* (open-tune-player t sr loop: #t))
+        (audio-set-source! pull! LIVE-GAIN)
+        #t))
+
+    (define (live-music-jump! pos)
+      (when *player* (player-jump! *player* pos 0)))
+
+    (define (live-music-stop!)
+      (when *player*
+        (audio-set-source! #f 0.0)
+        (player-close! *player*)
+        (set! *player* #f)))
+
+    (define (live-music-position)
+      (and *player* (player-position *player* (audio-source-depth))))))

@@ -97,6 +97,7 @@
           (crash cards save)
           (crash gpu post)
           (crash music)
+          (crash music live)   ; M1 spike
           (crash native)
           (only (crash credits) CREDITS-PATH)
           (crash trace))
@@ -177,6 +178,8 @@
     (define *advance-ms* 0.0)   ; the last frame's bg-advance time
     (define *frame-n* 0)        ; frames presented
     (define *copper* 'roll)     ; --copper / --raster, see the header
+    (define *live-path* #f)     ; M1 spike: --live PATH, the tune played live on the stack screen
+    (define *live-frames* 0)
     (define *phosphor* 'on)     ; --phosphor
     (define *bg-only* #f)       ; --bg-only
     (define *bg-pinned* #f)     ; --bg RULE: the dev door pins one rule for the process
@@ -725,7 +728,20 @@
                    (_ (when (and *reveal-over* (boot-done?))
                         (case (stage-screen a)
                           ((menu) (music-frame! (quote menu) #f))
-                          ((stack) (music-frame! (quote stack) (trace-phase (session-trace (stage-session a)))))
+                          ((stack)
+                           ;; M1 spike: --live PATH plays that tune on motif's player instead of the OGG model
+                           (if *live-path*
+                               (begin
+                                 (unless (live-music-playing?)
+                                   (live-music-open! (read-file-string *live-path*) (audio-rate))
+                                   (display "crash: music live ") (display (live-music-title)) (newline))
+                                 (when (memq 'j (input-frame-pressed f)) (live-music-jump! 8) (display "crash: music jump 8\n"))
+                                 (set! *live-frames* (+ *live-frames* 1))
+                                 (when (= 0 (modulo *live-frames* 120))
+                                   (let ((p (live-music-position)))
+                                     (display "crash: music cost ") (display (live-music-chunk-ms)) (display " ms/1024 at ")
+                                     (display (if p (car p) "-")) (display " ") (display (if p (cdr p) "-")) (newline))))
+                               (music-frame! (quote stack) (trace-phase (session-trace (stage-session a))))))
                           (else (music-frame! (quote cards) (trace-phase (deal-trace (stage-deal a))))))))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
@@ -1049,10 +1065,13 @@
              (bg-hold (let ((h (arg-value args "--bg-hold" #f))) (and h (string->number h))))
              (mute? (and (member "--mute" args) #t))
              (edit-path (arg-value args "--edit" #f))
+             (live-path (arg-value args "--live" #f))   ; M1 spike
              (code-arg (arg-value args "--code" #f))
              (tune-path (arg-value args "--tune" #f))
              (tracker? (or tune-path (and (member "--tracker" args) #t)))
              (bench-arg (arg-value args "--bench-probe" #f)))
+        (set! *live-path* live-path)   ; M1 spike
+        (when live-path (music-off!))
         (set! *copper* (let ((r (arg-value args "--raster" #f)))
                          (if r
                              (or (string->number r) 'roll)
