@@ -1,12 +1,14 @@
 ;;; (crash gpu rules) - Additional field step shaders for D55's deal pool.
-;;; All three use the existing nearest RGBA8 ping-pong and palette-only view.
+;;; All additions use the existing nearest RGBA8 ping-pong and palette-only view.
 ;;; CYCLIC: R is the shown byte; G is phase (0..15); B is waiting age.
 ;;; FLOW: R is the squared scalar for display; BA retains its 16-bit state.
 ;;; SIGNAL: R is the shown byte; G/B carry downward/rightward heads.
+;;; ECHO: R is the eased interference display; the emitters derive from the clock.
+;;; SYNAPSE: R is shown; G is pulse phase; B is wiring; A marks initialized cells.
 
 (define-library (crash gpu rules)
   (import (crash gpu glsl))
-  (export CYCLIC-SOURCE FLOW-SOURCE SIGNAL-SOURCE)
+  (export CYCLIC-SOURCE FLOW-SOURCE SIGNAL-SOURCE ECHO-SOURCE SYNAPSE-SOURCE)
 
   (begin
     (define FIELD-GLSL
@@ -136,4 +138,108 @@
        "    float shown = max(ground, min(150.0, floor(c.r * 255.0 * 0.94)));\n"
        "    if (down > 0.5 || right > 0.5) shown = 200.0;\n"
        "    fragColor = vec4(shown / 255.0, down, right, 1.0);\n"
-       "}\n"))))
+       "}\n"))
+
+    (define ECHO-SOURCE
+      (string-append
+       GLSL-PREFIX
+       FIELD-GLSL
+       "uniform float u_clock;\n"
+       "uniform float u_seed;\n"
+       "void main() {\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    vec2 q = vec2(p.x, int(u_resolution.y) - 1 - p.y);\n"
+       "    uint seed = uint(u_seed);\n"
+       "    uint grain = hash31(seed + 8192u + uint(q.x) + uint(q.y) * 64u);\n"
+       "    float wave = 0.0;\n"
+       "    // Four staggered drops. Each new center appears only after its old ring fades.\n"
+       "    for (int i = 0; i < 4; i++) {\n"
+       "        float clock = u_clock + float(i * 42);\n"
+       "        float age = mod(clock, 168.0);\n"
+       "        uint event = uint(floor(clock / 168.0)) * 4u + uint(i);\n"
+       "        uint h = hash31(seed + event * 7919u);\n"
+       "        vec2 center = vec2(2.0 + float(h % 36u), 2.0 + float((h >> 8) % 18u));\n"
+       "        float distance = length(q - center);\n"
+       "        float offset = distance - age * 0.19;\n"
+       "        float envelope = exp(-offset * offset / 7.0);\n"
+       "        float fade = smoothstep(0.0, 8.0, age) * (1.0 - smoothstep(90.0, 168.0, age));\n"
+       "        wave += cos(offset * 2.1) * envelope * fade;\n"
+       "    }\n"
+       "    // Signed waves interfere; only the small overlaps reach the accent range.\n"
+       "    float ground = float(grain % 32u);\n"
+       "    float target = min(200.0, ground + 116.0 * abs(wave));\n"
+       "    float shown = mix(cell(p).r * 255.0, target, 0.32);\n"
+       "    fragColor = vec4(shown / 255.0, 0.0, 0.0, 1.0);\n"
+       "}\n"))
+
+    (define SYNAPSE-SOURCE
+      (string-append
+       GLSL-PREFIX
+       FIELD-GLSL
+       "uniform float u_clock;\n"
+       "uniform float u_seed;\n"
+       "uint nodeKey(ivec2 tile) {\n"
+       "    return hash31(uint(u_seed) + uint(tile.x + 32) * 733u + uint(tile.y + 32) * 7919u);\n"
+       "}\n"
+       "vec2 node(ivec2 tile) {\n"
+       "    uint h = nodeKey(tile);\n"
+       "    return vec2(tile * 6) + vec2(1.0 + float(h % 4u), 1.0 + float((h >> 8) % 4u));\n"
+       "}\n"
+       "float segmentDistance(vec2 p, vec2 a, vec2 b) {\n"
+       "    vec2 d = b - a;\n"
+       "    float t = clamp(dot(p - a, d) / dot(d, d), 0.0, 1.0);\n"
+       "    return length(p - a - t * d);\n"
+       "}\n"
+       "int wiring(vec2 p) {\n"
+       "    ivec2 tile = ivec2(floor(p / 6.0));\n"
+       "    if (length(p - node(tile)) < 0.8) return 2;\n"
+       "    float nearest = 10.0;\n"
+       "    // Jittered junctions and diagonal branches avoid a regular circuit grid.\n"
+       "    for (int y = -1; y <= 0; y++) {\n"
+       "        for (int x = -1; x <= 0; x++) {\n"
+       "            ivec2 t = tile + ivec2(x, y);\n"
+       "            vec2 a = node(t);\n"
+       "            uint h = nodeKey(t);\n"
+       "            if (h % 4u != 0u) nearest = min(nearest, segmentDistance(p, a, node(t + ivec2(1, 0))));\n"
+       "            if ((h >> 4) % 4u != 0u) nearest = min(nearest, segmentDistance(p, a, node(t + ivec2(0, 1))));\n"
+       "            if ((h >> 8) % 3u == 0u) nearest = min(nearest, segmentDistance(p, a, node(t + ivec2(1, 1))));\n"
+       "        }\n"
+       "    }\n"
+       "    return nearest < 0.6 ? 1 : 0;\n"
+       "}\n"
+       "void main() {\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    vec2 q = vec2(p.x, int(u_resolution.y) - 1 - p.y);\n"
+       "    vec4 c = cell(p);\n"
+       "    uint h = hash31(uint(u_seed) + 8192u + uint(q.x) + uint(q.y) * 64u);\n"
+       "    // Cache the seeded graph once; later steps only read neighbors' pulse phases.\n"
+       "    int wire = c.a < 0.5 ? wiring(q) : int(floor(c.b * 255.0 + 0.5));\n"
+       "    int phase = int(floor(c.g * 255.0 + 0.5));\n"
+       "    if (c.a < 0.5) phase = wire == 2 && h % 4u == 0u ? 1 : 0;\n"
+       "    else if (int(u_clock) % 3 == 0) {\n"
+       "        if (phase > 0) phase = (phase + 1) % 18;\n"
+       "        else if (wire > 0) {\n"
+       "            bool incoming = false;\n"
+       "            for (int y = -1; y <= 1; y++) {\n"
+       "                for (int x = -1; x <= 1; x++) {\n"
+       "                    if (x != 0 || y != 0) {\n"
+       "                        int neighbor = int(floor(cell(p + ivec2(x, y)).g * 255.0 + 0.5));\n"
+       "                        if (neighbor == 3) incoming = true;\n"
+       "                    }\n"
+       "                }\n"
+       "            }\n"
+       "            uint pulse = hash31(uint(u_seed) + uint(u_clock / 42.0) * 1297u);\n"
+       "            ivec2 origin = ivec2(int(pulse % 6u), int((pulse >> 8) % 3u));\n"
+       "            bool scheduled = int(u_clock) % 42 == 0 && all(equal(ivec2(q) / 6, origin));\n"
+       "            bool spontaneous = wire == 2 && (scheduled || hash31(stepkey() + h) % 1000u < 2u);\n"
+       "            if (incoming || spontaneous) phase = wire == 2 ? 1 : 3;\n"
+       "        }\n"
+       "    }\n"
+       "    // Nodes pause for two beats before forwarding a pulse; refractory paths rest.\n"
+       "    float ground = float(h % 32u);\n"
+       "    if (wire > 0) ground = max(ground, 32.0 + float(h % 16u));\n"
+       "    float shown = max(ground, floor(c.r * 255.0 * 0.94));\n"
+       "    if (phase > 0 && phase <= 3) shown = min(wire == 2 ? 200.0 : 176.0, shown + 32.0);\n"
+       "    fragColor = vec4(shown, float(phase), float(wire), 255.0) / 255.0;\n"
+       "}\n"))
+))
