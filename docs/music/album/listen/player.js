@@ -27,8 +27,8 @@ function select(index) {
   if ('mediaSession' in navigator) {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: tracks[index].title,
-      artist: 'Crash The Stack',
-      album: 'Crash The Stack — Original Soundtrack',
+      artist: 'David Wilson',
+      album: 'Crash The Stack - Original Soundtrack',
       artwork: [{src: 'https://assets.crashthestack.com/soundtrack/art/cover-i.png', sizes: '1254x1254', type: 'image/png'}]
     });
   }

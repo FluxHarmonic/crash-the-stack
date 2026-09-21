@@ -247,7 +247,7 @@ sigil docs/music/tools/album-listening-site.sgl \
 ```
 
 This encodes all fifteen masters at 256 kbps, embeds Cover I as front-cover art,
-and writes ID3v2.3 tags: artist/album artist **Crash The Stack**, individual song
+and writes ID3v2.3 tags: artist/album artist **David Wilson**, individual song
 title, album title, track number out of fifteen, year, CC BY 4.0 license and
 **David Wilson** attribution. Each output is probed for tags, attached artwork,
 audio format and expected duration. `--track black-glass` (repeatable) limits a
@@ -262,11 +262,14 @@ sigil docs/music/tools/album-tag-mp3.sgl \
 ```
 
 The input manifest must reference local `audio/*.mp3` files. This copies the MP3
-audio packets, attaches the original PNG cover and validates tags and artwork.
+audio packets, attaches the compact JPEG cover and validates tags and artwork.
 Every result must decode to the exact same PCM hash as its input. Commands and
 per-track checks are recorded outside the public soundtrack/ directory.
-The original MP3s remain intact. Cover I is embedded without resizing, so each
-file includes its 2.84 MB PNG; no additional lossy image conversion is introduced.
+The original MP3s remain intact. Both export paths automatically prepare an
+800 x 800 JPEG of Cover I at FFmpeg quality 5 (about 196 KB), with a 250 KB
+size guard. The full PNG remains the archival and website image. Cover encoding
+commands and hashes are recorded in cover-preparation.json outside the public
+bundle. The album field is **Crash The Stack - Original Soundtrack**.
 
 Both paths use `(crash soundtrack album metadata)` in lib/album-metadata.sgl.
 Use the existing album-r2.sgl prepare/upload steps with a **new prefix** when

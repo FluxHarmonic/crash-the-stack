@@ -1,11 +1,16 @@
-# Crash The Stack — Original Soundtrack
+# Crash The Stack - Original Soundtrack
 
 Working album title and sequence, carried forward from [ALBUM-PLAN.md](../ALBUM-PLAN.md).
 David confirmed Black Glass as the opener, Cold Boot second and Glass Current
 as the closer. These are standalone listening arrangements, separate from the
 game's adaptive tunes.
 The album has fifteen titles; the title-screen arrangement belongs to Black Glass,
-not a sixteenth album track. Artist credit, artwork and release details remain open.
+not a sixteenth album track. Artist and album artist: **David Wilson**. Cover I
+is the accepted artwork; release details remain open.
+
+Created by David Wilson with AI-assisted composition, arrangement, and instrument
+design. The production notes retain the authoring, listening review and validation
+process.
 
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|

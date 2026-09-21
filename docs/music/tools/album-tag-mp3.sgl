@@ -18,7 +18,7 @@
            (output (option-ref options 'output))
            (album (json-decode (read-text (path bundle "album.json"))))
            (tracks (array->list (dict-ref album tracks:)))
-           (cover (path (root) "docs/music/album/art/cover-i.png"))
+           (cover #f)
            (site (path output "soundtrack"))
            (number 0)
            (checks '())
@@ -30,6 +30,7 @@
       (ensure-directory site)
       (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
              "Output resolves inside the repository")
+      (set! cover (prepare-mp3-cover output))
       (each track tracks
         (let* ((relative (dict-ref track mp3:))
                (source (path bundle relative))
@@ -55,22 +56,9 @@
           (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,target))
                  (format (dict-ref data format:))
                  (tags (dict-ref format tags:))
-                 (streams (array->list (dict-ref data streams:)))
-                 (pictures (filter (lambda (s) (equal? (dict-ref s codec_type:) "video")) streams))
                  (before (audio-hash source))
                  (after (audio-hash target)))
-            (each expected
-              (list (cons title: title)
-                    (cons artist: ALBUM-ARTIST)
-                    (cons album_artist: ALBUM-ARTIST)
-                    (cons album: ALBUM-TITLE)
-                    (cons track: (str number "/" (length tracks)))
-                    (cons copyright: "CC BY 4.0; attribution: David Wilson"))
-              (check (equal? (dict-ref tags (car expected)) (cdr expected))
-                     "Metadata mismatch" title (car expected)))
-            (check (and (= (length pictures) 1)
-                        (= 1 (dict-ref (dict-ref (car pictures) disposition:) attached_pic:)))
-                   "Missing embedded cover" title)
+            (check-mp3-tags target title number (length tracks))
             (check (equal? before after) "Decoded audio changed during tagging" title)
             (check (< (abs (- (string->number (dict-ref format duration:))
                              (dict-ref track duration_seconds:))) 0.1)
@@ -91,6 +79,6 @@
           (path site filename)))
       (write-json-file (path site "album.json")
         (dict title: ALBUM-TITLE
-              version: "Preview I — tagged"
+              version: "Preview I - tagged"
               duration_seconds: (dict-ref album duration_seconds:)
               tracks: (list->array tracks))))))

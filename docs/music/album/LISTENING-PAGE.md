@@ -213,3 +213,17 @@ the page retained all fifteen tracks. Playback was muted and paused after this
 functional check; physical phone player behavior has not been tested.
 New object URLs bypass old immutable audio caches. Reload the page and select a
 track to use them; previously downloaded files must be downloaded again.
+
+## Artist credit and compact cover revision
+
+David approved artist/album artist **David Wilson** and album title
+**Crash The Stack - Original Soundtrack**. Both export paths now derive an
+800 x 800 JPEG from Cover I for embedding (196,330 bytes at FFmpeg quality 5),
+retaining the full original PNG for the website and archival artwork. The
+shared metadata validator checks the JPEG codec, dimensions and attached-picture
+flag as well as titles, numbering, artist, album and license fields.
+
+The revised local bundle is tagged-preview-ii/soundtrack/audio/. Existing
+versions are retained. Public assets use soundtrack/preview-ii-tagged/ so
+listeners receive the revised metadata after reloading the player. The album
+notes now record the artist credit and AI-assisted production process.

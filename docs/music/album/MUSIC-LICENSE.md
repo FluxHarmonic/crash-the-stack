@@ -1,6 +1,6 @@
 # Music license
 
-The fifteen tracks of **Crash The Stack — Original Soundtrack**, including the
+The fifteen tracks of **Crash The Stack - Original Soundtrack**, including the
 music and album recordings presented at https://crashthestack.com/soundtrack/,
 are made available under **Creative Commons Attribution 4.0 International
 (CC BY 4.0)**.
@@ -8,7 +8,7 @@ are made available under **Creative Commons Attribution 4.0 International
 License: https://creativecommons.org/licenses/by/4.0/
 Legal code: https://creativecommons.org/licenses/by/4.0/legalcode
 
-Attribution credit: **David Wilson — Crash The Stack — Original Soundtrack**.
+Attribution credit: **David Wilson; Crash The Stack - Original Soundtrack**.
 Link to the soundtrack page and license, and indicate any changes when reusing
 the music. A track's title can be included for individual-track use.
 
