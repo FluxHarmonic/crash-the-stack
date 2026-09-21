@@ -5,10 +5,16 @@
 ;;; SIGNAL: R is the shown byte; G/B carry downward/rightward heads.
 ;;; ECHO: R is the eased interference display; the emitters derive from the clock.
 ;;; SYNAPSE: R is shown; G is pulse phase; B is wiring; A marks initialized cells.
+;;; FLAME: R is the eased heat display; BA retains 16-bit advected heat.
 
 (define-library (crash gpu rules)
   (import (crash gpu glsl))
-  (export CYCLIC-SOURCE FLOW-SOURCE SIGNAL-SOURCE ECHO-SOURCE SYNAPSE-SOURCE)
+  (export CYCLIC-SOURCE
+          FLOW-SOURCE
+          SIGNAL-SOURCE
+          ECHO-SOURCE
+          SYNAPSE-SOURCE
+          FLAME-SOURCE)
 
   (begin
     (define FIELD-GLSL
@@ -243,5 +249,61 @@
        "    float shown = max(ground, floor(c.r * 255.0 * 0.94));\n"
        "    if (phase > 0 && phase <= 3) shown = min(wire == 2 ? 200.0 : 176.0, shown + 32.0);\n"
        "    fragColor = vec4(shown, float(phase), float(wire), 255.0) / 255.0;\n"
+       "}\n"))
+
+    (define FLAME-SOURCE
+      (string-append
+       GLSL-PREFIX
+       FIELD-GLSL
+       "uniform float u_clock;\n"
+       "uniform float u_seed;\n"
+       "float lattice(ivec2 p) {\n"
+       "    uint h = hash31(uint(u_seed) + uint(p.x + 4096) * 733u + uint(p.y + 4096) * 7919u);\n"
+       "    return float(h % 65536u) / 65535.0;\n"
+       "}\n"
+       "float noise(vec2 p) {\n"
+       "    ivec2 i = ivec2(floor(p));\n"
+       "    vec2 f = fract(p);\n"
+       "    f = f * f * (3.0 - 2.0 * f);\n"
+       "    return mix(mix(lattice(i), lattice(i + ivec2(1, 0)), f.x),\n"
+       "               mix(lattice(i + ivec2(0, 1)), lattice(i + ivec2(1, 1)), f.x), f.y);\n"
+       "}\n"
+       "vec2 packHeat(float h) {\n"
+       "    float s = floor(clamp(h, 0.0, 1.0) * 65535.0 + 0.5);\n"
+       "    float hi = floor(s / 256.0);\n"
+       "    return vec2(hi, s - hi * 256.0) / 255.0;\n"
+       "}\n"
+       "float heat(ivec2 p) {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    p.x = (p.x % size.x + size.x) % size.x;\n"
+       "    p.y = clamp(p.y, 0, size.y - 1);\n"
+       "    vec2 bytes = floor(texelFetch(iTexChannel0_iSmpChannel0, p, 0).ba * 255.0 + 0.5);\n"
+       "    return (bytes.x * 256.0 + bytes.y) / 65535.0;\n"
+       "}\n"
+       "float sampleHeat(vec2 p) {\n"
+       "    ivec2 i = ivec2(floor(p));\n"
+       "    vec2 f = fract(p);\n"
+       "    return mix(mix(heat(i), heat(i + ivec2(1, 0)), f.x),\n"
+       "               mix(heat(i + ivec2(0, 1)), heat(i + ivec2(1, 1)), f.x), f.y);\n"
+       "}\n"
+       "void main() {\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    vec2 q = vec2(p);\n"
+       "    // Backtrace toward the bottom. Vertical samples never wrap onto the top.\n"
+       "    float gust = noise(vec2(q.x * 0.20 + q.y * 0.12, u_clock * 0.022 - q.y * 0.14));\n"
+       "    float h = sampleHeat(q + vec2((gust - 0.5) * 0.8, -0.42));\n"
+       "    float cooling = 0.014 + 0.007 * noise(vec2(q.x * 0.4 + 31.0, u_clock * 0.035 - q.y * 0.2));\n"
+       "    h = max(0.0, h - cooling);\n"
+       "    // Smooth, uneven fuel keeps the base alive without a solid bright stripe.\n"
+       "    if (p.y == 0) {\n"
+       "        float fuel = 0.75 * noise(vec2(q.x * 0.25, u_clock * 0.018));\n"
+       "        fuel += 0.25 * noise(vec2(q.x * 0.60 + 13.0, u_clock * 0.027 + 7.0));\n"
+       "        h = 0.25 + 0.72 * smoothstep(0.25, 0.75, fuel);\n"
+       "    }\n"
+       "    int vy = int(u_resolution.y) - 1 - p.y;\n"
+       "    uint grain = hash31(uint(u_seed) + 8192u + uint(p.x) + uint(vy) * 64u);\n"
+       "    float target = min(200.0, float(grain % 32u) + 184.0 * h * h);\n"
+       "    float shown = mix(cell(p).r * 255.0, target, 0.35);\n"
+       "    fragColor = vec4(shown / 255.0, 0.0, packHeat(h));\n"
        "}\n"))
 ))

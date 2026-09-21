@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 const args = process.argv.slice(2);
 const ruleAt = args.indexOf('--rule');
 const RULE = ruleAt < 0 ? 'cyclic' : args[ruleAt + 1];
-if (!['cyclic', 'flow', 'signal', 'echo', 'synapse'].includes(RULE)) throw new Error('Expected --rule cyclic|flow|signal|echo|synapse');
+if (!['cyclic', 'flow', 'signal', 'echo', 'synapse', 'flame'].includes(RULE)) throw new Error('Expected --rule cyclic|flow|signal|echo|synapse|flame');
 const secondsAt = args.indexOf('--seconds');
 const SECONDS = secondsAt < 0 ? 300 : Number(args[secondsAt + 1]);
 const errors = [];
