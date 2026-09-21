@@ -155,7 +155,7 @@
     (define *geom* #f)
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
-    (define *trap-armed* #f)  ; ?trap: every dispatch after the arming fires the trap door (%fatal!)
+    (define *trap-armed* #f)  ; ?trap: #f, or the door armed: (quote frame) fires on the next frame dispatch, (quote any) on the next dispatch of any kind; once fired, any
     (define *skip* (quote ()))  ; ?skip=audio,draw,frame,sim: parts of the tick left out (the soak's bisection door)
     (define (skip? part) (and (memq part *skip*) #t))
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
@@ -1847,7 +1847,13 @@
       0)
 
     (define (web-dispatch type payload)
-      (when *trap-armed* (%fatal!))
+      ;; the door armed for the next frame fires only on a frame (the copy poll or a
+      ;; gesture could otherwise take it first, inside a try/catch: the review); once
+      ;; it fires, every later dispatch fires too, so the FATAL count after the
+      ;; first is the count of dispatches that reached the dead instance
+      (when (and *trap-armed* (or (eq? *trap-armed* (quote any)) (string=? type "frame")))
+        (set! *trap-armed* (quote any))
+        (%fatal!))
       (cond ((string=? type "frame") (web-tick (frame-dt payload)) 0)
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
@@ -1906,6 +1912,9 @@
              (when *menu* (set! *menu* (menu-with-credits *menu* (credits-parse payload))))   ; a board boot has no menu yet: launch-menu takes them later
              (say "credits" (length (credits-parse payload)))
              0)
+            ;; the game's UTC day right now (the arm's rollover oracle: the epoch door plus
+            ;; the time since, as the daily and the scoreboard read it)
+            ((string=? type "day") (today))
             ((string=? type "epoch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ n (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))
             ;; ?code=XXXXX-XXXXX: the board of a share code, dealt at boot (P4)
             ((string=? type "code") (param! (lambda () (set! *code* payload))))
@@ -1950,7 +1959,7 @@
              (set! *skip* (map string->symbol (string-split payload ",")))
              0)
             ((string=? type "trap")
-             (set! *trap-armed* #t)
+             (set! *trap-armed* (if (string=? payload "now") (quote any) (quote frame)))
              (when (string=? payload "now") (%fatal!))
              0)
             ;; ?soak: one line of the runtime's memory numbers for the soak's

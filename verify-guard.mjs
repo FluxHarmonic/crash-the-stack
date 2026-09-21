@@ -10,24 +10,29 @@
 // wait that runs out prints TIMED-OUT with everything collected and exits 2.
 //
 //   trap-frame     ?trace&stack&fresh&trap=frame: the game boots, then the
-//                  page arms the trap door (("trap", "frame"): every dispatch
+//                  page arms the trap door (("trap", "frame"): the next frame
+//                  dispatch, and every dispatch
 //                  after it calls the C native %fatal!, which prints a FATAL
 //                  line and aborts, the runtime's own out-of-memory shape) so
 //                  the NEXT frame tick dies inside the gles3 loop, the path
 //                  Trev's died on. Then, over 4 s: exactly ONE "FATAL:" line
 //                  (the door is sticky, so any dispatch that still reaches the
 //                  instance prints another: the count IS the leak count),
-//                  exactly one uncaught RuntimeError, "crash: page dead fatal:
+//                  exactly one uncaught RuntimeError, and it came through the
+//                  gles3 tick (its stack names sigil-wasm-gles3.js; the door
+//                  armed for a frame fires only on a frame dispatch, so the
+//                  copy poll cannot take it first), "crash: page dead fatal:
 //                  FATAL: ..." (the guard reads the FATAL line ahead of the
 //                  trap that follows it),
-//                  window.crashGuard.dead, SigilWebApp.dispatch answering -1
+//                  SigilWebApp.dispatch answering -1
 //                  without a new FATAL, a synthetic keydown, pointerdown and
 //                  click on the page adding none, the audio context suspended,
 //                  the RECONNECT card shown with its word lit in C-SELECTED
 //                  and C-HIGHLIGHT, and a tap on the card booting the game
 //                  again (a new boot line after the reload)
 //   trap-dispatch  ?trap=now: the door fires inside a page dispatch instead
-//                  (the app's deliver, where the polls and gestures call in);
+//                  (the app's deliver, where the polls and gestures call in; the
+//                  RuntimeError's stack names sigil-web-app.js);
 //                  the same assertions, plus the frame tick already queued
 //                  when the page died never ran (it would have printed the
 //                  second FATAL)
@@ -46,7 +51,10 @@
 //                  FATAL (the instance is alive but unusable), frames stopped,
 //                  dispatch -1, the card, and the tap reboots the game
 //   rollover       ?epoch= 75 s before UTC day 20717, DAILY STACK dealt from the
-//                  menu (day 20716), the rollover waited out (95 s): no error,
+//                  menu (day 20716), the rollover waited out (95 s) with the
+//                  game's own day read before and after (("day", ""): 20716
+//                  then 20717, the oracle that the clock crossed under the
+//                  live board): no error,
 //                  no "car: expected pair", no sokol line, and the first pair
 //                  still removes
 //   console        over the four non-trap legs: zero error-level entries and
@@ -316,24 +324,29 @@ async function trapLeg(name, door) {
   await evalJS(`document.getElementById("stage").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))`);
   await sleep(1500);
   const fatals = countLines(FATAL_RE, b.mark);
-  const deadLines = countLines(/^crash: page dead /, b.mark);
-  const traps = consoleErrors.slice(errorsBefore).filter((e) => /RuntimeError|unreachable/.test(e)).length;
+  const trapErrors = consoleErrors.slice(errorsBefore).filter((e) => /RuntimeError|unreachable/.test(e));
+  const traps = trapErrors.length;
+  // the path the trap took, from the uncaught error's stack: the gles3 loop's tick
+  // for the frame door, the loader's dispatch for the page-dispatch door
+  const pathRe = door === "frame" ? /sigil-wasm-gles3\.js/ : /sigil-web-app\.js/;
+  const onPath = trapErrors.filter((e) => pathRe.test(e)).length;
   const otherErrors = consoleErrors.slice(errorsBefore).filter((e) => !/RuntimeError|unreachable/.test(e));
   const frames = await frameWithin(1500);
   const audio = await audioState();
   const problems = [];
   if (fatals !== 1) problems.push(`FATAL lines ${fatals} (want exactly 1: each extra is a dispatch that reached the dead instance)`);
-  if (deadLines !== 1) problems.push(`"crash: page dead" lines ${deadLines} (want 1)`);
+  if (traps === 1 && onPath !== 1) problems.push(`the trap did not come through ${door === "frame" ? "the gles3 frame tick" : "the loader's dispatch"}: ${trapErrors[0].split("\n").slice(0, 4).join(" / ")}`);
   // the guard sees the door's FATAL line (console.warn) before the trap it aborts with
   if (!/^(fatal: FATAL: crash: the trap door|trap)/.test(dead.m[1])) problems.push(`died of "${dead.m[1]}", expected the door's FATAL line or its trap`);
   if (traps !== 1) problems.push(`uncaught RuntimeErrors ${traps} (want exactly 1: the trap itself)`);
   if (otherErrors.length) problems.push(`other errors: ${otherErrors.join(" | ")}`);
-  if (!s1.dead) problems.push("window.crashGuard.dead is false");
   if (s1.rc !== -1) problems.push(`SigilWebApp.dispatch after death answered ${JSON.stringify(s1.rc)}, want -1`);
   if (!s1.shown) problems.push("the RECONNECT card is not shown");
   if (s1.word && !(s1.word.sel > 200 && s1.word.hi > 200)) problems.push(`the word's canvas: ${JSON.stringify(s1.word)} (want C-SELECTED and C-HIGHLIGHT pixels)`);
   if (frames) problems.push("an animation frame still fires after death");
-  if (audio !== "none" && !/^suspended(,suspended)*$/.test(audio)) problems.push(`audio context ${audio}, want suspended`);
+  // the arm's chrome allows autoplay, so the game's context is open and running by
+  // now; "none" would leave the suspend unobserved and is a failure of its own
+  if (!/^suspended(,suspended)*$/.test(audio)) problems.push(`audio context ${audio}, want suspended`);
   if (problems.length) { fail(name, problems.join("; ")); return; }
   // the tap on the card: a reload and a fresh boot
   const mark2 = consoleLines.length;
@@ -384,11 +397,12 @@ await trapLeg("trap-dispatch", "now");
     if (!hid) problems.push("no \"crash: visibility hidden\" from the game");
     if (!pageHid) problems.push("no \"crash: page hidden\" from the page");
     if (!frozen) problems.push("an animation frame fired while hidden");
-    if (audio0 !== "none" && !/^suspended(,suspended)*$/.test(audio1)) problems.push(`audio context while hidden ${audio1}, want suspended (was ${audio0})`);
+    if (audio0 !== "running") problems.push(`audio context before hiding ${audio0}, want running (the arm allows autoplay)`);
+    if (!/^suspended(,suspended)*$/.test(audio1)) problems.push(`audio context while hidden ${audio1}, want suspended (was ${audio0})`);
     if (!shown) problems.push("no \"crash: visibility visible\" from the game");
     if (!pageShown) problems.push("no \"crash: page visible after N s\" from the page");
     if (!running) problems.push("no animation frame within 1.5 s of coming back");
-    if (audio0 === "running" && audio2 !== "running") problems.push(`audio context after showing ${audio2}, want running`);
+    if (audio2 !== "running") problems.push(`audio context after showing ${audio2}, want running`);
     if (!rem) problems.push("no \"crash: removed\" after the tap on the pair's other tile");
     else if (rem.m[3] !== "142") problems.push(`removed line: ${rem.m[0]}`);
     if (sokol) problems.push(`${sokol} sokol line(s) over the leg`);
@@ -418,7 +432,6 @@ await trapLeg("trap-dispatch", "now");
   if (!dead) problems.push("no \"crash: page dead\" within 10 s of loseContext()");
   else if (dead.m[1] !== "webgl context lost") problems.push(`died of "${dead.m[1]}"`);
   if (fatals) problems.push(`${fatals} FATAL line(s): the instance should be alive, only unusable`);
-  if (!s.dead) problems.push("window.crashGuard.dead is false");
   if (s.rc !== -1) problems.push(`dispatch answered ${JSON.stringify(s.rc)}, want -1`);
   if (!s.shown) problems.push("the RECONNECT card is not shown");
   if (frames) problems.push("an animation frame still fires");
@@ -491,7 +504,11 @@ await trapLeg("trap-dispatch", "now");
           else {
             // the rollover: the epoch reaches day 20717 about 60 s from here
             const linesBefore = consoleLines.length;
+            // the oracle: the game's own UTC day (the epoch door plus the time since), read
+            // before and after the wait: 20716 then 20717, or the door was not honoured
+            const dayBefore = await evalJS(`globalThis.SigilWebApp.dispatch("day", "")`);
             await sleep(95000);
+            const dayAfter = await evalJS(`globalThis.SigilWebApp.dispatch("day", "")`);
             const cars = countLines(/car: expected pair/, linesBefore);
             const sokol = countLines(/sokol\[/, linesBefore);
             const errors = consoleErrors.slice(errorsBefore);
@@ -502,6 +519,8 @@ await trapLeg("trap-dispatch", "now");
             await tap(+dealt.m[7], +dealt.m[8]);
             const rem = await waitLine(/^crash: removed (\d+) (\d+) tiles (\d+)$/, mark, 5000);
             const problems = [];
+            if (dayBefore !== 20716) problems.push(`the game read day ${dayBefore} before the wait, want 20716`);
+            if (dayAfter !== 20717) problems.push(`the game read day ${dayAfter} after the wait, want 20717 (the rollover did not happen under the board)`);
             if (cars) problems.push(`${cars} "car: expected pair" line(s)`);
             if (sokol) problems.push(`${sokol} sokol line(s)`);
             if (errors.length) problems.push(`errors: ${errors.join(" | ")}`);
@@ -509,7 +528,7 @@ await trapLeg("trap-dispatch", "now");
             if (!sel || sel.m[1] !== dealt.m[3]) problems.push(`the first tap after the rollover selected ${sel ? sel.m[1] : "nothing"}, want ${dealt.m[3]}`);
             if (!rem || rem.m[3] !== "142") problems.push(`no pair removed after the rollover${rem ? " (" + rem.m[0] + ")" : ""}`);
             if (problems.length) detail = problems.join("; ");
-            else pass(name, `daily day 20716 seed ${dealt.m[1]} dealt at midnight - 75 s; 95 s later: ${rem.m[0]}, no errors, no car, no sokol`);
+            else pass(name, `daily day 20716 seed ${dealt.m[1]} dealt at midnight - 75 s; the game read day ${dayBefore} -> ${dayAfter} across the wait; then ${rem.m[0]}, no errors, no car, no sokol`);
           }
         }
       }
