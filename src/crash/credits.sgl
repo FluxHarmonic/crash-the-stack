@@ -1,95 +1,115 @@
-;;; (crash credits) - The CREDITS / ABOUT screen's text, as data.
+;;; (crash credits) - The CREDITS crawl's text, as data.
 ;;;
-;;; Ruling D44: the licenses go where people look for them. This screen
-;;; is the GPLv3 "appropriate legal notice": the code's license
-;;; (GPL-3.0-or-later), the assets' (CC-BY-4.0), the reserved marks (the
-;;; name, the logo, the title art, the Flux Harmonic mark), the AI
-;;; content disclosure BYTE FOR BYTE as the design note approved it
-;;; (test/test-credits holds DISCLOSURE to test/fixtures/disclosure.txt;
-;;; the same text goes on the site and the repo, P4b), the engine and
-;;; library credits per their licenses, and the version with the build's
-;;; commit. Two pages: NOTICES and ABOUT. The draw wraps a paragraph to
-;;; the screen; a line here is one line as written.
+;;; Ruling D44, amended 2026-09-21 (David): the credits are one crawl,
+;;; bottom to top, read from assets/credits.txt so David edits text, not
+;;; code. The file's format: `## TITLE` is a section heading (the block
+;;; alphabet, sliding in with the logo's glitch and settling), any other
+;;; line is one crawl line in the 5x7 as written, `[gap]` is one blank
+;;; row and `[gap gap]` two (one word per row), and a blank line is one
+;;; blank row too (David's read: the gaps he typed as blank lines are
+;;; his; runs of them are not collapsed). The crawl's CODE and ART DIRECTION sections are the AI
+;;; disclosure now; the earlier paragraph and its byte gate left with
+;;; them (test/fixtures/disclosure.txt stays for the README and the site,
+;;; P4b's). The shells hand the file's text in (the native reads it beside
+;;; the binary; the page fetches it); this module parses and lays it out.
 ;;;
-;;; The 5x7 font is one case, so the text shows in capitals; the strings
-;;; here keep the approved case, which is what the gate compares.
+;;; The 5x7 font is one case, so the text shows in capitals; headings
+;;; must stay in the block alphabet's characters (A-Z, 0-9, space).
 ;;; Rules family: no platform.
 
 (define-library (crash credits)
   (import (sigil math))
 
-  (export VERSION DISCLOSURE NOTICES-PAGE ABOUT-PAGE credits-page credits-lines wrap-text)
+  (export VERSION CREDITS-PATH
+          CRAWL-SPEED CRAWL-FAST CRAWL-BACK HEADING-H LINE-H GAP-H
+          credits-parse credits-layout credits-height credits-headings credits-lines-of)
 
   (begin
     (define VERSION "0.1.0")
+    (define CREDITS-PATH "assets/credits.txt")
 
-    ;; The design note's adapted in-game text ([[topics/cyber-casual-games-design]],
-    ;; "Disclosure language"), verbatim.
-    (define DISCLOSURE
-      "I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I review all of it, I play every build, and I decide what stays. The design, the art direction and the opinions are mine. If that's a dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.")
+    ;; px a second: the crawl's pace, the pace with Down held, and with Up
+    ;; held (backwards)
+    (define CRAWL-SPEED 20.0)   ; David's read of 2026-09-21: half the first pace
+    (define CRAWL-FAST 80.0)
+    (define CRAWL-BACK -40.0)
 
-    ;; A page is a list of entries: (heading "TEXT") a heading line,
-    ;; (line "TEXT") one line as written, (para "TEXT") a paragraph the
-    ;; draw wraps, (gap) a blank line.
-    (define NOTICES-PAGE
-      (list (list 'heading "CRASH THE STACK")
-            (list 'line "(C) 2026 DAVID WILSON - FLUX HARMONIC")
-            (list 'gap)
-            (list 'heading "LICENSES")
-            (list 'para "Code: GPL-3.0-or-later. You can run, study, share and change it; a version you ship stays under the same license.")
-            (list 'para "Art, audio and content packs: CC-BY-4.0. Reuse them with credit to David Wilson / Flux Harmonic.")
-            (list 'para "Reserved, not licensed for reuse: the name Crash The Stack, the logo, the title art and the Flux Harmonic mark.")
-            (list 'gap)
-            (list 'heading "MADE WITH")
-            (list 'line "SIGIL (BSD-3-CLAUSE) - SOKOL (ZLIB) - GLFW (ZLIB)")
-            (list 'line "MINIAUDIO (MIT-0) - STB (MIT)")))
+    ;; the rows' heights, px: a heading in the block alphabet at the
+    ;; items' cell with room under it, a line of 5x7 at scale 2, a gap
+    (define HEADING-H 40)
+    (define LINE-H 18)
+    (define GAP-H 18)
 
-    (define ABOUT-PAGE
-      (list (list 'heading "ABOUT")
-            (list 'para DISCLOSURE)
-            (list 'gap)
-            (list 'line "SOURCE: CODEBERG.ORG/FLUXHARMONIC/CRASH-THE-STACK")
-            (list 'line "PLAY: CRASHTHESTACK.COM")))
+    ;; The file's text as items: (heading TEXT), (line TEXT), (gap N).
+    (define (credits-parse text)
+      (let loop ((lines (split-lines text)) (acc '()))
+        (if (null? lines)
+            (reverse acc)
+            (let ((l (trim-right (car lines))))
+              (loop (cdr lines)
+                    (cond ((= (string-length l) 0) (cons (list 'gap 1) acc))
+                          ((starts-with? l "## ") (cons (list 'heading (substring l 3 (string-length l))) acc))
+                          ((starts-with? l "[gap") (cons (list 'gap (count-word l "gap")) acc))
+                          (else (cons (list 'line l) acc))))))))
 
-    (define (credits-page n)
-      (if (= n 0) NOTICES-PAGE ABOUT-PAGE))
+    ;; The items placed: (kind text y) with y the row's top from the
+    ;; crawl's start, px; a gap places nothing.
+    (define (credits-layout items)
+      (let loop ((items items) (y 0) (acc '()))
+        (if (null? items)
+            (reverse acc)
+            (let ((it (car items)))
+              (case (car it)
+                ((heading) (loop (cdr items) (+ y HEADING-H) (cons (list 'heading (cadr it) y) acc)))
+                ((line) (loop (cdr items) (+ y LINE-H) (cons (list 'line (cadr it) y) acc)))
+                (else (loop (cdr items) (+ y (* GAP-H (cadr it))) acc)))))))
 
-    ;; A paragraph wrapped at spaces into lines of at most width
-    ;; characters (a word longer than the width stands alone).
-    (define (wrap-text text width)
-      (let loop ((words (split-words text)) (line "") (acc '()))
-        (cond ((null? words)
-               (reverse (if (string=? line "") acc (cons line acc))))
-              ((string=? line "")
-               (loop (cdr words) (car words) acc))
-              ((<= (+ (string-length line) 1 (string-length (car words))) width)
-               (loop (cdr words) (string-append line " " (car words)) acc))
-              (else
-               (loop words "" (cons line acc))))))
+    ;; The crawl's whole height, px.
+    (define (credits-height items)
+      (let loop ((items items) (y 0))
+        (if (null? items)
+            y
+            (let ((it (car items)))
+              (loop (cdr items)
+                    (+ y (case (car it)
+                           ((heading) HEADING-H)
+                           ((line) LINE-H)
+                           (else (* GAP-H (cadr it))))))))))
 
-    (define (split-words text)
-      (let loop ((cs (string->list text)) (word '()) (acc '()))
-        (cond ((null? cs)
-               (reverse (if (null? word) acc (cons (list->string (reverse word)) acc))))
-              ((char=? (car cs) #\space)
-               (loop (cdr cs) '() (if (null? word) acc (cons (list->string (reverse word)) acc))))
-              (else (loop (cdr cs) (cons (car cs) word) acc)))))
+    (define (credits-headings items)
+      (map cadr (filter (lambda (it) (eq? (car it) 'heading)) items)))
 
-    ;; The page's lines for a draw: ((style . "TEXT") ...), style heading
-    ;; | line | gap, paragraphs wrapped at width characters. stamp: the
-    ;; build's commit for the version line at the end of the ABOUT page.
-    (define (credits-lines n width stamp)
-      (let loop ((entries (credits-page n)) (acc '()))
-        (if (null? entries)
-            (reverse (if (= n 1)
-                         (cons (cons 'line (string-append "VERSION " VERSION " (" stamp ")"))
-                               (cons (cons 'gap "") acc))
-                         acc))
-            (let ((e (car entries)))
-              (loop (cdr entries)
-                    (case (car e)
-                      ((heading) (cons (cons 'heading (cadr e)) acc))
-                      ((line) (append (reverse (map (lambda (l) (cons 'line l)) (wrap-text (cadr e) width))) acc))
-                      ((gap) (cons (cons 'gap "") acc))
-                      ((para) (append (reverse (map (lambda (l) (cons 'line l)) (wrap-text (cadr e) width))) acc))
-                      (else acc)))))))))
+    (define (credits-lines-of items)
+      (map cadr (filter (lambda (it) (eq? (car it) 'line)) items)))
+
+    ;; --- the text helpers (the rules family imports no string module) -----------
+
+    ;; the file's final newline ends its last line; it is not a blank one
+    (define (split-lines text)
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond ((= i (string-length text))
+               (reverse (if (= start i) acc (cons (substring text start i) acc))))
+              ((char=? (string-ref text i) #\newline)
+               (loop (+ i 1) (+ i 1) (cons (substring text start i) acc)))
+              (else (loop (+ i 1) start acc)))))
+
+    (define (trim-right l)
+      (let loop ((n (string-length l)))
+        (if (and (> n 0) (memv (string-ref l (- n 1)) (list #\space #\return #\tab)))
+            (loop (- n 1))
+            (substring l 0 n))))
+
+    (define (starts-with? l prefix)
+      (and (>= (string-length l) (string-length prefix))
+           (string=? (substring l 0 (string-length prefix)) prefix)))
+
+    ;; how many times word appears in l, as whole words between spaces and brackets
+    (define (count-word l word)
+      (let ((n (string-length word)))
+        (let loop ((i 0) (k 0))
+          (cond ((> (+ i n) (string-length l)) k)
+                ((and (string=? (substring l i (+ i n)) word)
+                      (or (= i 0) (memv (string-ref l (- i 1)) (list #\space #\[)))
+                      (or (= (+ i n) (string-length l)) (memv (string-ref l (+ i n)) (list #\space #\]))))
+                 (loop (+ i n) (+ k 1)))
+                (else (loop (+ i 1) k))))))))

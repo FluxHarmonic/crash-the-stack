@@ -121,7 +121,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "code", "daily", "scores", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "code", "daily", "scores", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -709,40 +709,15 @@ let barRects = null;
   }
 }
 
-// ---- 6d. hud: the bar's layouts behind the setting (ruling D33) -----------
-// ?hud=strip boots the strip layout (its boot line says so, and the meter
-// control moves to the band's top edge across the width), stored for the
-// next boot; a plain reload keeps it, so the arm sets it back to zones.
+// ---- 6d. hud: the one layout (A, zones; B and its setting left, D51) --------
 {
-  let detail = "";
-  const zones = await waitLine(/^crash: hud (zones|strip)$/, 0, 2000);
-  const meterZones = await waitLine(BAR_RE, 0, 2000);
-  if (!zones || zones.m[1] !== "zones") detail = `the first boot's layout line was ${zones ? zones.m[0] : "missing"}, not zones`;
-  else {
-    mark = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=strip` });
-    const strip = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
-    const meterStrip = await waitLine(BAR_RE, mark, 5000);
-    if (!strip || strip.m[1] !== "strip") detail = `?hud=strip booted ${strip ? strip.m[0] : "no layout line"}`;
-    else if (!meterZones || !meterStrip) detail = "no \"crash: bar meter\" line on one of the boots";
-    // the strip's meter runs from the left edge to the readout, so it
-    // starts left of the zones meter's box and higher, and is wider
-    else if (!(parseInt(meterStrip.m[2], 10) < parseInt(meterZones.m[2], 10) && parseInt(meterStrip.m[1], 10) < parseInt(meterZones.m[1], 10) && parseInt(meterStrip.m[3], 10) > parseInt(meterZones.m[3], 10))) detail = `the meter did not move to the strip: zones (${meterZones.m.slice(1, 5).join(",")}) strip (${meterStrip.m.slice(1, 5).join(",")})`;
-    // the padding (David's phone read, 2026-09-20): a pixel above and below
-    // the text, so 18 tall in zones (scale-2 text, 14) and 14 in the strip (7)
-    else if (meterZones.m[4] !== "18" || meterStrip.m[4] !== "14") detail = `the meter's height is ${meterZones.m[4]} (zones) and ${meterStrip.m[4]} (strip), not 18 and 14`;
-    // zones back whatever the checks said, so a red here does not leave
-    // the strip stored for the legs after (it did once: the bar leg then
-    // read the prompt inside the strip)
-    await sleep(800);
-    mark = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&hud=zones` });
-    const back = await waitLine(/^crash: hud (zones|strip)$/, mark, 15000);
-    if (!back || back.m[1] !== "zones") detail = detail || "?hud=zones did not set the layout back";
-    else if (!detail) pass("hud", `zones meter ${meterZones.m.slice(1, 5).join("x")}, strip meter ${meterStrip.m.slice(1, 5).join("x")}, stored and restored`);
-    await sleep(1500);
-  }
-  if (detail) fail("hud", detail);
+  const zones = await waitLine(/^crash: hud (\w+)$/, 0, 2000);
+  const meter = await waitLine(BAR_RE, 0, 2000);
+  if (!zones || zones.m[1] !== "zones") fail("hud", `the boot's layout line was ${zones ? zones.m[0] : "missing"}, not zones`);
+  else if (!meter) fail("hud", "no \"crash: bar meter\" line on the boot");
+  // the padding (David's phone read, 2026-09-20): a pixel above and below the text, 18 tall
+  else if (meter.m[4] !== "18") fail("hud", `the meter's height is ${meter.m[4]}, not 18`);
+  else pass("hud", `zones, meter ${meter.m.slice(1, 5).join("x")}`);
 }
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
@@ -1678,8 +1653,8 @@ async function downTo(order, id, at = 0) {
   if (r.error) detail = r.error;
   else {
     const want = { free: "stack cards daily-stack daily-cards code scores version back",
-                   settings: "draw scoring hud field music sfx volume scanlines veil back",
-                   credits: "back", scores: "back", code: "back" };
+                   settings: "music sfx volume scanlines veil back",
+                   credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
     // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; SCORES and CODE from FREE PLAY
     const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null], ["free-play", "free", "scores"], ["free-play", "free", "code"]];
@@ -1715,7 +1690,7 @@ async function downTo(order, id, at = 0) {
           await tap(r.top.rows[id].x, r.top.rows[id].y);
         const s = await menuOn(screen, m0);
         if (!s) { detail = `a tap on ${id} did not open the ${screen} screen`; break; }
-        let backRow = s.rows.back;
+        let backRow = s.rows.back || { x: 320, y: 200 };   // the crawl: any tap leaves
         if (sub) {
           m0 = consoleLines.length;
           await tap(s.rows[sub].x, s.rows[sub].y);
@@ -1743,92 +1718,265 @@ async function downTo(order, id, at = 0) {
   else pass("screens", `top continue jack-in free-play settings credits; ${seen.join(", ")}; Escape continues`);
 }
 
-// settings: PULL and SCORING stepped on the SETTINGS screen, stored, and
-// read back the same after a reload (gate leg 4, the web half); the deal
-// after honours them (its draw and scoring lines); then the defaults back.
+// settings (D51): the main menu's SETTINGS is the general five; DEFRAG's
+// PULL and SCORING live in the table's own overlay (GAME SETTINGS) and a
+// step there is stored and read back the same after a reload (gate leg 4,
+// the web half); the deal after honours them; then the defaults back.
 {
   let detail = "";
   let r = await pauseMenu();
   if (r.error) detail = r.error;
-  let s = null;
   if (!detail) {
     let m0 = consoleLines.length;
     await downTo(r.top.order, "settings", topAt); topAt = r.top.order.indexOf("settings");
     await press("Enter");
-    s = await menuOn("settings", m0);
+    const s = await menuOn("settings", m0);
     if (!s) detail = "SETTINGS did not open";
-    else if (s.rows.draw.value !== "1" || s.rows.scoring.value !== "BOUNTY" || s.rows.scanlines.value !== "OFF" || s.rows.veil.value !== "OFF" || s.rows.music.value !== "ON" || s.rows.sfx.value !== "ON" || s.rows.field.value !== "REACTION") detail = `the fresh defaults read ${s.order.map((id) => `${id}=${s.rows[id].value}`).join(" ")}`;
-  }
-  if (!detail) {
-    // Right on PULL (the highlight starts on the first row), then Down and Enter on SCORING
-    let m0 = consoleLines.length;
-    await press("ArrowRight");
-    const draw = await waitLine(/^crash: setting draw (\d)$/, m0, 2000);
-    m0 = consoleLines.length;
-    await press("ArrowDown"); await press("Enter");
-    const scoring = await waitLine(/^crash: setting scoring (\w+)$/, m0, 2000);
-    const said = await menuOn("settings", m0);
-    if (!draw || draw.m[1] !== "3") detail = `Right on PULL said ${draw ? draw.m[0] : "nothing"}`;
-    else if (!scoring || scoring.m[1] !== "standard") detail = `Enter on SCORING said ${scoring ? scoring.m[0] : "nothing"}`;
-    else if (!said || said.rows.draw.value !== "3" || said.rows.scoring.value !== "AUDIT") detail = `the screen re-said ${said ? `draw=${said.rows.draw.value} scoring=${said.rows.scoring.value}` : "nothing"} after the steps`;
-  }
-  if (!detail) {
-    // a reload: the same values on the screen, and the stored keys hold them
-    await sleep(500);
-    const stored = await evalJS(`[localStorage.getItem("draw"), localStorage.getItem("scoring")]`);
-    r = await pauseMenu();
-    if (r.error) detail = r.error;
-    else {
-      const m0 = consoleLines.length;
-      await downTo(r.top.order, "settings", topAt); topAt = r.top.order.indexOf("settings");
-      await press("Enter");
-      const again = await menuOn("settings", m0);
-      if (!again) detail = "SETTINGS did not open after the reload";
-      else if (again.rows.draw.value !== "3" || again.rows.scoring.value !== "AUDIT") detail = `after the reload the screen reads draw=${again.rows.draw.value} scoring=${again.rows.scoring.value} (stored ${JSON.stringify(stored)})`;
-      else if (stored[0] !== "3" || stored[1] !== "standard") detail = `the store holds draw=${stored[0]} scoring=${stored[1]}`;
-    }
-  }
-  if (!detail) {
-    // a DEFRAG deal under them: FREE PLAY -> DEFRAG draws three with AUDIT scoring
-    let m0 = consoleLines.length;
-    await press("Escape");
-    if (!(await menuOn("top", m0))) detail = "Escape did not leave SETTINGS";
+    else if (s.order.join(" ") !== "music sfx volume scanlines veil back") detail = `the main menu's SETTINGS rows are ${s.order.join(" ")}, not the general five`;
+    else if (s.rows.music.value !== "ON" || s.rows.sfx.value !== "ON" || s.rows.volume.value !== "10" || s.rows.scanlines.value !== "ON" || s.rows.veil.value !== "ON") detail = `the fresh defaults read ${s.order.map((id) => `${id}=${s.rows[id].value}`).join(" ")}`;
     else {
       m0 = consoleLines.length;
-      await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
-      await press("Enter");
-      const free = await menuOn("free", m0);
-      if (!free) detail = "FREE PLAY did not open";
+      await press("Escape");
+      if (!(await menuOn("top", m0))) detail = "Escape did not leave SETTINGS";
+    }
+  }
+  // DEFRAG's overlay: GAME SETTINGS with PULL and SCORING
+  const overlayGame = async () => {
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const p = await menuOn("pause", m0);
+    if (!p) return { error: "Escape on the deal did not open the table's overlay" };
+    if (p.order.join(" ") !== "resume game-settings settings share back-to-menu") return { error: `DEFRAG's overlay rows are ${p.order.join(" ")}` };
+    m0 = consoleLines.length;
+    await downTo(p.order, "game-settings");
+    await press("Enter");
+    const g = await menuOn("pause-game", m0);
+    if (!g) return { error: "GAME SETTINGS did not open from the overlay" };
+    if (g.order.join(" ") !== "draw scoring back") return { error: `GAME SETTINGS rows are ${g.order.join(" ")}` };
+    return { g };
+  };
+  const dealCards = async () => {
+    const r = await pauseMenu();
+    if (r.error) return { error: r.error };
+    let m0 = consoleLines.length;
+    await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+    await press("Enter");
+    const free = await menuOn("free", m0);
+    if (!free) return { error: "FREE PLAY did not open" };
+    m0 = consoleLines.length;
+    await downTo(free.order, "cards");
+    await press("Enter");
+    const dealt = await waitLine(/^crash: cards seed (\d+) moves \d+ draw (\d) scoring (\w+)$/, m0, 5000);
+    if (!dealt) return { error: "FREE PLAY -> DEFRAG dealt no seed line" };
+    await sleep(300);
+    return { dealt };
+  };
+  if (!detail) {
+    const d = await dealCards();
+    if (d.error) detail = d.error;
+    else if (d.dealt.m[2] !== "1" || d.dealt.m[3] !== "vegas") detail = `the fresh deal is draw ${d.dealt.m[2]} scoring ${d.dealt.m[3]}`;
+    else {
+      const o = await overlayGame();
+      if (o.error) detail = o.error;
+      else if (o.g.rows.draw.value !== "1" || o.g.rows.scoring.value !== "BOUNTY") detail = `GAME SETTINGS reads draw=${o.g.rows.draw.value} scoring=${o.g.rows.scoring.value} on a fresh store`;
       else {
+        let m0 = consoleLines.length;
+        await press("ArrowRight");
+        const draw = await waitLine(/^crash: setting draw (\d)$/, m0, 2000);
         m0 = consoleLines.length;
-        await downTo(free.order, "cards");
-        await press("Enter");
-        const spec = await waitLine(/^crash: spec cards hacker (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-        const dealt = spec && await waitLine(/^crash: cards seed (\d+) moves \d+ draw (\d) scoring (\w+)$/, m0, 5000);
-        if (!spec) detail = "FREE PLAY -> DEFRAG dealt no spec line";
-        else if (!dealt) detail = "the deal said no seed line";
-        else if (dealt.m[2] !== "3" || dealt.m[3] !== "standard") detail = `the deal under the settings is draw ${dealt.m[2]} scoring ${dealt.m[3]}, not 3 standard`;
+        await press("ArrowDown"); await press("Enter");
+        const scoring = await waitLine(/^crash: setting scoring (\w+)$/, m0, 2000);
+        const said = await menuOn("pause-game", m0);
+        if (!draw || draw.m[1] !== "3") detail = `Right on PULL said ${draw ? draw.m[0] : "nothing"}`;
+        else if (!scoring || scoring.m[1] !== "standard") detail = `Enter on SCORING said ${scoring ? scoring.m[0] : "nothing"}`;
+        else if (!said || said.rows.draw.value !== "3" || said.rows.scoring.value !== "AUDIT") detail = `the screen re-said ${said ? `draw=${said.rows.draw.value} scoring=${said.rows.scoring.value}` : "nothing"} after the steps`;
       }
     }
   }
-  // the defaults back through the screen (a red above still restores them)
-  {
-    const r2 = await pauseMenu();
-    if (!r2.error) {
-      let m0 = consoleLines.length;
-      await downTo(r2.top.order, "settings", topAt); topAt = r2.top.order.indexOf("settings");
-      await press("Enter");
-      const s2 = await menuOn("settings", m0);
-      if (s2) {
-        if (s2.rows.draw.value === "3") { m0 = consoleLines.length; await press("ArrowRight"); await waitLine(/^crash: setting draw 1$/, m0, 2000); }
+  if (!detail) {
+    // a reload: the stored keys hold them, the overlay reads them, the next deal honours them
+    await sleep(500);
+    const stored = await evalJS(`[localStorage.getItem("draw"), localStorage.getItem("scoring")]`);
+    const d = await dealCards();
+    if (d.error) detail = d.error;
+    else if (d.dealt.m[2] !== "3" || d.dealt.m[3] !== "standard") detail = `after the reload the deal is draw ${d.dealt.m[2]} scoring ${d.dealt.m[3]} (stored ${JSON.stringify(stored)})`;
+    else {
+      const o = await overlayGame();
+      if (o.error) detail = o.error;
+      else if (o.g.rows.draw.value !== "3" || o.g.rows.scoring.value !== "AUDIT") detail = `after the reload GAME SETTINGS reads draw=${o.g.rows.draw.value} scoring=${o.g.rows.scoring.value}`;
+      else if (stored[0] !== "3" || stored[1] !== "standard") detail = `the store holds draw=${stored[0]} scoring=${stored[1]}`;
+      else {
+        // the defaults back through the same rows
+        let m0 = consoleLines.length;
+        await press("ArrowRight");
+        await waitLine(/^crash: setting draw 1$/, m0, 2000);
         await press("ArrowDown");
-        if (s2.rows.scoring.value === "AUDIT") { m0 = consoleLines.length; await press("ArrowRight"); await waitLine(/^crash: setting scoring vegas$/, m0, 2000); }
+        m0 = consoleLines.length;
+        await press("ArrowRight");
+        await waitLine(/^crash: setting scoring vegas$/, m0, 2000);
         await sleep(300);
       }
     }
   }
   if (detail) fail("settings", detail);
-  else pass("settings", "PULL 3 and AUDIT stepped by Right and Enter, re-said, stored (draw=3 scoring=standard), the same after a reload; the DEFRAG deal after draws 3; defaults restored");
+  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil (defaults on/on/10/on/on); DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored");
+}
+
+// pause (D51): Escape on the board opens the table's own overlay over the
+// paused table: its rows by context (free play: RESUME, SETTINGS, CODE,
+// BACK TO MENU; the stack has no GAME SETTINGS), the table's clock holds
+// while it is up (the pause lines carry the ticks), RESUME (Escape again)
+// returns to the same board and the clock runs on, the bar's MENU button
+// opens it too, and BACK TO MENU lands on the main menu with CONTINUE.
+{
+  let detail = "";
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1` });
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) detail = "no boot line";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  let on = null, off = null, on2 = null;
+  if (!detail) {
+    await sleep(1500);   // the clock runs a while first
+    let m0 = consoleLines.length;
+    await press("Escape");
+    on = await waitLine(/^crash: pause on (\d+)$/, m0, 3000);
+    const p = on && await menuOn("pause", m0);
+    if (!on) detail = "Escape on the board said no \"crash: pause on\"";
+    else if (!p) detail = "no overlay rows were said";
+    else if (p.order.join(" ") !== "resume settings share back-to-menu") detail = `the stack's overlay rows are ${p.order.join(" ")}`;
+    else {
+      await sleep(2000);
+      m0 = consoleLines.length;
+      await press("Escape");
+      off = await waitLine(/^crash: pause off (\d+)$/, m0, 3000);
+      if (!off) detail = "Escape on the overlay did not resume (no \"crash: pause off\")";
+      else if (off.m[1] !== on.m[1]) detail = `the table's clock moved under the overlay: ${on.m[1]} -> ${off.m[1]} ticks over 2 s`;
+      else if (consoleLines.slice(on.index, off.index).some((l) => BOOT_ANY.test(l))) detail = "the board was re-dealt across the pause";
+    }
+  }
+  if (!detail) {
+    // the clock runs on after RESUME; the bar's MENU button opens the overlay too
+    await sleep(1500);
+    const btn = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    const m0 = consoleLines.length;
+    if (!btn) detail = "no \"crash: control menu\" line";
+    else {
+      await tap(btn.m[1], btn.m[2]);
+      on2 = await waitLine(/^crash: pause on (\d+)$/, m0, 3000);
+      if (!on2) detail = "the bar's MENU button did not open the overlay";
+      else if (!(parseInt(on2.m[1], 10) > parseInt(off.m[1], 10))) detail = `the clock did not run on after RESUME: ${off.m[1]} then ${on2.m[1]}`;
+    }
+  }
+  if (!detail) {
+    // BACK TO MENU: the main menu with CONTINUE; CONTINUE returns to the same board
+    const p = await menuOn("pause", on2.index, 3000);
+    let m0 = consoleLines.length;
+    if (!p) detail = "no overlay rows after the button";
+    else {
+      await tap(p.rows["back-to-menu"].x, p.rows["back-to-menu"].y);
+      const chose = await waitLine(/^crash: menu chose back-to-menu$/, m0, 3000);
+      const top = chose && await menuOn("top", m0);
+      if (!chose) detail = "a tap on BACK TO MENU chose nothing";
+      else if (!top || top.order[0] !== "continue") detail = `BACK TO MENU did not land on the main menu with CONTINUE (${top ? top.order.join(" ") : "no top line"})`;
+      else {
+        m0 = consoleLines.length;
+        await press("Enter");
+        const back = await waitLine(BOOT_ANY, m0, 5000);
+        if (!back) detail = "CONTINUE did not boot the board back";
+        else if (back.m[0].split(" ")[2] !== booted.m[0].split(" ")[2]) detail = `CONTINUE booted ${back.m[0]}, not the board's seed`;
+      }
+    }
+  }
+  if (detail) fail("pause", detail);
+  else pass("pause", `Escape opened the stack's overlay (resume settings share back-to-menu); the clock held at ${on.m[1]} ticks over 2 s and ran on after RESUME (${on2.m[1]} at the button's second open); BACK TO MENU landed on CONTINUE, which booted the same board`);
+}
+
+// run (D51, David 2026-09-21): a JACK IN layer's overlay carries DISCONNECT,
+// which lands on the main menu with CONTINUE resuming the layer; a cleared
+// layer (the demo door) shows the ledger with NEXT LAYER once the cascade
+// is over, and pulls the next layer by itself after the hold.
+{
+  let detail = "";
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1&demo=cleared` });
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) detail = "no boot line";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  let layer = null;
+  if (!detail) {
+    // to the main menu, JACK IN: the run's first layer (the demo arms it)
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const p = await menuOn("pause", m0);
+    if (!p) detail = "no overlay on the board";
+    else {
+      m0 = consoleLines.length;
+      await tap(p.rows["back-to-menu"].x, p.rows["back-to-menu"].y);
+      const top = await menuOn("top", m0);
+      if (!top) detail = "BACK TO MENU did not open the main menu";
+      else {
+        m0 = consoleLines.length;
+        await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
+        const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+        layer = start && await waitLine(/^crash: spec stack hacker (\d+) /, m0, 5000);
+        const demo = layer && await waitLine(/^crash: demo cleared stack$/, m0, 5000);
+        if (!start) detail = "JACK IN started no run";
+        else if (!layer) detail = "the run dealt no stack layer";
+        else if (!demo) detail = "the demo door did not arm the layer";
+      }
+    }
+  }
+  if (!detail) {
+    // DISCONNECT: the main menu with CONTINUE; CONTINUE resumes the layer
+    await sleep(500);
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const p = await menuOn("pause", m0);
+    if (!p) detail = "no overlay on the run's layer";
+    else if (p.order.join(" ") !== "resume settings share disconnect") detail = `the run layer's overlay rows are ${p.order.join(" ")}`;
+    else {
+      m0 = consoleLines.length;
+      await downTo(p.order, "disconnect");
+      await press("Enter");
+      const chose = await waitLine(/^crash: menu chose disconnect$/, m0, 3000);
+      const top = chose && await menuOn("top", m0);
+      if (!chose) detail = "Enter on DISCONNECT chose nothing";
+      else if (!top || top.order[0] !== "continue") detail = "DISCONNECT did not land on the main menu with CONTINUE";
+      else {
+        m0 = consoleLines.length;
+        await press("Enter");
+        const back = await waitLine(BOOT_ANY, m0, 5000);
+        if (!back) detail = "CONTINUE did not resume the layer";
+        else if (back.m[0].split(" ")[2] !== layer.m[1]) detail = `CONTINUE booted seed ${back.m[0].split(" ")[2]}, not the layer's ${layer.m[1]}`;
+      }
+    }
+  }
+  let done = null, next = null;
+  if (!detail) {
+    // the clear (the demo's one match), the cascade, the ledger, the pull
+    const b = consoleLines.slice().reverse().find((l) => BOOT_ANY.test(l));
+    const m = b && b.match(/pair (\d+)@\((\d+),(\d+)\) (\d+)@\((\d+),(\d+)\)/);
+    const m0 = consoleLines.length;
+    if (!m) detail = "the layer's boot line names no pair";
+    else {
+      await tap(m[2], m[3]); await sleep(300); await tap(m[5], m[6]);
+      const removed = await waitLine(/^crash: removed /, m0, 3000);
+      done = removed && await waitLine(/^crash: run layer-done stack$/, m0, 20000);
+      const rows = done && await menuOn("run-layer", done.index, 3000);
+      if (!removed) detail = "the demo's pair did not match";
+      else if (!done) detail = "no \"crash: run layer-done\" after the clear's cascade";
+      else if (!rows || rows.order.join(" ") !== "next-layer") detail = `the ledger screen's rows are ${rows ? rows.order.join(" ") : "missing"}`;
+      else {
+        next = await waitLine(/^crash: run layer (\d+)$/, done.index, 8000);
+        if (!next) detail = "the next layer was not pulled by itself within 8 s";
+        else if (next.m[1] !== "2") detail = `the pull went to layer ${next.m[1]}, not 2`;
+        else if (!(await waitLine(/^crash: spec cards hacker /, done.index, 5000))) detail = "layer 2 (DEFRAG) was not dealt";
+      }
+    }
+  }
+  if (detail) fail("run", detail);
+  else pass("run", `JACK IN layer ${layer.m[1]}: DISCONNECT landed on CONTINUE, which resumed it; the demo clear's cascade ended in the ledger (next-layer) and layer 2 was pulled by itself`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says

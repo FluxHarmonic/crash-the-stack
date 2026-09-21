@@ -24,7 +24,7 @@
   (test "seven rows in the ruled order, each with a default among its values"
     (assert-equal '(draw scoring music sfx volume scanlines veil) SETTING-IDS)
     (for-each (lambda (st) (assert-true (setting-value? st (setting-default st)))) SETTINGS))
-  (test "the defaults: pull 1, BOUNTY, music and sfx on, volume 10, scanlines on (David's phone read, 2026-09-21), the veil off (on|off symbols, never booleans)"
+  (test "the defaults: pull 1, BOUNTY, music and sfx on, volume 10, scanlines and the veil on (David's phone read, 2026-09-21) (on|off symbols, never booleans)"
     (let ((d (settings-defaults)))
       (assert-equal 1 (settings-value d 'draw))
       (assert-equal 'vegas (settings-value d 'scoring))
@@ -32,7 +32,7 @@
       (assert-equal 'on (settings-value d 'sfx))
       (assert-equal VOLUME-MAX (settings-value d 'volume))
       (assert-equal 'on (settings-value d 'scanlines))
-      (assert-equal 'off (settings-value d 'veil))))
+      (assert-equal 'on (settings-value d 'veil))))
   (test "the value labels"
     (assert-equal "BOUNTY" (setting-value-label 'scoring 'vegas))
     (assert-equal "AUDIT" (setting-value-label 'scoring 'standard))
@@ -104,7 +104,42 @@
   (test "the detector: a store that loses a write reads the default, not the stepped value"
     (let ((s (settings-step (settings-defaults) 'veil 1)))
       (store-remove! "veil")
+      (assert-equal 'off (settings-value s 'veil))
+      (assert-equal 'on (settings-value (settings-load) 'veil)))))
+
+;; The one-time reset (David, 2026-09-21): a store from before the
+;; settings' version key (P4a's) holds scanlines off as its default was;
+;; the first load at the new version clears the setting keys, the
+;; retired hud and field keys too, writes the version, and reads the new
+;; defaults; a store at the version keeps a stored off. The other keys
+;; (the scores, the run, the board) are not touched.
+(test-group "settings: the schema version and the one-time reset"
+  (test "an old store (no version) with scanlines off and a hud key reads the new defaults; the version is written; the scores key stays"
+    (process-run "rm" "-rf" ROOT)
+    (store-write-datum! "scanlines" 'off)
+    (store-write-datum! "veil" 'off)
+    (store-write-datum! "hud" 'strip)
+    (store-write-datum! "field" 'life)
+    (store-write-datum! "draw" 3)
+    (store-write-datum! "scores" '(crash-scores 1 (best stack hacker 1 2 3)))
+    (assert-false (store-read-datum SETTINGS-VERSION-KEY))
+    (let ((s (settings-load)))
+      (assert-equal 'on (settings-value s 'scanlines))
       (assert-equal 'on (settings-value s 'veil))
-      (assert-equal 'off (settings-value (settings-load) 'veil)))))
+      (assert-equal 1 (settings-value s 'draw)))
+    (assert-equal SETTINGS-VERSION (store-read-datum SETTINGS-VERSION-KEY))
+    (assert-false (store-read-datum "hud"))
+    (assert-false (store-read-datum "field"))
+    (assert-false (store-read-datum "scanlines"))
+    (assert-equal '(crash-scores 1 (best stack hacker 1 2 3)) (store-read-datum "scores")))
+  (test "a store at the current version with scanlines off keeps off"
+    (store-write-datum! "scanlines" 'off)
+    (assert-equal 'off (settings-value (settings-load) 'scanlines))
+    (assert-equal SETTINGS-VERSION (store-read-datum SETTINGS-VERSION-KEY)))
+  (test "a store at an older version number is reset the same way"
+    (store-write-datum! SETTINGS-VERSION-KEY (- SETTINGS-VERSION 1))
+    (store-write-datum! "scanlines" 'off)
+    (assert-equal 'on (settings-value (settings-load) 'scanlines))
+    (assert-equal SETTINGS-VERSION (store-read-datum SETTINGS-VERSION-KEY))))
 
 (process-run "rm" "-rf" ROOT)

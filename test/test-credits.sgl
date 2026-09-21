@@ -1,79 +1,83 @@
-;;; Gate leg 5 (P4): the AI content disclosure in the credits matches the
-;;; approved text byte for byte (the fixture is the design note's adapted
-;;; in-game text; P4b holds the site and the repo to the same file), the
-;;; notices are all there, every character of every page has a glyph in
-;;; the 5x7 font, and the wrap never exceeds its width.
+;;; The credits crawl (D44 as amended 2026-09-21): assets/credits.txt
+;;; parses into headings, lines and gaps in the file's order; the eight
+;;; sections are there with the notices (GPL-3.0-or-later, CC-BY-4.0,
+;;; the reserved marks, the copyright line, the libraries); every heading
+;;; is in the block alphabet's characters and every line's character has
+;;; a glyph in the 5x7; the layout places the rows in order and the
+;;; height is their sum; the gaps count their words.
 
 (import (sigil test)
         (sigil fs)
-        (sigil string)
         (crash credits)
-        (crash font))
+        (crash font)
+        (crash title alphabet))
 
-(define FIXTURE "test/fixtures/disclosure.txt")
-
-;; does text contain part?
-(define (string-contains text part)
-  (let ((n (string-length text)) (m (string-length part)))
-    (let loop ((i 0))
-      (cond ((> (+ i m) n) #f)
-            ((string=? (substring text i (+ i m)) part) #t)
-            (else (loop (+ i 1)))))))
+(define TEXT (read-file-string CREDITS-PATH))
+(define ITEMS (credits-parse TEXT))
 
 (define (has-glyph? c)
   (or (char=? c #\space) (and (glyph-rows-of c) #t)))
 
-(define (page-text n)
-  (apply string-append (map (lambda (e) (if (pair? (cdr e)) (cadr e) "")) (credits-page n))))
+(define (block-char? c)
+  (or (char=? c #\space)
+      (let loop ((i 0))
+        (cond ((= i (vector-length ALPHABET)) #f)
+              ((string=? (car (vector-ref ALPHABET i)) (string c)) #t)
+              (else (loop (+ i 1)))))))
 
-(test-group "credits: the disclosure"
-  (test "DISCLOSURE is the fixture byte for byte"
-    (let ((fixture (read-file-string FIXTURE)))
-      (assert-equal (string-length fixture) (string-length DISCLOSURE))
-      (assert-true (string=? fixture DISCLOSURE))))
-  (test "the four beats are in it: the disclosure, the provenance, the review, the out"
-    (assert-true (string-contains DISCLOSURE "AI agents write most of the code"))
-    (assert-true (string-contains DISCLOSURE "I review all of it"))
-    (assert-true (string-contains DISCLOSURE "the opinions are mine"))
-    (assert-true (string-contains DISCLOSURE "I understand!")))
-  (test "the ABOUT page carries it whole, and the version line ends the page"
-    (assert-true (string-contains (page-text 1) DISCLOSURE))
-    (let ((lines (credits-lines 1 50 "abc123")))
-      (assert-equal (cons 'line "VERSION 0.1.0 (abc123)") (car (reverse lines)))
-      (assert-true (string-contains (apply string-append (map (lambda (l) (string-append (cdr l) " ")) lines)) "I understand! The source")))))
+(define (has-line? text)
+  (and (member text (credits-lines-of ITEMS)) #t))
 
-(test-group "credits: the notices (D44)"
-  (test "GPL-3.0-or-later, CC-BY-4.0, the reserved marks, the copyright line, the libraries"
-    (let ((text (page-text 0)))
-      (assert-true (string-contains text "GPL-3.0-or-later"))
-      (assert-true (string-contains text "CC-BY-4.0"))
-      (assert-true (string-contains text "Reserved"))
-      (assert-true (string-contains text "the name Crash The Stack, the logo, the title art and the Flux Harmonic mark"))
-      (assert-true (string-contains text "(C) 2026 DAVID WILSON - FLUX HARMONIC"))
-      (for-each (lambda (lib) (assert-true (string-contains text lib)))
-                '("SIGIL" "SOKOL" "GLFW" "MINIAUDIO" "STB"))))
-  (test "every character of both pages has a glyph (the font gained ' , ; ! for this screen)"
-    (for-each (lambda (n)
-                (for-each (lambda (c) (assert-true (has-glyph? c))) (string->list (page-text n))))
-              '(0 1))))
+(test-group "credits: the file"
+  (test "the eight sections, in order"
+    (assert-equal '("DESIGN AND DIRECTION" "CODE" "ART DIRECTION" "MUSIC AND SOUND" "SPECIAL THANKS" "MADE WITH" "LICENSES" "FIND IT")
+                  (credits-headings ITEMS)))
+  (test "the notices: GPL-3.0-or-later, CC-BY-4.0, the reserved marks, the copyright, the libraries"
+    (assert-true (has-line? "CODE: GPL-3.0-OR-LATER"))
+    (assert-true (has-line? "ART, AUDIO AND CONTENT: CC-BY-4.0"))
+    (assert-true (has-line? "RESERVED: THE NAME CRASH THE STACK,"))
+    (assert-true (has-line? "AND THE FLUX HARMONIC MARK"))
+    (assert-true (has-line? "(C) 2026 DAVID WILSON"))
+    (assert-true (has-line? "THIRD-PARTY NOTICES IN THE SOURCE"))
+    (for-each (lambda (lib) (assert-true (has-line? lib)))
+              '("SIGIL" "SOKOL" "GLFW" "MINIAUDIO" "STB" "MOTIF" "SOUNDPIPE")))
+  (test "the disclosure is the CODE and ART DIRECTION sections: who wrote, who reviewed, what was generated"
+    (assert-true (has-line? "WRITTEN BY CLAUDE OPUS AND FABLE"))
+    (assert-true (has-line? "UNDER DAVID'S DIRECTION"))
+    (assert-true (has-line? "REVIEWED, PLAYED AND CURATED"))
+    (assert-true (has-line? "GENERATED BY GPT"))
+    (assert-true (has-line? "SHAPED BY CLAUDE")))
+  (test "the version line is the module's VERSION"
+    (assert-true (has-line? (string-append "VERSION " VERSION))))
+  (test "every heading is set in the block alphabet's characters; every line's character has a 5x7 glyph (# was added for #SYSTEMCRAFTERS)"
+    (for-each (lambda (h) (for-each (lambda (c) (assert-true (block-char? c))) (string->list h)))
+              (credits-headings ITEMS))
+    (for-each (lambda (l) (for-each (lambda (c) (assert-true (has-glyph? c))) (string->list l)))
+              (credits-lines-of ITEMS))
+    (assert-true (has-line? "#SYSTEMCRAFTERS ON IRC")))
+  (test "the file starts with its two-gap marker and ends with its three"
+    (assert-equal '(gap 2) (car ITEMS))
+    (assert-true (member '(gap 3) ITEMS))))
 
-(test-group "credits: the wrap"
-  (test "no wrapped line exceeds the width, words are kept whole, nothing is lost"
-    (for-each (lambda (width)
-                (let ((lines (wrap-text DISCLOSURE width)))
-                  (for-each (lambda (l) (assert-true (<= (string-length l) width))) lines)
-                  (assert-true (string=? DISCLOSURE (join-lines lines)))))
-              '(30 50 100)))
-  (test "a word longer than the width stands alone"
-    (assert-equal '("abcdefghij" "k") (wrap-text "abcdefghij k" 5)))
-  (test "both pages fit the screen at 50 characters: at most 19 rows each (the screen has 20 at scale 2)"
-    (for-each (lambda (n) (assert-true (<= (length (credits-lines n 50 "0123456789ab")) 19)))
-              '(0 1)))
-  (test "the detector: a width of 20 needs more rows than 50"
-    (assert-true (> (length (credits-lines 1 20 "x")) (length (credits-lines 1 50 "x"))))))
-
-(define (join-lines lines)
-  (let loop ((ls lines) (acc ""))
-    (cond ((null? ls) acc)
-          ((string=? acc "") (loop (cdr ls) (car ls)))
-          (else (loop (cdr ls) (string-append acc " " (car ls)))))))
+(test-group "credits: the parse and the layout"
+  (test "headings, lines, gap markers, and a blank line is a blank row (runs kept)"
+    (assert-equal '((gap 2) (gap 1) (heading "T") (line "A LINE") (gap 1) (gap 1) (gap 1) (line "B") (gap 3))
+                  (credits-parse "[gap gap]\n\n## T\nA LINE\n[gap]\n\n\nB  \n[gap gap gap]")))
+  (test "the layout places the rows in order at their heights; the height is the sum"
+    (let* ((items (credits-parse "## T\nA\n[gap gap]\nB\n"))
+           (rows (credits-layout items)))
+      (assert-equal (list (list 'heading "T" 0)
+                          (list 'line "A" HEADING-H)
+                          (list 'line "B" (+ HEADING-H LINE-H (* 2 GAP-H))))
+                    rows)
+      (assert-equal (+ HEADING-H LINE-H (* 2 GAP-H) LINE-H) (credits-height items))))
+  (test "the real file's rows climb, and its height is over a screen (it scrolls)"
+    (let loop ((rows (credits-layout ITEMS)) (last -1))
+      (unless (null? rows)
+        (assert-true (> (caddr (car rows)) last))
+        (loop (cdr rows) (caddr (car rows)))))
+    (assert-true (> (credits-height ITEMS) 400)))
+  (test "the pace: 20 px a second forward, faster with Down, backwards with Up"
+    (assert-equal 20.0 CRAWL-SPEED)
+    (assert-true (> CRAWL-FAST CRAWL-SPEED))
+    (assert-true (< CRAWL-BACK 0.0))))

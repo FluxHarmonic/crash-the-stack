@@ -12,7 +12,7 @@
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;                   [--mute]            no sound (the context still opens)
-;;;                   [--bg life|reaction|life-cpu|reaction-cpu|off]
+;;;                   [--bg reaction|reaction-cpu|off]
 ;;;                                       the living background's rule (reaction on the GPU by default;
 ;;;                                       -cpu the fallback field, the oracle)
 ;;;                   [--copper roll|always|off|bitmap]  the copper raster over the field (roll: cleared only)
@@ -92,6 +92,7 @@
           (crash gpu post)
           (crash music)
           (crash native)
+          (only (crash credits) CREDITS-PATH)
           (crash trace))
 
   (export native-main load-editor)
@@ -423,16 +424,39 @@
                       (hit-card-control card-geom (deal-hud (stage-deal a)) (car click) (cdr click))
                       (hit-control *geom* (session-hud (stage-session a)) (car click) (cdr click)))))))
 
-    (define (overlay-step a f card-geom)
-      (let* ((r (if (or (menu-frame? f) (overlay-button-tap? a f card-geom))
-                    (cons (stage-overlay a) 'resume)
-                    (menu-step (stage-overlay a) f VW VH)))
-             (a (stage a overlay: (car r)))
-             (choice (cdr r)))
+    ;; A run's layer cleared and its cascade over (David, 2026-09-21): the
+    ;; run's ledger over the table with NEXT LAYER, pulled by Enter, a tap,
+    ;; Escape, or by itself after LAYER-HOLD-MS; the last layer goes to
+    ;; RUN COMPLETE on the main menu, which closes to the top the same way.
+    (define LAYER-HOLD-MS 4000)
+    (define *layer-cleared* #f)
+    (define *overlay-at* 0)
+    (define *run-done-at* 0)
+    (define (layer-done a table lay model)
+      (set! *layer-cleared* #f)
+      (let ((r (run-in-force)))
+        (cond ((not r) a)
+              ((run-done? r) (run-request a 'next lay model))
+              (else
+               (display "crash: run layer-done ") (display table) (newline)
+               (set! *overlay-at* (current-milliseconds))
+               (stage a overlay: (menu-new-layer-done table r (run-code r)))))))
+
+    (define (overlay-step a f dt card-geom lay model)
+      (let* ((layer? (eq? (menu-screen (stage-overlay a)) 'run-layer))
+             (r (cond ((and layer? (> (- (current-milliseconds) *overlay-at*) LAYER-HOLD-MS))
+                       (cons (stage-overlay a) 'next-layer))
+                      ((and (not layer?) (or (menu-frame? f) (overlay-button-tap? a f card-geom)))
+                       (cons (stage-overlay a) 'resume))
+                      (else (menu-step (stage-overlay a) f VW VH (* 1000.0 dt)))))
+             (choice (cdr r))
+             (a (begin (play-cues! (menu-cues (stage-overlay a) (car r) choice))
+                       (stage a overlay: (car r)))))
         (cond ((not choice) a)
               ((pair? choice)
                (if (eq? (car choice) 'set) (apply-setting a (cadr choice) (cddr choice)) a))
               ((eq? choice 'resume) (close-overlay a))
+              ((eq? choice 'next-layer) (run-request (stage a overlay: #f) 'next lay model))
               ((memq choice (list 'disconnect 'back-to-menu)) (open-menu (close-overlay a)))
               (else a))))
 
@@ -491,6 +515,7 @@
                (display "crash: run done ") (display (run-seed r)) (newline)
                (let ((a (open-menu a)))
                  (set-run! #f)
+                 (set! *run-done-at* (current-milliseconds))
                  (stage a menu: (menu-open-run-done (stage-menu a) (cons r (run-code r))))))
               ((eq? request 'retry)
                (let ((r (run-severed r)))
@@ -706,13 +731,16 @@
                                (not (memq 'continue (menu-entries (stage-menu a))))))
                    (a (case (stage-screen a)
                         ((menu)
-                         (let ((r (menu-step (stage-menu a) f VW VH)))
-                           (play-cues! (menu-cues (stage-menu a) (car r)))   ; the title reveal's cues (P3d)
+                         (let ((r (if (and (eq? (menu-screen (stage-menu a)) 'run-done)
+                                           (> (- (current-milliseconds) *run-done-at*) LAYER-HOLD-MS))
+                                      (menu-step (stage-menu a) (make-input-frame (list 'escape) '() #f) VW VH (* 1000.0 dt))
+                                      (menu-step (stage-menu a) f VW VH (* 1000.0 dt)))))
+                           (play-cues! (menu-cues (stage-menu a) (car r) (cdr r)))   ; the title reveal's cues (P3d) and the menu's own
                            (if (cdr r)
                                (open (stage a menu: (car r)) (cdr r))
                                (stage a menu: (car r)))))
                         ((stack)
-                         (cond ((stage-overlay a) (overlay-step a f card-geom))
+                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((menu-frame? f) (open-menu a))
                                ((jack-out? (stage-session a) f VW VH (geometry-hud-h *geom*))
                                 (open-menu a))
@@ -728,9 +756,14 @@
                                           ((menu) (open-overlay a))
                                           ((next retry) (run-request a request lay model))
                                           (else a)))
-                                      a)))))
+                                      (let ((t (take-layer-cleared!)))
+                                        (when t (set! *layer-cleared* t))
+                                        ;; a run's layer cleared: the ledger once the cascade is over
+                                        (if (and (eq? *layer-cleared* 'stack) (not (fx-cleared (stage-fx a))))
+                                            (layer-done a 'stack lay model)
+                                            a)))))))
                         (else
-                         (cond ((stage-overlay a) (overlay-step a f card-geom))
+                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((or (menu-frame? f)
                                     (jack-out-tap? (stage-deal a) f card-geom))
                                 (open-menu a))
@@ -744,7 +777,11 @@
                                           ((menu) (open-overlay a))
                                           ((next retry) (run-request a request lay model))
                                           (else a)))
-                                      a))))))))
+                                      (let ((t (take-layer-cleared!)))
+                                        (when t (set! *layer-cleared* t))
+                                        (if (and (eq? *layer-cleared* 'cards) (not (card-fx-cascading? (stage-card-fx a))))
+                                            (layer-done a 'cards lay model)
+                                            a))))))))))
               (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
                         (lambda ()
                           (when (eq? (stage-screen a) 'stack)
@@ -756,7 +793,7 @@
                           ((stack) (and (fx-cleared (stage-fx a)) #t))
                           ((cards) (card-fx-cascading? (stage-card-fx a)))
                           (else #f))
-                        (and log-keys? (not (eq? (stage-screen a) 'menu)))
+                        log-keys?   ; the menu's frames too (the credits crawl's cost, 2026-09-21)
                         (lambda ()
                           (case (stage-screen a)
                             ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
@@ -902,13 +939,12 @@
                             (>= seed-arg 0))
                        (min seed-arg SEED-MAX)   ; the share code's range, so the board and its code agree
                        #f))
-             (hud-arg (arg-value args "--hud" #f))
              (model-arg (arg-value args "--keys" #f))
              (model (and model-arg (string->symbol model-arg)))
              (log-keys? (and (member "--log-keys" args) #t))
              (fresh? (and (member "--fresh" args) #t))
              (cards? (and (member "--cards" args) #t))
-             ;; --bg life|reaction|life-cpu|reaction-cpu|off; none given: the FIELD setting (P4)
+             ;; --bg reaction|reaction-cpu|off pins the field's rule (a dev door); none given: the pool's pick at each deal
              (bg-mode (let ((b (arg-value args "--bg" #f))) (and b (string->symbol b))))
              (bg-hold (let ((h (arg-value args "--bg-hold" #f))) (and h (string->number h))))
              (mute? (and (member "--mute" args) #t))
@@ -928,12 +964,13 @@
         (set! *fresh* fresh?)
         (atlas-set! (not (equal? (arg-value args "--atlas" "on") "off")))
         (let ((d (arg-value args "--audio-depth" #f))) (when (and d (string->number d)) (audio-set-depth! (string->number d))))
-        ;; --hud zones|strip: the bar's layout for this boot, stored (the
-        ;; web's ?hud= door; any other word leaves the store alone)
-        (when (and hud-arg (layout-name? (string->symbol hud-arg)))
-          (set-stored-hud! (string->symbol hud-arg)))
         ;; the build's commit for the credits (P4): a VERSION file beside the binary when a release
         ;; artifact ships one, else git's word in a checkout, else unversioned
+        ;; the credits crawl's text, beside the binary's assets (P4c)
+        (let ((text (guard (e (#t #f)) (read-file-string CREDITS-PATH missing: #f))))
+          (if text
+              (credits-text! text)
+              (begin (display "crash: credits missing ") (display CREDITS-PATH) (newline))))
         (title-stamp! (let ((file (guard (e (#t #f)) (read-file-string "VERSION" missing: #f))))
                         (cond ((and file (> (string-length (string-trim file)) 0)) (string-trim file))
                               (else (let ((sha (guard (e (#t "")) (string-trim (process-output->string "git" "rev-parse" "--short=12" "HEAD")))))

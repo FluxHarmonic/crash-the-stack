@@ -2,22 +2,22 @@
 ;;;
 ;;; Determinism from a seed: two runs of one seed over 600 ticks are the
 ;;; same field, cell for cell, and different seeds differ. A live, bounded
-;;; field, for both rules over 3600 ticks (a minute) on seeds 1..8: the
-;;; field never freezes (it changes between ticks), the tones the runs
-;;; draw are spread (at least four of the ramp's seven present at the
-;;; end: a field gone one flat color is dead) and no tone ever holds
-;;; more than DOMINANT-CAP of the half cells (sampled every 60 ticks: the
-;;; runs are the renderer's cost). The phase inputs take effect: the ICE
-;;; changes more cells a tick than calm, a burst more still and passes,
-;;; severed collapses every value and changes nothing else. bg-runs
-;;; answers rectangles on the half-cell grid inside the board area,
-;;; and under 3000 of them (sokol_gp's frame budget shared with the
-;;; tiles). Flow, for the life rule: after a minute at least FLOW-MIN
-;;; of the cells equal a neighbor exactly, which only copies produce
-;;; (measured 2026-09-19: 0.56..0.59 with the copy, 0 without it, so
-;;; sabotage S4, the copy made a no-op, reddens exactly this; the
-;;; mutations alone keep the field changing and the tones spread, so
-;;; the other two would stay green).
+;;; field, for every rule in the pool (REACTION alone since 2026-09-21,
+;;; when the voter model LIFE left it with its flow test) over 3600
+;;; ticks (a minute) on seeds 1..8: the field never freezes (it changes
+;;; between ticks), the tones the runs draw are spread (at least four
+;;; of the ramp's seven present at the end: a field gone one flat color
+;;; is dead) and no tone ever holds more than DOMINANT-CAP of the half
+;;; cells (sampled every 60 ticks: the runs are the renderer's cost).
+;;; The phase inputs take effect: the ICE runs more Gray-Scott iterations
+;;; a step than calm, so its step lands the field somewhere else (every
+;;; step of the reaction touches every cell: the diffusion reaches them
+;;; all, so a changed-cell count tells the phases apart no better than
+;;; 880 = 880), a burst runs the cap (REACT-STEPS-MAX, which the ICE
+;;; reaches too at 2.5 x 2) and passes, severed collapses every value
+;;; and changes nothing else. bg-runs answers rectangles on the
+;;; half-cell grid inside the board area, and under 3000 of them
+;;; (sokol_gp's frame budget shared with the tiles).
 
 (import (sigil test)
         (sigil list)
@@ -26,7 +26,6 @@
 
 (define TICKS 3600)
 (define SEEDS 4)
-(define FLOW-MIN 0.3)
 (define RECORDED-SEED 7)
 (define RECORDED-TICKS 600)
 
@@ -63,7 +62,7 @@
                                       (bg-canonical (bg-tick (bg-new 2 mode) 120))))))
             MODES))
 
-(test-group "bg: a live, bounded field, both rules"
+(test-group "bg: a live, bounded field, every rule"
   (for-each (lambda (mode)
               (let loop ((seed 1))
                 (when (<= seed SEEDS)
@@ -83,26 +82,24 @@
                             (assert-true (<= (car (car rs)) (car (cadr rs))))
                             (sorted (cdr rs))))))
                     (test (string-append label ": at least four tones after a minute (saw " (number->string (tones-present (bg-runs b))) ")")
-                      (assert-true (>= (tones-present (bg-runs b)) 4)))
-                    (when (eq? mode 'life)
-                      (test (string-append label ": the color flowed (cells equal to a neighbor: " (number->string (bg-flow b)) ")")
-                        (assert-true (>= (bg-flow b) FLOW-MIN)))))
+                      (assert-true (>= (tones-present (bg-runs b)) 4))))
                   (loop (+ seed 1)))))
             MODES))
 
 (test-group "bg: the phase inputs"
-  (test "the ICE changes more cells a step than calm; a burst more still, and it passes"
-    (let* ((b (bg-tick (bg-new 3 'life) 60))
-           (calm (cells-changed b (bg-tick (bg-with-phase b 'trace) STRIDE)))
-           (ice (cells-changed b (bg-tick (bg-with-phase b 'counter) STRIDE)))
-           (burst (bg-with-burst (bg-with-phase b 'counter)))
-           (loud (cells-changed b (bg-tick burst STRIDE))))
-      (assert-true (> ice calm))
-      (assert-true (> loud ice))
+  (test "the ICE runs more iterations a step than calm, and its step lands elsewhere; a burst runs the cap, and it passes"
+    (let* ((b (bg-tick (bg-new 3 'reaction) 60))
+           (calm (bg-with-phase b 'trace))
+           (ice (bg-with-phase b 'counter))
+           (burst (bg-with-burst ice)))
+      (assert-true (> (bg-iterations ice) (bg-iterations calm)))
+      (assert-true (> (cells-changed (bg-tick calm STRIDE) (bg-tick ice STRIDE)) 0))
+      (assert-equal REACT-STEPS-MAX (bg-iterations burst))
+      (assert-true (>= (bg-iterations burst) (bg-iterations ice)))
       (assert-equal BURST-TICKS (bg-burst burst))
       (assert-equal 0 (bg-burst (bg-tick burst BURST-TICKS)))))
   (test "severed: every value falls toward the ground, and keeps falling"
-    (let* ((b (bg-with-phase (bg-tick (bg-new 5 'life) 300) 'severed))
+    (let* ((b (bg-with-phase (bg-tick (bg-new 5 'reaction) 300) 'severed))
            (after (bg-tick b 120)))
       (assert-true (< (bg-mean after) (bg-mean b)))
       (assert-true (< (bg-mean (bg-tick after 120)) (bg-mean after))))))
@@ -140,14 +137,14 @@
 ;; included (the leader's review, 2026-09-19).
 (test-group "bg: a GPU field's schedule"
   (test "steps count, the field is the seed, no runs"
-    (let* ((b (bg-new 1 'life #t))
+    (let* ((b (bg-new 1 'reaction #t))
            (after (bg-tick b (* 4 STRIDE))))
       (assert-true (bg-gpu? after))
       (assert-equal 4 (bg-steps after))
       (assert-equal (vector->list (bg-field b)) (vector->list (bg-field after)))
       (assert-equal '() (bg-runs after))))
   (test "each step remembers the agitation it ran at across a burst's end"
-    (let* ((b (bg-with-burst (bg-new 1 'life #t)))
+    (let* ((b (bg-with-burst (bg-new 1 'reaction #t)))
            (after (bg-tick b (+ BURST-TICKS STRIDE))))
       ;; the burst counts down every tick and a step at the tick it reaches 0
       ;; is already calm (b0, the CPU path's struct too): steps 0..8 at the
@@ -158,11 +155,13 @@
       (assert-equal (cons AGITATION-TRACE #f) (bg-step-agit after 0))
       (assert-true (<= (length (bg-pending after)) 8))))
   (test "the CPU field steps at the same agitation the GPU schedule records"
-    (let* ((cpu (bg-with-burst (bg-new 2 'life)))
-           (gpu (bg-with-burst (bg-new 2 'life #t)))
+    (let* ((cpu (bg-with-burst (bg-new 2 'reaction)))
+           (gpu (bg-with-burst (bg-new 2 'reaction #t)))
            (cpu1 (bg-tick cpu STRIDE))
-           (gpu1 (bg-tick gpu STRIDE)))
-      ;; both stepped once, at the burst; a burst step visits every cell
+           (gpu1 (bg-tick gpu STRIDE))
+           (calm1 (bg-tick (bg-new 2 'reaction) STRIDE)))
+      ;; both stepped once, at the burst: the cap's iterations, so the CPU
+      ;; field is not the calm step's
       (assert-equal 1 (bg-steps cpu1))
-      (assert-equal 1000 (bg-visit-permille (car (bg-step-agit gpu1 0)) (bg-stride gpu1)))
-      (assert-true (> (cells-changed cpu cpu1) (* 0.5 CELLS))))))
+      (assert-equal REACT-STEPS-MAX (bg-iterations-at gpu1 (car (bg-step-agit gpu1 0))))
+      (assert-true (> (cells-changed cpu1 calm1) 0)))))

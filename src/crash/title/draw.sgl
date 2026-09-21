@@ -386,7 +386,11 @@
     ;; frames either. A label whose sheet is not baked yet draws directly
     ;; for those frames. One sheet also stays under the 4096 px a target
     ;; may have.
-    (define SHEET-LABELS 8)
+    ;; Three a sheet since the credits crawl's titles (2026-09-21): eight
+    ;; 20-character titles in the two styles overran the vertex buffer
+    ;; again ("SGP vertices buffer is full", the bake half done and the
+    ;; titles gone); three of the longest are under half the budget.
+    (define SHEET-LABELS 3)
     (define *items-sheets* '())                       ; ((rt . tex) ...), one per SHEET-LABELS labels, in order
     (define *items-tex* #f)                           ; the first sheet's texture (draw-menu-item's "anything baked" test)
     (define *items-key* #f)                           ; the labels the sheets are for, in order
@@ -432,7 +436,7 @@
         (draw-texture-region (cdr sheet) tx ty cw ITEM-H
                              0 (* BAKE-SCALE (- *items-h* cy)) (* BAKE-SCALE cw) (- (* BAKE-SCALE ITEM-H)))))
 
-    (define (draw-menu-item label rect lit? frames . rest)
+    (define (draw-menu-item label rect lit? blink? . rest)
       (let* ((index (and (pair? rest) (car rest)))
              (x (car rect)) (y (cadr rect)) (w (caddr rect)) (h (cadddr rect))
              (tw (* ITEM-CELL (block-text-width label)))
@@ -442,7 +446,7 @@
         (if (and *bake* index *items-tex*)
             (draw-item-row index (if lit? 'ramp 'flat) tx ty tw)
             (draw-block-text label tx ty ITEM-CELL (if lit? 'ramp 'flat)))
-        (when (and lit? (cursor-on? frames))
+        (when (and lit? blink?)
           (color! C-SELECTED)
           (draw-filled-rect (- tx (* 3 ITEM-CELL) (* ALPHABET-W ITEM-CELL)) ty
                             (* ALPHABET-W ITEM-CELL) th))))
@@ -469,7 +473,7 @@
                                           (number->string (car p))
                                           "/"
                                           (number->string (cdr p)))))
-               (draw-menu-item label (menu-entry-rect m 0 vw vh) #t (menu-frames m))))
+               (draw-menu-item label (menu-entry-rect m 0 vw vh) #t (menu-cursor-on? m))))
             (else #f)))
 
     ;; The index of a label on the baked sheets, or #f when it is not
@@ -490,7 +494,7 @@
             (draw-menu-item (car ls)
                             (menu-entry-rect m i vw vh)
                             (= i (menu-highlight m))
-                            (menu-frames m)
+                            (menu-cursor-on? m)
                             (label-index (car ls)))
             (loop (cdr ls) (+ i 1))))
         ;; the live board's share code (P4), with COPY on the web
@@ -509,6 +513,9 @@
     (define (screen-labels m)
       (let ((ids (menu-entries m)))
         (append (list (or (menu-heading m) ""))
+                ;; the crawl's section titles bake to the sheets too (a title
+                ;; drawn cell by cell cost 20-90 ms a frame natively, 2026-09-21)
+                (if (eq? (menu-screen m) 'credits) (credits-headings (menu-credits m)) '())
                 (map menu-label ids)
                 (apply append
                        (map (lambda (id)
@@ -536,9 +543,9 @@
                  (lit? (= i (menu-highlight m)))
                  (value (menu-row-value m id)))
             (if value
-                (draw-value-row (menu-label id) value rect lit? (menu-frames m) (menu-row-note m id))
+                (draw-value-row (menu-label id) value rect lit? (menu-cursor-on? m) (menu-row-note m id))
                 (begin
-                  (draw-menu-item (menu-label id) rect lit? (menu-frames m) (label-index (menu-label id)))
+                  (draw-menu-item (menu-label id) rect lit? (menu-cursor-on? m) (label-index (menu-label id)))
                   ;; an item's note (the overlay's exit row: what leaving keeps) under it, centered
                   (let ((note (menu-row-note m id)))
                     (when note
@@ -548,16 +555,19 @@
       ;; the screen's content, on a panel in the band's style where it is text
       ;; (solid C-BG with a C-BAR-C rule: the backdrop is busy under the
       ;; credits' lines, and the bible keeps alpha for the glow and the veil)
-      (when (memq (menu-screen m) (list 'credits 'scores 'code 'run-done))
-        (color! C-BAR-C)
-        (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- TEXT-ROWS-Y TEXT-Y 2))
-        (color! C-BG)
-        (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- TEXT-ROWS-Y TEXT-Y 4)))
+      (when (memq (menu-screen m) (list 'credits 'scores 'code 'run-done 'run-layer))
+        ;; the crawl has no rows under it: its panel runs to the bottom
+        (let ((panel-bottom (if (eq? (menu-screen m) 'credits) (- vh CRAWL-BOTTOM-INSET) (- TEXT-ROWS-Y 11))))
+          (color! C-BAR-C)
+          (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
+          (color! C-BG)
+          (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- panel-bottom 1 (- TEXT-Y 8)))))
       (case (menu-screen m)
         ((credits) (draw-credits m vw vh))
         ((scores) (draw-scores m vw vh))
         ((code) (draw-code-entry m vw vh))
         ((run-done) (draw-run-done m vw vh))
+        ((run-layer) (draw-run-layer m vw vh))
         (else #f)))
 
     ;; A value row: the name at the row's left, the value right-aligned
@@ -565,7 +575,7 @@
     ;; name's left.
     ;; note: a word in the 5x7 beside the value (GAME SETTINGS says when
     ;; a change takes: NEXT DEAL or NOW), or #f.
-    (define (draw-value-row name value rect lit? frames . rest)
+    (define (draw-value-row name value rect lit? blink? . rest)
       (let* ((note (and (pair? rest) (car rest)))
              (x (car rect))
              (y (cadr rect))
@@ -588,22 +598,42 @@
         (when note
           (color! C-TEXT-DIM)
           (text! note (- vx (text-width note 1) 12) (+ ty (quotient (- th GLYPH-H) 2)) 1))
-        (when (and lit? (cursor-on? frames))
+        (when (and lit? blink?)
           (color! C-SELECTED)
           (draw-filled-rect (- nx (* 3 ITEM-CELL) (* ALPHABET-W ITEM-CELL)) ty
                             (* ALPHABET-W ITEM-CELL) th))))
 
-    ;; The table's overlay (ruling D51): the paused table's own menu on a
-    ;; solid panel (the text screens' style: C-BG with a C-BAR-C rule) from
-    ;; the top of the viewport to bottom (the HUD bar's top: the bar stays
-    ;; visible with its meter frozen), the heading and rows as any
-    ;; sub-screen draws them.
+    ;; The table's overlay (ruling D51; David's read of 2026-09-21: not a
+    ;; black rectangle over the table): the paused table stays in view
+    ;; with its faces hidden, and the menu sits on a panel sized to its
+    ;; rows (the text screens' style: C-BG with a C-BAR-C rule), centered,
+    ;; from above the heading to under the last row and its note; the
+    ;; heading and rows as any sub-screen draws them. bottom (the HUD
+    ;; bar's top) caps the panel.
+    (define OVERLAY-PAD 12)
     (define (draw-overlay m vw vh bottom)
-      (color! C-BAR-C)
-      (draw-filled-rect 8 8 (- vw 16) (- bottom 12))
-      (color! C-BG)
-      (draw-filled-rect 9 9 (- vw 18) (- bottom 14))
-      (draw-sub-screen m vw vh))
+      (let* ((n (length (menu-entries m)))
+             (last (if (> n 0) (menu-entry-rect m (- n 1) vw vh) (list 0 SUB-ENTRIES-Y ENTRY-W 0)))
+             (wide? (let loop ((ids (menu-entries m)))
+                      (cond ((null? ids) #f)
+                            ((menu-row-value m (car ids)) #t)
+                            (else (loop (cdr ids))))))
+             (w (+ (if wide? VALUE-ROW-W ENTRY-W) (* 2 OVERLAY-PAD)))
+             (x (quotient (- vw w) 2))
+             (top (- HEADING-Y OVERLAY-PAD))
+             (note? (let loop ((ids (menu-entries m)))
+                      (cond ((null? ids) #f)
+                            ((and (not (menu-row-value m (car ids))) (menu-row-note m (car ids))) #t)
+                            (else (loop (cdr ids))))))
+             (content-bottom (if (memq (menu-screen m) TEXT-SCREENS)
+                                 (+ (cadr last) (cadddr last))
+                                 (+ (cadr last) (cadddr last) (if note? 10 0))))
+             (bot (min bottom (+ content-bottom OVERLAY-PAD))))
+        (color! C-BAR-C)
+        (draw-filled-rect x top w (- bot top))
+        (color! C-BG)
+        (draw-filled-rect (+ x 1) (+ top 1) (- w 2) (- bot top 2))
+        (draw-sub-screen m vw vh)))
 
     ;; --- the text screens ------------------------------------------------------------
 
@@ -616,17 +646,59 @@
 
     ;; The credits (D44): the page's lines, headings lit; the page
     ;; indicator under them.
+    ;; The CREDITS crawl (D44 as amended 2026-09-21): the rows climb from
+    ;; under the panel's bottom edge to its top at the crawl's pace; a
+    ;; line in the 5x7 at scale 2 centered; a heading in the block
+    ;; alphabet slides in from the right over its first SLIDE-PX of
+    ;; travel with the logo's glitch (a jitter from the frame and the
+    ;; row, in the flat style) and settles centered in the ramp. Rows
+    ;; over the panel's edges are drawn and the edges painted back over
+    ;; them (there is no clip).
+    (define CRAWL-TOP TEXT-Y)
+    (define CRAWL-BOTTOM-INSET 16)   ; the panel ends above the (C) band
+    (define SLIDE-PX 60.0)
     (define (draw-credits m vw vh)
-      (let loop ((lines (credits-lines (menu-page m) TEXT-WIDTH *stamp*)) (y TEXT-Y))
-        (unless (null? lines)
-          (let ((style (car (car lines))) (text (cdr (car lines))))
-            (unless (eq? style 'gap)
-              (color! (if (eq? style 'heading) C-LABEL-LIT C-TEXT))
-              (text! text TEXT-X y TEXT-SCALE)))
-          (loop (cdr lines) (+ y TEXT-PITCH))))
-      (let ((line (string-append "PAGE " (number->string (+ 1 (menu-page m))) "/" (number->string CREDITS-PAGES) "  LEFT/RIGHT TURNS")))
-        (color! C-TEXT-DIM)
-        (text! line (- vw TEXT-X (text-width line 1)) (- TEXT-ROWS-Y 12) 1)))
+      (let* ((bottom (- vh CRAWL-BOTTOM-INSET))
+             (offset (menu-scroll m))
+             (frames (menu-frames m)))
+        (for-each
+         (lambda (row)
+           (let* ((kind (car row))
+                  (text (cadr row))
+                  (y (- (+ bottom (caddr row)) offset))
+                  (h (if (eq? kind 'heading) HEADING-H LINE-H)))
+             (when (and (< y bottom) (> (+ y h) CRAWL-TOP))
+               (if (eq? kind 'heading)
+                   (let* ((tw (* ITEM-CELL (block-text-width text)))
+                          (cx (quotient (- vw tw) 2))
+                          (t (min 1.0 (/ (- bottom y) SLIDE-PX)))
+                          (ease (- 1.0 (* (- 1.0 t) (- 1.0 t))))
+                          (jitter (if (< t 1.0) (* ITEM-CELL (- (modulo (+ frames (caddr row)) 5) 2)) 0))
+                          (x (+ cx jitter (exact (round (* (- 1.0 ease) (- vw cx))))))
+                          (style (if (< t 1.0) 'flat 'ramp))
+                          (i (label-index text)))
+                     ;; from the baked sheet once it is there (menu-prepare! bakes
+                     ;; the titles with the screen's labels), else cell by cell
+                     (if (and *bake* i *items-tex*)
+                         (draw-item-row i style x (+ y 4) tw)
+                         (draw-block-text text x (+ y 4) ITEM-CELL style)))
+                   (begin
+                     (color! C-TEXT)
+                     (text! text (quotient (- vw (text-width text TEXT-SCALE)) 2) y TEXT-SCALE))))))
+         (menu-crawl-rows m))
+        ;; the edges back over the rows crossing them: the heading's strip and the bottom rule
+        (color! C-BG)
+        (draw-filled-rect 9 9 (- vw 18) (- CRAWL-TOP 9 2))
+        (color! C-BAR-C)
+        (draw-filled-rect 8 bottom (- vw 16) 1)
+        (color! C-BG)
+        (draw-filled-rect 9 (+ bottom 1) (- vw 18) (- vh bottom 1))
+        (let* ((heading "CREDITS")
+               (tw (* ITEM-CELL (block-text-width heading)))
+               (i (label-index heading)))
+          (if (and *bake* i *items-tex*)
+              (draw-item-row i 'ramp (quotient (- vw tw) 2) HEADING-Y tw)
+              (draw-block-text heading (quotient (- vw tw) 2) HEADING-Y ITEM-CELL 'ramp)))))
 
     ;; The build's commit for the version line: the shells set it.
     (define *stamp* "unversioned")
@@ -692,7 +764,7 @@
         (draw-filled-rect (- x 6) (- y 4) (+ full 12) (+ (* GLYPH-H scale) 8))
         (color! C-LABEL-LIT)
         (text! shown x y scale)
-        (when (and (< (string-length (menu-code m)) CODE-LENGTH) (cursor-on? (menu-frames m)))
+        (when (and (< (string-length (menu-code m)) CODE-LENGTH) (menu-cursor-on? m))
           (color! C-SELECTED)
           (draw-filled-rect (+ x tw (if (> tw 0) scale 0)) y (* GLYPH-W scale) (* GLYPH-H scale)))
         (color! C-TEXT-DIM)
@@ -734,28 +806,54 @@
           (row 5 "RECONNECTS" (number->string (ledger-reconnects l)))
           (row 7 "RUN CODE" (if code (code-display code) "-")))))
 
+    ;; A layer cleared: which, the tally so far, the next one named.
+    (define (draw-run-layer m vw vh)
+      (let* ((entry (menu-run m))
+             (r (and entry (car entry)))
+             (l (and r (run-ledger r)))
+             (row (lambda (i label value)
+                    (let ((y (+ TEXT-Y (* i TEXT-PITCH))))
+                      (color! C-TEXT-DIM)
+                      (text! label (+ TEXT-X 60) y TEXT-SCALE)
+                      (color! C-TEXT)
+                      (text! value (+ TEXT-X 300) y TEXT-SCALE)))))
+        (when l
+          (color! C-LABEL-LIT)
+          (text! (string-append "LAYER " (number->string (ledger-cleared l)) "/" (number->string (run-layer-count))
+                                " CRASHED. LINK HELD.")
+                 TEXT-X TEXT-Y TEXT-SCALE)
+          (row 2 "TIME" (clock-text (ledger-ticks l)))
+          (row 3 "MOVES" (number->string (ledger-moves l)))
+          (row 4 "RECONNECTS" (number->string (ledger-reconnects l)))
+          (color! C-TEXT-DIM)
+          (text! (string-append "NEXT: LAYER " (number->string (run-layer-number r)) ", "
+                                (if (eq? (run-layer-table r) 'cards) "DEFRAG" "STACK")
+                                ". PULLED IN A MOMENT, OR NOW.")
+                 TEXT-X (+ TEXT-Y (* 6 TEXT-PITCH)) TEXT-SCALE))))
+
     (define PRESENTS-LINE "PRESENTS")   ; under the publisher card's mark, with the resolve
 
-    ;; The bottom band (P4, [[t-1c53b6]]): a C-BG strip over the
-    ;; backdrop's last rows holding the copyright (ruling D44: the holder
-    ;; is David, the brand publishes, nothing else on the title), the key
-    ;; hint and the build stamp, all in the 5x7 at scale 1 on two rows: the
-    ;; copyright above, the hint and the stamp below. Off the image, so no
-    ;; orange band swallows it (David's read of abdce9f).
-    (define BAND-H 24)
+    ;; The bottom band (P4, [[t-1c53b6]]; David's read of 2026-09-21): a
+    ;; C-BG band at BAND-ALPHA over the backdrop's last rows, so the image
+    ;; shows through it, holding the copyright (ruling D44: the holder is
+    ;; David, the brand publishes) centered on the very bottom row, and
+    ;; the build stamp at the right in the dim text; the key hint went
+    ;; (the menu is tap-and-play). The alpha is a real blend, as every
+    ;; fade in the game is since P3 (frame-begin! sets normal blending);
+    ;; the palette gate is over the assets, not the composed frame.
+    (define BAND-H 12)
+    (define BAND-ALPHA 0.8)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)
       (let ((top (- vh BAND-H))
-            (y1 (- vh 22))
-            (y2 (- vh 11)))
-        (color! C-BG)
+            (y1 (- vh 10)))
+        (color-alpha! C-BG BAND-ALPHA)
         (draw-filled-rect 0 top vw BAND-H)
         (color! C-LABEL-LIT)
         (text! TITLE-LINE (quotient (- vw (text-width TITLE-LINE 1)) 2) y1 1)
-        (color! C-TEXT-DIM)
-        (text! hint 8 y2 1)
         (when version
-          (text! version (- vw 8 (text-width version 1)) y2 1))))
+          (color! C-TEXT-DIM)
+          (text! version (- vw 4 (text-width version 1)) y1 1))))
 
     ;; text through P3c's atlas when it is on (one textured rectangle a
     ;; glyph), else (crash font)'s rectangles, the oracle the atlas leg

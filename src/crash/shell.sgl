@@ -33,6 +33,7 @@
           (crash code)
           (crash daily)
           (crash music)
+          (crash credits)
           (crash title)
           (sigil math)
           (sigil time)
@@ -49,10 +50,10 @@
           literal-check LITERAL-NAMES
           AMBIENT-RATE play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
-          stored-hud set-stored-hud!
+          stored-hud
           settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
           scores-in-force record-clear! news-line mode->version
-          run-in-force set-run! run-spec run-code
+          run-in-force set-run! run-spec run-code take-layer-cleared! credits-text!
           set-clock-source! now-second today
           music-frame! music-fresh! music-off!
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
@@ -148,7 +149,7 @@
                       (every (lambda (name) (string? (look-label (look-ref name)))) LOOK-NAMES))))
         ;; symbol lists: a mangled cell holds another symbol and passes any
         ;; shape test, so these are compared with twins built at init
-        (check 'layouts (lambda () (equal? HUD-LAYOUTS (list 'zones 'strip))))
+        (check 'layouts (lambda () (equal? HUD-LAYOUTS (list 'zones))))
         (check 'phases (lambda () (equal? PHASES (list 'trace 'counter 'severed 'cleared))))
         (check 'models (lambda () (equal? MODELS (list 'hint 'cursor))))
         (check 'cues (lambda () (equal? CUES (list 'select 'match 'mismatch 'shuffle 'lock 'scramble 'cleared 'severed 'modem 'dial 'card))))
@@ -168,16 +169,26 @@
     ;; --- P4: the settings in force, the scoreboard, the run, codes, the daily ------
 
     ;; The settings, loaded from the store on first use (one key each,
-    ;; (crash settings)). The hud key keeps its P3 shape: ?hud= and --hud
-    ;; still write it through set-stored-hud!.
+    ;; (crash settings)).
     (define *settings* #f)
     ;; Every setting from the store, the default where the key is missing
     ;; or holds something outside the row's values.
     (define (settings-load)
+      (settings-migrate!)
       (map (lambda (st)
              (let ((d (store-read-datum (setting-key st))))
                (cons (setting-id st) (if (setting-value? st d) d (setting-default st)))))
            SETTINGS))
+
+    ;; The one-time reset: a store without the settings' version, or at
+    ;; another one, loses its setting keys (the rows' and the retired
+    ;; ones) and gets the version written; a store at the version keeps
+    ;; what it holds (a stored off wins a new default of on).
+    (define (settings-migrate!)
+      (unless (eqv? (store-read-datum SETTINGS-VERSION-KEY) SETTINGS-VERSION)
+        (for-each (lambda (st) (store-remove! (setting-key st))) SETTINGS)
+        (for-each store-remove! RETIRED-KEYS)
+        (store-write-datum! SETTINGS-VERSION-KEY SETTINGS-VERSION)))
 
     ;; One setting to the store. Answers what the store said.
     (define (settings-save! s id)
@@ -203,8 +214,9 @@
       (audio-set-sfx! (eq? (setting 'sfx) 'on))
       (audio-set-volume! (/ (setting 'volume) (* 1.0 VOLUME-MAX))))
 
-    (define (stored-hud) (setting 'hud))
-    (define (set-stored-hud! name) (set-setting! 'hud name))
+    ;; The bar's layout: A, zones, the one layout (B and its setting left
+    ;; on 2026-09-21, D51); the tables still carry the name.
+    (define (stored-hud) DEFAULT-LAYOUT)
 
     ;; The scoreboard, loaded on first use.
     (define *scores* #f)
@@ -365,12 +377,21 @@
         (and r (not (run-done? r)) (eq? (run-layer-table r) table)
              (let ((r (run-cleared r ticks moves)))
                (set-run! r)
+               (set! *layer-cleared* table)
                (if (run-done? r)
-                   "STACK CRASHED. RUN COMPLETE. NEXT SHOWS THE LEDGER."
+                   "STACK CRASHED. RUN COMPLETE."
                    (string-append "LAYER " (number->string (run-layer r))   ; the layer just cleared, 1-based, is the next's index
                                   "/" (number->string (run-layer-count))
-                                  " CRASHED. NEXT PULLS LAYER "
-                                  (number->string (run-layer-number r)) "."))))))
+                                  " CRASHED."))))))
+
+    ;; The table whose layer was just cleared (David, 2026-09-21: after the
+    ;; cascade the shells show the run's ledger with NEXT LAYER, and pull
+    ;; it themselves after a few seconds), taken once by the shell.
+    (define *layer-cleared* #f)
+    (define (take-layer-cleared!)
+      (let ((t *layer-cleared*))
+        (set! *layer-cleared* #f)
+        t))
 
     ;; A demo board's frame (the cleared sequence on demand): nothing
     ;; reaches the store's board, best or scores, but a run still advances.
@@ -503,18 +524,18 @@
         (bg-tick b steps))))
 
     ;; The background a `?bg=`/`--bg` name asks for: the rule on the GPU
-    ;; (life, reaction; the default), on the CPU (life-cpu, reaction-cpu,
-    ;; the fallback and the oracle), or none (off, or any other name).
+    ;; (reaction; the default), on the CPU (reaction-cpu, the fallback and
+    ;; the oracle), or none (off, or any other name).
     ;; hold: a field-step count to stop at (the arm's door), or #f.
     ;; The field's rule is picked at deal (David, 2026-09-21: not a
     ;; setting) from the pool, by the board's seed, so a share code
     ;; replays the same field; and never the rule of the last deal when
     ;; the pool allows: when the seed's pick is the last deal's, the next
-    ;; rule in the pool is taken instead (with two rules the two wants
-    ;; cannot both hold; no repeat wins, the seed decides otherwise). The
-    ;; pool grows later (D50's shape); `?bg=`/`--bg` stay as dev doors that
-    ;; pin one rule for the process.
-    (define FIELD-POOL (list 'reaction 'life))
+    ;; rule in the pool is taken instead (no repeat wins, the seed decides
+    ;; otherwise). The pool is REACTION alone today (LIFE left the same
+    ;; day, David); it is the seam for the rules to come (D50's shape).
+    ;; `?bg=`/`--bg` stay as dev doors that pin one rule for the process.
+    (define FIELD-POOL (list 'reaction))
     (define *field-last* #f)
     (define (field-pick! seed)
       (let* ((n (length FIELD-POOL))
@@ -582,8 +603,9 @@
             (code-line (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
             (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest))))
         (set! *title-shown* #t)
-        (menu-with-scores
-         (menu-with-code-line
+        (menu-with-credits
+         (menu-with-scores
+          (menu-with-code-line
           (menu-with-settings
            (menu-new (append (if continue? (list 'continue) '())
                              (list 'jack-in 'free-play 'settings 'credits)   ; built with list, not quoted (the wasm literal hazard)
@@ -591,9 +613,17 @@
                      (if continue? 'continue 'jack-in)
                      seed)
            (settings-in-force))
-          code-line
-          copy?)
-         (scores-in-force))))
+           code-line
+           copy?)
+          (scores-in-force))
+         *credits*)))
+
+    ;; The CREDITS crawl's items, parsed once from the text the shell
+    ;; hands in (the native reads assets/credits.txt beside the binary,
+    ;; the page fetches it); '() until then (an empty crawl).
+    (define *credits* '())
+    (define (credits-text! text)
+      (set! *credits* (credits-parse text)))
 
     ;; Does this frame ask for the menu by key: ctrl+e? (The MENU tool
     ;; comes out of the table's step as a request, read after it.)

@@ -36,19 +36,20 @@
           (crash input)
           (crash title)
           (crash settings)
+          (crash credits)
           (crash code))
 
-  (export menu menu? menu-new menu-screen menu-entries menu-highlight menu-frames
+  (export menu menu? menu-new menu-screen menu-entries menu-highlight menu-frames menu-ms menu-cursor-on?
           menu-title menu-with-title menu-settings menu-with-settings
           menu-version menu-code-line menu-with-code-line menu-copy menu-code menu-page
           menu-scores menu-with-scores menu-run menu-open-run-done
-          menu-new-overlay menu-home menu-table menu-row-note
+          menu-new-overlay menu-new-layer-done menu-home menu-table menu-row-note
           menu-step menu-entry-rect menu-hit menu-cues menu-live?
           menu-label menu-row-value menu-row-kind menu-heading menu-code-display
           code-line-rect keypad-cells keypad-rect keypad-hit
           MENU-ENTRIES MENU-TITLE SCREENS
-          ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y SUB-ENTRIES-Y HEADING-Y CODE-LINE-Y VALUE-ROW-W TEXT-ROWS-Y
-          CREDITS-PAGES)
+          ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y SUB-ENTRIES-Y HEADING-Y CODE-LINE-Y VALUE-ROW-W TEXT-ROWS-Y TEXT-SCREENS
+          menu-credits menu-with-credits menu-scroll menu-crawl-rows menu-crawl-height)
 
   (begin
     (define MENU-TITLE "CRASH THE STACK")
@@ -78,7 +79,8 @@
             (list 'game-settings "GAME SETTINGS")
             (list 'share "CODE")
             (list 'disconnect "DISCONNECT")
-            (list 'back-to-menu "BACK TO MENU")))
+            (list 'back-to-menu "BACK TO MENU")
+            (list 'next-layer "NEXT LAYER")))
 
     ;; The screens: each with its entries in order and its heading (the
     ;; top screen has the logo instead).
@@ -86,7 +88,7 @@
       (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update)
             (list 'free "FREE PLAY" 'stack 'cards 'daily-stack 'daily-cards 'code 'scores 'version 'back)
             (list 'settings "SETTINGS" 'music 'sfx 'volume 'scanlines 'veil 'back)   ; the general five (D51)
-            (list 'credits "CREDITS" 'back)
+            (list 'credits "CREDITS")   ; the crawl: no rows; Escape, Backspace or a tap leaves
             (list 'scores "SCORES" 'back)
             (list 'code "ENTER CODE" 'back)
             (list 'run-done "RUN COMPLETE" 'back)
@@ -94,9 +96,12 @@
             ;; table; the exit row is disconnect in a run, back-to-menu else
             (list 'pause "PAUSED" 'resume 'game-settings 'settings 'share 'disconnect 'back-to-menu)
             ;; GAME SETTINGS: the table's rows, filled per table by open-screen
-            (list 'pause-game "GAME SETTINGS" 'back)))
+            (list 'pause-game "GAME SETTINGS" 'back)
+            ;; a run's layer cleared (David, 2026-09-21): the ledger so far
+            ;; over the cleared table, NEXT LAYER the one action (the shell
+            ;; pulls it itself after a few seconds)
+            (list 'run-layer "LAYER CLEARED" 'next-layer)))
 
-    (define CREDITS-PAGES 2)
 
     (define (screen-entries screen)
       (let ((e (assq screen SCREENS)))
@@ -137,7 +142,7 @@
     (define CODE-LINE-Y 360)
     ;; the text screens (CREDITS, SCORES, CODE) keep their rows at the bottom, under their content
     (define TEXT-ROWS-Y 340)
-    (define TEXT-SCREENS (list 'credits 'scores 'code 'run-done))
+    (define TEXT-SCREENS (list 'credits 'scores 'code 'run-done 'run-layer))
 
     (define-struct menu
       (screen default: 'top)     ; top | free | settings | credits | scores | code
@@ -149,19 +154,27 @@
       (code-line default: #f)    ; the live board's share code (ten characters), or #f
       (copy default: #f)         ; the code line offers COPY (the web: the page writes the clipboard)
       (code default: "")         ; the CODE screen's typed characters
-      (page default: 0)          ; the CREDITS screen's page
+      (page default: 0)          ; unused since the crawl (kept for the datum's shape)
+      (credits default: '())     ; the CREDITS crawl's items, (crash credits)' parse, set by the shell
+      (crawl default: #f)        ; the crawl laid out once: (height . rows), or #f until the items are in
+      (scroll default: 0.0)      ; the crawl's offset, px
       (scores default: #f)       ; the scoreboard for the SCORES screen, or #f
       (run default: #f)          ; the finished run for the RUN COMPLETE screen (ledger, seed), or #f
       (title default: #f)        ; the title's reveal state, (crash title)
       (home default: 'top)       ; the screen a sub-screen closes to: top, or pause for the table's overlay
       (table default: #f)        ; the overlay's table (stack | cards): its GAME SETTINGS rows
-      (frames default: 0))       ; menu frames so far, for the cursor's blink
+      (frames default: 0)        ; menu frames so far
+      (ms default: 0.0))         ; milliseconds so far: the cursor's blink (the same at 60 and 120 Hz)
 
     (define (menu-with-title m t) (menu m title: t))
     (define (menu-with-settings m s) (menu m settings: s))
     (define (menu-with-code-line m code . rest)
       (menu m code-line: code copy: (and (pair? rest) (car rest) #t)))
     (define (menu-with-scores m s) (menu m scores: s))
+    (define (menu-with-credits m items)
+      (menu m credits: items crawl: (cons (credits-height items) (credits-layout items))))
+    (define (menu-crawl-height m) (if (menu-crawl m) (car (menu-crawl m)) 0))
+    (define (menu-crawl-rows m) (if (menu-crawl m) (cdr (menu-crawl m)) '()))
 
     ;; The RUN COMPLETE screen over the top screen, showing r (the shell
     ;; opens it when the last layer is cleared and NEXT is asked for).
@@ -209,6 +222,17 @@
     ;; The table's overlay (ruling D51): RESUME, GAME SETTINGS, SETTINGS,
     ;; CODE and the context's exit row over a paused table. No title; the
     ;; settings in force; the live board's code (copy? on the web).
+    ;; A run's layer cleared: the ledger over the table with NEXT LAYER.
+    ;; r: the run as advanced by the clear (its layer is the next one).
+    (define (menu-new-layer-done table r code)
+      (menu screen: 'run-layer
+            entries: (screen-entries 'run-layer)
+            top-entries: (screen-entries 'run-layer)
+            highlight: 0
+            home: 'run-layer
+            table: table
+            run: (cons r code)))
+
     (define (menu-new-overlay table run? settings code-line copy?)
       (let ((ids (pause-entries table run?)))
         (menu screen: 'pause
@@ -316,6 +340,7 @@
     ;; --- stepping ----------------------------------------------------------------
 
     (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+    (define (held? f key) (and (memq key (input-frame-held f)) #t))
 
     (define (move m delta)
       (let ((n (length (menu-entries m))))
@@ -344,7 +369,8 @@
                            (screen-entries screen))
               highlight: 0
               code: ""
-              page: 0))
+              page: 0
+              scroll: 0.0))
 
     ;; Back to the home screen, the item that opened the sub-screen highlighted.
     (define (close-screen m)
@@ -457,11 +483,21 @@
     ;; step a value row, Enter or Space pick, Escape or Backspace close a
     ;; sub-screen (on the top screen Escape is CONTINUE when a board is
     ;; live: the pause menu closes), a tap on a row picks it at once.
-    (define (menu-step m f vw vh)
+    ;; The menu's cursor blinks on time, not frames (David, 2026-09-21: a
+    ;; frame count blinked twice as fast on a 120 Hz display): the FT2/DOS
+    ;; cadence, on for BLINK-ON of every BLINK-PERIOD milliseconds.
+    (define BLINK-PERIOD 1060.0)
+    (define BLINK-ON 530.0)
+    (define (menu-cursor-on? m)
+      (< (- (menu-ms m) (* BLINK-PERIOD (floor (/ (menu-ms m) BLINK-PERIOD)))) BLINK-ON))
+
+    ;; rest: the frame's milliseconds (the shells' dt; 16.7 when not given).
+    (define (menu-step m f vw vh . rest)
       (let* ((t (menu-title m))
              (running? (and t (title-running? t)))
              (t (and t (title-step t)))
-             (m (menu m title: t frames: (+ 1 (menu-frames m))))
+             (dt-ms (if (pair? rest) (car rest) 16.7))
+             (m (menu m title: t frames: (+ 1 (menu-frames m)) ms: (+ (menu-ms m) dt-ms)))
              (click (input-frame-click f))
              (top? (eq? (menu-screen m) (menu-home m))))   ; the home screen: top, or the overlay's pause
         (cond ((and t (title-gated? t) (or click (pair? (input-frame-pressed f))))
@@ -477,17 +513,12 @@
               ((not (menu-live? m)) (cons m #f))
               ((eq? (menu-screen m) 'code)
                (if click (code-tap m vw vh (car click) (cdr click)) (code-key m f)))
+              ((eq? (menu-screen m) 'credits) (credits-step m f dt-ms))
               (click (tap-rows m vw vh (car click) (cdr click)))
               ((or (pressed? f 'up) (pressed? f 'k)) (cons (move m -1) #f))
               ((or (pressed? f 'down) (pressed? f 'j)) (cons (move m 1) #f))
-              ((or (pressed? f 'left) (pressed? f 'h))
-               (if (eq? (menu-screen m) 'credits)
-                   (cons (menu m page: (modulo (- (menu-page m) 1) CREDITS-PAGES)) #f)
-                   (step-highlighted m -1)))
-              ((or (pressed? f 'right) (pressed? f 'l))
-               (if (eq? (menu-screen m) 'credits)
-                   (cons (menu m page: (modulo (+ (menu-page m) 1) CREDITS-PAGES)) #f)
-                   (step-highlighted m 1)))
+              ((or (pressed? f 'left) (pressed? f 'h)) (step-highlighted m -1))
+              ((or (pressed? f 'right) (pressed? f 'l)) (step-highlighted m 1))
               ((or (pressed? f 'return) (pressed? f 'space)) (pick m))
               ((or (pressed? f 'escape) (and (pressed? f 'backspace) (not top?)))
                ;; on the home screen Escape is CONTINUE (the pause menu, D14) or
@@ -495,8 +526,29 @@
                (cond ((not top?) (cons (close-screen m) #f))
                      ((memq 'continue (menu-entries m)) (cons m 'continue))
                      ((memq 'resume (menu-entries m)) (cons m 'resume))
+                     ((memq 'next-layer (menu-entries m)) (cons m 'next-layer))
                      (else (cons m #f))))
               (else (cons m #f)))))
+
+    ;; The CREDITS crawl's frame: the offset climbs at the crawl's pace
+    ;; (faster with Down held, backwards with Up held) and wraps past the
+    ;; end; Escape, Backspace, Enter or a tap leaves.
+    (define (credits-step m f dt-ms)
+      (let* ((click (input-frame-click f))
+             (speed (cond ((or (held? f 'down) (held? f 'j)) CRAWL-FAST)
+                          ((or (held? f 'up) (held? f 'k)) CRAWL-BACK)
+                          (else CRAWL-SPEED)))
+             (span (+ (menu-crawl-height m) CRAWL-VH))
+             (next (+ (menu-scroll m) (* speed (/ dt-ms 1000.0))))
+             (next (cond ((>= next span) (- next span))
+                         ((< next 0.0) (+ next span))
+                         (else next))))
+        (if (or click (pressed? f 'escape) (pressed? f 'backspace) (pressed? f 'return))
+            (cons (close-screen m) #f)
+            (cons (menu m scroll: next) #f))))
+
+    ;; the crawl's visible span, px: the panel from under the heading to the bottom
+    (define CRAWL-VH 328)
 
     ;; left/right on a value row steps it; on an item, nothing.
     (define (step-highlighted m delta)
@@ -509,8 +561,20 @@
     ;; came on, the reveal settled) as the bank's cue names, for the shell
     ;; to play: modem for a line, the select blip for a glitch, the match
     ;; pings for the settle.
-    (define (menu-cues before after)
-      (if (and (menu-title before) (menu-title after))
-          (map (lambda (c) (case c ((glitch) 'select) ((settle) 'match) (else c)))
-               (title-cues (menu-title before) (menu-title after)))
-          '()))))
+    ;; The menu's own cues (David, 2026-09-21: the menu never had them):
+    ;; the select blip on a cursor move, the match cue on a pick or a
+    ;; screen opening (rest: the frame's choice, or #f), the mismatch
+    ;; buzz on BACK or Escape closing a screen. The title's reveal cues
+    ;; first, while it runs.
+    (define (menu-cues before after . rest)
+      (let ((choice (and (pair? rest) (car rest)))
+            (title (if (and (menu-title before) (menu-title after))
+                       (map (lambda (c) (case c ((glitch) 'select) ((settle) 'match) (else c)))
+                            (title-cues (menu-title before) (menu-title after)))
+                       '())))
+        (append title
+                (cond ((not (eq? (menu-screen before) (menu-screen after)))
+                       (list (if (eq? (menu-screen after) (menu-home after)) 'mismatch 'match)))
+                      (choice (list (if (memq choice (list 'resume 'continue)) 'mismatch 'match)))
+                      ((not (= (menu-highlight before) (menu-highlight after))) (list 'select))
+                      (else '())))))))

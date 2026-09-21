@@ -9,23 +9,23 @@
 // (--phone). Each sub-arm prints PASS / FAIL <name>: <detail>; any FAIL
 // exits 1; a wait that runs out prints TIMED-OUT and exits 2.
 //
-//   field-life      the page with ?bg=life&bghold=N&bgonly is read at every
-//                   half-cell center of the board area (80x44 samples) once
-//                   the game says "crash: bg held N"; then the same page
-//                   with ?bg=life-cpu, the CPU field, the oracle. Every
-//                   sample must be one of the ramp's eight palette colors,
-//                   the field must be alive (at least four tones, no tone
-//                   over 90 % of the samples) and the two maps must be
-//                   IDENTICAL (the life rule is integer arithmetic on both
-//                   sides: nothing may differ)
-//   field-reaction  the same with ?bg=reaction: the reaction's arithmetic is
-//                   float32 on the GPU and double on the CPU between 16-bit
-//                   quantizations, so the maps are compared as dither levels
-//                   (base tone x 4 + quarter, 32 per ring): at least 97 % of
-//                   the cells at the same level and every cell within one
-//                   (a wrong neighbor, wrap, orientation, feed rate or
-//                   laplacian weight moves most cells by whole levels within
-//                   the held steps; the plants in the evidence note show it)
+//   field-reaction  the page with ?bg=reaction&bghold=N&bgonly is read at
+//                   every half-cell center of the board area (80x44 samples)
+//                   once the game says "crash: bg held N"; then the same
+//                   page with ?bg=reaction-cpu, the CPU field, the oracle.
+//                   Every sample must be one of the ramp's eight palette
+//                   colors and the field must be alive (at least four
+//                   tones, no tone over 90 % of the samples). The reaction's
+//                   arithmetic is float32 on the GPU and double on the CPU
+//                   between 16-bit quantizations, so the maps are compared
+//                   as dither levels (base tone x 4 + quarter, 32 per ring):
+//                   at least 97 % of the cells at the same level and every
+//                   cell within one (a wrong neighbor, wrap, orientation,
+//                   feed rate or laplacian weight moves most cells by whole
+//                   levels within the held steps; the plants in the evidence
+//                   note show it). The pool is REACTION alone: the voter
+//                   model LIFE and its field-life leg (an exact match, integer
+//                   arithmetic on both sides) left on 2026-09-21
 //   copper          ?bg=off&copper=bitmap (the painted bars, the reference)
 //                   and ?bg=off (the raster) read down one column of the
 //                   board area at every scanline: identical; then
@@ -47,7 +47,7 @@
 //                   time-moving readouts left out, and the count of
 //                   lit rows floors it against a blank frame)
 //   default         a stack boot without ?bg= says "crash: bg gpu reaction" (David, 2026-09-20:
-//                   reaction is the default rule; life stays a door)
+//                   reaction is the default rule)
 //   gl-log          no sokol refusal reached the console (a "sokol[level=0|1]"
 //                   line: a failed pass or resource prints at log level with
 //                   no message on the web build)
@@ -55,7 +55,7 @@
 //
 // --expect-steps N is the assertion-layer control: the CPU page is held at
 // N instead of --steps, so the two maps come from different step counts and
-// field-life must go red (and field-reaction, on a lively field).
+// field-reaction must go red on a lively field.
 //
 // --shot DIR writes the GPU and CPU field captures (PNG) into DIR.
 
@@ -95,7 +95,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["field-life", "field-reaction", "copper", "phosphor", "atlas", "default", "gl-log", "console"];
+const planned = ["field-reaction", "copper", "phosphor", "atlas", "default", "gl-log", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -370,46 +370,42 @@ const alive = (counts) => {
   return { present, top, ok: present >= 4 && top <= 0.9 };
 };
 
-// ---- field-life ---------------------------------------------------------------------
-for (const rule of ["life", "reaction"]) {
+// ---- field-reaction -----------------------------------------------------------------
+field: {
+  const rule = "reaction";
   const name = `field-${rule}`;
   const gpu = await readField(rule, STEPS);
-  if (typeof gpu === "string") { fail(name, `gpu page: ${gpu}`); if (/within/.test(gpu)) timedOut(name); continue; }
+  if (typeof gpu === "string") { fail(name, `gpu page: ${gpu}`); if (/within/.test(gpu)) timedOut(name); break field; }
   await shot(`field-${rule}-gpu${PHONE ? "-phone" : ""}.png`);
   const cpu = await readField(`${rule}-cpu`, EXPECT_STEPS);
-  if (typeof cpu === "string") { fail(name, `cpu page: ${cpu}`); if (/within/.test(cpu)) timedOut(name); continue; }
+  if (typeof cpu === "string") { fail(name, `cpu page: ${cpu}`); if (/within/.test(cpu)) timedOut(name); break field; }
   await shot(`field-${rule}-cpu${PHONE ? "-phone" : ""}.png`);
   const detail = [];
   if (gpu.path !== "gpu") detail.push(`the ?bg=${rule} page took the ${gpu.path} path`);
   if (cpu.path !== "cpu") detail.push(`the ?bg=${rule}-cpu page took the ${cpu.path} path`);
   if (gpu.badN) detail.push(`${gpu.badN} GPU samples outside the ramp: ${gpu.bad.join(" ")}`);
   if (cpu.badN) detail.push(`${cpu.badN} CPU samples outside the ramp: ${cpu.bad.join(" ")}`);
-  const life = alive(gpu.counts), lifeCpu = alive(cpu.counts);
-  if (!life.ok) detail.push(`the GPU field is not alive: ${life.present} tones, the top one at ${life.top.toFixed(2)}`);
-  if (!lifeCpu.ok) detail.push(`the CPU field is not alive: ${lifeCpu.present} tones, the top one at ${lifeCpu.top.toFixed(2)}`);
-  let same = 0; const diffs = [];
-  gpu.tones.forEach((t, i) => { if (t === cpu.tones[i]) same++; else if (diffs.length < 6) diffs.push(`(${i % COLS},${Math.floor(i / COLS)}) gpu ${t} cpu ${cpu.tones[i]}`); });
+  const liveGpu = alive(gpu.counts), liveCpu = alive(cpu.counts);
+  if (!liveGpu.ok) detail.push(`the GPU field is not alive: ${liveGpu.present} tones, the top one at ${liveGpu.top.toFixed(2)}`);
+  if (!liveCpu.ok) detail.push(`the CPU field is not alive: ${liveCpu.present} tones, the top one at ${liveCpu.top.toFixed(2)}`);
+  let same = 0;
+  gpu.tones.forEach((t, i) => { if (t === cpu.tones[i]) same++; });
   const total = gpu.tones.length;
-  if (rule === "life") {
-    if (same !== total) detail.push(`${total - same} of ${total} half cells differ between the GPU and CPU fields at step ${STEPS}: ${diffs.join("; ")}`);
-  } else {
-    const lg = levels(gpu.tones), lc = levels(cpu.tones);
-    let equal = 0, within = 0, torn = 0; const far = [];
-    lg.forEach((a, i) => {
-      const b = lc[i];
-      if (a < 0 || b < 0) { torn++; return; }
-      const d = Math.min((a - b + 32) % 32, (b - a + 32) % 32);
-      if (d === 0) equal++;
-      if (d <= 1) within++; else if (far.length < 6) far.push(`(${i % GRID_W},${Math.floor(i / GRID_W)}) gpu ${a} cpu ${b}`);
-    });
-    const cells = lg.length;
-    if (torn) detail.push(`${torn} cells whose four half cells form no dither pattern`);
-    if (equal < REACTION_SAME_MIN * cells) detail.push(`only ${equal} of ${cells} cells at the same dither level (need ${Math.ceil(REACTION_SAME_MIN * cells)})`);
-    if (within < cells - torn) detail.push(`${cells - torn - within} cells more than one level apart: ${far.join("; ")}`);
-    if (!detail.length) detail.push(`ok: ${equal}/${cells} cells at the same level, all within one`);
-  }
-  if (detail.length && !(rule === "reaction" && detail.length === 1 && detail[0].startsWith("ok:"))) fail(name, detail.join("; "));
-  else pass(name, `${same}/${total} half cells identical at step ${STEPS} (${gpu.path} vs ${cpu.path}, buffer ${gpu.buffer}); GPU field ${life.present} tones, top ${life.top.toFixed(2)}${rule === "reaction" ? "; " + detail[0] : ""}`);
+  const lg = levels(gpu.tones), lc = levels(cpu.tones);
+  let equal = 0, within = 0, torn = 0; const far = [];
+  lg.forEach((a, i) => {
+    const b = lc[i];
+    if (a < 0 || b < 0) { torn++; return; }
+    const d = Math.min((a - b + 32) % 32, (b - a + 32) % 32);
+    if (d === 0) equal++;
+    if (d <= 1) within++; else if (far.length < 6) far.push(`(${i % GRID_W},${Math.floor(i / GRID_W)}) gpu ${a} cpu ${b}`);
+  });
+  const cells = lg.length;
+  if (torn) detail.push(`${torn} cells whose four half cells form no dither pattern`);
+  if (equal < REACTION_SAME_MIN * cells) detail.push(`only ${equal} of ${cells} cells at the same dither level (need ${Math.ceil(REACTION_SAME_MIN * cells)})`);
+  if (within < cells - torn) detail.push(`${cells - torn - within} cells more than one level apart: ${far.join("; ")}`);
+  if (detail.length) fail(name, detail.join("; "));
+  else pass(name, `${same}/${total} half cells identical at step ${STEPS} (${gpu.path} vs ${cpu.path}, buffer ${gpu.buffer}); GPU field ${liveGpu.present} tones, top ${liveGpu.top.toFixed(2)}; ok: ${equal}/${cells} cells at the same level, all within one`);
 }
 
 // ---- copper -----------------------------------------------------------------------------
@@ -582,8 +578,8 @@ for (const rule of ["life", "reaction"]) {
 // ---- default: the rule a page gets without ?bg= ---------------------------------------------
 // David (2026-09-20, after the merge): "We should have made the other bg
 // mode 'reaction' the default." A stack boot with no bg= door must say
-// the reaction rule on the GPU; a boot that says life (the old default)
-// or the CPU field is red. ?bg=life stays a door, read above.
+// the reaction rule on the GPU; a boot that says any other rule or the
+// CPU field is red.
 {
   mark = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh` });
