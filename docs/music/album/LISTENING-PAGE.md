@@ -227,3 +227,12 @@ The revised local bundle is tagged-preview-ii/soundtrack/audio/. Existing
 versions are retained. Public assets use soundtrack/preview-ii-tagged/ so
 listeners receive the revised metadata after reloading the player. The album
 notes now record the artist credit and AI-assisted production process.
+
+Revision II is live at https://dff6aa97.crashthestack.pages.dev (source 2e935c2).
+All fifteen public objects passed checksum, range, MIME and CORS checks. All
+fifteen local MP3s retain identical decoded audio, with a total size reduction
+of 39,719,295 bytes. A complete fresh Black Glass export also passed validation.
+Live browser playback confirmed artist David Wilson, the selected album title,
+the new audio URL and fifteen tracks. The browser check was muted and does not
+claim physical phone testing. Publication logs and verification are retained
+in publication-tagged-ii/ and r2-tagged-ii/ outside the repository.
