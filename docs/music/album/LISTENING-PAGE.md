@@ -167,8 +167,9 @@ provenance. The delivered image is 1254x1254 PNG; it is kept in Git and served
 from assets.crashthestack.com/soundtrack/art/cover-i.png. The page uses an
 accessible hidden heading, image description and compact runtime line.
 
-David also requested a CC-BY music notice. The footer links CC BY 4.0 and uses
-Flux Harmonic as the attribution credit, matching the publisher branding.
+David also requested a CC-BY music notice. The footer links CC BY 4.0 and credits
+David Wilson, as explicitly selected by David. Flux Harmonic remains the cover
+publisher mark.
 MUSIC-LICENSE.md records its scope; existing software, art and logo terms are
 unchanged. CC BY allows sharing and adaptation with attribution, a license link
 and change notices. The notice is on the page; existing immutable MP3 objects

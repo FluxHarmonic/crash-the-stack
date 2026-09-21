@@ -8,12 +8,12 @@ are made available under **Creative Commons Attribution 4.0 International
 License: https://creativecommons.org/licenses/by/4.0/
 Legal code: https://creativecommons.org/licenses/by/4.0/legalcode
 
-Attribution credit: **Flux Harmonic — Crash The Stack — Original Soundtrack**.
+Attribution credit: **David Wilson — Crash The Stack — Original Soundtrack**.
 Link to the soundtrack page and license, and indicate any changes when reusing
 the music. A track's title can be included for individual-track use.
 
 This music license does not change the existing terms for the game's software,
 cover artwork, title graphics or Flux Harmonic logo.
 
-David requested a CC-BY notice on 2026-09-21. The page uses CC BY 4.0, with Flux
-Harmonic as the attribution credit to match the cover and publisher identity.
+David requested a CC-BY notice on 2026-09-21. David explicitly selected **David Wilson** as the attribution credit.
+Flux Harmonic remains the publisher mark on the cover.
