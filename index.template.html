@@ -29,6 +29,14 @@
           <path d="M14 2L5 11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="square"/>
         </svg>
       </button>
+      <!-- The RECONNECT card (the web soak row): shown by the page guard
+           over the last frame once the wasm instance is dead (a trap, a
+           FATAL line, a lost WebGL context); a tap reloads. The word is
+           drawn into its canvas in the block alphabet by the guard script. -->
+      <div id="reconnect" hidden>
+        <canvas id="reconnect-word" width="568" height="56" aria-hidden="true"></canvas>
+        <p>LINK DROPPED. TAP TO RECONNECT.</p>
+      </div>
     </div>
     <!-- The loader writes "Loading" here while booting and "Failed to start:
          ..." on a boot error; the stylesheet hides the first and shows the
@@ -441,6 +449,234 @@
     document.addEventListener("keydown", function (e) {
       if (e.key === "Tab") e.preventDefault();
     }, true);
+
+    // ---- the page guard (the web soak row, 2026-09-21) --------------------
+    // Trev's console (a tab left running for hours, [[t-7cef66]]): one
+    // FATAL from the runtime, one wasm trap, then the same FATAL on every
+    // dispatch that followed, because nothing on this page knew the
+    // instance was dead: the gles3 loop had stopped by itself (a throwing
+    // tick never reschedules) but the page's polls and gesture listeners
+    // kept calling in. A wasm instance that trapped is not a thing to call
+    // again: its C stack and allocator are wherever the trap left them.
+    //
+    // So: the first uncaught wasm trap (a RuntimeError out of any callback:
+    // the frame tick, a poll, a gesture), any throw out of the app's own
+    // dispatch, a "FATAL:" line on the runtime's stderr, or a lost WebGL
+    // context (sokol_gfx cannot re-create its resources on the GLES3 path:
+    // every handle is garbage, and this page registers no restore) ends
+    // the page: no further dispatch (every app.dispatch answers -1), no
+    // further animation frame (requests are dropped, and a frame already
+    // queued is skipped, so the loop's pending tick never runs), the audio
+    // context suspended (the pump ran in the tick; the ring's drain stops
+    // too), and the RECONNECT card over the last frame (ruling D23: a
+    // dropped link is reconnected, never a death). A tap on the card, or
+    // Enter / Space, reloads the page. The reload is plain (a version
+    // waiting in the service worker is not applied here: D14's prompt on
+    // the next launch decides that, as on any launch).
+    //
+    // window.crashGuard is the arm's view: dead, why, fatals (the count of
+    // "FATAL:" lines seen), hidden (how many times the page hid).
+    // With ?trace: "crash: page dead WHY".
+    var guard = { dead: false, why: "", fatals: 0, hidden: 0, lastHiddenAt: 0 };
+    window.crashGuard = guard;
+    var audioContexts = [];   // every AudioContext the bridge makes (one), for suspend / resume
+    var glContext = null;      // the stage's WebGL2 context once the bridge made it: isContextLost() is read before every frame
+    (function () {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (typeof AC !== "function") return;
+      var Wrapped = function () {
+        var ctx = arguments.length ? new AC(arguments[0]) : new AC();
+        audioContexts.push(ctx);
+        return ctx;
+      };
+      Wrapped.prototype = AC.prototype;
+      window.AudioContext = Wrapped;
+      if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+    })();
+    var traceOn = new URLSearchParams(location.search).has("trace");
+    function die(why) {
+      if (guard.dead) return;
+      guard.dead = true;
+      guard.why = why;
+      if (traceOn) console.log("crash: page dead " + why);
+      audioContexts.forEach(function (ctx) { try { if (ctx.state !== "closed") ctx.suspend(); } catch (e) { /* a closed context */ } });
+      showReconnect();
+    }
+    // every animation frame request after death is dropped, and one already
+    // queued is skipped: the loop's pending tick, the audio chunk delivery
+    (function () {
+      var raf = window.requestAnimationFrame;
+      window.requestAnimationFrame = function (cb) {
+        if (guard.dead) return 0;
+        return raf.call(window, function (t) {
+          if (guard.dead) return;
+          // the loss itself is seen here, a frame or more before the browser's
+          // webglcontextlost event arrives (five sokol framebuffer errors in
+          // between, measured 2026-09-21); the event listener below still stands
+          if (glContext && glContext.isContextLost()) { die("webgl context lost"); return; }
+          return cb(t);
+        });
+      };
+    })();
+    // the runtime's stderr arrives as console.warn (the loader's fd_write);
+    // a FATAL line is the runtime giving up (gc-generational.c: fprintf, abort)
+    (function () {
+      var warn = console.warn;
+      console.warn = function () {
+        var first = arguments[0];
+        if (typeof first === "string" && first.indexOf("FATAL:") === 0) {
+          guard.fatals++;
+          die("fatal: " + first.slice(0, 120));
+        }
+        return warn.apply(console, arguments);
+      };
+    })();
+    // a trap out of any callback: the frame tick (the gles3 loop calls the
+    // wasm directly), a poll, a listener. A wasm stack overflow surfaces as
+    // a RangeError; anything else the page throws is the page's own bug
+    window.addEventListener("error", function (e) {
+      var err = e.error;
+      var trap = (typeof WebAssembly !== "undefined" && err instanceof WebAssembly.RuntimeError) ||
+                 (err instanceof RangeError && /call stack/i.test(String(e.message))) ||
+                 (!err && /RuntimeError/.test(String(e.message)));
+      if (trap) die("trap: " + String(e.message).slice(0, 120));
+    });
+    withApp(function (app) {
+      // the context the gles3 bridge made for the stage (getContext answers the
+      // existing one; the bridge chose its attributes), for the per-frame read
+      try { glContext = canvas.getContext("webgl2"); } catch (e) { /* no context: the boot failed before this */ }
+      // the app's dispatch: dead answers -1 without touching the instance; a
+      // throw out of the instance is the death itself (and still thrown, so
+      // the console shows the one uncaught trap the way it always did)
+      var deliver = app.deliver;
+      app.deliver = function (type, payload) {
+        if (guard.dead) return -1;
+        try {
+          return deliver.call(app, type, payload);
+        } catch (err) {
+          die("trap in dispatch " + type + ": " + String(err && err.message || err).slice(0, 120));
+          throw err;
+        }
+      };
+      // ?trap=now: the trap door inside a page dispatch; ?trap=frame: inside
+      // the next frame tick (the arm's two legs). Fired a moment after the
+      // menu is live, so the boot's own dispatches are done.
+      var trap = new URLSearchParams(location.search).get("trap");
+      if (trap === "now" || trap === "frame") {
+        window.crashLive.then(function () { setTimeout(function () { app.dispatch("trap", trap); }, 1500); });
+      }
+    });
+    // the WebGL context: lost is the end (see above); the default action of
+    // webglcontextlost is not prevented, so the browser never restores a
+    // context nothing could use
+    canvas.addEventListener("webglcontextlost", function () { die("webgl context lost"); });
+
+    // ---- visibility (the web soak row) ------------------------------------
+    // The browser stops requestAnimationFrame while the tab is hidden, so
+    // the game's tick (and with it the audio pump) already pauses; what
+    // this adds is the audio context suspended meanwhile (its worklet ran
+    // on, draining a ring nothing filled and counting underruns for hours)
+    // and the game told, so the first frame back carries no dt. On show:
+    // the context resumed (the player's earlier tap is the activation the
+    // browser wants; a context that never ran stays suspended until the
+    // game's next gesture, as before) and the game told. The wake lock
+    // (keepAwake above) already follows visibility.
+    //   crash: page hidden
+    //   crash: page visible after N s
+    document.addEventListener("visibilitychange", function () {
+      if (guard.dead) return;
+      if (document.visibilityState === "hidden") {
+        guard.hidden++;
+        guard.lastHiddenAt = Date.now();
+        if (updates.app) updates.app.dispatch("visibility", "hidden");
+        audioContexts.forEach(function (ctx) { try { if (ctx.state === "running") ctx.suspend(); } catch (e) { /* closed */ } });
+        if (traceOn) console.log("crash: page hidden");
+      } else {
+        if (updates.app) updates.app.dispatch("visibility", "visible");
+        audioContexts.forEach(function (ctx) { try { if (ctx.state === "suspended") ctx.resume().catch(function () {}); } catch (e) { /* no activation yet */ } });
+        if (traceOn) console.log("crash: page visible after " + Math.round((Date.now() - guard.lastHiddenAt) / 1000) + " s");
+      }
+    });
+
+    // ---- the RECONNECT card -----------------------------------------------
+    // The word in the block alphabet (assets/src/title/blocky.txt: the six
+    // rows of seven of each letter, # full, ^ v < > half blocks; the game's
+    // (crash title alphabet)), set the way (crash title draw) sets a lit
+    // menu item: the hero ramp row by row (C-SELECTED, C-SELECTED, then
+    // C-HIGHLIGHT under C-SELECTED at 75, 50 and 25 percent on the 4x4
+    // dot grid, then C-HIGHLIGHT) with a one-cell C-STATIC-B shadow
+    // down-right of every lit cell. Drawn once, on the 2D canvas inside the
+    // card, at 8 px a cell; the stylesheet scales it with the board.
+    var GLYPHS = {
+      R: ["######v", "##   ##", "##vvv#^", "##^^## ", "##   ##", "##   ##"],
+      E: ["#######", "##     ", "##vvv  ", "##^^^  ", "##     ", "#######"],
+      C: [" v#####", "##^    ", "##     ", "##     ", "##v    ", " ^#####"],
+      O: [" v###v ", "##^ ^##", "##   ##", "##   ##", "##v v##", " ^###^ "],
+      N: ["##v  ##", "###v ##", "##^#v##", "## ^###", "##  ^##", "##   ##"],
+      T: ["#######", "^^###^^", "  ##   ", "  ##   ", "  ##   ", "  ##   "]
+    };
+    var RAMP = ["a", "a", "3", "2", "1", "b"];
+    var C_SELECTED = "#4DF2D9", C_HIGHLIGHT = "#FF59D9", C_STATIC_B = "#2A2D3A";
+    function blockInk(code, dx, dy) {
+      switch (code) {
+        case "#": return true;
+        case "3": return !((dx & 1) && (dy & 1));
+        case "2": return ((dx + dy) & 1) === 0;
+        case "1": return (dx & 1) === 0 && (dy & 1) === 0;
+        case "^": return dy < 2;
+        case "v": return dy >= 2;
+        case "<": return dx < 2;
+        case ">": return dx >= 2;
+        default: return false;
+      }
+    }
+    function drawBlock(g, code, x, y, cell) {
+      var dot = cell / 4;
+      for (var dy = 0; dy < 4; dy++) for (var dx = 0; dx < 4; dx++) {
+        if (blockInk(code, dx, dy)) g.fillRect(x + dx * dot, y + dy * dot, dot, dot);
+      }
+    }
+    function drawWord(g, word, cell) {
+      var at = function (rows, r, c) { return (r < 0 || r >= 6 || c < 0 || c >= 7) ? " " : rows[r].charAt(c); };
+      for (var i = 0; i < word.length; i++) {
+        var rows = GLYPHS[word.charAt(i)], x = i * 8 * cell;
+        if (!rows) continue;
+        g.fillStyle = C_STATIC_B;
+        for (var r = 0; r < 6; r++) for (var c = 0; c < 7; c++) {
+          if (at(rows, r, c) !== " " && at(rows, r + 1, c + 1) === " ") g.fillRect(x + (c + 1) * cell, (r + 1) * cell, cell, cell);
+        }
+        for (r = 0; r < 6; r++) {
+          var token = RAMP[r];
+          for (c = 0; c < 7; c++) {
+            var code = at(rows, r, c), px = x + c * cell, py = r * cell;
+            if (code === " ") continue;
+            if (code === "#") {
+              if (token === "a") { g.fillStyle = C_SELECTED; g.fillRect(px, py, cell, cell); }
+              else if (token === "b") { g.fillStyle = C_HIGHLIGHT; g.fillRect(px, py, cell, cell); }
+              else { g.fillStyle = C_HIGHLIGHT; g.fillRect(px, py, cell, cell); g.fillStyle = C_SELECTED; drawBlock(g, token, px, py, cell); }
+            } else {
+              g.fillStyle = (token === "a" || token === "3" || token === "2") ? C_SELECTED : C_HIGHLIGHT;
+              drawBlock(g, code, px, py, cell);
+            }
+          }
+        }
+      }
+    }
+    var reconnectShown = false;
+    function showReconnect() {
+      if (reconnectShown) return;
+      reconnectShown = true;
+      var card = document.getElementById("reconnect");
+      var word = document.getElementById("reconnect-word");
+      var CELL = 8, WORD = "RECONNECT";
+      word.width = (WORD.length * 8 - 1) * CELL;
+      word.height = 7 * CELL;
+      drawWord(word.getContext("2d"), WORD, CELL);
+      card.hidden = false;
+      var go = function () { location.reload(); };
+      card.addEventListener("click", go);
+      document.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") go(); }, true);
+    }
   })();
 
   // Updates, ruling D14 (2026-09-17): sw.js is registered at every launch and

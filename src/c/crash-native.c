@@ -23,6 +23,11 @@
  *     7.5 MB tune decoded a character at a time in Sigil took whole
  *     frames per 16 KB; here a 512 KB chunk is under a millisecond.
  *
+ *   (%fatal!) -> never returns
+ *     The page guard's trap door (?trap): a FATAL line on stderr and abort(),
+ *     the runtime's own out-of-memory shape, so the browser arm can kill the
+ *     instance on demand.
+ *
  *   (%decode-ogg path) -> (rate channels bytevector) or #f
  *     The whole file decoded by stb_vorbis to s16le interleaved PCM.
  *     Native only: on the web the page decodes with decodeAudioData and
@@ -42,6 +47,7 @@
  * allocation is not a root otherwise */
 extern void sigil__gc_push_temp_root(SigilVM *vm, Value v);
 extern void sigil__gc_pop_temp_root(SigilVM *vm);
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -164,6 +170,24 @@ static Value native_decode_ogg(SigilVM *vm, int argc, Value *args)
 #endif
 }
 
+/* (%fatal!) -> never returns
+ *   The page guard's trap door (the web soak row, 2026-09-21): the same
+ *   two steps the runtime's own out-of-memory path takes in
+ *   gc-generational.c (a "FATAL: ..." line on stderr, then abort(), which
+ *   is the wasm `unreachable` trap Trev's console showed), so the arm can
+ *   kill the instance on demand and count the FATAL lines that follow: one
+ *   means nothing dispatched into the dead instance after the guard fired.
+ *   Reached only through the web shell's ("trap", ...) dispatch, which the
+ *   page sends for ?trap; never on a player's page. */
+static Value native_fatal(SigilVM *vm, int argc, Value *args)
+{
+    (void)vm; (void)argc; (void)args;
+    fprintf(stderr, "FATAL: crash: the trap door fired (?trap)\n");
+    fflush(stderr);
+    abort();
+    return SIGIL_FALSE;
+}
+
 void sigil__init_crash_native_module(SigilVM *vm)
 {
     SigilModule *module = sigil_begin_module(vm, "(crash native)");
@@ -174,8 +198,11 @@ void sigil__init_crash_native_module(SigilVM *vm)
                                  "Decode an OGG Vorbis file to (rate channels s16-bytevector), or #f");
     sigil_module_register_native(vm, "%b64-decode", native_b64_decode, SIGIL_ARITY_EXACT(1),
                                  "Decode a base64 string to a bytevector");
+    sigil_module_register_native(vm, "%fatal!", native_fatal, SIGIL_ARITY_EXACT(0),
+                                 "The page guard's trap door: a FATAL line on stderr, then abort()");
     sigil_module_export(vm, "%mix-track!");
     sigil_module_export(vm, "%decode-ogg");
     sigil_module_export(vm, "%b64-decode");
+    sigil_module_export(vm, "%fatal!");
     sigil_end_module(vm);
 }

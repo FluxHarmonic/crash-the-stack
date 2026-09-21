@@ -139,7 +139,7 @@
           (crash run)
           (only (crash scores) scores-best scores-streak)
           (only (crash daily) daily-date)
-          (only (crash native) %b64-decode)
+          (only (crash native) %b64-decode %fatal!)
           (only (crash credits) credits-parse CREDITS-PATH)
           (crash store)
           (crash cards save)
@@ -155,6 +155,7 @@
     (define *geom* #f)
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
+    (define *trap-armed* #f)  ; ?trap: every dispatch after the arming fires the trap door (%fatal!)
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
@@ -1840,6 +1841,7 @@
       0)
 
     (define (web-dispatch type payload)
+      (when *trap-armed* (%fatal!))
       (cond ((string=? type "frame") (web-tick (frame-dt payload)) 0)
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
@@ -1919,4 +1921,35 @@
                    ;; registers the worker then, so its precache never runs in the boot window
                    ((string=? payload "live?") (if (and *booted* (boot-done?) (or (not *menu*) (not (menu-title *menu*)) (title-settled? (menu-title *menu*)))) 1 0))
                    (else 0)))
+            ;; the page's visibility (the web soak row): the tab hidden or shown
+            ;; again. The browser stops requestAnimationFrame while a tab is
+            ;; hidden, so nothing ticks meanwhile; the first frame back must not
+            ;; carry the hours between as one dt (the fixed clock caps it, the
+            ;; ms readout and the stats ring would take it whole), so the frame
+            ;; clock restarts. The page suspends the audio context itself.
+            ;;   crash: visibility hidden|visible
+            ((string=? type "visibility")
+             (set! *last-ms* #f)
+             (say "visibility" payload)
+             0)
+            ;; ?trap: the page guard's trap door. "now" fires at once, inside this
+            ;; dispatch (the page's own dispatch path); "frame" arms it for the
+            ;; next frame tick (the gles3 loop's path, where Trev's died). Once
+            ;; armed, EVERY dispatch fires it: the count of FATAL lines after the
+            ;; first is the count of dispatches that reached the dead instance.
+            ((string=? type "trap")
+             (set! *trap-armed* #t)
+             (when (string=? payload "now") (%fatal!))
+             0)
+            ;; ?soak: one line of the runtime's memory numbers for the soak's
+            ;; minute log (the page adds the wasm memory size and the GL counts):
+            ;;   crash: soak gc ALLOCATED peak PEAK next NEXT young YOUNG minor N major N gcms MS tracks BYTES
+            ((string=? type "soak")
+             (let* ((stats (guard (e (#t '())) (gc-stats)))
+                    (get (lambda (key) (let ((p (assq key stats))) (if p (cdr p) 0)))))
+               (say "soak" "gc" (get 'bytes-allocated) "peak" (get 'heap-peak-bytes) "next" (get 'next-gc)
+                    "young" (get 'young-bytes) "minor" (get 'minor-collections) "major" (get 'major-collections)
+                    "gcms" (tenth (/ (+ (get 'minor-time-ns) (get 'major-time-ns)) 1000000.0))
+                    "tracks" (audio-track-bytes)))
+             0)
             (else 0)))))
