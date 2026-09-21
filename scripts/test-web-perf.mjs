@@ -53,36 +53,63 @@ for (let i = 0; i < pcm.length; i++) {
   expected[2 * i] = u & 255;
   expected[2 * i + 1] = (u >> 8) & 255;
 }
-const chunks = [];
-let reserved = 0, finished = null, settled = null;
-const uploadQueue = [];
-const delivery = {
-  pcm, name: 'spy', Uint8Array,
-  performance: { now: () => now },
-  btoa: s => Buffer.from(s, 'binary').toString('base64'),
-  requestAnimationFrame: cb => uploadQueue.push(cb),
-  remember: (xs, value) => xs.push(value),
-  audioWork: { upload: [], finish: [] },
-  settled: failed => { settled = failed; },
-  app: { dispatch(type, payload) {
-    if (type === 'audio-size') reserved = Number(payload);
-    if (type === 'audio-chunk') {
-      chunks.push(Buffer.from(payload, 'base64'));
-      now += chunks.length === 1 ? 20 : 2;
-    }
-    if (type === 'audio-done') finished = Number(payload);
-  } },
-};
-vm.createContext(delivery);
-const deliveryStart = html.indexOf('      function deliver(pcm)');
-const deliveryEnd = html.indexOf('      (function attempt()', deliveryStart);
-vm.runInContext(html.slice(deliveryStart, deliveryEnd) + '\ndeliver(pcm);', delivery);
-assert.equal(chunks.length, 0, 'conversion and upload must yield before the first batch');
-while (uploadQueue.length) uploadQueue.shift()();
-assert.equal(reserved, expected.length);
-assert.deepEqual(Buffer.concat(chunks), expected);
-assert.equal(finished, chunks.length);
-assert.equal(settled, false);
-assert.ok(chunks[1].length < chunks[0].length, 'slow work must reduce the next batch');
-assert.ok(chunks.every(chunk => chunk.length <= 256 * 1024));
-console.log('PASS audio delivery: yielded batches preserve every PCM byte, adapt to slow work, and finish with the correct count');
+function checkDelivery(mode) {
+  const chunks = [];
+  let reserved = 0, finished = null, settled = null, completions = 0;
+  const uploadQueue = [];
+  const delivery = {
+    pcm, name: 'spy', Uint8Array,
+    performance: { now: () => now },
+    btoa: s => Buffer.from(s, 'binary').toString('base64'),
+    requestAnimationFrame: cb => uploadQueue.push(cb),
+    remember: (xs, value) => xs.push(value),
+    audioWork: { upload: [], finish: [] },
+    settled: failed => { settled = failed; completions++; },
+    app: { dispatch(type, payload) {
+      if (type === 'audio-size') reserved = Number(payload);
+      if (type === 'audio-chunk') {
+        chunks.push(Buffer.from(payload, 'base64'));
+        now += chunks.length === 1 ? 20 : 2;
+      }
+      if (type === 'audio-done') finished = Number(payload);
+    } },
+  };
+  let terminated = false, revoked = false, source = '';
+  if (mode !== 'unsupported') {
+    delivery.Blob = class { constructor(parts) { source = parts.join(''); } };
+    delivery.URL = { createObjectURL: () => 'blob:test', revokeObjectURL: () => { revoked = true; } };
+    delivery.Worker = class {
+      constructor() {
+        this.context = { Uint8Array, btoa: delivery.btoa,
+          postMessage: data => uploadQueue.push(() => this.onmessage({ data })) };
+        vm.createContext(this.context);
+        vm.runInContext(source, this.context);
+      }
+      postMessage(data) {
+        uploadQueue.push(() => {
+          if (mode === 'failed' || (mode === 'chunk-failed' && !data.pcm)) this.onerror({ preventDefault() {} });
+          else this.context.onmessage({ data });
+        });
+      }
+      terminate() { terminated = true; }
+    };
+  }
+  vm.createContext(delivery);
+  const deliveryStart = html.indexOf('      function deliver(pcm)');
+  const deliveryEnd = html.indexOf('      (function attempt()', deliveryStart);
+  const encoderStart = html.indexOf('    function encodePcmChunk(');
+  const encoderEnd = html.indexOf('    var TRACKS =', encoderStart);
+  vm.runInContext(html.slice(encoderStart, encoderEnd) + html.slice(deliveryStart, deliveryEnd) + '\ndeliver(pcm);', delivery);
+  assert.equal(chunks.length, 0, 'conversion and upload must yield before the first batch');
+  while (uploadQueue.length) uploadQueue.shift()();
+  assert.equal(reserved, expected.length);
+  assert.deepEqual(Buffer.concat(chunks), expected);
+  assert.equal(finished, chunks.length);
+  assert.equal(settled, false);
+  assert.equal(completions, 1, 'worker errors must not create a second delivery loop');
+  assert.ok(chunks[1].length < chunks[0].length, 'slow work must reduce the next batch');
+  assert.ok(chunks.every(chunk => chunk.length <= 256 * 1024));
+  if (mode !== 'unsupported') { assert.ok(terminated); assert.ok(revoked); }
+  console.log('PASS audio delivery (' + mode + '): exact PCM, adaptive yielded batches, completion and cleanup');
+}
+for (const mode of ['unsupported', 'worker', 'failed', 'chunk-failed']) checkDelivery(mode);

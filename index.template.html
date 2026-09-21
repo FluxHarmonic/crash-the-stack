@@ -340,9 +340,21 @@
     // waits for it (D40); the others land while the menu is up. Fetched
     // once swReady resolves, outside the service worker's activation
     // window, and never fatal: no tune means sound effects alone. One
-    // adaptive conversion/delivery batch per frame, targeting 4 ms of work.
-    // Conversion stays inside each batch; there is no whole-track conversion
-    // before the first yield, and the receiver needs no final concatenation.
+    // adaptive delivery batch per frame, targeting 8 ms of main-thread work.
+    // A worker converts PCM while the game draws. Without workers conversion
+    // stays inside each yielded batch. The receiver needs no final concatenation.
+    function encodePcmChunk(pcm, offset, end) {
+      var bytes = new Uint8Array((end - offset) * 2);
+      for (var i = offset, o = 0; i < end; i++, o += 2) {
+        var v = Math.max(-1, Math.min(1, pcm[i])), sample = v < 0 ? v * 32768 : v * 32767;
+        var u = sample < 0 ? sample + 65536 : sample;
+        bytes[o] = u & 255; bytes[o + 1] = (u >> 8) & 255;
+      }
+      var text = "";
+      for (var k = 0; k < bytes.length; k += 8192)
+        text += String.fromCharCode.apply(null, bytes.subarray(k, Math.min(k + 8192, bytes.length)));
+      return btoa(text);
+    }
     var TRACKS = ["spy", "groove", "breaker"];
     var ambientSettled = null;
     window.crashAmbientSettled = new Promise(function (resolve) { ambientSettled = resolve; });
@@ -360,36 +372,61 @@
       }
       function deliver(pcm) {
         var offset = 0, n = 0, batch = 32768; // samples: 64 KB initially
-        app.dispatch("track", name);
         var allocationStart = performance.now();
+        var worker = null, workerUrl = null, waiting = false;
+        function stopWorker() {
+          if (worker) worker.terminate();
+          if (workerUrl) URL.revokeObjectURL(workerUrl);
+          worker = null; workerUrl = null;
+        }
+        // Keep only one encoded chunk in flight. The worker never dispatches
+        // into the runtime; delivery still happens once per animation frame.
+        try {
+          workerUrl = URL.createObjectURL(new Blob([
+            encodePcmChunk.toString(),
+            ';var pcm;onmessage=function(e){if(e.data.pcm){pcm=e.data.pcm;return;}',
+            'postMessage(encodePcmChunk(pcm,e.data.offset,e.data.end));};'
+          ], { type: "text/javascript" }));
+          worker = new Worker(workerUrl);
+          worker.onmessage = function (e) {
+            waiting = false;
+            requestAnimationFrame(function () { upload(e.data); });
+          };
+          worker.onerror = function (e) {
+            e.preventDefault(); stopWorker();
+            if (waiting) { waiting = false; requestAnimationFrame(next); }
+          };
+          // AudioBuffer channel storage is not transferable. Structured clone
+          // takes one snapshot; subsequent messages carry only chunk bounds.
+          worker.postMessage({ pcm: pcm });
+        } catch (e) { stopWorker(); }
+        app.dispatch("track", name);
         app.dispatch("audio-size", String(pcm.length * 2));
         remember(audioWork.upload, performance.now() - allocationStart);
         function next() {
           if (offset >= pcm.length) {
+            stopWorker();
             var finishStart = performance.now();
             app.dispatch("audio-done", String(n));
             remember(audioWork.finish, performance.now() - finishStart);
             settled(false);
             return;
           }
+          var end = Math.min(offset + batch, pcm.length);
+          if (worker) { waiting = true; worker.postMessage({ offset: offset, end: end }); }
+          else upload(null);
+        }
+        function upload(encoded) {
           var started = performance.now();
           var end = Math.min(offset + batch, pcm.length);
-          var bytes = new Uint8Array((end - offset) * 2);
-          for (var i = offset, o = 0; i < end; i++, o += 2) {
-            var v = Math.max(-1, Math.min(1, pcm[i])), sample = v < 0 ? v * 32768 : v * 32767;
-            var u = sample < 0 ? sample + 65536 : sample;
-            bytes[o] = u & 255; bytes[o + 1] = (u >> 8) & 255;
-          }
-          var text = "";
-          for (var k = 0; k < bytes.length; k += 8192)
-            text += String.fromCharCode.apply(null, bytes.subarray(k, Math.min(k + 8192, bytes.length)));
-          app.dispatch("audio-chunk", btoa(text));
+          app.dispatch("audio-chunk", encoded === null ? encodePcmChunk(pcm, offset, end) : encoded);
           offset = end; n++;
           var elapsed = performance.now() - started;
           remember(audioWork.upload, elapsed);
           // Limit growth to 2x, keep samples whole, and bound transient work.
-          batch = Math.max(4096, Math.min(131072, Math.floor(batch * Math.min(2, 4 / Math.max(0.1, elapsed)))));
-          requestAnimationFrame(next);
+          batch = Math.max(4096, Math.min(131072, Math.floor(batch * Math.min(2, 8 / Math.max(0.1, elapsed)))));
+          if (worker) next();
+          else requestAnimationFrame(next);
         }
         requestAnimationFrame(next);
       }
