@@ -313,10 +313,12 @@
     ;; --cards boot, and the arms).
     ;; The field for a new deal (not a continued board): the pool's rule
     ;; for the seed, the field seeded by it too, unless --bg pinned one.
+    (define *field-seed* 1)   ; the seed the field was last dealt from (a BACKGROUND change re-seeds it)
     (define (field-for-deal a seed)
+      (set! *field-seed* seed)
       (if *bg-pinned*
           a
-          (let* ((rule (field-pick! seed))
+          (let* ((rule (field-rule-for-deal! seed))
                  (b (bg-choose rule seed *bg-hold-n*)))
             (display "crash: field ") (display rule) (display " ") (display seed) (newline)
             (stage a bg: (and b (bg b
@@ -324,6 +326,7 @@
                                     react-steps: (or *bg-rsteps* (bg-react-steps b))))))))
 
     (define (open-stack a lay seed fresh? model resume?)
+      (set-active-game! 'stack)   ; the table up is the one CONTINUE returns to
       (unless (and resume? (stage-session a)) (music-fresh!))
       (let* ((held (stage-session a))
              (s (cond ((and resume? held) held)
@@ -345,6 +348,7 @@
                  screen: 'stack session: s fx: (if (eq? s held) (stage-fx a) (fx-new))))))
 
     (define (open-cards a seed fresh? resume?)
+      (set-active-game! 'cards)
       (unless (and resume? (stage-deal a)) (music-fresh!))
       (let* ((held (stage-deal a))
              (d (cond ((and resume? held) held)
@@ -473,7 +477,8 @@
                                 #f
                                 (live-code a)
                                 #f          ; no COPY natively (no clipboard)
-                                *fresh*)))  ; --fresh: the saved board is not offered
+                                *fresh*     ; --fresh: the saved board is not offered
+                                #t)))       ; EXIT, the native build's last row (David, 2026-09-21)
                      ;; a menu rebuilt mid-reveal keeps the reveal (P3d); a fresh one
                      ;; starts on the publisher card (D43), whose strip loads here at
                      ;; once (no gate on native: the card opens the process)
@@ -532,12 +537,9 @@
       (set-setting! id v)
       (display "crash: setting ") (display id) (display " ") (display v) (newline)
       (case id
-        ((hud)
-         (stage a
-                session: (and (stage-session a) (session-with-hud (stage-session a) v))
-                deal: (and (stage-deal a) (deal-with-hud (stage-deal a) v))))
         ((scanlines) (post-set-scanlines! (eq? v 'on)) a)
         ((veil) (post-set-veil! (eq? v 'on)) a)
+        ((background) (field-for-deal a *field-seed*))   ; LIVE/STILL takes now
         (else a)))
 
     ;; A menu choice (P4): CONTINUE resumes the active table; JACK IN
@@ -573,6 +575,7 @@
                ((code-refused)
                 (display "crash: code refused ") (display (menu-code (stage-menu a))) (newline)
                 a)
+               ((exit) (request-quit) a)   ; the main menu's EXIT row: the process ends after this frame
                (else a)))))
 
     ;; The stack's geometry, made once.
@@ -690,7 +693,7 @@
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? model))))
           (ensure-geometry! lay)
-          (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose (or bg-mode (car FIELD-POOL)) 1 bg-hold)))
+          (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose (or bg-mode (field-rule-at-boot)) 1 bg-hold)))
                                                  (and b (bg b
                                                            stride: (or *bg-stride* (bg-stride b))
                                                            react-steps: (or *bg-rsteps* (bg-react-steps b))))))))

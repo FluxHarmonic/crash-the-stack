@@ -257,7 +257,7 @@ process.on("SIGTERM", () => shutdown(143));
 process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 600000;   // P3d added a throttled boot (slow-link: the 20 MB wasm at 8 Mbps is ~25 s), three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
+const WHOLE_RUN_MS = 900000;   // P3d added a throttled boot (slow-link: the 20 MB wasm at 8 Mbps is ~25 s), three boots (title), a 4 s held ambient (preload) and two 300-frame ms windows (menu-return); 180 s fired under loadavg 28
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -592,6 +592,35 @@ else fail("keys-match", keysDetail);
   else pass("tools", "Space opens, a tile tag is refused while open, H fires HINT and closes, a tap outside closes");
 }
 
+// From a live table to the main menu (D51): Escape opens the table's own
+// overlay ("crash: pause on TICKS", its rows), and its exit row (BACK TO
+// MENU in free play, DISCONNECT in a run) lands on the main menu's top
+// screen. Answers the top line's index, or null with the reason in
+// toMenuDetail.
+let toMenuDetail = "";
+async function toMenu(how) {
+  const m0 = consoleLines.length;
+  if (how === "button") {
+    const btn = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
+    if (!btn) { toMenuDetail = "no \"crash: control menu\" boot line"; return null; }
+    await tap(btn.m[1], btn.m[2]);
+  } else {
+    await press("Escape");
+  }
+  const on = await waitLine(/^crash: pause on (\d+)$/, m0, 3000);
+  const rows = on && await waitLine(/^crash: menu pause (.*)$/, m0, 3000);
+  if (!on) { toMenuDetail = `${how}: no \"crash: pause on\" (the table's overlay did not open)`; return null; }
+  if (!rows) { toMenuDetail = `${how}: the overlay said no rows`; return null; }
+  const parts = rows.m[1].split(" ");
+  const i = parts.findIndex((w) => w === "back-to-menu" || w === "disconnect");
+  if (i < 0) { toMenuDetail = `${how}: the overlay has no exit row: ${rows.m[1]}`; return null; }
+  const m1 = consoleLines.length;
+  await tap(parseFloat(parts[i + 1]), parseFloat(parts[i + 2]));
+  const top = await waitLine(/^crash: menu top /, m1, 3000);
+  if (!top) { toMenuDetail = `${how}: the exit row ${parts[i]} did not land on the main menu`; return null; }
+  return top;
+}
+
 // ---- 6a2. menu: Escape and the bar's MENU button open the menu (David 2026-09-19) --
 // Escape on the board prints the menu's boot line; Enter on CONTINUE comes
 // back to the same board (its boot line says tiles 142, the matched pair
@@ -613,9 +642,9 @@ else fail("keys-match", keysDetail);
   // the menu is live only once the boot's steps are done (ruling D40): the
   // first visit's boot can outlast these sub-arms under load
   if (!(await waitLine(/^crash: boot done /, 0, 20000))) fail("menu", "no \"crash: boot done\" within 20 s of the boot");
-  await press("Escape");
-  const menu = await waitLine(/^crash: menu top (continue) /, mark, 3000);
-  if (!menu) detail = "Escape did not open the menu (no \"crash: menu top continue ...\" line)";
+  const menu = await toMenu("Escape");
+  if (!menu) detail = toMenuDetail;
+  else if (!/^crash: menu top continue /.test(consoleLines[menu.index])) detail = `the main menu opened without CONTINUE first: ${consoleLines[menu.index]}`;
   else {
     // the entries (P4, D14 and D19): CONTINUE, JACK IN, FREE PLAY, SETTINGS,
     // CREDITS, and UPDATE only while a version waits; the prototype rows
@@ -626,18 +655,12 @@ else fail("keys-match", keysDetail);
     else detail = await back("Escape");
   }
   if (!detail && !EXPECT_NO_SELECTION) {
-    const btn = await waitLine(/^crash: control menu (-?[\d.]+) (-?[\d.]+)$/, 0, 2000);
-    if (!btn) detail = "no \"crash: control menu\" boot line";
-    else {
-      mark = consoleLines.length;
-      await tap(btn.m[1], btn.m[2]);
-      const menu2 = await waitLine(/^crash: menu top (continue) /, mark, 3000);
-      if (!menu2) detail = "the MENU button opened no menu";
-      else detail = await back("the MENU button");
-    }
+    const menu2 = await toMenu("button");
+    if (!menu2) detail = toMenuDetail;
+    else detail = await back("the MENU button");
   }
   if (detail) fail("menu", detail);
-  else pass("menu", "Escape opens the menu and CONTINUE returns; the MENU button beside the wrench does the same");
+  else pass("menu", "Escape opens the table's overlay and BACK TO MENU lands on the main menu with CONTINUE, which returns; the MENU button beside the wrench does the same");
 }
 
 // ---- 6b. removed: the polish row's prototype toggles do nothing ----------
@@ -1426,7 +1449,8 @@ let iceLock = null;
   // the card, then the reveal; the menu live at settle: a tap chooses STACK
   let settled = null;
   if (!detail) {
-    const cardDone = await waitLine(/^crash: title card done /, dialed.index, 30000);
+    // 90 s: with SCANLINES on by default (P4c) the post pass costs SwiftShader ~200 ms a frame at dpr 3, and the card is 164 ticks
+    const cardDone = await waitLine(/^crash: title card done /, dialed.index, 90000);
     settled = cardDone && await waitLine(/^crash: title settled /, cardDone.index, 60000);
     if (!cardDone) detail = "the card never ended after the meter";
     else if (!settled) detail = "the reveal did not settle after the card";
@@ -1550,9 +1574,8 @@ let iceLock = null;
   }))`);
   if (!detail) {
     const m0 = consoleLines.length;
-    await press("Escape");
-    const menu = await waitLine(/^crash: menu top (continue) /, m0, 5000);
-    if (!menu) detail = "Escape did not open the menu";
+    const menu = await toMenu("Escape");
+    if (!menu) detail = toMenuDetail;
     else {
       // nothing re-runs on the return: no new boot step line, no new title seed line
       await sleep(1500);
@@ -1616,7 +1639,7 @@ function parseMenuLine(line) {
 const MENU_LINE = /^crash: menu ([a-z-]+) /;
 // the menu line for a screen, said after `from`
 async function menuOn(screen, from, ms = 3000) {
-  const l = await waitLine(new RegExp(`^crash: menu ${screen} `), from, ms);
+  const l = await waitLine(new RegExp(`^crash: menu ${screen}( |$)`), from, ms);
   return l ? parseMenuLine(consoleLines[l.index]) : null;
 }
 // the top screen's highlight after a sub-screen closes stays on the row
@@ -1632,10 +1655,10 @@ async function pauseMenu(extra = "") {
   if (!(await waitLine(/^crash: boot done /, from, 20000))) return { error: "no \"crash: boot done\" within 20 s" };
   await sleep(200);
   const m0 = consoleLines.length;
-  await press("Escape");
-  const top = await menuOn("top", m0);
+  const line = await toMenu("Escape");
+  const top = line && parseMenuLine(consoleLines[line.index]);
   topAt = 0;   // a fresh menu highlights its first row
-  return top ? { top, from: m0 } : { error: "Escape did not open the pause menu" };
+  return top ? { top, from: m0 } : { error: toMenuDetail };
 }
 // the highlight to a row: the rows wrap, so Down from wherever it is
 // (the last Escape or step left it somewhere) lands by going round
@@ -1653,7 +1676,7 @@ async function downTo(order, id, at = 0) {
   if (r.error) detail = r.error;
   else {
     const want = { free: "stack cards daily-stack daily-cards code scores version back",
-                   settings: "music sfx volume scanlines veil back",
+                   settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
     // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; SCORES and CODE from FREE PLAY
@@ -1732,12 +1755,59 @@ async function downTo(order, id, at = 0) {
     await press("Enter");
     const s = await menuOn("settings", m0);
     if (!s) detail = "SETTINGS did not open";
-    else if (s.order.join(" ") !== "music sfx volume scanlines veil back") detail = `the main menu's SETTINGS rows are ${s.order.join(" ")}, not the general five`;
-    else if (s.rows.music.value !== "ON" || s.rows.sfx.value !== "ON" || s.rows.volume.value !== "10" || s.rows.scanlines.value !== "ON" || s.rows.veil.value !== "ON") detail = `the fresh defaults read ${s.order.map((id) => `${id}=${s.rows[id].value}`).join(" ")}`;
+    else if (s.order.join(" ") !== "music sfx volume scanlines veil background back") detail = `the main menu's SETTINGS rows are ${s.order.join(" ")}, not the general six`;
+    else if (s.rows.music.value !== "ON" || s.rows.sfx.value !== "ON" || s.rows.volume.value !== "10" || s.rows.scanlines.value !== "ON" || s.rows.veil.value !== "ON" || s.rows.background.value !== "LIVE") detail = `the fresh defaults read ${s.order.map((id) => `${id}=${s.rows[id].value}`).join(" ")}`;
+    else {
+      // BACKGROUND: STILL is a seeded gradient the field never steps: the next
+      // deal's field line says still, and no "bg held"/step line follows
+      m0 = consoleLines.length;
+      await downTo(s.order, "background");
+      await press("Enter");
+      const still = await waitLine(/^crash: setting background (\w+)$/, m0, 2000);
+      if (!still || still.m[1] !== "still") detail = `Enter on BACKGROUND said ${still ? still.m[0] : "nothing"}`;
+      else {
+        m0 = consoleLines.length;
+        await press("Escape");
+        if (!(await menuOn("top", m0))) detail = "Escape did not leave SETTINGS";
+      }
+    }
+  }
+  if (!detail) {
+    // a deal under STILL: its field line names the still rule with the board's seed
+    let m0 = consoleLines.length;
+    const r2 = await pauseMenu();
+    if (r2.error) detail = r2.error;
     else {
       m0 = consoleLines.length;
-      await press("Escape");
-      if (!(await menuOn("top", m0))) detail = "Escape did not leave SETTINGS";
+      await downTo(r2.top.order, "free-play", topAt); topAt = r2.top.order.indexOf("free-play");
+      await press("Enter");
+      const free = await menuOn("free", m0);
+      if (!free) detail = "FREE PLAY did not open";
+      else {
+        m0 = consoleLines.length;
+        await downTo(free.order, "stack");
+        await press("Enter");
+        const field = await waitLine(/^crash: field (\w+) (\d+)$/, m0, 5000);
+        const spec = field && await waitLine(/^crash: spec stack \w+ (\d+) /, m0, 5000);
+        if (!field) detail = "FREE PLAY -> STACK said no field line";
+        else if (field.m[1] !== "still") detail = `the deal's field is ${field.m[1]}, not still`;
+        else if (!spec || spec.m[1] !== field.m[2]) detail = `the still field's seed ${field.m[2]} is not the board's ${spec ? spec.m[1] : "?"}`;
+        else {
+          await sleep(2500);
+          if (consoleLines.slice(m0).some((l) => /^crash: bg held /.test(l))) detail = "the still field stepped (a bg held line)";
+        }
+      }
+    }
+    // LIVE back through the main menu's SETTINGS
+    if (!detail) {
+      const r3 = await pauseMenu();
+      if (!r3.error) {
+        m0 = consoleLines.length;
+        await downTo(r3.top.order, "settings", topAt); topAt = r3.top.order.indexOf("settings");
+        await press("Enter");
+        const s3 = await menuOn("settings", m0);
+        if (s3) { await downTo(s3.order, "background"); m0 = consoleLines.length; await press("Enter"); await waitLine(/^crash: setting background live$/, m0, 2000); await press("Escape"); }
+      }
     }
   }
   // DEFRAG's overlay: GAME SETTINGS with PULL and SCORING
@@ -1819,7 +1889,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("settings", detail);
-  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil (defaults on/on/10/on/on); DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored");
+  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil background (defaults on/on/10/on/on/live); BACKGROUND STILL dealt a still field seeded by the board with no step; DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored");
 }
 
 // pause (D51): Escape on the board opens the table's own overlay over the
@@ -1899,13 +1969,14 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1&demo=cleared` });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1` });
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
   let layer = null;
   if (!detail) {
-    // to the main menu, JACK IN: the run's first layer (the demo arms it)
+    // to the main menu, then the demo door armed for the next spec'd board,
+    // then JACK IN: the run's first layer clears with one match
     let m0 = consoleLines.length;
     await press("Escape");
     const p = await menuOn("pause", m0);
@@ -1920,10 +1991,8 @@ async function downTo(order, id, at = 0) {
         await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
         const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10})$/, m0, 5000);
         layer = start && await waitLine(/^crash: spec stack hacker (\d+) /, m0, 5000);
-        const demo = layer && await waitLine(/^crash: demo cleared stack$/, m0, 5000);
         if (!start) detail = "JACK IN started no run";
         else if (!layer) detail = "the run dealt no stack layer";
-        else if (!demo) detail = "the demo door did not arm the layer";
       }
     }
   }
@@ -1954,17 +2023,22 @@ async function downTo(order, id, at = 0) {
   }
   let done = null, next = null;
   if (!detail) {
-    // the clear (the demo's one match), the cascade, the ledger, the pull
-    const b = consoleLines.slice().reverse().find((l) => BOOT_ANY.test(l));
-    const m = b && b.match(/pair (\d+)@\((\d+),(\d+)\) (\d+)@\((\d+),(\d+)\)/);
-    const m0 = consoleLines.length;
-    if (!m) detail = "the layer's boot line names no pair";
+    // a second run with the demo door armed: its first layer clears at once
+    // (the door's own match), the cascade runs, the ledger opens, the pull
+    let m0 = consoleLines.length;
+    const t = await toMenu("Escape");
+    const top = t && parseMenuLine(consoleLines[t.index]);
+    if (!top) detail = toMenuDetail;
     else {
-      await tap(m[2], m[3]); await sleep(300); await tap(m[5], m[6]);
-      const removed = await waitLine(/^crash: removed /, m0, 3000);
+      await evalJS("window.__crashUpdates.app.dispatch('demo', 'cleared')");
+      m0 = consoleLines.length;
+      await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
+      const demo = await waitLine(/^crash: demo cleared stack$/, m0, 5000);
+      const removed = demo && await waitLine(/^crash: removed /, m0, 5000);
       done = removed && await waitLine(/^crash: run layer-done stack$/, m0, 20000);
       const rows = done && await menuOn("run-layer", done.index, 3000);
-      if (!removed) detail = "the demo's pair did not match";
+      if (!demo) detail = "the demo door did not arm the new run's layer";
+      else if (!removed) detail = "the demo's match did not fire";
       else if (!done) detail = "no \"crash: run layer-done\" after the clear's cascade";
       else if (!rows || rows.order.join(" ") !== "next-layer") detail = `the ledger screen's rows are ${rows ? rows.order.join(" ") : "missing"}`;
       else {
@@ -1976,7 +2050,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("run", detail);
-  else pass("run", `JACK IN layer ${layer.m[1]}: DISCONNECT landed on CONTINUE, which resumed it; the demo clear's cascade ended in the ledger (next-layer) and layer 2 was pulled by itself`);
+  else pass("run", `JACK IN layer ${layer.m[1]}: DISCONNECT landed on CONTINUE, which resumed it; a second run's demo clear ended in the ledger (next-layer) and layer 2 was pulled by itself`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says
@@ -2008,13 +2082,15 @@ async function downTo(order, id, at = 0) {
   }
   let copied = null;
   if (!detail) {
-    // the pause menu's code line, and COPY
+    // the overlay's CODE row shows the code (D51); then the main menu's code line, and COPY
     await sleep(300);
     let m0 = consoleLines.length;
-    await press("Escape");
-    const top = await menuOn("top", m0);
+    const top = await toMenu("Escape");
+    const overlayRow = top && consoleLines.slice(m0, top.index).find((l) => /^crash: menu pause /.test(l));
+    const shareOk = overlayRow && overlayRow.includes(`share=${code.slice(0, 5)}-${code.slice(5)}`);
     const line = top && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, m0, 2000);
-    if (!top) detail = "Escape on the deal did not open the pause menu";
+    if (!top) detail = toMenuDetail;
+    else if (!shareOk) detail = `the overlay's CODE row did not show ${code}: ${overlayRow}`;
     else if (!line) detail = "the pause menu said no code line for the live deal";
     else if (line.m[1] !== `${code.slice(0, 5)}-${code.slice(5)}`) detail = `the pause menu's code is ${line.m[1]}, the deal's ${code}`;
     else if (!EXPECT_NO_SELECTION) {
@@ -2077,7 +2153,16 @@ async function downTo(order, id, at = 0) {
         const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, m0, 3000);
         if (!refused || refused.m[1] !== flipped) detail = `typed, the flipped code was not refused (${refused ? refused.m[0] : "no line"})`;
         else {
-          for (let k = 0; k < 10; k++) await press("Backspace");
+          // the screen reopened clears the typed text (ten Backspaces can land
+          // two to a frame under load and leave characters behind)
+          m0 = consoleLines.length;
+          await press("Escape");
+          if (!(await menuOn("top", m0))) detail = "Escape did not leave the CODE screen";
+          await downTo(r2.top.order, "free-play", topAt); topAt = r2.top.order.indexOf("free-play");
+          await press("Enter");
+          const free2 = await menuOn("free", m0);
+          if (free2) { await downTo(free2.order, "code"); await press("Enter"); }
+          if (!(free2 && await menuOn("code", m0))) detail = detail || "the CODE screen did not reopen";
           m0 = consoleLines.length;
           await type(code.toLowerCase());
           await press("Enter");

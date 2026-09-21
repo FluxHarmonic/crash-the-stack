@@ -377,6 +377,10 @@
     ;; measured 2026-09-20 on the return's slowdown). A label the sheet
     ;; does not hold (CONNECTING n/m, which changes) draws directly.
     (define ITEM-H (* ITEM-CELL (+ ALPHABET-H 1)))   ; a row of the sheet: the letters and the shadow's cell
+    ;; the rows' pitch on a sheet: a row and a gap of two cells, so the
+    ;; linear filter never samples the row above (the flat style's orange
+    ;; showed under a ramp title's edge, David's read of 2026-09-21)
+    (define ROW-PITCH (+ ITEM-H (* 2 ITEM-CELL)))
     ;; The labels are baked in sheets of SHEET-LABELS each (a flat and a
     ;; ramp row per label), ONE SHEET PER FRAME: a label drawn cell by cell
     ;; is ~200 rectangles a style, sgp's vertex buffer is 65,536 vertices
@@ -402,7 +406,7 @@
         (set! *items-sheets* '())
         (set! *items-tex* #f)
         (set! *items-w* (+ ITEM-CELL (* ITEM-CELL (fold (lambda (m l) (max m (block-text-width l))) 0 labels))))
-        (set! *items-h* (* ITEM-H 2 SHEET-LABELS))
+        (set! *items-h* (* ROW-PITCH 2 SHEET-LABELS))
         (set! *items-key* labels))
       ;; the next sheet, when one is missing
       (let* ((baked (length *items-sheets*))
@@ -413,8 +417,8 @@
               (set-blend-mode 'none)
               (let loop ((ls ls) (i 0))
                 (unless (or (null? ls) (= i SHEET-LABELS))
-                  (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H 2 i) (* BAKE-SCALE ITEM-CELL) 'flat)
-                  (draw-block-text (car ls) 0 (* BAKE-SCALE ITEM-H (+ 1 (* 2 i))) (* BAKE-SCALE ITEM-CELL) 'ramp)
+                  (draw-block-text (car ls) 0 (* BAKE-SCALE ROW-PITCH 2 i) (* BAKE-SCALE ITEM-CELL) 'flat)
+                  (draw-block-text (car ls) 0 (* BAKE-SCALE ROW-PITCH (+ 1 (* 2 i))) (* BAKE-SCALE ITEM-CELL) 'ramp)
                   (loop (cdr ls) (+ i 1)))))
             (set-blend-mode 'normal)
             (set! *items-bakes* (+ 1 *items-bakes*))
@@ -430,7 +434,7 @@
     (define (draw-item-row index style tx ty tw)
       (let* ((sheet (list-ref *items-sheets* (quotient index SHEET-LABELS)))
              (row (modulo index SHEET-LABELS))
-             (cy (* ITEM-H (+ (* 2 row) (if (eq? style 'ramp) 1 0))))
+             (cy (* ROW-PITCH (+ (* 2 row) (if (eq? style 'ramp) 1 0))))
              (cw (+ tw ITEM-CELL)))
         (color! C-TEX-PLAIN)
         (draw-texture-region (cdr sheet) tx ty cw ITEM-H
@@ -560,7 +564,8 @@
         (let ((panel-bottom (if (eq? (menu-screen m) 'credits) (- vh CRAWL-BOTTOM-INSET) (- TEXT-ROWS-Y 11))))
           (color! C-BAR-C)
           (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
-          (color! C-BG)
+          ;; the crawl's ground shows the backdrop through it (the band's treatment)
+          (if (eq? (menu-screen m) 'credits) (color-alpha! C-BG BAND-ALPHA) (color! C-BG))
           (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- panel-bottom 1 (- TEXT-Y 8)))))
       (case (menu-screen m)
         ((credits) (draw-credits m vw vh))
@@ -655,7 +660,7 @@
     ;; over the panel's edges are drawn and the edges painted back over
     ;; them (there is no clip).
     (define CRAWL-TOP TEXT-Y)
-    (define CRAWL-BOTTOM-INSET 16)   ; the panel ends above the (C) band
+    (define CRAWL-BOTTOM-INSET 8)   ; the panel runs to the bottom: the (C) band is off under the crawl
     (define SLIDE-PX 60.0)
     (define (draw-credits m vw vh)
       (let* ((bottom (- vh CRAWL-BOTTOM-INSET))
@@ -673,7 +678,10 @@
                           (cx (quotient (- vw tw) 2))
                           (t (min 1.0 (/ (- bottom y) SLIDE-PX)))
                           (ease (- 1.0 (* (- 1.0 t) (- 1.0 t))))
-                          (jitter (if (< t 1.0) (* ITEM-CELL (- (modulo (+ frames (caddr row)) 5) 2)) 0))
+                          ;; the glitch on the way in: one cell either way, changing every 80 ms
+                          ;; (time, not the frame count: the same at 60 and 120 Hz, and never a
+                          ;; jump of two cells a frame, David's read of 2026-09-21)
+                          (jitter (if (< t 1.0) (* ITEM-CELL (- (modulo (+ (exact (floor (/ (menu-ms m) 80.0))) (caddr row)) 3) 1)) 0))
                           (x (+ cx jitter (exact (round (* (- 1.0 ease) (- vw cx))))))
                           (style (if (< t 1.0) 'flat 'ramp))
                           (i (label-index text)))
@@ -687,6 +695,7 @@
                      (text! text (quotient (- vw (text-width text TEXT-SCALE)) 2) y TEXT-SCALE))))))
          (menu-crawl-rows m))
         ;; the edges back over the rows crossing them: the heading's strip and the bottom rule
+        ;; (opaque: a row half under a translucent strip would show through it)
         (color! C-BG)
         (draw-filled-rect 9 9 (- vw 18) (- CRAWL-TOP 9 2))
         (color! C-BAR-C)

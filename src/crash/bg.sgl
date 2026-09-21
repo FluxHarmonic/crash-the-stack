@@ -77,6 +77,7 @@
           bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean
           bg-held? bg-agit bg-step-key bg-rain bg-kill bg-shown-value
           bg-cell-tones
+          still-params STILL-OFFSET STILL-BAND-MAX STILL-TONES
           hash31 mul31 add31
           CELL GRID-W GRID-H CELLS RAMP MODES RULES STRIDE
           DOMINANT-CAP
@@ -197,7 +198,7 @@
     (define (bg-new seed . rest)
       (let* ((mode (if (and (pair? rest) (memq (car rest) MODES)) (car rest) 'reaction))
              (gpu? (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-             (b ((rule-seed (rule-ref mode)) mode (prng-seed seed)))
+             (b ((rule-seed (rule-ref mode)) mode (prng-seed seed) seed))   ; the stream, and the seed itself (the still rule's parameters)
              (b (bg b seed: seed gpu?: gpu?)))
         (if gpu? b (bg b runs-held: (build-runs b)))))
 
@@ -205,7 +206,7 @@
     ;; fronts grow out of them from the first tick (a dozen left the field
     ;; blank for its first seconds; smoothed noise is too thin to take and
     ;; dies). Values quantized to the 16-bit grid, as stored.
-    (define (seed-reaction mode rng)
+    (define (seed-reaction mode rng . rest)
       (let ((field (make-vector CELLS 0.0))
             (sub (make-vector CELLS (q16 1.0)))
             (half (q16 REACT-SEED)))
@@ -387,8 +388,95 @@
     ;; (crash menu)).
     (define (shown-reaction v) (min REACT-SHOWN-MAX (* REACT-SHOWN-SCALE v)))
 
+    ;; --- the still background (BACKGROUND: STILL, David 2026-09-21) -----------------
+    ;;
+    ;; No automaton: the field is a radial gradient in the dark ramp, drawn
+    ;; once at deal from the board's seed (so a share code reproduces it)
+    ;; and never stepped. The parameters come from the seed's stream, all
+    ;; bounded: the center (off the board by up to STILL-OFFSET of the
+    ;; grid either way), the radius and its falloff, a second smaller
+    ;; focus for asymmetry, a squash and a rotation (elliptical), and the
+    ;; band of two or three ramp tones the dither runs between. The
+    ;; values are stored so that the reaction's shown mapping (the view
+    ;; shader's, and shown-reaction's) lands them in that band: v =
+    ;; level / REACT-SHOWN-SCALE, level in [lo, lo + span) tones over RAMP.
+    (define STILL-OFFSET 0.3)
+    (define STILL-BAND-MAX 3)   ; tones in a band, two or three
+    (define STILL-TONES 4)      ; the band lies in the ramp's dark first four (C-BG, C-BAR-A, C-BAR-C, C-ARCHIVE): the bars' ramp, not the moss accent
+    (define (still-params seed)
+      (let* ((rng (prng-seed seed))
+             (u (lambda (rng) (draw-unit rng)))
+             (a (u rng))
+             (b (u (cdr a)))
+             (c (u (cdr b)))
+             (d (u (cdr c)))
+             (e (u (cdr d)))
+             (f (u (cdr e)))
+             (g (u (cdr f)))
+             (h (u (cdr g)))
+             (i (u (cdr h)))
+             (j (u (cdr i)))
+             (cx (* GRID-W (+ (- STILL-OFFSET) (* (car a) (+ 1.0 (* 2 STILL-OFFSET))))))
+             (cy (* GRID-H (+ (- STILL-OFFSET) (* (car b) (+ 1.0 (* 2 STILL-OFFSET))))))
+             (radius (* GRID-W (+ 0.5 (* 0.7 (car c)))))
+             (falloff (+ 1.2 (* 1.3 (car d))))
+             (cx2 (* GRID-W (car e)))
+             (cy2 (* GRID-H (car f)))
+             (radius2 (* radius (+ 0.3 (* 0.3 (car g)))))
+             (squash (+ 0.6 (* 0.8 (car h))))
+             (angle (* 3.141592653589793 (car i)))
+             (span (if (< (car j) 0.5) 2 3))
+             (lo (modulo (exact (floor (* (car j) 2 (- STILL-TONES span)))) (- STILL-TONES span))))
+        (list (cons 'center (cons cx cy))
+              (cons 'radius radius)
+              (cons 'falloff falloff)
+              (cons 'focus (list cx2 cy2 radius2))
+              (cons 'squash squash)
+              (cons 'angle angle)
+              (cons 'band (cons lo span)))))
+
+    (define (still-param ps key) (cdr (assq key ps)))
+
+    ;; The gradient's intensity in 0..1 at a cell: the main focus'
+    ;; elliptical falloff, lifted by the second focus at half weight.
+    (define (still-intensity ps x y)
+      (let* ((c (still-param ps 'center))
+             (dx (- (+ x 0.5) (car c)))
+             (dy (- (+ y 0.5) (cdr c)))
+             (angle (still-param ps 'angle))
+             (rx (+ (* dx (cos angle)) (* dy (sin angle))))
+             (ry (/ (- (* dy (cos angle)) (* dx (sin angle))) (still-param ps 'squash)))
+             (d (/ (sqrt (+ (* rx rx) (* ry ry))) (still-param ps 'radius)))
+             (main (max 0.0 (- 1.0 (expt (min 1.0 d) (still-param ps 'falloff)))))
+             (f (still-param ps 'focus))
+             (fx (- (+ x 0.5) (car f)))
+             (fy (- (+ y 0.5) (cadr f)))
+             (d2 (/ (sqrt (+ (* fx fx) (* fy fy))) (caddr f)))
+             (second (max 0.0 (- 1.0 (* d2 d2)))))
+        (min 1.0 (+ main (* 0.5 second)))))
+
+    (define (seed-still mode rng . rest)
+      (let* ((field (make-vector CELLS 0.0))
+             (sub (make-vector CELLS (q16 1.0)))
+             (seed (if (pair? rest) (car rest) 1))
+             (ps (still-params seed))
+             (band (still-param ps 'band))
+             (lo (car band))
+             (span (cdr band)))
+        (let loop ((i 0))
+          (when (< i CELLS)
+            (let* ((x (modulo i GRID-W))
+                   (y (quotient i GRID-W))
+                   (level (/ (+ lo (* (still-intensity ps x y) (- span 0.001))) (inexact RAMP))))
+              (vector-set! field i (q16 (/ level REACT-SHOWN-SCALE))))
+            (loop (+ i 1))))
+        (bg mode: mode field: field sub: sub)))
+
+    (define (step-still b key) b)   ; never stepped
+
     (define RULES
-      (list (list 'reaction seed-reaction step-reaction shown-reaction)))
+      (list (list 'reaction seed-reaction step-reaction shown-reaction)
+            (list 'still seed-still step-still shown-reaction)))
 
     (define MODES (map car RULES))
 

@@ -1467,9 +1467,11 @@
     ;; The field for a new deal (not a continued board): the pool's rule
     ;; for the seed, the field itself seeded by it too, unless ?bg= pinned one.
     ;;   crash: field RULE SEED
+    (define *field-seed* 1)   ; the seed the field was last dealt from (a BACKGROUND change re-seeds it)
     (define (field-for-deal! seed)
+      (set! *field-seed* seed)
       (unless *bg-asked*
-        (let ((rule (field-pick! seed)))
+        (let ((rule (field-rule-for-deal! seed)))
           (set! *bg-mode* rule)
           (set! *bg* (bg-choose rule seed *bg-hold*))
           (say "field" rule seed))))
@@ -1518,6 +1520,7 @@
     ;; one, or a fresh deal of ?seed (the arms' and a bookmark's boot).
     (define (open-stack! resume?)
       (set! *screen* 'stack)
+      (set-active-game! 'stack)   ; the table up is the one CONTINUE returns to (a ?stack boot after a DEFRAG deal had no CONTINUE)
       (set! *announced* #f)
       (unless (and resume? *session*) (music-fresh!))   ; a new deal: its rest track from the top (D50)
       (let ((lay (turtle-layout)))
@@ -1538,6 +1541,7 @@
 
     (define (open-cards! resume?)
       (set! *screen* 'cards)
+      (set-active-game! 'cards)
       (set! *announced* #f)
       (unless *card-geom* (set! *card-geom* (make-card-geometry VW VH)))
       (unless (and resume? *deal*) (music-fresh!))
@@ -1631,11 +1635,9 @@
       (set-setting! id v)
       (say "setting" id v)
       (case id
-        ((hud)
-         (when *session* (set! *session* (session-with-hud *session* v)))
-         (when *deal* (set! *deal* (deal-with-hud *deal* v))))
         ((scanlines) (post-set-scanlines! (eq? v 'on)))
         ((veil) (post-set-veil! (eq? v 'on)))
+        ((background) (field-for-deal! *field-seed*))   ; LIVE/STILL takes now, on the field as dealt
         (else #f)))
 
     ;; A menu choice (P4). UPDATE applies the waiting version the same
@@ -1760,6 +1762,7 @@
       ;; the field: ?bg= pins a rule for this boot (the dev door); else each
       ;; deal picks from the pool by its seed (field-for-deal!), and the menu
       ;; before the first deal shows the default rule
+      (unless *bg-asked* (set! *bg-mode* (field-rule-at-boot)))
       (set! *bg* (bg-choose *bg-mode* 1 *bg-hold*))
       (apply-audio-settings!)
       (post-set-scanlines! (eq? (setting 'scanlines) 'on))
@@ -1876,7 +1879,7 @@
             ;; memory takes it too
             ((string=? type "credits")
              (credits-text! payload)
-             (set! *menu* (menu-with-credits *menu* (credits-parse payload)))
+             (when *menu* (set! *menu* (menu-with-credits *menu* (credits-parse payload))))   ; a board boot has no menu yet: launch-menu takes them later
              (say "credits" (length (credits-parse payload)))
              0)
             ((string=? type "epoch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ n (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))

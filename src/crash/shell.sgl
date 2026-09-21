@@ -46,7 +46,7 @@
           (crash cards geometry)
           (only (crash stack generate) FACE-ORDER))
 
-  (export VW VH MODIFIERS bg-advance bg-choose FIELD-POOL field-pick! copper-choice phosphor-choice demo-won-deal
+  (export VW VH MODIFIERS bg-advance bg-choose FIELD-POOL field-pick! field-rule-for-deal! field-rule-at-boot copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
           AMBIENT-RATE play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
@@ -537,6 +537,11 @@
     ;; `?bg=`/`--bg` stay as dev doors that pin one rule for the process.
     (define FIELD-POOL (list 'reaction))
     (define *field-last* #f)
+    ;; The rule a deal gets: STILL when the BACKGROUND setting says so
+    ;; (the seeded gradient, never stepped), else the pool's pick.
+    (define (field-rule-for-deal! seed)
+      (if (eq? (setting 'background) 'still) 'still (field-pick! seed)))
+
     (define (field-pick! seed)
       (let* ((n (length FIELD-POOL))
              (i (modulo seed n))
@@ -554,6 +559,10 @@
              (mode (string->symbol (if cpu? (substring text 0 (- n 4)) text))))
         (and (memq mode MODES)
              (bg-with-hold (bg-new seed mode (not cpu?)) hold))))
+
+    ;; The rule for the menu before any deal: still under STILL, else the pool's first.
+    (define (field-rule-at-boot)
+      (if (eq? (setting 'background) 'still) 'still (car FIELD-POOL)))
 
     ;; When the copper raster draws over the field: roll (the cleared
     ;; sequence only; the default), always, off, bitmap (the painted bars,
@@ -593,7 +602,7 @@
     ;; each boot's glitches differ (P3d). The reveal plays once per
     ;; process and only when the process opens on the menu (a ?stack boot
     ;; forfeits it): later menus open settled.
-    (define (launch-menu update-waiting? held? . rest)   ; rest: seed, code-line, copy?, fresh? (a fresh boot ignores the saved board: no CONTINUE unless held)
+    (define (launch-menu update-waiting? held? . rest)   ; rest: seed, code-line, copy?, fresh? (a fresh boot ignores the saved board: no CONTINUE unless held), exit? (the native build's EXIT row)
       (let ((continue? (or held?
                            (and (not (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (pair? (cdddr rest)) (cadddr rest)))
                                 (saved-game? (active-game)))))
@@ -601,7 +610,8 @@
                        (or (and (pair? rest) (car rest))
                            (now-second))))
             (code-line (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-            (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest))))
+            (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest)))
+            (exit? (and (>= (length rest) 5) (list-ref rest 4))))
         (set! *title-shown* #t)
         (menu-with-credits
          (menu-with-scores
@@ -609,7 +619,8 @@
           (menu-with-settings
            (menu-new (append (if continue? (list 'continue) '())
                              (list 'jack-in 'free-play 'settings 'credits)   ; built with list, not quoted (the wasm literal hazard)
-                             (if update-waiting? (list 'update) '()))
+                             (if update-waiting? (list 'update) '())
+                             (if exit? (list 'exit) '()))
                      (if continue? 'continue 'jack-in)
                      seed)
            (settings-in-force))

@@ -62,7 +62,9 @@
                                       (bg-canonical (bg-tick (bg-new 2 mode) 120))))))
             MODES))
 
-(test-group "bg: a live, bounded field, every rule"
+(define LIVE-MODES (filter (lambda (m) (not (eq? m 'still))) MODES))   ; the still background is frozen by design
+
+(test-group "bg: a live, bounded field, every live rule"
   (for-each (lambda (mode)
               (let loop ((seed 1))
                 (when (<= seed SEEDS)
@@ -84,7 +86,7 @@
                     (test (string-append label ": at least four tones after a minute (saw " (number->string (tones-present (bg-runs b))) ")")
                       (assert-true (>= (tones-present (bg-runs b)) 4))))
                   (loop (+ seed 1)))))
-            MODES))
+            LIVE-MODES))
 
 (test-group "bg: the phase inputs"
   (test "the ICE runs more iterations a step than calm, and its step lands elsewhere; a burst runs the cap, and it passes"
@@ -165,3 +167,45 @@
       (assert-equal 1 (bg-steps cpu1))
       (assert-equal REACT-STEPS-MAX (bg-iterations-at gpu1 (car (bg-step-agit gpu1 0))))
       (assert-true (> (cells-changed cpu1 calm1) 0)))))
+
+;; BACKGROUND: STILL (David, 2026-09-21): a gradient seeded by the deal,
+;; never stepped. Two seeds give different parameter sets, one seed the
+;; same one; the field's values sit in the band the seed picked (two or
+;; three of the ramp's tones, through the reaction's shown mapping); a
+;; tick changes nothing.
+(test-group "bg: the still background"
+  (test "the parameters are the seed's: two seeds differ, one seed repeats; every one bounded"
+    (let ((a (still-params 280))
+          (b (still-params 281))
+          (c (still-params 280)))
+      (assert-equal a c)
+      (assert-false (equal? a b))
+      (for-each (lambda (ps)
+                  (let ((center (cdr (assq 'center ps)))
+                        (band (cdr (assq 'band ps))))
+                    (assert-true (>= (car center) (* -0.3 40)))
+                    (assert-true (<= (car center) (* 1.3 40)))
+                    (assert-true (memv (cdr band) '(2 3)))
+                    (assert-true (>= (car band) 0))
+                    (assert-true (<= (+ (car band) (cdr band)) STILL-TONES))))
+                (list a b))))
+  (test "a still field is the seed's alone: the same twice, different from another seed's, and a tick leaves it"
+    (let ((s1 (bg-new 280 'still))
+          (s2 (bg-new 280 'still))
+          (s3 (bg-new 281 'still)))
+      (assert-equal (bg-field s1) (bg-field s2))
+      (assert-false (equal? (bg-field s1) (bg-field s3)))
+      (assert-equal (bg-field s1) (bg-field (bg-tick s1 120)))
+      (assert-equal 'still (bg-mode s1))))
+  (test "the values shown lie in the seed's band of tones"
+    (let* ((b (bg-new 280 'still))
+           (band (cdr (assq 'band (still-params 280))))
+           (lo (/ (car band) 8.0))
+           (hi (/ (+ (car band) (cdr band)) 8.0))
+           (f (bg-field b)))
+      (let loop ((i 0))
+        (when (< i (vector-length f))
+          (let ((shown (bg-shown-value b (vector-ref f i))))
+            (assert-true (>= shown (- lo 0.01)))
+            (assert-true (< shown hi)))
+          (loop (+ i 1)))))))
