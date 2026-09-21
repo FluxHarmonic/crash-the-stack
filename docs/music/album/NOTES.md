@@ -107,3 +107,16 @@ Obsidian uses the selected Waves IV patches and side-pad accents, retaining the
 accepted Pedal II identity. The audit now checks paired-pad harmony and release
 spacing across boundaries. No game backport is proposed. Breach Vector, Clock
 Edge and the confirmed closer Glass Current remain to be arranged.
+
+## Edge pair I
+
+David explicitly requested the next two as soon as Dead Sector and Obsidian Index
+were done. The stone-pair full OGGs were acknowledged before work continued on
+Breach Vector and Clock Edge. Fourteen of fifteen full arrangements now exist;
+Glass Current remains the final planned closer. No new listening acceptance is
+inferred for the recent pairs. See EDGE-PAIR-I.md for the new forms and checks.
+
+Breach retains the accepted smooth opening balance, spaced middle plucks and
+adaptive grit/pipe development on its native speed-4 clock. Clock Edge retains
+Room II's body and selective ambience. All game sources and both instrument
+banks/buses remain intact. No game backport or new synth feature is proposed.

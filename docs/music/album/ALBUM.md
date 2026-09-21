@@ -21,8 +21,8 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 | 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
 | 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
-| 13 | Breach Vector | Planned | 3:30 |
-| 14 | Clock Edge | Planned | 3:30 |
+| 13 | Breach Vector | Edge pair I ready for listening | 3:30 actual |
+| 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |
 | 15 | Glass Current | Planned | 4:00 |
 
 Durations guide the form, not the number of repetitions. First establish the

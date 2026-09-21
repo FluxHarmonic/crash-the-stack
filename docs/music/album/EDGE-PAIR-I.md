@@ -88,3 +88,22 @@ its answering bell stays on eighths, while finer lead subdivisions remain.
 Audio, source snapshots, command manifests, hashes and raw reports live in
 ~/Ops/artifacts/crash-the-stack-album/edge-pair-i/. Native export is 16-bit;
 these are full provisional album auditions, not high-resolution release masters.
+
+## Provisional mastering and full render results
+
+| Track | Native LUFS-I | Gain | WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Breach Vector | -17.0 | +0.5 dB | -16.6 | -16.6 | -1.6 dBTP | 4.3 LU |
+| Clock Edge | -20.3 | +3 dB | -17.3 | -17.3 | -2.9 dBTP | 4.6 LU |
+
+Breach needs only a small lift to sit near the stronger groove tracks. Clock
+Edge remains between the quieter pieces and heavier opening material. Both
+retain their native loudness range at reported precision, 4.3/4.6 LU. Use the
+provisional pilot processing chain with these explicit gains; no EQ, extra
+reverb or stereo widening is added.
+
+All native/master WAV/FLAC/OGG durations match the section maps within one sample.
+Master WAV and decoded FLAC PCM match exactly. Both final master seconds peak
+at -90.3 dBFS; WAV and decoded OGG true peaks pass the -1 dBTP ceiling. The full
+tails remain intact. Technical checks establish consistency, not listening
+approval. Fourteen of fifteen full arrangements now exist; Glass Current remains.

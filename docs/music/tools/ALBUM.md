@@ -183,3 +183,24 @@ and wrong root; the raw check script/result accompanies the external renders.
 See [STONE-PAIR-I.md](../album/STONE-PAIR-I.md) for arrangement landmarks and
 measurements. Scores/maps reproduce exactly; instrument banks and buses match
 the game references, including the accepted Waves IV pad and pedal balance.
+
+## Edge pair: Breach Vector and Clock Edge
+
+```sh
+sigil docs/music/tools/album-compose-edge.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track breach-vector --track clock-edge --output /absolute/external/edge-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track breach-vector --track clock-edge --output /absolute/external/edge-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track breach-vector --gain 0.5 --output /absolute/external/edge-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track clock-edge --gain 3 --output /absolute/external/edge-pair-i
+```
+
+Set MOTIF_BIN or supply --motif for compilation/synthesis. Explicitly select the
+pair. Breach retains speed 4, the default (4 4) display grouping and its original
+64-row motifs. Do not apply the speed-3 scores' odd-row or eighth-grid restrictions
+to its written subdivisions. The exact rational sample-clock audit and slide
+semantics still apply to every channel. Clock Edge retains speed 3, no off-
+sixteenth attacks, and eighth-grid bell answers; its lead uses finer subdivisions.
+
+See [EDGE-PAIR-I.md](../album/EDGE-PAIR-I.md). Both composers' scores/maps reproduce
+exactly; sound banks and buses equal the accepted sources. Only Glass Current
+remains unarranged. Rhythm-game chart generation is outside this album pass.
