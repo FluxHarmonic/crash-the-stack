@@ -107,3 +107,8 @@ Master WAV and decoded FLAC PCM match exactly. Both final master seconds peak
 at -90.3 dBFS; WAV and decoded OGG true peaks pass the -1 dBTP ceiling. The full
 tails remain intact. Technical checks establish consistency, not listening
 approval. Fourteen of fifteen full arrangements now exist; Glass Current remains.
+
+Telegram acknowledged the complete Breach Vector album I OGG as message 1126
+and Clock Edge album I as message 1127. David then authorized Glass Current as
+the final arrangement, to begin after this delivery. Listening feedback on the
+edge pair remains open.
