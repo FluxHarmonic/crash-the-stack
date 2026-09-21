@@ -125,3 +125,35 @@ and both packaging tools now omit OGG from public manifests and uploads. The
 selected MP3 objects already passed checksum, MIME, CORS and range checks; no
 re-encoding was needed. Final page bundle: r2-mp3-i/soundtrack/ beneath the
 external album artifact root. Local OGG/WAV/FLAC sources remain intact.
+
+## Published and verified — 2026-09-21
+
+Live: https://crashthestack.com/soundtrack/.
+Final deployment: https://f162bc5a.crashthestack.pages.dev, source ae07ce6.
+The previous R2 two-format player was b8b2f99b; the earlier all-audio Pages
+attempt never deployed. The game/tracker remain the 2c33835 build, with only
+the documented service-worker soundtrack bypass and version changed. Its
+worker version is 2c338353d1a0-album-a186034.
+
+The final public manifest contains fifteen MP3 URLs and no OGG URLs. The MP3
+set is 105,931,365 bytes. Its source-hash upload receipts are retained under
+r2-mp3-i/; the resume check skips all fifteen successfully completed uploads.
+The initial fifteen OGG uploads remain unreferenced in R2; local OGG/WAV/FLAC
+artifacts are unchanged. Future upload plans contain only MP3.
+
+Public checks: the game page, tracker page, worker, player HTML/JS/CSS and album
+manifest match their staged hashes. /soundtrack redirects to /soundtrack/.
+All uploaded audio objects passed byte-range, full-content MD5/ETag, MIME and
+CORS checks. On the live site, Chromium requests no audio before playback,
+plays Black Glass from assets.crashthestack.com, seeks near its end and advances
+to Cold Boot. The page remains cross-origin isolated and anonymous CORS audio
+works. Browser checks are muted; they do not replace listening review.
+
+Existing clients controlled by the old game worker may need to open the game
+and accept its normal update before /soundtrack/ reaches the new route. No
+forced activation or clearing of game storage was introduced.
+
+Publication manifests, logs, scripts and raw HTTP verification are external in
+publication-mp3-i/, publication-r2-i/ and r2-preview-i/. The publisher safeguard
+and route change are committed on feat/codex-album; the coordinator must merge
+them before the next game deployment to retain the soundtrack page.
