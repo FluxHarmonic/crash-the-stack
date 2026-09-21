@@ -23,7 +23,7 @@ export function cyclicAt(seed, steps, rain = 16, legacy = false, visit = 550) {
     rng = rng * 48271 % 2147483647;
     current[i] = Math.floor((rng % 1000000) / 1000000 * 16);
     ages[i] = legacy ? 0 : hash31((seed + i) & 0x7fffffff) % 24;
-    shown[i] = current[i] * (legacy ? 16 : 10);
+    shown[i] = legacy ? current[i] * 16 : 32;
   }
   let peak = 0, peakStep = 0, minimumChanged = CELLS, minimumTones = 8;
   let longestWait = 0, accentPeak = 0;
@@ -40,7 +40,7 @@ export function cyclicAt(seed, steps, rain = 16, legacy = false, visit = 550) {
       ages[i] = moved ? 0 : Math.min(255, ages[i] + 1);
       longestWait = Math.max(longestWait, ages[i]);
       changed += moved;
-      shown[i] = legacy ? next[i] * 16 : moved && (h >>> 20) % 32 === 0 ? 200 : next[i] * 10;
+      shown[i] = legacy ? next[i] * 16 : Math.floor((shown[i] * 7 + (moved ? 176 : 16)) / 8);
       const base = Math.floor(shown[i] / 32), quarter = Math.floor((shown[i] % 32) / 8);
       counts[base] += 4 - quarter;
       counts[(base + 1) % 8] += quarter;

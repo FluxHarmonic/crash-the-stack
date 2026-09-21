@@ -1,7 +1,8 @@
 ;;; (crash gpu rules) - Additional field step shaders for D55's deal pool.
-;;; Both use the existing nearest RGBA8 ping-pong and palette-only view.
+;;; All three use the existing nearest RGBA8 ping-pong and palette-only view.
 ;;; CYCLIC: R is the shown byte; G is phase (0..15); B is waiting age.
 ;;; FLOW: R is the squared scalar for display; BA retains its 16-bit state.
+;;; SIGNAL: R is the shown byte; G/B carry downward/rightward heads.
 
 (define-library (crash gpu rules)
   (import (crash gpu glsl))
@@ -55,10 +56,10 @@
        "    if (h % 1000u < uint(u_rain)) advance = true;\n"
        "    bool moved = age >= int(u_max_age) - 1 || (advance && (h >> 10) % 1000u < uint(u_rate));\n"
        "    if (moved) { k = next; age = 0; } else age++;\n"
-       "    // Dark tones carry the phases; sparse advancing tips carry the accents.\n"
-       "    float shown = float(k) * 10.0;\n"
-       "    if (moved && (h >> 20) % 32u == 0u) shown = 200.0;\n"
-       "    fragColor = vec4(shown, float(k), float(age), 255.0) / 255.0;\n"
+       "    // Ease local activity into dark patches instead of flashing phase colors.\n"
+       "    int previous = int(floor(c.r * 255.0 + 0.5));\n"
+       "    int shown = (previous * 7 + (moved ? 176 : 16)) / 8;\n"
+       "    fragColor = vec4(float(shown), float(k), float(age), 255.0) / 255.0;\n"
        "}\n"))
 
     (define FLOW-SOURCE
@@ -129,8 +130,10 @@
        "        right = cell(p + ivec2(-1, 0)).b;\n"
        "        if (p.x == 0) right = horizontalLane && hash31(stepkey() + 4096u + uint(vy)) % 1000u < 60u ? 1.0 : 0.0;\n"
        "    }\n"
-       "    // Bright heads, dark fading tails: the scalar occupies the view's red byte.\n"
-       "    float shown = min(150.0, floor(c.r * 255.0 * 0.94));\n"
+       "    // Slow waves move the darkest two-tone dither beneath the fading tails.\n"
+       "    float drift = u_clock * 0.002 + float(seed % 256u) * 0.024543693;\n"
+       "    float ground = floor(16.0 + 7.0 * sin(float(p.x) * 0.23 + drift) * cos(float(vy) * 0.29 - drift * 0.7));\n"
+       "    float shown = max(ground, min(150.0, floor(c.r * 255.0 * 0.94)));\n"
        "    if (down > 0.5 || right > 0.5) shown = 200.0;\n"
        "    fragColor = vec4(shown / 255.0, down, right, 1.0);\n"
        "}\n"))))
