@@ -69,3 +69,25 @@ All audio and raw reports belong in
 ~/Ops/artifacts/crash-the-stack-album/air-pair-i/. Retain the native sources,
 canonical snapshots, exact command manifests and hashes. Native source precision
 remains 16-bit; these are provisional album-level auditions, not release masters.
+
+## Provisional mastering and full render checks
+
+| Track | Native LUFS-I | Gain | WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Blind Spot | -23.0 | +3 dB | -20.0 | -20.0 | -3.6 dBTP | 4.7 LU |
+| Sector Drift | -21.2 | +3.5 dB | -17.7 | -17.6 | -2.0 dBTP | 4.8 LU |
+
+Blind Spot stays below Quiet Array's provisional album level, preserving the
+stealth piece's small gestures. Sector Drift sits near Closed Loop while its
+softer kit retains its identity. These gains use available headroom without
+forcing a common loudness. The pilot limiter recipe remains in place, but both
+pieces stay below its nominal -1.5 dB ceiling; no extra loudness is sought by
+pushing these tracks into compression. Native and mastered loudness ranges match
+at reported precision. No new EQ, reverb or stereo processing is applied.
+
+Native/master WAV, FLAC and OGG all match the score durations within one sample.
+Master WAV and decoded FLAC samples match exactly. The final master second peaks
+at -90.3 dBFS for both tracks; WAV and decoded OGG pass the -1 dBTP delivery limit.
+The full files retain natural tails. Technical checks do not establish listening
+approval; David's feedback on this pair remains open. Eight of fifteen complete
+album arrangements now exist, with seven still planned.

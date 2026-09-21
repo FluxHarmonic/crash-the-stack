@@ -122,3 +122,20 @@ on that clock; the original `phrase` convenience remains thirty-two rows/bar.
 See [SIGNALS-PAIR-I.md](../album/SIGNALS-PAIR-I.md) for arrangement landmarks and
 checks. The new composer and the prior opening composer both reproduce their
 scores and maps byte-for-byte after the shared clock support was added.
+
+## Air pair: Blind Spot and Sector Drift
+
+```sh
+sigil docs/music/tools/album-compose-air.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track blind-spot --track sector-drift --output /absolute/external/air-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track blind-spot --track sector-drift --output /absolute/external/air-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track blind-spot --gain 3 --output /absolute/external/air-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track sector-drift --gain 3.5 --output /absolute/external/air-pair-i
+```
+
+Set MOTIF_BIN or supply --motif for compilation/synthesis. The default selection
+still remains Cold Boot and Relay Ghost; explicitly select the air pair. Both
+use the speed-3 grid, with no off-sixteenth rhythmic attacks. The melodic signals
+are checked on eighths. See [AIR-PAIR-I.md](../album/AIR-PAIR-I.md) for arrangement
+landmarks and technical results. These additions only extend the registry;
+previous scores and mastering settings are unchanged.

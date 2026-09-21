@@ -74,3 +74,13 @@ snap-click identity and Shadow Protocol's delicate pad/vibes and subtle tension.
 Shadow uses the older speed-6, sixteen-row bar clock; its off-eighth bass/lead
 notes and slides are intentional. The shared tools now account for that clock
 without changing the prior scores or maps. No game backport is proposed.
+
+## Air pair I
+
+David reports that everything sounds great so far and asked for the next two.
+The opening and signals pairs are liked; finer listening feedback remains open.
+Blind Spot and Sector Drift fill positions 6/8, bringing the album to eight full
+arrangements. See AIR-PAIR-I.md. Blind Spot retains its complete spacious body
+with a new entrance and ending. Sector Drift adds a brief bass-and-dust break,
+a full calm reprise and a G-minor landing. Both retain their accepted banks,
+buses and onset grids. No game backport is proposed.
