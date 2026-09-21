@@ -8,7 +8,7 @@
 //
 //   imports    tracker/crash-tracker.wasm imports only wasi + gl + sigil_wasm_gles3 +
 //              sigil_browser + sigil_wasm_audio (as the game's wasm; no env)
-//   sizes      the game's wasm is within 0.3 MB of master's 21,425,074 bytes
+//   sizes      the game's wasm is within 0.3 MB of master's 23,647,979 bytes (05f4712)
 //              (the tracker is not in it) and the tracker's within 20 MB
 //   open       /tracker/?tune=spy: "crash: tracker open spy" then "crash: tune loaded spy"
 //              (the page fetched assets/tunes/spy.cts and handed it over in chunks)
@@ -28,7 +28,11 @@
 //   door       the game page at /?tracker=spy is just the game: it boots (its
 //              literal-check line) and never says "crash: tracker open" (the
 //              game's wasm carries no tracker; /tracker/ is the one entry)
-//              loads the same tune
+//   menu       FREE PLAY > TRACKER on the game's menu (taps at the menu trace
+//              line's centers): the page goes to tracker/ and the tracker opens
+//   worker     under a controlling service worker (registered by the game page,
+//              active) /tracker/?tune=breaker still opens the tracker: the game
+//              page, served for that path by sw.js, swaps the real page in
 //   bar        (phone only) a synthetic touch on the bar's PLAY button starts playback
 //              ("crash: tracker play"), one on STOP stops it: the screen closes on touch
 //   console    no error-level console entries or exceptions across the run
@@ -55,7 +59,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
 const results = [];
-const planned = ["imports", "sizes", "open", "render", "play", "edit", "share", "fragment", "door", "worker", "bar", "console"];
+const planned = ["imports", "sizes", "open", "render", "play", "edit", "share", "fragment", "door", "menu", "worker", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -216,7 +220,7 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
     if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
     else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
   } catch (e) { fail("imports", "compile: " + e.message); }
-  const BASE = 21425074, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;
+  const BASE = 23647979, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;   // BASE: master 05f4712 through scripts/dev (OPTIMIZE on), measured 2026-09-21
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
@@ -326,6 +330,44 @@ if (firstURL) {
   else fail("door", `game ${game ? "booted" : "did not boot"}, tracker opened ${opened}, at ${where}`);
 }
 
+// ---- menu ---------------------------------------------------------------------
+// FREE PLAY > TRACKER on the game's menu (web only: the row is a link the
+// page follows on "crash: open tracker"). The menu's trace line gives every
+// row's center: "crash: menu SCREEN id X Y ..."; the taps use them.
+{
+  const rowCenter = (line, id) => { const m = new RegExp(`(?:^| )${id} (-?[\\d.]+) (-?[\\d.]+)`).exec(line); return m ? [Number(m[1]), Number(m[2])] : null; };
+  let from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+  const gate = await waitLine(/^crash: literal-check ok$/, from, 40000);
+  await sleep(1500);
+  await press("Enter");   // the title gate
+  const live = await waitLine(/^crash: ambient start$/, from, 60000);   // the menu live (the music began)
+  const top = await waitLine(/^crash: menu top /, from, 5000);
+  let detail = "";
+  if (!gate || !live || !top) detail = `gate ${!!gate}, live ${!!live}, top line ${!!top}`;
+  else {
+    const c = rowCenter(consoleLines[top.index], "free-play");
+    if (!c) detail = "no free-play center in " + consoleLines[top.index];
+    else {
+      from = consoleLines.length;
+      await tap(c[0], c[1]);
+      const free = await waitLine(/^crash: menu free /, from, 5000);
+      const t = free && rowCenter(consoleLines[free.index], "tracker");
+      if (!t) detail = free ? "no tracker row on the FREE PLAY screen: " + consoleLines[free.index] : "FREE PLAY did not open";
+      else {
+        from = consoleLines.length;
+        await tap(t[0], t[1]);
+        const said = await waitLine(/^crash: open tracker$/, from, 5000);
+        const opened = said && await waitLine(/^crash: tracker open untitled$/, from, 40000);
+        const where = await evalJS("location.pathname");
+        if (said && opened && /\/tracker\/$/.test(where)) pass("menu", `FREE PLAY > TRACKER tapped at ${t.join(",")}: the page went to ${where} and the tracker opened`);
+        else detail = `open line ${!!said}, tracker opened ${!!opened}, at ${where}`;
+      }
+    }
+  }
+  if (detail) fail("menu", detail);
+}
+
 // ---- worker -------------------------------------------------------------------
 // sw.js answers every navigation with the cached root page (its fix is
 // proposed with P4a); the game page, landed at /tracker/ that way, fetches
@@ -335,6 +377,9 @@ if (firstURL) {
 // controlled; /tracker/ after that must still be the tracker.
 {
   let from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });   // the game page, whatever the menu leg left
+  await waitLine(/^crash: literal-check ok$/, from, 40000);
+  await sleep(1500);
   await press("Enter");   // the title gate
   const registered = await waitLine(/^crash: sw registered$/, from, 95000);
   let controlled = false;
