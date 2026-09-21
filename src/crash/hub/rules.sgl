@@ -35,7 +35,7 @@
           hub-enter-layer hub-descriptor
           hub-alert hub-tense? hub-tempo hub-trace-fraction hub-pulse?
           hub-passable? hub-daemon-passable? hub-can-descend? hub-at-market? hub-can-buy?
-          hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent?
+          hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent? hub-runner-sight hub-path
           hub-nearest-daemon hub-node-here
           launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson
           action-valid? ACTIONS)
@@ -53,28 +53,36 @@
     ;; and the daemons, nothing opened, taken, dark or held (keys are the
     ;; layer's), no layer credits, the trace and the beat at zero.
     (define (hub-with-layer w l depth attempt)
-      (world w
-             depth: depth
-             attempt: attempt
-             layer: l
-             runner: (runner cell: (layer-entry l))
-             nodes: (layer-nodes l)
-             daemons: (layer-daemons l)
-             keys: '()
-             opened: '()
-             taken: '()
-             dark: '()
-             decoys: '()
-             layer-credits: 0
-             trace: 0
-             beat: 0
-             request: #f
-             events: '()))
+      (remember
+       (world w
+              depth: depth
+              attempt: attempt
+              layer: l
+              runner: (runner cell: (layer-entry l))
+              nodes: (layer-nodes l)
+              daemons: (layer-daemons l)
+              keys: '()
+              opened: '()
+              taken: '()
+              dark: '()
+              decoys: '()
+              layer-credits: 0
+              trace: 0
+              beat: 0
+              request: #f
+              events: '()
+              seen: (make-vector (layer-size l) #f))))
 
     (define (hub-enter-layer w depth attempt)
       (let ((l (generate-layer (world-run-seed w) depth attempt)))
         (unless l (error "hub: no layer built for this run seed, depth and attempt" (world-run-seed w) depth attempt))
         (hub-with-layer w l depth attempt)))
+
+    ;; The world with the runner's sight added to its memory.
+    (define (remember w)
+      (let ((v (vector-copy (world-seen w))))
+        (for-each (lambda (c) (vector-set! v c #t)) (hub-runner-sight w))
+        (world w seen: v)))
 
     ;; A run from its seed, on layer 1.
     (define (hub-new run-seed)
@@ -242,6 +250,33 @@
             ((= (car sorted) (cadr sorted)) (dedupe (cdr sorted)))
             (else (cons (car sorted) (dedupe (cdr sorted))))))
 
+    ;; What the runner sees: every walkable cell within RUNNER-SIGHT
+    ;; (Euclidean) with a line of sight from his cell, his own cell first,
+    ;; ascending. Fog and light are one system (D61): this is what the
+    ;; draw lights and what joins the memory each beat.
+    (define (hub-runner-sight w)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (c (runner-cell (world-runner w)))
+             (cx (idx-x c width))
+             (cy (idx-y c width))
+             (r2 (* RUNNER-SIGHT RUNNER-SIGHT)))
+        (let rows ((y (max 0 (- cy RUNNER-SIGHT))) (acc '()))
+          (if (> y (min (- height 1) (+ cy RUNNER-SIGHT)))
+              (reverse acc)
+              (rows (+ y 1)
+                    (let cols ((x (max 0 (- cx RUNNER-SIGHT))) (acc acc))
+                      (if (> x (min (- width 1) (+ cx RUNNER-SIGHT)))
+                          acc
+                          (cols (+ x 1)
+                                (let ((i (idx x y width)))
+                                  (if (and (<= (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) r2)
+                                           (cell-walkable? (layer-cell l i))
+                                           (line-of-sight? l c i))
+                                      (cons i acc)
+                                      acc))))))))))
+
     ;; Is the runner hidden from this daemon? Cloaked: yes. In contact or
     ;; beside it: no. In shadow: yes, unless beside it. Else: hidden when
     ;; out of the fan.
@@ -254,6 +289,32 @@
               ((cell-adjacent? c (daemon-cell d) (layer-width l)) #f)
               ((eq? (layer-cell l c) 'shadow) #t)
               (else (not (memv c (daemon-sight l d)))))))
+
+    ;; The shortest path from the runner to a cell over what he may pass
+    ;; now, as directions, or #f. For the auto-player and the doors.
+    (define (hub-path w target)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (parent (make-vector (layer-size l) #f))
+             (from (runner-cell (world-runner w))))
+        (vector-set! parent from (cons from #f))
+        (let loop ((front (list from)) (back '()))
+          (cond ((and (null? front) (null? back)) #f)
+                ((null? front) (loop (reverse back) '()))
+                ((= (car front) target)
+                 (let walk ((c target) (acc '()))
+                   (let ((p (vector-ref parent c)))
+                     (if (not (cdr p)) acc (walk (car p) (cons (cdr p) acc))))))
+                (else
+                 (loop (cdr front)
+                       (fold-left (lambda (back dir)
+                                    (let ((n (step-cell (car front) dir width height)))
+                                      (if (and n (not (vector-ref parent n)) (hub-passable? w n))
+                                          (begin (vector-set! parent n (cons (car front) dir)) (cons n back))
+                                          back)))
+                                  back
+                                  (list 'up 'down 'left 'right))))))))
 
     ;; --- the runner's phase ------------------------------------------------------
 
@@ -541,6 +602,7 @@
                     (w (detection-phase w))
                     (w (world w trace: (+ 1 (world-trace w))))
                     (w (timer-phase w))
+                    (w (remember w))
                     (w (world w
                               beat: (+ 1 (world-beat w))
                               ledger: (ledger-add (world-ledger w) 'beats 1))))

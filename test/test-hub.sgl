@@ -441,6 +441,43 @@
       (assert-true (has-event? w2 'severed))
       (assert-equal w2 (hub-step w2 'wait)))))
 
+;; --- the runner's sight and memory (D61: fog and light are one system) ----------
+
+(test-group "hub: what the runner sees, and remembers"
+  (test "the runner's sight: RUNNER-SIGHT cells around him with a line of sight, walls block, void and barriers are never seen"
+    (let* ((w (world-of HALL 1))
+           (w (world w runner: (runner cell: (cell w 2 2))))
+           (s (hub-runner-sight w)))
+      (assert-true (and (memv (cell w 2 2) s) #t))
+      (assert-true (and (memv (cell w 9 2) s) #t))          ; 7 away
+      (assert-false (memv (cell w 10 2) s))                 ; 8 away
+      (assert-true (and (memv (cell w 7 4) s) #t))          ; sqrt(29) < 7
+      (assert-false (memv (cell w 0 2) s))                  ; a barrier
+      (assert-true (every (lambda (c) (cell-walkable? (layer-cell (world-layer w) c))) s)))
+    (let* ((w (world-of "#########\n#@..#...#\n#########" 1))
+           (s (hub-runner-sight w)))
+      (assert-equal (list (cell w 1 1) (cell w 2 1) (cell w 3 1)) s)))
+  (test "memory: what he has seen stays seen; a move adds; a new layer forgets"
+    (let* ((w (world-of "###########\n#@.......>#\n###########" 1)))
+      (assert-true (world-seen? w (cell w 8 1)))          ; 7 away, seen from the start
+      (assert-false (world-seen? w (cell w 9 1)))         ; 8 away
+      (let ((w2 (moves w 'right 'right)))
+        (assert-true (world-seen? w2 (cell w 9 1)))
+        (assert-true (world-seen? w2 (cell w 1 1)))       ; behind him, remembered
+        (assert-false (memv (cell w 1 1) (hub-runner-sight (world w2 runner: (runner cell: (cell w 9 1)))))))
+      (let* ((w3 (world w request: 'severed))
+             (w4 (hub-severed-layer (world w3 run-seed: 5))))
+        (assert-equal (layer-size (world-layer w4)) (vector-length (world-seen w4)))
+        (assert-true (world-seen? w4 (runner-at w4)))
+        (assert-false (world-seen? w4 (layer-exit (world-layer w4)))))))
+  (test "hub-path: the shortest passable path as directions; none through a locked gate"
+    (let ((w (world-of ROOM 1)))
+      (assert-equal (list 'down 'right 'right) (hub-path w (cell w 3 2)))
+      (assert-false (hub-path (world-of "#########\n#@..R..>#\n#########" 1) (cell w 7 1)))   ; sealed: no way round the gate
+      (assert-equal '() (hub-path w (runner-at w)))
+      (assert-equal (length (path-to (world w keys: (list 'red)) (cell w 7 1)))
+                    (length (hub-path (world w keys: (list 'red)) (cell w 7 1)))))))
+
 ;; --- the node's board ---------------------------------------------------------------
 
 (test-group "hub: what a node launches and what returns (D23)"

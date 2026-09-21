@@ -25,7 +25,8 @@
           (crash hub gen)
           (crash hub rules))
 
-  (export hub-door! hub-door-seed hub-door-world hub-door-prepare! hub-door-draw!
+  (export hub-door! hub-look! hub-scale! hub-door-seed hub-door-look hub-door-scale hub-door-world hub-door-prepare! hub-door-draw!
+          draw-hub-world-2 lit-tiles-ensure! lit-role HUE-NAMES STEPS
           hub-tiles-ensure! draw-hub-world
           VIEW-W VIEW-H)
 
@@ -33,11 +34,12 @@
     (define VIEW-W 40)                ; cells across the 640 px view
     (define VIEW-H 22)                ; cells down the 352 px board area
     (define BAND-H 48)                ; the status band below, the HUD's height
-
     ;; --- the door --------------------------------------------------------------
 
     (define *door-seed* #f)
+    (define *door-look* 1)
     (define *door-world* #f)
+    (define WALK-BEATS 12)            ; look 2 shows the world this many beats down the path to the first key
 
     ;; ?hub=SEED / --hub SEED: arm the door with a run seed (a non-number disarms it).
     (define (hub-door! text)
@@ -45,19 +47,47 @@
         (set! *door-world* #f)
         (set! *door-seed* (and n (exact? n) (integer? n) (>= n 0) (max 1 n)))))
 
-    (define (hub-door-seed) *door-seed*)
+    ;; &look=2 / --look 2: the second screen (D61); anything else is look 1.
+    (define (hub-look! text)
+      (set! *door-world* #f)
+      (set! *door-look* (if (and (string? text) (string=? text "2")) 2 1)))
 
-    ;; The door's world, built on first use.
+    ;; &scale=2 / --scale 2: look 2 at 2x, a 20x11 window of the same tiles
+    ;; integer-scaled (an experiment on tile scope, not a decision); 1 otherwise.
+    (define *door-scale* 1)
+    (define (hub-scale! text)
+      (set! *door-scale* (if (and (string? text) (string=? text "2")) 2 1)))
+    (define (hub-door-scale) *door-scale*)
+
+    (define (hub-door-seed) *door-seed*)
+    (define (hub-door-look) *door-look*)
+
+    ;; The door's world, built on first use: look 1 at the layer's top,
+    ;; look 2 WALK-BEATS beats down the shortest path to the first key node
+    ;; (so the runner is off-center and the memory has a trail), the walk
+    ;; the scripted run's, one move per beat.
     (define (hub-door-world)
       (when (and *door-seed* (not *door-world*))
-        (set! *door-world* (hub-new *door-seed*)))
+        (let ((w (hub-new *door-seed*)))
+          (set! *door-world*
+                (if (= *door-look* 2)
+                    (let* ((n (find (lambda (n) (node-key n)) (world-nodes w)))
+                           (path (and n (hub-path w (node-cell n)))))
+                      (let walk ((w w) (path (or path '())) (k 0))
+                        (if (or (null? path) (= k WALK-BEATS) (world-request w))
+                            w
+                            (walk (hub-step w (list 'move (car path))) (cdr path) (+ k 1)))))
+                    w))))
       *door-world*)
 
-    ;; Before the frame's passes: the bake, and the world itself on the first
-    ;; call (a generation inside the frame would be a one-time hitch).
+    ;; Before the frame's passes: the bake (look 2's, one hue per call), and
+    ;; the world itself on the first call (a generation inside the frame
+    ;; would be a one-time hitch).
     (define (hub-door-prepare!)
       (when *door-seed*
-        (hub-tiles-ensure!)
+        (if (= *door-look* 2)
+            (lit-tiles-ensure!)
+            (hub-tiles-ensure!))
         (hub-door-world)))
 
     ;; Inside the frame: the screen, or #f when the door is shut so the
@@ -65,9 +95,10 @@
     (define (hub-door-draw! vw vh bg)
       (and *door-seed*
            (let ((w (hub-door-world)))
-             (draw-hub-world w vw vh bg)
+             (if (= *door-look* 2)
+                 (draw-hub-world-2 w vw vh bg)
+                 (draw-hub-world w vw vh bg))
              #t)))
-
     ;; --- the bake --------------------------------------------------------------
 
     (define *rt* #f)
@@ -162,16 +193,17 @@
                  (and n (node-key n) (key-number (node-key n)))))
               (else #f))))
 
-    ;; A dither of ICE dots over a seen cell: one dot every 4 px, offset by row.
+    ;; A dither of ICE dots over a seen cell: one dot every 4 px (scaled), offset by row.
     (define (draw-sight-cell x y)
       (color! C-ICE)
-      (let rows ((r 0))
-        (when (< r 4)
-          (let cols ((c 0))
-            (when (< c 4)
-              (draw-filled-rect (+ x (* c 4) (if (odd? r) 2 0)) (+ y (* r 4) 1) 1 1)
-              (cols (+ c 1))))
-          (rows (+ r 1)))))
+      (let ((s *door-scale*))
+        (let rows ((r 0))
+          (when (< r 4)
+            (let cols ((c 0))
+              (when (< c 4)
+                (draw-filled-rect (+ x (* s (+ (* c 4) (if (odd? r) 2 0)))) (+ y (* s (+ (* r 4) 1))) s s)
+                (cols (+ c 1))))
+            (rows (+ r 1))))))
 
     (define (clamp v lo hi) (max lo (min v hi)))
 
@@ -227,4 +259,360 @@
                                   " AT " (number->string width) "X" (number->string height)
                                   ", " (number->string (length (world-daemons w))) " DAEMONS, "
                                   (number->string (length (layer-gates l))) " GATES")
+                   8 (+ top 28) 1)))
+
+    ;; --- look 2 (D61): fog and reveal, 2.5D walls, lighting, a camera ---------
+    ;;
+    ;; Light and fog are one system. A cell in the runner's sight
+    ;; (hub-runner-sight: RUNNER-SIGHT with a line of sight) is lit by the
+    ;; nearest source with a line of sight to it: the runner (widest,
+    ;; cool), a node (its key's color), the ICE (hot), a gate (its
+    ;; color); a link glints on its own. The light is distance-based,
+    ;; 4 * (1 - d / R), clamped to 1..4 within sight, and quantized to
+    ;; four steps with a 4x4 Bayer dither at each boundary (the STILL
+    ;; gradient's method) in 4 px blocks. A cell seen before and out of
+    ;; sight holds at step 1, the memory. A cell never seen is fog: dots
+    ;; on the ground. The void shows the field under a veil (one step
+    ;; dimmer than the plane; the field itself is phase 2's). A barrier
+    ;; is a top face over a front face when the cell below is walkable,
+    ;; with a shadow row on the plane below; it takes the light of its
+    ;; brightest lit neighbor. Every tile is baked at the four steps in
+    ;; six hues (cool, hot, red, green, blue, yellow) into one 'nearest
+    ;; render target per hue, one hue per prepare call; a step's colors
+    ;; come from DIM, a chain of four palette roles per role, and a
+    ;; hue's from HUES, a remap of the sheet's line, wire and glint
+    ;; digits, so every pixel stays a palette role.
+
+    (define STEPS 4)
+    (define HUE-NAMES (list 'cool 'hot 'red 'green 'blue 'yellow))
+    (define RUNNER-LIGHT (+ RUNNER-SIGHT 1))  ; the runner's light reaches one past his sight, so its edge is step 1, never 0
+    (define NODE-LIGHT 3.5)
+    (define ICE-LIGHT 2.5)
+    (define GATE-LIGHT 2.5)
+    (define LINK-GLINT 1.5)           ; a link's own light, at least
+    (define BAYER-4
+      '#(0 8 2 10 12 4 14 6 3 11 1 9 15 7 13 5))
+
+    ;; The dimming chains: a role at steps 4, 3, 2, 1.
+    (define DIM
+      (list (cons 'C-BG (vector 'C-BG 'C-BG 'C-BG 'C-BG))
+            (cons 'C-BAR-A (vector 'C-BAR-A 'C-BAR-A 'C-BG 'C-BG))
+            (cons 'C-BAR-C (vector 'C-BAR-C 'C-BAR-A 'C-BAR-A 'C-BG))
+            (cons 'C-WIRE-DARK (vector 'C-WIRE-DARK 'C-BAR-C 'C-BAR-C 'C-BAR-A))
+            (cons 'C-STATIC-B (vector 'C-STATIC-B 'C-BAR-C 'C-BAR-A 'C-BAR-A))
+            (cons 'C-STATIC-A (vector 'C-STATIC-A 'C-STATIC-B 'C-BAR-C 'C-BAR-A))
+            (cons 'C-WIRE-LIT (vector 'C-WIRE-LIT 'C-WIRE-DARK 'C-WIRE-DARK 'C-BAR-C))
+            (cons 'C-ICE (vector 'C-ICE 'C-ICE 'C-ARCHIVE 'C-BAR-C))
+            (cons 'C-ARCHIVE (vector 'C-ARCHIVE 'C-ARCHIVE 'C-BAR-C 'C-BAR-A))
+            (cons 'C-TRACE-HOT (vector 'C-TRACE-HOT 'C-LOCKED 'C-LOCKED 'C-BAR-C))
+            (cons 'C-LOCKED (vector 'C-LOCKED 'C-LOCKED 'C-BAR-C 'C-BAR-A))
+            (cons 'C-SUIT-2 (vector 'C-SUIT-2 'C-MOSS 'C-MOSS 'C-BAR-C))
+            (cons 'C-MOSS (vector 'C-MOSS 'C-MOSS 'C-BAR-C 'C-BAR-A))
+            (cons 'C-COLD (vector 'C-COLD 'C-WIRE-DARK 'C-WIRE-DARK 'C-BAR-C))
+            (cons 'C-LABEL-LIT (vector 'C-LABEL-LIT 'C-LOCK-WEAK 'C-LOCK-WEAK 'C-BAR-C))
+            (cons 'C-LOCK-WEAK (vector 'C-LOCK-WEAK 'C-LOCK-WEAK 'C-BAR-C 'C-BAR-A))))
+
+    ;; A hue remaps the sheet's digits 4 (the wire dark) and 7 (the wire
+    ;; lit): the runner's cool teal, the ICE's hot orange, the four keys.
+    (define HUES
+      (list (cons 'cool (list (cons 4 'C-WIRE-DARK) (cons 7 'C-WIRE-LIT)))
+            (cons 'hot (list (cons 4 'C-ARCHIVE) (cons 7 'C-ICE)))
+            (cons 'red (list (cons 4 'C-LOCKED) (cons 7 'C-TRACE-HOT)))
+            (cons 'green (list (cons 4 'C-MOSS) (cons 7 'C-SUIT-2)))
+            (cons 'blue (list (cons 4 'C-WIRE-DARK) (cons 7 'C-COLD)))
+            (cons 'yellow (list (cons 4 'C-LOCK-WEAK) (cons 7 'C-LABEL-LIT)))))
+
+    (define (key-hue color)
+      (cond ((eq? color 'red) 'red)
+            ((eq? color 'green) 'green)
+            ((eq? color 'blue) 'blue)
+            ((eq? color 'yellow) 'yellow)
+            (else 'cool)))
+
+    (define (hue-index hue)
+      (let loop ((hs HUE-NAMES) (i 0))
+        (cond ((null? hs) 0)
+              ((eq? (car hs) hue) i)
+              (else (loop (cdr hs) (+ i 1))))))
+
+    ;; The role of digit d under hue h at step s (1..4).
+    (define (lit-role hue d step)
+      (let* ((base (string->symbol (vector-ref TILE-RAMP (- d 1))))
+             (remap (assq hue HUES))
+             (role (let ((e (and remap (assv d (cdr remap))))) (if e (cdr e) base)))
+             (chain (assq role DIM)))
+        (if chain (vector-ref (cdr chain) (- STEPS step)) role)))
+
+    (define (role-color role)
+      (let ((entry (assq role PALETTE)))
+        (if entry (cdr entry) C-TEXT)))
+
+    ;; One render target per (hue, step): every tile at that step. Baked
+    ;; one per call (a whole hue in one pass overran sokol's vertex buffer:
+    ;; VALIDATE_APPENDBUF_SIZE on the first native drive), 24 calls in all;
+    ;; the screen waits for the last.
+    (define *lit-rts* '())              ; alist (hue . step) -> (target . texture); the target is kept: the texture only borrows it
+
+    (define (lit-key hue step) (cons hue step))
+    (define (lit-texture hue step)
+      (let ((e (assoc (lit-key hue step) *lit-rts*))) (and e (cddr e))))
+
+    (define (lit-tiles-ensure!)
+      (let ((missing (filter (lambda (k) (not (assoc k *lit-rts*)))
+                             (apply append (map (lambda (h) (map (lambda (s) (lit-key h s)) (list 4 3 2 1))) HUE-NAMES)))))
+        (unless (null? missing)
+          (let* ((hue (car (car missing)))
+                 (step (cdr (car missing)))
+                 (n (vector-length TILES))
+                 (rt (make-render-target (* n TILE-SIZE) TILE-SIZE 'nearest)))
+            (with-render-target rt
+              (set-blend-mode 'none)
+              (let tiles ((i 0))
+                (when (< i n)
+                  (let ((rows (vector-ref TILES i)))
+                    (let tones ((d 1))
+                      (when (<= d 8)
+                        (color! (role-color (lit-role hue d step)))
+                        (draw-rows (rows-of-tone rows d) (* i TILE-SIZE) 0 1 TILE-SIZE)
+                        (tones (+ d 1)))))
+                  (tiles (+ i 1)))))
+            (set-blend-mode 'normal)
+            (set! *lit-rts* (cons (cons (lit-key hue step) (cons rt (render-target->texture rt))) *lit-rts*))))))
+
+    (define (lit-ready?) (= (length *lit-rts*) (* STEPS (length HUE-NAMES))))
+
+    ;; A sub-rectangle (sx, sy, sw, sh) of tile i at step s under hue h,
+    ;; drawn at (x, y): the whole tile when sx sy are 0 and sw sh TILE-SIZE.
+    ;; The destination is scaled by *door-scale* (the source is not).
+    (define (draw-lit-part hue i step x y sx sy sw sh)
+      (let ((tex (lit-texture hue step)))
+        (when (and tex i)
+          (set-color 1.0 1.0 1.0 1.0)
+          (draw-texture-region tex
+                               (+ x (* *door-scale* sx)) (+ y (* *door-scale* sy)) (* *door-scale* sw) (* *door-scale* sh)
+                               (+ (* i TILE-SIZE) sx) (- TILE-SIZE sy) sw (- sh)))))
+
+    ;; A tile at a continuous light L (1..4): the step below L, and where
+    ;; L sits between two steps the 4 px blocks dither up to the next by
+    ;; the Bayer matrix.
+    (define (draw-lit hue name light x y)
+      (let* ((i (tile-index name))
+             (l (max 1.0 (min (* 1.0 STEPS) light)))
+             (lo (min STEPS (exact (floor l))))
+             (frac (- l lo)))
+        (cond ((not i) #t)
+              ((or (< frac 0.0625) (= lo STEPS))
+               (draw-lit-part hue i lo x y 0 0 TILE-SIZE TILE-SIZE))
+              (else
+               (let blocks ((b 0))
+                 (when (< b 16)
+                   (let ((bx (* 4 (modulo b 4)))
+                         (by (* 4 (quotient b 4))))
+                     (draw-lit-part hue i
+                                    (if (> (* frac 16) (vector-ref BAYER-4 b)) (+ lo 1) lo)
+                                    x y bx by 4 4))
+                   (blocks (+ b 1))))))))
+
+    ;; --- the light map -------------------------------------------------------------
+
+    ;; Per cell: the light (0 for fog or unseen) and the hue of its
+    ;; brightest source. Computed once per world (the screen is static).
+    (define *light-key* #f)
+    (define *light* #f)
+    (define *hue* #f)
+    (define *visible* #f)
+
+    (define (distance a b width)
+      (let ((dx (- (idx-x a width) (idx-x b width)))
+            (dy (- (idx-y a width) (idx-y b width))))
+        (sqrt (* 1.0 (+ (* dx dx) (* dy dy))))))
+
+    ;; (cell radius hue) for every source in the layer.
+    (define (light-sources w)
+      (let* ((l (world-layer w))
+             (size (layer-size l)))
+        (append
+         (list (list (runner-cell (world-runner w)) RUNNER-LIGHT 'cool))
+         (filter-map (lambda (n)
+                       (and (not (eq? (node-state n) 'cleared))
+                            (list (node-cell n) NODE-LIGHT (key-hue (node-key n)))))
+                     (world-nodes w))
+         (filter-map (lambda (g)
+                       (and (not (memv (car g) (world-opened w)))
+                            (list (car g) GATE-LIGHT (key-hue (cdr g)))))
+                     (layer-gates l))
+         (filter-map (lambda (i)
+                       (and (eq? (layer-cell l i) 'ice)
+                            (not (assv i (world-dark w)))
+                            (list i ICE-LIGHT 'hot)))
+                     (iota size)))))
+
+    (define (light-map! w)
+      (unless (eq? *light-key* w)
+        (let* ((l (world-layer w))
+               (width (layer-width l))
+               (size (layer-size l))
+               (light (make-vector size 0.0))
+               (hue (make-vector size 'cool))
+               (visible (make-vector size #f))
+               (sight (hub-runner-sight w))
+               (sources (light-sources w)))
+          (for-each (lambda (c) (vector-set! visible c #t)) sight)
+          ;; the lit cells: the brightest source with a line of sight
+          (for-each
+           (lambda (c)
+             (let loop ((ss sources) (best (if (eq? (layer-cell l c) 'link) LINK-GLINT 1.0)) (best-hue 'cool))
+               (if (null? ss)
+                   (begin (vector-set! light c (min (* 1.0 STEPS) best))
+                          (vector-set! hue c best-hue))
+                   (let* ((s (car ss))
+                          (d (distance (car s) c width))
+                          (q (/ d (cadr s)))
+                          (v (* STEPS (- 1.0 (* q q)))))     ; a squared falloff: the room stays lit, the edge fades
+                     (if (and (> v best) (line-of-sight? l (car s) c))
+                         (loop (cdr ss) v (caddr s))
+                         (loop (cdr ss) best best-hue))))))
+           sight)
+          ;; the memory: step 1, cool
+          (let cells ((c 0))
+            (when (< c size)
+              (when (and (not (vector-ref visible c)) (world-seen? w c))
+                (vector-set! light c 1.0))
+              (cells (+ c 1))))
+          ;; a barrier takes its brightest lit neighbor's light and hue (eight ways)
+          (let cells ((c 0))
+            (when (< c size)
+              (when (eq? (layer-cell l c) 'barrier)
+                (let ((x (idx-x c width)) (y (idx-y c width)))
+                  (let around ((dx -1) (best 0.0) (best-hue 'cool))
+                    (if (> dx 1)
+                        (begin (vector-set! light c best) (vector-set! hue c best-hue))
+                        (let down ((dy -1) (best best) (best-hue best-hue))
+                          (if (> dy 1)
+                              (around (+ dx 1) best best-hue)
+                              (let ((n (and (in-bounds? (+ x dx) (+ y dy) width (layer-height l))
+                                            (idx (+ x dx) (+ y dy) width))))
+                                (if (and n (not (eq? (layer-cell l n) 'barrier)) (> (vector-ref light n) best))
+                                    (down (+ dy 1) (vector-ref light n) (vector-ref hue n))
+                                    (down (+ dy 1) best best-hue)))))))))
+              (cells (+ c 1))))
+          (set! *light* light)
+          (set! *hue* hue)
+          (set! *visible* visible)
+          (set! *light-key* w))))
+
+    ;; --- the screen ---------------------------------------------------------------------
+
+    ;; Has the runner seen this void cell? Void beside a seen cell counts (it
+    ;; is the edge he looked over); void beyond the grid, or beside nothing
+    ;; seen, stays in the fog.
+    (define (seen-void? w l x y)
+      (let ((width (layer-width l)) (height (layer-height l)))
+        (and (in-bounds? x y width height)
+             (let around ((dx -1))
+               (and (<= dx 1)
+                    (or (let down ((dy -1))
+                          (and (<= dy 1)
+                               (or (and (in-bounds? (+ x dx) (+ y dy) width height)
+                                        (world-seen? w (idx (+ x dx) (+ y dy) width)))
+                                   (down (+ dy 1)))))
+                        (around (+ dx 1))))))))
+
+    (define (item-tile-2 w i)
+      (let* ((l (world-layer w))
+             (kind (layer-cell l i))
+             (x (idx-x i (layer-width l)))
+             (y (idx-y i (layer-width l))))
+        (cond ((eq? kind 'link)
+               (if (or (walkable-at? l (- x 1) y) (walkable-at? l (+ x 1) y)) "link2-h" "link2-v"))
+              ((eq? kind 'gate) (if (memv i (world-opened w)) #f "gate2"))
+              ((eq? kind 'node)
+               (let* ((n (layer-node-at l i))
+                      (live (and n (world-node w (node-index n)))))
+                 (if (and live (eq? (node-state live) 'cleared)) "node2-cleared" "node2")))
+              ((eq? kind 'market) "market2")
+              ((eq? kind 'cache) (if (memv i (world-taken w)) #f "cache2"))
+              ((eq? kind 'ice) (if (assv i (world-dark w)) #f "ice2"))
+              ((eq? kind 'shadow) "shadow2")
+              ((eq? kind 'ladder-up) "ladder-up2")
+              ((eq? kind 'ladder-down) "ladder-down2")
+              (else #f))))
+
+    ;; The 40x22 window centered on the runner, wherever he stands: the
+    ;; map runs past the edges and the field shows beyond it.
+    (define (draw-hub-world-2 w vw vh bg)
+      (light-map! w)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (top (- vh BAND-H))
+             (r (world-runner w))
+             (s *door-scale*)
+             (cell-px (* s TILE-SIZE))
+             (view-w (quotient VIEW-W s))
+             (view-h (quotient VIEW-H s))
+             (ox (- (idx-x (runner-cell r) width) (quotient view-w 2)))
+             (oy (- (idx-y (runner-cell r) width) (quotient view-h 2)))
+             (fans (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w)))
+             (daemon-cells (map daemon-cell (world-daemons w))))
+        (color! C-BG)
+        (draw-filled-rect 0 0 vw vh)
+        (when (lit-ready?)
+          (let rows ((y 0))
+            (when (< y view-h)
+              (let cols ((x 0))
+                (when (< x view-w)
+                  (let* ((lx (+ x ox))
+                         (ly (+ y oy))
+                         (inside (in-bounds? lx ly width height))
+                         (i (and inside (idx lx ly width)))
+                         (kind (if inside (layer-cell l i) 'void))
+                         (px (* x cell-px))
+                         (py (* y cell-px))
+                         (light (if inside (vector-ref *light* i) 0.0))
+                         (hue (if inside (vector-ref *hue* i) 'cool))
+                         (visible? (and inside (vector-ref *visible* i))))
+                    (cond ((and (eq? kind 'void) (not (seen-void? w l lx ly)))
+                           (draw-lit 'cool "fog" 4.0 px py))            ; unseen: fog, whatever lies there (no outline leaks)
+                          ((eq? kind 'void)
+                           (draw-lit 'cool "veil" 4.0 px py))           ; the field under a veil (phase 2 draws the field)
+                          ((<= light 0.0)
+                           (draw-lit 'cool "fog" 4.0 px py))
+                          ((eq? kind 'barrier)
+                           (draw-lit hue (if (walkable-at? l lx (+ ly 1)) "barrier-front" "barrier-top") light px py))
+                          (else
+                           (draw-lit hue "floor2" light px py)
+                           (let ((item (item-tile-2 w i)))
+                             (when item (draw-lit hue item light px py)))
+                           (when (and (in-bounds? lx (- ly 1) width height)
+                                      (eq? (layer-cell l (idx lx (- ly 1) width)) 'barrier))
+                             (draw-lit hue "wall-shadow" light px py))
+                           (when (and visible? (memv i fans))
+                             (draw-sight-cell px py))
+                           (let ((k (key-label-for w i)))
+                             (when k
+                               (color! (role-color (cdr (assv 7 (cdr (assq hue HUES))))))
+                               (draw-text (number->string k) (+ px (* 2 s)) (+ py (* 2 s)) s)))
+                           (when (and visible? (memv i daemon-cells))
+                             (draw-lit 'cool "daemon" light px py))
+                           (when (= i (runner-cell r))
+                             (draw-lit 'cool "runner" 4.0 px py)))))
+                  (cols (+ x 1))))
+              (rows (+ y 1)))))
+        ;; the band
+        (color! C-BG)
+        (draw-filled-rect 0 top vw BAND-H)
+        (color! C-BAR-C)
+        (draw-filled-rect 0 top vw 1)
+        (color! C-TEXT)
+        (draw-text (string-append "LAYER " (number->string (world-depth w)) "/" (number->string (layer-count))
+                                  "  TRACE " (number->string (world-trace w)) "/" (number->string (descriptor-budget (hub-descriptor w)))
+                                  "  CR " (number->string (world-layer-credits w))
+                                  "  BEAT " (number->string (world-beat w))
+                                  "  SEED " (number->string (world-run-seed w)))
+                   8 (+ top 8) 2)
+        (color! C-TEXT-DIM)
+        (draw-text (string-append "HUB DOOR LOOK 2: FOG, WALLS, LIGHT, CAMERA (D61). BEAT " (number->string (world-beat w))
+                                  " OF A SCRIPTED WALK; "
+                                  (number->string (length (hub-runner-sight w))) " CELLS IN SIGHT")
                    8 (+ top 28) 1)))))
