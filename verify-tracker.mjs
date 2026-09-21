@@ -179,13 +179,16 @@ async function keyEvent(type, key, code, mods) {
 async function press(key, mods = 0) {
   const code = key.length === 1 ? (/[a-z]/.test(key) ? "Key" + key.toUpperCase() : /[0-9]/.test(key) ? "Digit" + key : key === " " ? "Space" : key) : key;
   if (mods & CTRL) { await keyEvent("keyDown", "Control", "ControlLeft", CTRL); await sleep(40); }
+  if (mods & ALT) { await keyEvent("keyDown", "Alt", "AltLeft", ALT); await sleep(40); }
   await keyEvent("keyDown", key, code, mods);
   await sleep(40);
   await keyEvent("keyUp", key, code, mods);
   if (mods & CTRL) { await sleep(40); await keyEvent("keyUp", "Control", "ControlLeft", 0); }
+  if (mods & ALT) { await sleep(40); await keyEvent("keyUp", "Alt", "AltLeft", 0); }
   await sleep(120);
 }
 const CTRL = 2;
+const ALT = 1;
 let stopRow = -1;   // the row the play leg stopped on; the edit leg writes there
 
 // the canvas over a virtual rect, one sample per virtual pixel: { px: [r,g,b,...] }
@@ -257,6 +260,16 @@ await sleep(800);
         t.analysers.forEach(function (an) { var buf = new Float32Array(an.fftSize); an.getFloatTimeDomainData(buf); var s = 0; for (var i = 0; i < buf.length; i++) s += buf[i]*buf[i]; best = Math.max(best, Math.sqrt(s / buf.length)); }); return best; })()`);
       await sleep(50);
     }
+    // the spectrum strip's cost on the web (David asked for the number once):
+    // the mean rAF callback-to-callback interval over 90 frames with the
+    // strip (on by default), then with it off (Alt-S), then on again
+    const frameMean = () => evalJS(`new Promise((resolve) => { const t = []; let last = performance.now(); let n = 0;
+      (function f() { const now = performance.now(); t.push(now - last); last = now; if (++n < 90) requestAnimationFrame(f); else resolve(t.slice(10).reduce((a, b) => a + b, 0) / (t.length - 10)); })(); })`);
+    const withStrip = await frameMean();
+    await press("s", ALT);
+    const without = await frameMean();
+    await press("s", ALT);
+    console.log(`INFO spectrum: mean frame ${withStrip.toFixed(2)} ms with the strip, ${without.toFixed(2)} ms without (90 frames each, playing)`);
     await sleep(1500);
     const from2 = consoleLines.length;
     await press("Escape");

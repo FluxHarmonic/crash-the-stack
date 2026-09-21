@@ -22,7 +22,7 @@
 ;;;   zoom save open share new undo redo
 ;;;   (mute CH) mute-cursor solo unmute-all
 ;;;   panel panel-up panel-down panel-inc panel-dec panel-inc-big panel-dec-big
-;;;   (panel-type CHAR) panel-commit panel-backspace panel-close panel-bus
+;;;   (panel-type CHAR) panel-commit panel-backspace panel-close panel-bus meter-next spectrum
 ;;; A movement in edit mode after a note entry advances one row (FT2's
 ;;; edit skip of 1).
 
@@ -42,7 +42,7 @@
           tracker-with-tune tracker-with-message tracker-with-name
           tracker-pattern tracker-pattern-id tracker-rows tracker-channels
           tracker-cell tracker-block tracker-muted? tstate-mutes tstate-solo tstate-panel
-          tracker-panel-lines tstate-panel-page
+          tracker-panel-lines tstate-panel-page tstate-spectrum
           COLUMNS ZOOM-CHANNELS PAGE-ROWS)
 
   (begin
@@ -81,7 +81,9 @@
       (panel default: #f)
       ;; which page the panel shows: inst (the cursor's instrument) or bus
       ;; (the tune's reverb and compressor settings)
-      (panel-page default: 'inst))
+      (panel-page default: 'inst)
+      ;; the spectrum strip under the header (David, 2026-09-21), Alt-S
+      (spectrum default: #t))
 
     ;; ------------------------------------------------------------
     ;; Lookups
@@ -319,7 +321,7 @@
            (set-order s (list-set-at order (tstate-pos s) next) (tstate-pos s)))
           ((> d 0)
            (let* ((new-id (+ (max-pattern-id t) 1))
-                  (p (tune-pattern id: new-id rows: (tracker-rows s) cells: '()))
+                  (p (tune-pattern id: new-id rows: (meter-rows t) cells: '()))
                   (t2 (tune-with-patterns t (append (tune-patterns t) (list p)))))
              (set-order (tstate s tune: t2 dirty: #t)
                         (list-set-at order (tstate-pos s) new-id)
@@ -404,11 +406,38 @@
           (bus-lines (tstate-tune s))
           (instrument-lines s)))
 
-    ;; The bus page: every bus key with the defaults filled in. A tune
-    ;; without a bus section starts from mix 0, so opening the page and
-    ;; changing the compressor does not switch a reverb on.
+    ;; The meter (David, 2026-09-21): (rows-per-beat . beats-per-bar), the
+    ;; tune's; Ctrl-M cycles these, the bus page takes any 1..16 x 1..16.
+    (define METER-PRESETS '((4 . 4) (4 . 3) (2 . 6) (2 . 7) (4 . 5)))
+
+    ;; rows of a new pattern: a bar of beats, four bars
+    (define (meter-rows t)
+      (let ((m (tune-meter t)))
+        (* (car m) (cdr m) 4)))
+
+    (define (put-meter s rows beats)
+      (let* ((t2 (tune (tstate-tune s) meter: (cons rows beats)))
+             (errs (tune-errors t2)))
+        (if (null? errs)
+            (tracker-with-tune s t2)
+            (tstate s message: "OUT OF RANGE"))))
+
+    ;; The bus page: the meter's two rows first, then every bus key with the
+    ;; defaults filled in. A tune without a bus section starts from mix 0,
+    ;; so opening the page and changing the compressor does not switch a
+    ;; reverb on.
     (define (bus-lines t)
-      (bus-canonical (or (tune-bus t) '((mix . 0.0)))))
+      (append (list (cons 'rows-per-beat (car (tune-meter t)))
+                    (cons 'beats-per-bar (cdr (tune-meter t))))
+              (bus-canonical (or (tune-bus t) '((mix . 0.0))))))
+
+    (define (meter-key? key) (memq key '(rows-per-beat beats-per-bar)))
+
+    (define (put-meter-key s key value)
+      (let ((m (tune-meter (tstate-tune s))))
+        (if (and (integer? value) (exact? value))
+            (if (eq? key 'rows-per-beat) (put-meter s value (cdr m)) (put-meter s (car m) value))
+            (tstate s message: "OUT OF RANGE"))))
 
     ;; the symbol-valued bus keys and what they cycle through
     (define BUS-CHOICES '((reverb zitarev revsc) (comp on off)))
@@ -416,8 +445,11 @@
     ;; A bus edit that the validator refuses (a value out of range) is
     ;; dropped with a message; the tune value only ever holds valid text.
     (define (put-bus s key value)
+      (if (meter-key? key) (put-meter-key s key value) (put-bus-key s key value)))
+
+    (define (put-bus-key s key value)
       (let* ((t (tstate-tune s))
-             (bus (bus-lines t))
+             (bus (bus-canonical (or (tune-bus t) (quote ((mix . 0.0))))))   ; the bus keys alone (the meter rows are the tune header's)
              (bus2 (map (lambda (kv) (if (eq? (car kv) key) (cons key value) kv)) bus))
              (t2 (tune t bus: bus2))
              (errs (tune-errors t2)))
@@ -637,6 +669,13 @@
                                       (tstate s panel: (cons (car (tstate-panel s)) (if (<= (string-length e) 1) #f (substring e 0 (- (string-length e) 1))))))
                                     s))
              ((panel-close) (tstate s panel: #f))
+             ((spectrum) (tstate s spectrum: (not (tstate-spectrum s))))
+             ;; Ctrl-M: the next common meter (4/4 3/4 6/8 7/8 5/4); a typed one is the bus page's
+             ((meter-next)
+              (let* ((m (tune-meter (tstate-tune s)))
+                     (rest (member m METER-PRESETS))
+                     (next (cond ((and rest (pair? (cdr rest))) (cadr rest)) (else (car METER-PRESETS)))))
+                (put-meter s (car next) (cdr next))))
              (else s))))))
 
     ))

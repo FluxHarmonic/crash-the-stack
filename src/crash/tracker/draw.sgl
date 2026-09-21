@@ -22,7 +22,7 @@
           (crash tracker model))
 
   (export draw-tracker tracker-touch-hit
-          HEADER-H ROW-H BAR-H CELL-W ROW-COL-W)
+          HEADER-H ROW-H BAR-H CELL-W ROW-COL-W SPECTRUM-H)
 
   (begin
     (define HEADER-H 24)
@@ -76,9 +76,11 @@
     (define (draw-header s vw)
       (let* ((t (tstate-tune s))
              (line1 (string-append
+                      "MOTIF TRACKER  "   ; the editor's name on every surface (David, 2026-09-21)
                       (string-upcase (tstate-name s))
                       " " (dec3 (tune-tempo t)) "BPM"
                       " SPD" (dec2 (tune-speed t))
+                      " MTR" (number->string (cdr (tune-meter t))) "X" (number->string (car (tune-meter t)))   ; beats per bar X rows per beat
                       " ORD" (dec2 (tstate-pos s)) "/" (dec2 (length (tune-order t)))
                       " PAT" (dec2 (tracker-pattern-id s))
                       " OCT" (number->string (tstate-octave s))
@@ -135,7 +137,10 @@
              (play-row (and (tstate-playing s)
                             (= (car (tstate-playing s)) (tstate-pos s))
                             (cdr (tstate-playing s))))
-             (block (and (tstate-mark s) (tracker-block s))))
+             (block (and (tstate-mark s) (tracker-block s)))
+             ;; the meter shades a beat row and, brighter, a bar row (David, 2026-09-21)
+             (rpb (car (tune-meter (tstate-tune s))))
+             (bar-rows (* rpb (cdr (tune-meter (tstate-tune s))))))
         (let loop ((i 0))
           (when (< i nvis)
             (let* ((row (+ (- cur-row mid) i))
@@ -145,8 +150,9 @@
                 (cond
                   ((= row cur-row) (color! C-BAR-C) (draw-filled-rect 0 y vw row-h))
                   ((and play-row (= row play-row)) (color! C-BAR-B) (draw-filled-rect 0 y vw row-h))
-                  ((= 0 (modulo row 4)) (color! C-BAR-A) (draw-filled-rect 0 y vw row-h)))
-                (text! (hex2 row) MARGIN y scale (if (= 0 (modulo row 4)) C-TEXT C-TEXT-DIM))
+                  ((= 0 (modulo row bar-rows)) (color! C-BAR-B) (draw-filled-rect 0 y vw row-h))
+                  ((= 0 (modulo row rpb)) (color! C-BAR-A) (draw-filled-rect 0 y vw row-h)))
+                (text! (hex2 row) MARGIN y scale (if (= 0 (modulo row rpb)) C-TEXT C-TEXT-DIM))
                 (let cl ((ch ch0) (x x0))
                   (when (<= ch ch1)
                     (let* ((c (find-cell cells row ch))
@@ -225,7 +231,7 @@
                                (>= y (cadddr b)) (< y (+ (cadddr b) BAR-H))))
                         (car (car bs)))
                        (else (loop (cdr bs))))))
-          (let* ((top HEADER-H)
+          (let* ((top (+ HEADER-H (spectrum-h s)))
                  (bottom (if touch? (- vh BAR-H) vh))
                  (third (quotient (- bottom top) 3)))
             (cond ((< y top) #f)
@@ -310,12 +316,42 @@
 
     ;; --- the screen ----------------------------------------------------------
 
-    (define (draw-tracker s vw vh touch? peaks)
+    ;; --- the spectrum strip (David, 2026-09-21) ------------------------------
+
+    ;; SPECTRUM-H px under the header: one bar per band (32, 20 Hz left to
+    ;; 16 kHz right) in the palette, the peak hold a 1 px tick above it.
+    (define SPECTRUM-H 12)
+    (define (draw-spectrum s vw spectrum)
+      (let* ((levels (car spectrum))
+             (holds (cdr spectrum))
+             (n (vector-length levels))
+             (w (quotient vw n))
+             (y0 HEADER-H)
+             (h (- SPECTRUM-H 2)))
+        (color! C-BAR-A)
+        (draw-filled-rect 0 y0 vw SPECTRUM-H)
+        (let loop ((i 0))
+          (when (< i n)
+            (let* ((x (+ (* i w) 1))
+                   (lh (exact (round (* h (vector-ref levels i)))))
+                   (hh (exact (round (* h (vector-ref holds i))))))
+              (color! C-HIGHLIGHT)
+              (when (> lh 0) (draw-filled-rect x (- (+ y0 h) lh) (- w 2) lh))
+              (color! C-TEXT)
+              (when (> hh 0) (draw-filled-rect x (- (+ y0 h) hh) (- w 2) 1)))
+            (loop (+ i 1))))))
+
+    ;; the strip keeps its place whether or not something plays (no layout jump)
+    (define (spectrum-h s) (if (tstate-spectrum s) SPECTRUM-H 0))
+
+    (define (draw-tracker s vw vh touch? peaks spectrum)
       (color! C-BG)
       (draw-filled-rect 0 0 vw vh)
       (let* ((bar (if touch? BAR-H 0))
-             (grid-h (- vh HEADER-H bar)))
-        (draw-grid s vw HEADER-H grid-h)
+             (strip (spectrum-h s))
+             (grid-h (- vh HEADER-H strip bar)))
+        (draw-grid s vw (+ HEADER-H strip) grid-h)
+        (when (> strip 0) (draw-spectrum s vw (or spectrum (cons (make-vector 32 0.0) (make-vector 32 0.0)))))
         (draw-header s vw)
         (draw-meters s vw peaks)
         (when (tstate-panel s) (draw-panel s vw vh))
