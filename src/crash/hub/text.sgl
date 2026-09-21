@@ -1,0 +1,205 @@
+;;; (crash hub text) - A layer and its world as text, for the tests and
+;;; for reading. The only place ASCII appears (D60: the game draws tiles).
+;;;
+;;; One character per cell:
+;;;   (space) void   # barrier   . floor   = link   : shadow   ~ ICE   _ ICE dark
+;;;   R G B Y a gate by color (r g b y once opened)
+;;;   S a STACK node  F a DEFRAG node (s f cleared, * alerted)   M market
+;;;   $ a cache (. once taken)   < ladder up   > ladder down
+;;;   @ the runner   ! a daemon   , a cell in a daemon's sight (the world dump)
+;;; Then the status lines: the layer, the beat and the trace, the runner,
+;;; the keys and the inventory, each daemon with its facing and state.
+
+(define-library (crash hub text)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash hub world)
+          (crash hub rules))
+
+  (export layer->text world->text world-status-lines cell-char text->layer)
+
+  (begin
+    (define (gate-char color open?)
+      (let ((c (cond ((eq? color 'red) #\R)
+                     ((eq? color 'green) #\G)
+                     ((eq? color 'blue) #\B)
+                     (else #\Y))))
+        (if open? (char-downcase c) c)))
+
+    (define (node-char n)
+      (cond ((eq? (node-state n) 'alerted) #\*)
+            ((eq? (node-state n) 'cleared) (if (eq? (node-table n) 'stack) #\s #\f))
+            (else (if (eq? (node-table n) 'stack) #\S #\F))))
+
+    ;; The character of cell i: the layer's own, with the live state when
+    ;; a world is given.
+    (define (cell-char l w i)
+      (let ((kind (layer-cell l i)))
+        (cond ((eq? kind 'void) #\space)
+              ((eq? kind 'barrier) #\#)
+              ((eq? kind 'floor) #\.)
+              ((eq? kind 'link) #\=)
+              ((eq? kind 'shadow) #\:)
+              ((eq? kind 'ice) (if (and w (assv i (world-dark w))) #\_ #\~))
+              ((eq? kind 'gate) (gate-char (layer-gate-color l i) (and w (memv i (world-opened w)) #t)))
+              ((eq? kind 'node)
+               (let ((n (layer-node-at l i)))
+                 (node-char (or (and w n (world-node w (node-index n))) n))))
+              ((eq? kind 'market) #\M)
+              ((eq? kind 'cache) (if (and w (memv i (world-taken w))) #\. #\$))
+              ((eq? kind 'ladder-up) #\<)
+              ((eq? kind 'ladder-down) #\>)
+              (else #\?))))
+
+    (define (rows->text rows)
+      (string-join (map list->string rows) "\n"))
+
+    (define (grid-rows l char-at)
+      (let ((w (layer-width l)) (h (layer-height l)))
+        (map (lambda (y)
+               (map (lambda (x) (char-at (idx x y w))) (iota w)))
+             (iota h))))
+
+    ;; The layer alone, as placed.
+    (define (layer->text l)
+      (rows->text (grid-rows l (lambda (i) (cell-char l #f i)))))
+
+    (define (facing-char d)
+      (let ((f (daemon-facing d)))
+        (cond ((eq? f 'up) "^") ((eq? f 'down) "v") ((eq? f 'left) "<") (else ">"))))
+
+    (define (n->s n) (number->string n))
+
+    (define (alert-word a)
+      (cond ((eq? a (quote hunted)) "HUNTED") ((eq? a (quote alert)) "ALERT") (else "QUIET")))
+
+    (define (alist->text entries)
+      (if (null? entries)
+          "-"
+          (string-join (map (lambda (e) (string-append (symbol->string (car e)) ":" (n->s (cdr e)))) entries) " ")))
+
+    (define (world-status-lines w)
+      (let* ((l (world-layer w))
+             (r (world-runner w))
+             (width (layer-width l)))
+        (append
+         (list (string-append "LAYER " (n->s (world-depth w)) "/" (n->s (layer-count))
+                              " ATTEMPT " (n->s (world-attempt w))
+                              " SEED " (n->s (layer-seed-of w))
+                              " TRY " (n->s (layer-try l))
+                              " BEAT " (n->s (world-beat w))
+                              " TRACE " (n->s (world-trace w)) "/" (n->s (descriptor-budget (hub-descriptor w)))
+                              " " (alert-word (hub-alert w))
+                              " " (n->s (hub-tempo w)) "BPM")
+               (string-append "RUNNER " (n->s (idx-x (runner-cell r) width)) "," (n->s (idx-y (runner-cell r) width))
+                              " " (symbol->string (runner-facing r))
+                              (if (> (runner-cloak r) 0) (string-append " CLOAK " (n->s (runner-cloak r))) "")
+                              " CR " (n->s (world-credits w)) "+" (n->s (world-layer-credits w))
+                              " KEYS " (if (null? (world-keys w)) "-" (string-join (map symbol->string (world-keys w)) " "))
+                              " TOOLS " (alist->text (world-inventory w))
+                              (if (world-request w) (string-append " REQUEST " (symbol->string (world-request w))) "")))
+         (map (lambda (d)
+                (string-append "DAEMON " (n->s (daemon-index d)) " "
+                               (n->s (idx-x (daemon-cell d) width)) "," (n->s (idx-y (daemon-cell d) width))
+                               " " (facing-char d)
+                               (cond ((daemon-alert d)
+                                      (string-append " ALERT " (n->s (idx-x (car (daemon-alert d)) width)) ","
+                                                     (n->s (idx-y (car (daemon-alert d)) width)) " " (n->s (cdr (daemon-alert d)))))
+                                     ((daemon-returning? d) " RETURNING")
+                                     (else (string-append " PATROL " (n->s (daemon-step d)) "/" (n->s (vector-length (daemon-route d))))))))
+              (world-daemons w))
+         (if (null? (world-events w))
+             '()
+             (list (string-append "EVENTS " (string-join (map event->text (reverse (world-events w))) " ")))))))
+
+    (define (layer-seed-of w) (layer-seed* w))
+    (define (layer-seed* w) (layer-seed (world-layer w)))
+
+    (define (event->text e)
+      (cond ((symbol? e) (symbol->string e))
+            ((pair? e) (string-append "(" (string-join (map (lambda (x)
+                                                               (cond ((symbol? x) (symbol->string x))
+                                                                     ((number? x) (n->s x))
+                                                                     (else "?")))
+                                                             e)
+                                                        " ")
+                                      ")"))
+            (else "?")))
+
+    ;; A layer from text, for the tests and hand-built controls: the
+    ;; legend above, plus 1..4 for a STACK node holding the key of that
+    ;; color in KEY-COLORS order, % for a cache holding a cloak ($ holds
+    ;; ten credits), @ or < for the entry, and ! for a daemon standing
+    ;; still (a route of its one cell). Rows may differ in length; the
+    ;; grid is the widest. Nodes and daemons are indexed in reading order.
+    (define (text->layer text)
+      (let* ((rows (split-lines text))
+             (h (length rows))
+             (w (fold-left (lambda (m r) (max m (string-length r))) 1 rows))
+             (cells (make-vector (* w h) 'void))
+             (gates '())
+             (nodes '())
+             (caches '())
+             (daemons '())
+             (entry 0)
+             (exit 0)
+             (market #f))
+        (let rows-loop ((rs rows) (y 0))
+          (unless (null? rs)
+            (let cols ((x 0))
+              (when (< x (string-length (car rs)))
+                (let ((c (string-ref (car rs) x))
+                      (i (idx x y w)))
+                  (cond ((char=? c #\#) (vector-set! cells i 'barrier))
+                        ((char=? c #\.) (vector-set! cells i 'floor))
+                        ((char=? c #\=) (vector-set! cells i 'link))
+                        ((char=? c #\:) (vector-set! cells i 'shadow))
+                        ((char=? c #\~) (vector-set! cells i 'ice))
+                        ((memv c (list #\R #\G #\B #\Y))
+                         (vector-set! cells i 'gate)
+                         (set! gates (cons (cons i (cond ((char=? c #\R) 'red) ((char=? c #\G) 'green) ((char=? c #\B) 'blue) (else 'yellow)))
+                                           gates)))
+                        ((memv c (list #\1 #\2 #\3 #\4))
+                         (vector-set! cells i 'node)
+                         (set! nodes (cons (node index: (length nodes) cell: i table: 'stack bounty: 40 required?: #t
+                                                 key: (list-ref KEY-COLORS (- (char->integer c) (char->integer #\1))))
+                                           nodes)))
+                        ((or (char=? c #\S) (char=? c #\F))
+                         (vector-set! cells i 'node)
+                         (set! nodes (cons (node index: (length nodes) cell: i table: (if (char=? c #\S) 'stack 'cards) bounty: 25)
+                                           nodes)))
+                        ((char=? c #\M) (vector-set! cells i 'market) (set! market i))
+                        ((char=? c #\$) (vector-set! cells i 'cache) (set! caches (cons (cons i (cons 'credits 10)) caches)))
+                        ((char=? c #\%) (vector-set! cells i 'cache) (set! caches (cons (cons i (cons 'tool 'cloak)) caches)))
+                        ((or (char=? c #\<) (char=? c #\@)) (vector-set! cells i 'ladder-up) (set! entry i))
+                        ((char=? c #\>) (vector-set! cells i 'ladder-down) (set! exit i))
+                        ((char=? c #\!)
+                         (vector-set! cells i 'floor)
+                         (set! daemons (cons (daemon index: (length daemons) cell: i route: (vector i)) daemons)))
+                        (else #t)))
+                (cols (+ x 1))))
+            (rows-loop (cdr rs) (+ y 1))))
+        (layer depth: 1 seed: 0 width: w height: h cells: cells
+               gates: (reverse gates) nodes: (reverse nodes) caches: (reverse caches)
+               daemons: (reverse daemons) entry: entry exit: exit market: market)))
+
+    (define (split-lines text)
+      (let loop ((cs (string->list text)) (line '()) (acc '()))
+        (cond ((null? cs) (reverse (if (null? line) acc (cons (list->string (reverse line)) acc))))
+              ((char=? (car cs) #\newline) (loop (cdr cs) '() (cons (list->string (reverse line)) acc)))
+              (else (loop (cdr cs) (cons (car cs) line) acc)))))
+
+    ;; The world: the grid with the sight fans, the daemons and the
+    ;; runner over it, then the status lines.
+    (define (world->text w)
+      (let* ((l (world-layer w))
+             (sight (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w)))
+             (daemon-cells (map daemon-cell (world-daemons w)))
+             (grid (grid-rows l (lambda (i)
+                                  (cond ((= i (runner-cell (world-runner w))) #\@)
+                                        ((memv i daemon-cells) #\!)
+                                        ((and (memv i sight) (memq (layer-cell l i) (list 'floor 'link 'shadow)))
+                                         #\,)
+                                        (else (cell-char l w i)))))))
+        (string-append (rows->text grid) "\n" (string-join (world-status-lines w) "\n"))))))

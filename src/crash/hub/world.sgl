@@ -1,0 +1,347 @@
+;;; (crash hub world) - The hub's data: a layer of the stack, the runner in
+;;; it, and the numbers the whole family tunes.
+;;;
+;;; Crash The Stack's world (ruling D60, the design note's overworld
+;;; section): the runner moves through the layers of Gibson's stack, one
+;;; tile grid per layer, and the classics are the hacks run at its nodes.
+;;; This module holds the structs and the vocabulary only: the layer as
+;;; the generator leaves it (cells, gates, nodes, caches, ICE, the
+;;; daemons' routes, the ladders), the live world over it (the runner,
+;;; the daemons, what is opened and taken, the inventory, credits, the
+;;; trace, the beat, the ledger), and the layer descriptors the run is
+;;; made of. Everything is an immutable struct changed by
+;;; copy-construction; (crash hub gen) builds a layer, (crash hub rules)
+;;; steps the world, (crash hub text) dumps it. No platform, no drawing.
+;;;
+;;; The numbers below are placeholders in one block, each named, so the
+;;; calibration row (the headless auto-player) can sweep them; they are
+;;; not measured yet.
+
+(define-library (crash hub world)
+  (import (sigil struct)
+          (sigil math))
+
+  (export ;; --- the tuning block ---
+          BEATS-PER-BAR SIGHT SEEN-SPIKE ICE-SPIKE CONTACT-FACTOR
+          ALERT-BEATS CLOAK-BEATS DECOY-BEATS JAM-BEATS JAM-RADIUS
+          TENSE-AT HUNTED-AT ALERT-AT CARRY HIGH
+          KEY-COLORS TOOLS tool-scope tool-table hub-tool? board-tool? tool-known?
+          PRICES tool-price
+          ;; --- cells ---
+          CELL-KINDS cell-walkable? cell-blocks-sight?
+          DIRECTIONS direction-delta direction? opposite-direction
+          idx idx-x idx-y in-bounds? step-cell
+          ;; --- descriptors ---
+          descriptor descriptor? descriptor-depth descriptor-table descriptor-width descriptor-height
+          descriptor-rooms descriptor-extra-links descriptor-required descriptor-optional
+          descriptor-daemons descriptor-ice descriptor-caches descriptor-shadows descriptor-market?
+          descriptor-budget descriptor-calm-bpm descriptor-tense-bpm
+          descriptor-bounty descriptor-optional-bounty descriptor-trace-at descriptor-sever-at
+          descriptor-shop descriptor-loot descriptor-log descriptor-gibson descriptor-tier-scale
+          LAYERS layer-count descriptor-at
+          ;; --- the layer ---
+          node node? node-index node-cell node-table node-bounty node-key node-effect node-effect-arg node-loot
+          node-required? node-state node-attempts
+          daemon daemon? daemon-index daemon-cell daemon-facing daemon-route daemon-step daemon-alert daemon-returning?
+          layer layer? layer-depth layer-seed layer-width layer-height layer-cells layer-gates
+          layer-nodes layer-caches layer-daemons layer-entry layer-exit layer-rooms layer-market layer-try
+          layer-cell layer-gate-color layer-node-at layer-cache-at layer-size
+          ;; --- the world ---
+          runner runner? runner-cell runner-facing runner-cloak
+          ledger ledger? ledger-cleared ledger-beats ledger-moves ledger-reconnects
+          ledger-severed-layers ledger-seen ledger-credits
+          world world? world-run-seed world-depth world-attempt world-layer world-runner
+          world-nodes world-daemons world-keys world-opened world-taken world-dark world-decoys
+          world-inventory world-credits world-layer-credits world-trace world-beat world-ledger
+          world-request world-events world-done?
+          world-node world-inventory-count)
+
+  (begin
+    ;; --- the tuning block (placeholders; the auto-player row sweeps them) ---
+
+    (define BEATS-PER-BAR 4)        ; the ICE pulses on the bar's first beat
+    (define SIGHT 4)                ; a daemon's fan reaches this many cells ahead
+    (define SEEN-SPIKE 30)          ; the trace when a daemon sees the runner
+    (define ICE-SPIKE 15)           ; the trace when a pulsing ICE cell hits him
+    (define CONTACT-FACTOR 2)       ; contact (one cell) doubles the seen spike
+    (define ALERT-BEATS 12)         ; a daemon hunts a target this long
+    (define CLOAK-BEATS 8)          ; unseen by sight and ICE
+    (define DECOY-BEATS 12)         ; a decoy holds the daemons that see it
+    (define JAM-BEATS 16)           ; the ICE near the runner goes dark
+    (define JAM-RADIUS 3)           ; Chebyshev cells from the runner a jam reaches
+    (define TENSE-AT 0.6)           ; trace fraction where the tempo turns tense
+    (define ALERT-AT 0.5)           ; trace fraction where the layer counts as alert
+    (define HUNTED-AT 0.8)          ; trace fraction where it is hunted: ICE every half bar
+    (define CARRY 0.25)             ; of the budget: what a board's finishing trace adds, times its fraction
+    (define HIGH 0.75)              ; of the budget: the trace a severed board leaves you at
+
+    ;; blackICE's four tokens, renamed keys; a gate is one color.
+    (define KEY-COLORS (list 'red 'green 'blue 'yellow))
+
+    ;; One bag of tools across the world and the boards: (name scope table).
+    ;; scope world: used on a beat here; scope board: carried into the
+    ;; named table's board (the design note's exploit tools and DEFRAG's
+    ;; scramble) and consumed there once the boards learn them.
+    (define TOOLS
+      (list (list 'cloak 'world #f)
+            (list 'decoy 'world #f)
+            (list 'jam 'world #f)
+            (list 'scramble 'board 'cards)
+            (list 'peek 'board 'stack)
+            (list 'probe 'board 'stack)
+            (list 'purge 'board 'stack)))
+
+    (define (tool-entry name) (assq name TOOLS))
+    (define (tool-known? name) (and (tool-entry name) #t))
+    (define (tool-scope name) (let ((e (tool-entry name))) (and e (cadr e))))
+    (define (tool-table name) (let ((e (tool-entry name))) (and e (caddr e))))
+    (define (hub-tool? name) (eq? (tool-scope name) 'world))
+    (define (board-tool? name) (eq? (tool-scope name) 'board))
+
+    ;; What a market asks, in credits (placeholders).
+    (define PRICES
+      (list (cons 'cloak 30)
+            (cons 'decoy 20)
+            (cons 'jam 25)
+            (cons 'scramble 35)
+            (cons 'peek 25)
+            (cons 'probe 25)
+            (cons 'purge 40)))
+
+    (define (tool-price name)
+      (let ((e (assq name PRICES))) (and e (cdr e))))
+
+    ;; --- cells and directions ------------------------------------------------
+
+    ;; void: outside the structure, the field shows through. barrier: a
+    ;; wall (void beside something walkable). The rest are walkable; a
+    ;; gate only with its key or once opened.
+    (define CELL-KINDS
+      (list 'void 'barrier 'floor 'link 'gate 'node 'market 'cache 'ice 'shadow 'ladder-up 'ladder-down))
+
+    (define (cell-walkable? kind)
+      (not (or (eq? kind 'void) (eq? kind 'barrier))))
+
+    (define (cell-blocks-sight? kind)
+      (or (eq? kind 'void) (eq? kind 'barrier)))
+
+    (define DIRECTIONS
+      (list (cons 'up (cons 0 -1))
+            (cons 'down (cons 0 1))
+            (cons 'left (cons -1 0))
+            (cons 'right (cons 1 0))))
+
+    (define (direction? d) (and (assq d DIRECTIONS) #t))
+    (define (direction-delta d) (cdr (assq d DIRECTIONS)))
+    (define (opposite-direction d)
+      (cond ((eq? d 'up) 'down)
+            ((eq? d 'down) 'up)
+            ((eq? d 'left) 'right)
+            (else 'left)))
+
+    ;; blackICE's index grid: i = y * w + x.
+    (define (idx x y w) (+ (* y w) x))
+    (define (idx-x i w) (modulo i w))
+    (define (idx-y i w) (quotient i w))
+    (define (in-bounds? x y w h)
+      (and (>= x 0) (< x w) (>= y 0) (< y h)))
+
+    ;; The cell one step from i in direction d, or #f off the grid.
+    (define (step-cell i d w h)
+      (let* ((delta (direction-delta d))
+             (nx (+ (idx-x i w) (car delta)))
+             (ny (+ (idx-y i w) (cdr delta))))
+        (and (in-bounds? nx ny w h) (idx nx ny w))))
+
+    ;; --- the layer descriptors -----------------------------------------------
+
+    ;; A layer of the run as data (the design note's shared layer): what
+    ;; the generator places and how many, the beat budget and the two
+    ;; tempos, the boards' thresholds at this depth, the bounties, the
+    ;; market's list and the optional nodes' loot, the terminal-log line
+    ;; and Gibson's lines (David's to write; empty until then), and a
+    ;; tier scale (D-tier, unused in phase 1).
+    (define-struct descriptor
+      (depth default: 1)
+      (table default: 'stack)         ; the required nodes' table; stack | cards
+      (width default: 40)
+      (height default: 22)
+      (rooms default: 6)
+      (extra-links default: 1)
+      (required default: 2)           ; gated links on the path, one key node each
+      (optional default: 1)           ; nodes with a bounty and loot, no key
+      (daemons default: 2)
+      (ice default: 1)                ; 2x2 fields
+      (caches default: 2)
+      (shadows default: 2)            ; 2x2 patches of cover
+      (market? default: #f)
+      (budget default: 400)           ; beats before the layer's link severs
+      (calm-bpm default: 90)
+      (tense-bpm default: 140)
+      (bounty default: 40)            ; a required node's clear
+      (optional-bounty default: 25)
+      (trace-at default: 180)         ; the boards' thresholds at this depth, seconds
+      (sever-at default: 220)
+      (shop default: '())             ; what the market sells (tool names)
+      (loot default: '())             ; what an optional node yields, in order
+      (log default: "")               ; the terminal-log line (David's)
+      (gibson default: '())           ; Gibson's lines (David's)
+      (tier-scale default: 1))
+
+    ;; Six layers, STACK and DEFRAG alternating as run.sgl's LAYERS (D60:
+    ;; JACK IN's six layers become six maps). Built with list, not quoted
+    ;; (the wasm literal hazard, (crash menu)).
+    (define LAYERS
+      (list (descriptor depth: 1 table: 'stack width: 40 height: 22 rooms: 6 extra-links: 1
+                        required: 2 optional: 1 daemons: 2 ice: 1 caches: 2 shadows: 2
+                        budget: 400 bounty: 40 optional-bounty: 25 trace-at: 180 sever-at: 220
+                        loot: (list 'cloak))
+            (descriptor depth: 2 table: 'cards width: 44 height: 24 rooms: 7 extra-links: 1
+                        required: 2 optional: 1 daemons: 2 ice: 2 caches: 2 shadows: 3 market?: #t
+                        budget: 440 bounty: 50 optional-bounty: 35 trace-at: 180 sever-at: 220
+                        shop: (list 'cloak 'decoy 'scramble) loot: (list 'scramble))
+            (descriptor depth: 3 table: 'stack width: 48 height: 28 rooms: 8 extra-links: 2
+                        required: 3 optional: 2 daemons: 3 ice: 2 caches: 3 shadows: 3 market?: #t
+                        budget: 480 bounty: 60 optional-bounty: 45 trace-at: 170 sever-at: 210
+                        shop: (list 'cloak 'decoy 'jam 'peek) loot: (list 'jam 'peek))
+            (descriptor depth: 4 table: 'cards width: 52 height: 30 rooms: 9 extra-links: 2
+                        required: 3 optional: 2 daemons: 3 ice: 3 caches: 3 shadows: 4 market?: #t
+                        budget: 520 bounty: 70 optional-bounty: 55 trace-at: 160 sever-at: 200
+                        shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'decoy 'scramble))
+            (descriptor depth: 5 table: 'stack width: 60 height: 34 rooms: 11 extra-links: 3
+                        required: 4 optional: 3 daemons: 4 ice: 3 caches: 4 shadows: 5 market?: #t
+                        budget: 600 bounty: 80 optional-bounty: 65 trace-at: 150 sever-at: 190
+                        shop: (list 'cloak 'decoy 'jam 'peek 'probe 'purge) loot: (list 'cloak 'probe 'purge))
+            (descriptor depth: 6 table: 'cards width: 60 height: 34 rooms: 12 extra-links: 3
+                        required: 4 optional: 3 daemons: 4 ice: 4 caches: 4 shadows: 5 market?: #t
+                        budget: 640 bounty: 90 optional-bounty: 75 trace-at: 140 sever-at: 180
+                        shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'jam 'scramble 'decoy))))
+
+    (define (layer-count) (length LAYERS))
+
+    ;; The descriptor of a depth counted from 1, or #f past the last.
+    (define (descriptor-at depth)
+      (and (>= depth 1) (<= depth (layer-count)) (list-ref LAYERS (- depth 1))))
+
+    ;; --- the layer as generated ----------------------------------------------
+
+    ;; A terminal. key: the gate color its clear yields, or #f. effect: a
+    ;; subsystem effect instead (dark | open | reroute) with its subject in
+    ;; effect-arg, or #f. loot: the tool an optional clear yields, or #f.
+    ;; state: sealed | cleared | alerted. attempts: severed boards here so
+    ;; far (the next seed differs, D23).
+    (define-struct node
+      (index default: 0)
+      (cell default: 0)
+      (table default: 'stack)
+      (bounty default: 0)
+      (key default: #f)
+      (effect default: #f)
+      (effect-arg default: #f)
+      (loot default: #f)
+      (required? default: #f)
+      (state default: 'sealed)
+      (attempts default: 0))
+
+    ;; A daemon on patrol. route: a vector of cells walked in a cycle;
+    ;; step: the index it stands at. alert: #f, or (target . ttl) while it
+    ;; hunts a cell; returning?: walking back to its route after a hunt.
+    (define-struct daemon
+      (index default: 0)
+      (cell default: 0)
+      (facing default: 'right)
+      (route default: #())
+      (step default: 0)
+      (alert default: #f)
+      (returning? default: #f))
+
+    ;; cells: a vector of CELL-KINDS symbols, w * h. gates: alist cell ->
+    ;; color. nodes: the node structs as placed. caches: alist cell ->
+    ;; (credits . n) | (tool . name). daemons: the daemon structs as
+    ;; placed. rooms: (x y w h) each, the entry's first. market: its cell
+    ;; or #f. try: which sub-seed the generator settled on.
+    (define-struct layer
+      (depth default: 1)
+      (seed default: 1)
+      (width default: 1)
+      (height default: 1)
+      (cells default: #())
+      (gates default: '())
+      (nodes default: '())
+      (caches default: '())
+      (daemons default: '())
+      (entry default: 0)
+      (exit default: 0)
+      (rooms default: '())
+      (market default: #f)
+      (try default: 0))
+
+    (define (layer-size l) (* (layer-width l) (layer-height l)))
+    (define (layer-cell l i) (vector-ref (layer-cells l) i))
+    (define (layer-gate-color l i)
+      (let ((e (assv i (layer-gates l)))) (and e (cdr e))))
+    (define (layer-node-at l i)
+      (let loop ((ns (layer-nodes l)))
+        (cond ((null? ns) #f)
+              ((= (node-cell (car ns)) i) (car ns))
+              (else (loop (cdr ns))))))
+    (define (layer-cache-at l i)
+      (let ((e (assv i (layer-caches l)))) (and e (cdr e))))
+
+    ;; --- the live world ------------------------------------------------------
+
+    (define-struct runner
+      (cell default: 0)
+      (facing default: 'right)
+      (cloak default: 0))             ; beats of cloak left
+
+    ;; P4a's ledger grown: layers cleared, beats and moves spent, severed
+    ;; boards (reconnects), severed layers, times seen, credits banked.
+    (define-struct ledger
+      (cleared default: 0)
+      (beats default: 0)
+      (moves default: 0)
+      (reconnects default: 0)
+      (severed-layers default: 0)
+      (seen default: 0)
+      (credits default: 0))
+
+    ;; nodes, daemons: the live copies. keys: colors held. opened: gate
+    ;; cells opened. taken: cache cells emptied. dark: alist ice cell ->
+    ;; beats left dark (-1 for good). decoys: alist cell -> beats left.
+    ;; inventory: alist tool -> count. request: #f, or what the shell must
+    ;; answer before the next beat: launch | market | descend | severed |
+    ;; done. events: what the last step did, newest first, for the shell
+    ;; and the dump.
+    (define-struct world
+      (run-seed default: 1)
+      (depth default: 1)
+      (attempt default: 0)
+      (layer default: #f)
+      (runner default: (runner))
+      (nodes default: '())
+      (daemons default: '())
+      (keys default: '())
+      (opened default: '())
+      (taken default: '())
+      (dark default: '())
+      (decoys default: '())
+      (inventory default: '())
+      (credits default: 0)
+      (layer-credits default: 0)
+      (trace default: 0)
+      (beat default: 0)
+      (ledger default: (ledger))
+      (request default: #f)
+      (events default: '())
+      (done? default: #f))
+
+    ;; The live node by index, or #f.
+    (define (world-node w index)
+      (let loop ((ns (world-nodes w)))
+        (cond ((null? ns) #f)
+              ((= (node-index (car ns)) index) (car ns))
+              (else (loop (cdr ns))))))
+
+    (define (world-inventory-count w tool)
+      (let ((e (assq tool (world-inventory w)))) (if e (cdr e) 0)))))

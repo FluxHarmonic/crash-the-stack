@@ -1,0 +1,593 @@
+;;; The hub (P5 phase 1): a layer of the stack from a seed, the beat, the
+;;; runner's verbs, patrols and sight, the node's launch and return
+;;; (D23), and a scripted run down six layers by the rules alone.
+;;; Hand-built layers come from (crash hub text)'s text->layer; the
+;;; generator's are proved by its own breadth-first search, with a
+;;; hand-built unsolvable layer as the positive control.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash code)
+        (crash hub world)
+        (crash hub gen)
+        (crash hub rules)
+        (crash hub text))
+
+;; --- helpers -------------------------------------------------------------------
+
+(define (world-of text depth)
+  (hub-with-layer (world run-seed: 1) (text->layer text) depth 0))
+
+(define (cell w x y) (idx x y (layer-width (world-layer w))))
+
+(define (runner-at w) (runner-cell (world-runner w)))
+
+(define (steps w actions)
+  (fold-left (lambda (w a) (hub-step w a)) w actions))
+
+(define (moves w . dirs)
+  (steps w (map (lambda (d) (list 'move d)) dirs)))
+
+(define (has-event? w e)
+  (and (member e (world-events w)) #t))
+
+(define (daemon-of w i)
+  (find (lambda (d) (= (daemon-index d) i)) (world-daemons w)))
+
+(define (with-daemon w d)
+  (world w daemons: (map (lambda (e) (if (= (daemon-index e) (daemon-index d)) d e)) (world-daemons w))))
+
+;; A world with one daemon walking a route (a b c ... back), facing set by the first step.
+(define (patrol w cells)
+  (with-daemon w (daemon index: 0 cell: (car cells) route: (list->vector cells) step: 0
+                         facing: (if (> (cadr cells) (car cells)) 'right 'left))))
+
+;; The shortest path of directions from the runner to target over what
+;; he may pass now, or #f.
+(define (path-to w target)
+  (let* ((l (world-layer w))
+         (width (layer-width l))
+         (height (layer-height l))
+         (parent (make-vector (layer-size l) #f))
+         (from (runner-at w)))
+    (vector-set! parent from (cons from #f))
+    (let loop ((queue (list from)))
+      (cond ((null? queue) #f)
+            ((= (car queue) target)
+             (let walk ((c target) (acc '()))
+               (let ((p (vector-ref parent c)))
+                 (if (not (cdr p)) acc (walk (car p) (cons (cdr p) acc))))))
+            (else
+             (loop (append (cdr queue)
+                           (filter-map (lambda (dir)
+                                         (let ((n (step-cell (car queue) dir width height)))
+                                           (and n
+                                                (not (vector-ref parent n))
+                                                (hub-passable? w n)
+                                                (begin (vector-set! parent n (cons (car queue) dir)) n))))
+                                       (list 'up 'down 'left 'right)))))))))
+
+(define (walk-to w target)
+  (let ((path (path-to w target)))
+    (assert-true (and path #t))
+    (apply moves w path)))
+
+;; One board at the runner's node, cleared quietly (a fifth of the trace).
+(define (clear-here w)
+  (let ((w (hub-step w 'enter)))
+    (if (eq? (world-request w) 'launch)
+        (hub-return w (list 'cleared 60 20 0.2 '()))
+        w)))
+
+;; Walk the shortest passable path to a cell, stopping when the world
+;; asks for something (the layer severed).
+(define (walk w target)
+  (let ((path (path-to w target)))
+    (assert-true (and path #t))
+    (let loop ((w w) (path path))
+      (if (or (null? path) (world-request w))
+          w
+          (loop (hub-step w (list 'move (car path))) (cdr path))))))
+
+;; The layer by the rules alone: the key nodes in gate order, then the
+;; ladder. Answers a world asking to descend, or one whose link severed.
+(define (script-layer w)
+  (let loop ((w w) (k 0))
+    (cond ((world-request w) w)
+          ((< k (length (layer-gates (world-layer w))))
+           (let* ((n (find (lambda (n) (eq? (node-key n) (list-ref KEY-COLORS k))) (world-nodes w)))
+                  (w (walk w (node-cell n))))
+             (if (world-request w) w (loop (clear-here w) (+ k 1)))))
+          (else
+           (let ((w (walk w (layer-exit (world-layer w)))))
+             (if (world-request w) w (hub-step w 'descend)))))))
+
+;; --- generation ----------------------------------------------------------------
+
+(test-group "hub: generation"
+  (test "a layer is a function of (run seed, depth, attempt): the same twice, different for another input"
+    (let ((a (generate-layer 1 1 0))
+          (b (generate-layer 1 1 0))
+          (c (generate-layer 2 1 0))
+          (d (generate-layer 1 1 1)))
+      (assert-equal (layer->text a) (layer->text b))
+      (assert-false (string=? (layer->text a) (layer->text c)))
+      (assert-false (string=? (layer->text a) (layer->text d)))))
+  (test "layer 1 of run seed 1: the descriptor's counts, the ladders, the gates keyed in order"
+    (let* ((l (generate-layer 1 1 0))
+           (d (descriptor-at 1)))
+      (display (layer->text l)) (newline)
+      (assert-equal (descriptor-rooms d) (length (layer-rooms l)))
+      (assert-equal (descriptor-required d) (length (layer-gates l)))
+      (assert-equal (list 'red 'green) (map cdr (layer-gates l)))
+      (assert-equal (+ (descriptor-required d) (descriptor-optional d)) (length (layer-nodes l)))
+      (assert-equal (list 'red 'green #f) (map node-key (layer-nodes l)))
+      (assert-equal (descriptor-daemons d) (length (layer-daemons l)))
+      (assert-equal 'ladder-up (layer-cell l (layer-entry l)))
+      (assert-equal 'ladder-down (layer-cell l (layer-exit l)))
+      (assert-false (layer-market l))))
+  (test "layer 1 of 200 run seeds and layers 2-6 of 25 build, are solvable, and need their keys (325 layers)"
+    (let loop ((seed 1) (depth 1) (built 0) (solvable 0) (gated 0) (tries 0))
+      (cond ((> depth 6)
+             (display (string-append "  built " (number->string built)
+                                     " solvable " (number->string solvable)
+                                     " gated " (number->string gated)
+                                     " extra tries " (number->string tries)))
+             (newline)
+             (assert-equal 325 built)
+             (assert-equal 325 solvable)
+             (assert-equal 325 gated))
+            ((> seed (if (= depth 1) 200 25)) (loop 1 (+ depth 1) built solvable gated tries))
+            (else
+             (let ((l (generate-layer seed depth 0)))
+               (loop (+ seed 1) depth
+                     (+ built (if l 1 0))
+                     (+ solvable (if (and l (layer-solvable? l)) 1 0))
+                     (+ gated (if (and l (not (layer-reachable? l #f '()))) 1 0))
+                     (+ tries (if l (layer-try l) 0))))))))
+  (test "deeper layers grow and carry a market; every placement lands"
+    (let ((l (generate-layer 7 6 0))
+          (d (descriptor-at 6)))
+      (assert-equal (descriptor-width d) (layer-width l))
+      (assert-equal (descriptor-rooms d) (length (layer-rooms l)))
+      (assert-equal (descriptor-required d) (length (layer-gates l)))
+      (assert-true (and (layer-market l) #t))
+      (assert-equal (descriptor-daemons d) (length (layer-daemons l)))
+      (assert-equal (descriptor-caches d) (length (layer-caches l)))))
+  (test "positive control: a key behind its own gate is reported unsolvable; the key before it, solvable"
+    (let ((bad (text->layer "#########\n#<.R.1.>#\n#########"))
+          (good (text->layer "#########\n#<1.R..>#\n#########")))
+      (assert-false (layer-solvable? bad))
+      (assert-true (layer-solvable? good))
+      (assert-false (layer-reachable? good #f '()))
+      (assert-true (layer-reachable? good #f (list (idx 4 1 (layer-width good))))))))
+
+;; --- the verbs ------------------------------------------------------------------
+
+(define ROOM
+  (string-append "#########\n"
+                 "#@..R..>#\n"
+                 "#..1..$.#\n"
+                 "#########"))
+
+(test-group "hub: the runner's verbs on a beat"
+  (test "a move takes the cell, counts a move and a beat, and the trace ticks once"
+    (let* ((w (world-of ROOM 1))
+           (w2 (hub-step w (list 'move 'right))))
+      (assert-equal (cell w 2 1) (runner-at w2))
+      (assert-equal 'right (runner-facing (world-runner w2)))
+      (assert-equal 1 (world-beat w2))
+      (assert-equal 1 (world-trace w2))
+      (assert-equal 1 (ledger-moves (world-ledger w2)))
+      (assert-equal 1 (ledger-beats (world-ledger w2)))))
+  (test "a bump is a wait: the beat and the trace pass, the cell does not change, the facing does"
+    (let* ((w (world-of ROOM 1))
+           (w2 (hub-step w (list 'move 'up))))
+      (assert-equal (runner-at w) (runner-at w2))
+      (assert-equal 'up (runner-facing (world-runner w2)))
+      (assert-equal 1 (world-beat w2))
+      (assert-equal 1 (world-trace w2))
+      (assert-equal 0 (ledger-moves (world-ledger w2)))
+      (assert-true (has-event? w2 (list 'bump 'up)))))
+  (test "wait passes the beat"
+    (let ((w2 (steps (world-of ROOM 1) (list 'wait 'wait 'wait))))
+      (assert-equal 3 (world-beat w2))
+      (assert-equal 3 (world-trace w2))
+      (assert-equal (cell w2 1 1) (runner-at w2))))
+  (test "a locked gate without its key is a bump; with the key it opens for good and the key is spent"
+    (let* ((w (moves (world-of ROOM 1) 'right 'right 'right)))
+      (assert-equal (cell w 3 1) (runner-at w))
+      (assert-true (has-event? w (list 'bump 'right)))
+      (let* ((w (world w keys: (list 'red)))
+             (w (hub-step w (list 'move 'right))))
+        (assert-equal (cell w 4 1) (runner-at w))
+        (assert-equal '() (world-keys w))
+        (assert-equal (list (cell w 4 1)) (world-opened w))
+        (assert-true (has-event? w (list 'gate-opened (cell w 4 1) 'red)))
+        (let ((w (moves w 'left 'right)))
+          (assert-equal (cell w 4 1) (runner-at w))))))
+  (test "a cache is taken on entry: credits to the layer, a tool to the bag, once"
+    (let* ((w (moves (world-of ROOM 1) 'down 'right 'right 'right 'right 'right)))
+      (assert-equal (cell w 6 2) (runner-at w))
+      (assert-equal 10 (world-layer-credits w))
+      (assert-true (has-event? w (list 'pickup 'credits 10)))
+      (let ((w (moves w 'left 'right)))
+        (assert-equal 10 (world-layer-credits w))))
+    (let* ((w (world-of "#####\n#@%.#\n#####" 1))
+           (w (hub-step w (list 'move 'right))))
+      (assert-equal 1 (world-inventory-count w 'cloak))
+      (assert-true (has-event? w (list 'pickup 'tool 'cloak)))))
+  (test "enter on a node asks for a launch and the world holds; off a node it is refused"
+    (let* ((w (moves (world-of ROOM 1) 'down 'right 'right))
+           (w2 (hub-step w 'enter)))
+      (assert-equal 'launch (world-request w2))
+      (assert-true (has-event? w2 (list 'enter 0)))
+      (assert-equal w2 (hub-step w2 'wait))
+      (assert-equal (world-beat w2) (world-beat (hub-step w2 (list 'move 'left)))))
+    (let ((w (hub-step (world-of ROOM 1) 'enter)))
+      (assert-false (world-request w))
+      (assert-true (has-event? w (list 'refused 'enter)))
+      (assert-equal 1 (world-beat w))))
+  (test "descend works on the ladder down only"
+    (let ((w (hub-step (world-of ROOM 1) 'descend)))
+      (assert-false (world-request w))
+      (assert-true (has-event? w (list 'refused 'descend))))
+    (let* ((w (world (world-of ROOM 1) keys: (list 'red)))
+           (w (walk-to w (cell w 7 1)))
+           (w (hub-step w 'descend)))
+      (assert-equal 'descend (world-request w))))
+  (test "use: a cloak hides for CLOAK-BEATS beats counting the beat of use, a missing tool is refused"
+    (let* ((w (world (world-of ROOM 1) inventory: (list (cons 'cloak 1))))
+           (w (hub-step w (list 'use 'cloak))))
+      (assert-equal 0 (world-inventory-count w 'cloak))
+      (assert-equal (- CLOAK-BEATS 1) (runner-cloak (world-runner w)))
+      (assert-true (has-event? w (list 'used 'cloak)))
+      (let ((w (steps w (make-list (- CLOAK-BEATS 1) 'wait))))
+        (assert-equal 0 (runner-cloak (world-runner w))))
+      (let ((w (hub-step w (list 'use 'cloak))))
+        (assert-true (has-event? w (list 'refused 'use 'cloak))))))
+  (test "use: a decoy lies on the runner's cell for DECOY-BEATS; a jam darkens the ICE in reach for JAM-BEATS"
+    (let* ((w (world (world-of "#######\n#@~..~#\n#######" 1) inventory: (list (cons 'decoy 1) (cons 'jam 1))))
+           (w (hub-step w (list 'use 'decoy))))
+      (assert-equal (list (cons (cell w 1 1) (- DECOY-BEATS 1))) (world-decoys w))
+      (let ((w (hub-step w (list 'use 'jam))))
+        (assert-equal (list (cons (cell w 2 1) (- JAM-BEATS 1))) (world-dark w))
+        (assert-equal 0 (world-inventory-count w 'jam))
+        (let ((w (steps w (make-list (- JAM-BEATS 1) 'wait))))
+          (assert-equal '() (world-dark w))
+          (assert-equal '() (world-decoys w))))))
+  (test "buy: at a market, a listed tool at its price, layer credits first; elsewhere refused"
+    (let* ((w (world (world-of "#####\n#@M.#\n#####" 2) credits: 20 layer-credits: 20))
+           (refused (hub-step w (list 'buy 'cloak))))
+      (assert-true (has-event? refused (list 'refused 'buy 'cloak)))
+      (let* ((w (hub-step w (list 'move 'right)))
+             (w (hub-step w (list 'buy 'cloak))))
+        (assert-equal 1 (world-inventory-count w 'cloak))
+        (assert-equal 0 (world-layer-credits w))
+        (assert-equal 10 (world-credits w))
+        (assert-true (has-event? w (list 'bought 'cloak 30)))
+        (let ((w (hub-step w (list 'buy 'cloak))))
+          (assert-true (has-event? w (list 'refused 'buy 'cloak))))
+        (let ((w (hub-step w (list 'buy 'peek))))   ; not on layer 2's list
+          (assert-true (has-event? w (list 'refused 'buy 'peek)))))))
+  (test "an action outside the vocabulary changes nothing"
+    (let ((w (world-of ROOM 1)))
+      (assert-equal w (hub-step w 'fly))
+      (assert-equal w (hub-step w (list 'move 'sideways)))
+      (assert-equal w (hub-step w (list 'use 'hammer))))))
+
+;; --- patrols, sight, ICE ----------------------------------------------------------
+
+(define HALL
+  (string-append "############\n"
+                 "#@.........#\n"
+                 "#..........#\n"
+                 "#....!.....#\n"
+                 "#..........#\n"
+                 "############"))
+
+(test-group "hub: patrols, sight and the ICE on the beat"
+  (test "a daemon walks its route one cell a beat, facing where it goes, and wraps"
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1) (+ a 2) (+ a 1))))
+           (w1 (hub-step w 'wait))
+           (w2 (hub-step w1 'wait))
+           (w3 (hub-step w2 'wait))
+           (w4 (hub-step w3 'wait)))
+      (assert-equal (+ a 1) (daemon-cell (daemon-of w1 0)))
+      (assert-equal 'right (daemon-facing (daemon-of w1 0)))
+      (assert-equal (+ a 2) (daemon-cell (daemon-of w2 0)))
+      (assert-equal (+ a 1) (daemon-cell (daemon-of w3 0)))
+      (assert-equal 'left (daemon-facing (daemon-of w3 0)))
+      (assert-equal a (daemon-cell (daemon-of w4 0)))
+      (assert-equal 0 (daemon-step (daemon-of w4 0)))))
+  (test "the fan: SIGHT ahead, no wider than deep, walls block it, the four neighbors always"
+    (let* ((w (world-of HALL 1))
+           (l (world-layer w))
+           (d (daemon index: 0 cell: (cell w 5 3) facing: 'right route: (vector (cell w 5 3))))
+           (sight (daemon-sight l d)))
+      (assert-true (and (memv (cell w 6 3) sight) #t))
+      (assert-true (and (memv (cell w 9 3) sight) #t))          ; 4 ahead
+      (assert-true (and (memv (cell w 7 1) sight) #t))          ; 2 ahead, 2 across
+      (assert-false (memv (cell w 6 1) sight))                  ; 1 ahead, 2 across: outside the fan
+      (assert-false (memv (cell w 10 3) sight))                 ; 5 ahead: past SIGHT
+      (assert-false (memv (cell w 3 3) sight))                  ; behind
+      (assert-true (and (memv (cell w 4 3) sight) #t))          ; the neighbor behind, always
+      (assert-true (and (memv (cell w 5 2) sight) #t)))
+    (let* ((w (world-of "#######\n#!.#..#\n#######" 1))
+           (l (world-layer w))
+           (d (daemon index: 0 cell: (cell w 1 1) facing: 'right route: (vector (cell w 1 1)))))
+      (assert-equal (list (cell w 2 1)) (daemon-sight l d))))
+  (test "seen: the trace spikes, the ledger counts, the daemon hunts the runner's cell; hidden behind it, nothing"
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1))))
+           (w (world w runner: (runner cell: (cell w 8 3))))
+           (w2 (hub-step w 'wait)))
+      (assert-equal (+ 1 SEEN-SPIKE) (world-trace w2))
+      (assert-equal 1 (ledger-seen (world-ledger w2)))
+      (assert-equal (cons (cell w 8 3) ALERT-BEATS) (daemon-alert (daemon-of w2 0)))
+      (assert-true (has-event? w2 (list 'seen 0)))
+      (assert-equal 'alert (hub-alert w2))
+      (assert-true (hub-tense? w2))
+      (assert-equal (descriptor-tense-bpm (descriptor-at 1)) (hub-tempo w2))
+      ;; still in view next beat: the hunter spikes no second time, the ledger counts no second sighting
+      (let ((w3 (hub-step w2 (quote wait))))
+        (assert-equal (+ 2 SEEN-SPIKE) (world-trace w3))
+        (assert-equal 1 (ledger-seen (world-ledger w3)))
+        (assert-false (has-event? w3 (list (quote seen) 0)))
+        (assert-equal (cons (cell w 8 3) ALERT-BEATS) (daemon-alert (daemon-of w3 0)))))
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1))))
+           (w (world w runner: (runner cell: (cell w 2 3))))
+           (w2 (hub-step w 'wait)))
+      (assert-equal 1 (world-trace w2))
+      (assert-equal 0 (ledger-seen (world-ledger w2)))
+      (assert-false (daemon-alert (daemon-of w2 0)))
+      (assert-equal 'quiet (hub-alert w2))
+      (assert-equal (descriptor-calm-bpm (descriptor-at 1)) (hub-tempo w2))))
+  (test "a hunting daemon steps toward its target and gives up after ALERT-BEATS, walking home"
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1))))
+           (w (world w runner: (runner cell: (cell w 8 3) cloak: 100)))   ; unseen from here on
+           (w (with-daemon w (daemon (daemon-of w 0) alert: (cons (cell w 9 1) 3))))
+           (w1 (hub-step w 'wait))
+           (w2 (hub-step w1 'wait))
+           (w3 (hub-step w2 'wait))
+           (w4 (hub-step w3 'wait)))
+      (assert-equal (cons (cell w 9 1) 2) (daemon-alert (daemon-of w1 0)))
+      (assert-false (= a (daemon-cell (daemon-of w1 0))))
+      (assert-false (daemon-alert (daemon-of w4 0)))
+      (assert-true (daemon-returning? (daemon-of w4 0)))
+      (let ((home (steps w4 (make-list 12 'wait))))
+        (assert-false (daemon-returning? (daemon-of home 0)))
+        (assert-true (and (memv (daemon-cell (daemon-of home 0)) (list a (+ a 1))) #t)))))
+  (test "contact doubles the spike; shadow hides unless beside; cloak hides from everything"
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1))))
+           (w (world w runner: (runner cell: (+ a 1))))
+           (w2 (hub-step w 'wait)))
+      (assert-equal (+ 1 (* CONTACT-FACTOR SEEN-SPIKE)) (world-trace w2))
+      (assert-true (has-event? w2 (list 'contact 0))))
+    (let* ((w (world-of "########\n#!..::.#\n########" 1))
+           (w (patrol w (list (cell w 1 1) (cell w 2 1))))
+           (in-shadow (hub-step (world w runner: (runner cell: (cell w 5 1))) 'wait))
+           (beside (hub-step (world w runner: (runner cell: (cell w 4 1))) 'wait))    ; the daemon steps to 2,1: not beside; 4 is 2 ahead in shadow
+           (cloaked (hub-step (world w runner: (runner cell: (cell w 3 1) cloak: 5)) 'wait)))
+      (assert-equal 1 (world-trace in-shadow))
+      (assert-equal 1 (world-trace beside))
+      (assert-equal 1 (world-trace cloaked))
+      (let* ((w (patrol w (list (cell w 3 1) (cell w 2 1))))
+             (w (world w runner: (runner cell: (cell w 4 1))))    ; daemon steps to 2,1 then... use a still daemon instead
+             (still (with-daemon w (daemon index: 0 cell: (cell w 3 1) facing: 'right route: (vector (cell w 3 1)))))
+             (seen (hub-step still 'wait)))
+        (assert-equal (+ 1 SEEN-SPIKE) (world-trace seen)))))
+  (test "a decoy in sight takes the daemon for as long as it lasts"
+    (let* ((w (world-of HALL 1))
+           (a (cell w 5 3))
+           (w (patrol w (list a (+ a 1))))
+           (w (world w runner: (runner cell: (cell w 8 3) cloak: 100) decoys: (list (cons (cell w 8 3) 3))))
+           (w1 (hub-step w 'wait)))
+      (assert-equal (cons (cell w 8 3) 2) (daemon-alert (daemon-of w1 0)))))
+  (test "the ICE pulses on the bar: a hit on beats 0 and 4, none on 1; dark ICE and a cloak do not hit"
+    (let* ((w (world-of "#####\n#@~.#\n#####" 1))
+           (w (world w runner: (runner cell: (cell w 2 1))))
+           (b0 (hub-step w 'wait))
+           (b1 (hub-step b0 'wait))
+           (b4 (steps b1 (list 'wait 'wait 'wait))))
+      (assert-equal (+ 1 ICE-SPIKE) (world-trace b0))
+      (assert-true (has-event? b0 'ice-hit))
+      (assert-equal (+ 2 ICE-SPIKE) (world-trace b1))
+      (assert-false (has-event? b1 'ice-hit))
+      (assert-equal (+ 5 (* 2 ICE-SPIKE)) (world-trace b4))
+      (assert-true (has-event? b4 'ice-hit))
+      (assert-equal 1 (world-trace (hub-step (world w dark: (list (cons (cell w 2 1) -1))) 'wait)))
+      (assert-equal 1 (world-trace (hub-step (world w runner: (runner cell: (cell w 2 1) cloak: 2)) 'wait)))))
+  (test "hunted (trace at HUNTED-AT): the ICE pulses every half bar"
+    (let* ((w (world-of "#####\n#@~.#\n#####" 1))
+           (budget (descriptor-budget (descriptor-at 1)))
+           (w (world w runner: (runner cell: (cell w 2 1)) trace: (exact (floor (* HUNTED-AT budget))) beat: 1))
+           (w1 (hub-step w 'wait))
+           (w2 (hub-step w1 'wait)))
+      (assert-equal 'hunted (hub-alert w))
+      (assert-false (has-event? w1 'ice-hit))     ; beat 1
+      (assert-true (has-event? w2 'ice-hit))))    ; beat 2: the half bar
+  (test "the layer severs when the trace reaches the budget: the world asks for a reconnect and holds"
+    (let* ((w (world-of ROOM 1))
+           (budget (descriptor-budget (descriptor-at 1)))
+           (w (world w trace: (- budget 1)))
+           (w2 (hub-step w 'wait)))
+      (assert-equal 'severed (world-request w2))
+      (assert-true (has-event? w2 'severed))
+      (assert-equal w2 (hub-step w2 'wait)))))
+
+;; --- the node's board ---------------------------------------------------------------
+
+(test-group "hub: what a node launches and what returns (D23)"
+  (test "the launch is a (crash code) spec that round-trips, with the table's tools and the depth's thresholds"
+    (let* ((w (world (world-of ROOM 1) inventory: (list (cons 'peek 2) (cons 'scramble 1) (cons 'cloak 1))))
+           (w (moves w 'down 'right 'right))
+           (w (hub-step w 'enter))
+           (l (hub-launch w 1 'vegas))
+           (s (launch-spec l)))
+      (assert-true (and l #t))
+      (assert-equal 'stack (spec-table s))
+      (assert-equal 'hacker (spec-version s))
+      (assert-true (spec-equal? s (decode (encode s))))
+      (assert-true (> (spec-seed s) 0))
+      (assert-equal (list (cons 'peek 2)) (launch-tools l))
+      (assert-equal (descriptor-trace-at (descriptor-at 1)) (launch-trace-at l))
+      (assert-equal (descriptor-sever-at (descriptor-at 1)) (launch-sever-at l))
+      (assert-equal 0 (node-index (launch-node l)))
+      (assert-false (hub-launch (world-of ROOM 1) 1 'vegas))))
+  (test "a clear opens the node, yields its key and bounty, counts the board, and its trace follows the runner out"
+    (let* ((w (moves (world-of ROOM 1) 'down 'right 'right))
+           (w (hub-step w 'enter))
+           (budget (descriptor-budget (descriptor-at 1)))
+           (w2 (hub-return w (list 'cleared 120 30 0.0 '()))))
+      (assert-false (world-request w2))
+      (assert-equal 'cleared (node-state (world-node w2 0)))
+      (assert-equal (list 'red) (world-keys w2))
+      (assert-equal 40 (world-layer-credits w2))
+      (assert-equal 124 (ledger-beats (world-ledger w2)))   ; 120 on the board, 4 beats getting there
+      (assert-equal 33 (ledger-moves (world-ledger w2)))
+      (assert-equal (world-trace w) (world-trace w2))
+      (assert-true (has-event? w2 (list 'cleared 0)))
+      (assert-true (has-event? (hub-step w2 'enter) (list 'refused 'enter)))
+      (let ((hot (hub-return w (list 'cleared 120 30 0.8 '()))))
+        (assert-equal (+ (world-trace w) (exact (floor (* 0.8 CARRY budget)))) (world-trace hot))))))
+  (test "a clear consumes the board's tools and yields loot"
+    (let* ((w (world (world-of "#####\n#@S.#\n#####" 1) inventory: (list (cons 'peek 2))))
+           (w (hub-step w (list 'move 'right)))
+           (w (world w nodes: (list (node (car (world-nodes w)) loot: 'jam))))
+           (w (hub-step w 'enter))
+           (w2 (hub-return w (list 'cleared 10 1 0.0 (list (cons 'peek 1))))))
+      (assert-equal 1 (world-inventory-count w2 'peek))
+      (assert-equal 1 (world-inventory-count w2 'jam))
+      (assert-equal 25 (world-layer-credits w2))))
+  (test "a hot clear (trace at half) draws the nearest daemon to the node"
+    (let* ((w (world-of "#######\n#@S..!#\n#######" 1))
+           (w (hub-step w (list 'move 'right)))
+           (w (hub-step w 'enter))
+           (w2 (hub-return w (list 'cleared 10 1 0.5 '()))))
+      (assert-equal (cons (cell w 2 1) ALERT-BEATS) (daemon-alert (daemon-of w2 0)))))
+  (test "a severed board: back at the node, the node alerted, a daemon inbound, the trace high, a reconnect on the ledger, Gibson speaks"
+    (let* ((w (world-of "#######\n#@1..!#\n#######" 1))
+           (w (hub-step w (list 'move 'right)))
+           (w (hub-step w 'enter))
+           (l1 (hub-launch w 1 'vegas))
+           (budget (descriptor-budget (descriptor-at 1)))
+           (w2 (hub-return w (list 'severed (list (cons 'peek 1))))))
+      (assert-false (world-request w2))
+      (assert-equal (cell w 2 1) (runner-at w2))
+      (assert-equal 'alerted (node-state (world-node w2 0)))
+      (assert-equal 1 (node-attempts (world-node w2 0)))
+      (assert-equal (cons (cell w 2 1) ALERT-BEATS) (daemon-alert (daemon-of w2 0)))
+      (assert-equal (exact (floor (* HIGH budget))) (world-trace w2))
+      (assert-equal 1 (ledger-reconnects (world-ledger w2)))
+      (assert-equal '() (world-keys w2))
+      (assert-true (has-event? w2 'gibson))
+      (assert-true (has-event? w2 (list 'severed-board 0)))
+      ;; the retry is a fresh seed of the same node, and the node can be entered again
+      (let* ((w3 (hub-step w2 'enter))
+             (l2 (hub-launch w3 1 'vegas)))
+        (assert-equal 'launch (world-request w3))
+        (assert-false (= (spec-seed (launch-spec l1)) (spec-seed (launch-spec l2)))))))
+  (test "a node's effects: dark ICE for good, a gate opened, a daemon's route collapsed"
+    (let* ((w (world-of "#########\n#@S~R.!.#\n#########" 1))
+           (ice (cell w 3 1))
+           (gate (cell w 4 1))
+           (w (world w daemons: (list (daemon (daemon-of w 0) route: (vector (cell w 6 1) (cell w 7 1))))))
+           (n (car (world-nodes w)))
+           (try (lambda (effect arg)
+                  (let* ((w (world w nodes: (list (node n effect: effect effect-arg: arg))))
+                         (w (hub-step w (list 'move 'right)))
+                         (w (hub-step w 'enter)))
+                    (hub-return w (list 'cleared 1 1 0.0 '()))))))
+      (assert-equal (list (cons ice -1)) (world-dark (try 'dark (list ice))))
+      (assert-equal (list gate) (world-opened (try 'open gate)))
+      (assert-equal (vector (cell w 6 1)) (daemon-route (daemon-of (try 'reroute 0) 0)))))   ; two beats on a two-cell route: back where it started
+  (test "a return without a launch pending changes nothing"
+    (let ((w (world-of ROOM 1)))
+      (assert-equal w (hub-return w (list 'cleared 1 1 0.0 '())))
+      (assert-equal w (hub-return w (list 'severed '())))))
+
+;; --- layers -----------------------------------------------------------------------
+
+(test-group "hub: down the stack"
+  (test "descend banks the layer's credits, counts the layer, and enters the next depth from its own seed"
+    (let* ((w (world (world-of ROOM 1) keys: (list 'red) layer-credits: 55 credits: 5 inventory: (list (cons 'cloak 1))))
+           (w (walk-to w (cell w 7 1)))
+           (w (hub-step w 'descend))
+           (w2 (hub-descend w)))
+      (assert-equal 2 (world-depth w2))
+      (assert-equal 0 (world-attempt w2))
+      (assert-equal 60 (world-credits w2))
+      (assert-equal 0 (world-layer-credits w2))
+      (assert-equal 1 (ledger-cleared (world-ledger w2)))
+      (assert-equal 55 (ledger-credits (world-ledger w2)))
+      (assert-equal 1 (world-inventory-count w2 'cloak))
+      (assert-equal '() (world-keys w2))
+      (assert-equal 0 (world-trace w2))
+      (assert-equal 0 (world-beat w2))
+      (assert-false (world-request w2))
+      (assert-equal (layer->text (generate-layer 1 2 0)) (layer->text (world-layer w2)))
+      (assert-equal (layer-entry (world-layer w2)) (runner-at w2))
+      (let ((held (world w request: #f)))
+        (assert-equal held (hub-descend held)))))
+  (test "a severed layer regrows from the next attempt: tools kept, layer credits lost, the trace and the beat reset"
+    (let* ((w (hub-new 3))
+           (w (world w layer-credits: 30 credits: 12 inventory: (list (cons 'jam 2)) keys: (list 'red)
+                     trace: (descriptor-budget (descriptor-at 1)) request: 'severed))
+           (w2 (hub-severed-layer w)))
+      (assert-equal 1 (world-depth w2))
+      (assert-equal 1 (world-attempt w2))
+      (assert-equal 0 (world-layer-credits w2))
+      (assert-equal 12 (world-credits w2))
+      (assert-equal 2 (world-inventory-count w2 'jam))
+      (assert-equal '() (world-keys w2))
+      (assert-equal 0 (world-trace w2))
+      (assert-equal 1 (ledger-severed-layers (world-ledger w2)))
+      (assert-false (world-request w2))
+      (assert-equal (layer->text (generate-layer 3 1 1)) (layer->text (world-layer w2)))
+      (assert-false (string=? (layer->text (world-layer w)) (layer->text (world-layer w2))))
+      (let ((held (world w request: #f)))
+        (assert-equal held (hub-severed-layer held)))))
+  (test "a scripted run by the rules alone: key nodes in order, the ladder, six layers, done with the ledger"
+    (let run ((w (hub-new 1)) (attempts 0) (layers 0))
+      (cond ((world-done? w)
+             (assert-equal 6 layers)
+             (assert-equal 6 (ledger-cleared (world-ledger w)))
+             (assert-equal 'done (world-request w))
+             (assert-true (> (ledger-beats (world-ledger w)) 0))
+             (assert-true (> (ledger-credits (world-ledger w)) 0))
+             (assert-equal (ledger-credits (world-ledger w)) (world-credits w))
+             (assert-equal w (hub-step w 'wait))
+             (display (string-append "  done: beats " (number->string (ledger-beats (world-ledger w)))
+                                     " moves " (number->string (ledger-moves (world-ledger w)))
+                                     " seen " (number->string (ledger-seen (world-ledger w)))
+                                     " reconnects " (number->string (ledger-reconnects (world-ledger w)))
+                                     " severed layers " (number->string (ledger-severed-layers (world-ledger w)))
+                                     " credits " (number->string (world-credits w))))
+             (newline))
+            (else
+             (assert-true (< layers 6))
+             (let ((w (script-layer w)))
+               (cond ((eq? (world-request w) 'severed)
+                      (assert-true (< attempts 32))
+                      (run (hub-severed-layer w) (+ attempts 1) layers))
+                     (else
+                      (assert-equal 'descend (world-request w))
+                      (display (string-append "  layer " (number->string (world-depth w))
+                                              " beats " (number->string (world-beat w))
+                                              " trace " (number->string (world-trace w))
+                                              "/" (number->string (descriptor-budget (hub-descriptor w)))
+                                              " seen " (number->string (ledger-seen (world-ledger w)))
+                                              " attempts " (number->string attempts)))
+                      (newline)
+                      (run (hub-descend w) 0 (+ layers 1))))))))))
