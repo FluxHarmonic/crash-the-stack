@@ -1,0 +1,296 @@
+;;; Shared score and command operations for the soundtrack's shell tools.
+(define-library (crash soundtrack tools)
+  (import (sigil shell prelude)
+          (sigil args)
+          (sigil json)
+          (sigil list))
+  (export initialize root catalog historical accepted field child replace-child
+          set-field read-score score-text check require-tool canonical
+          write-canonical section-score ticks run-tool cli option-ref
+          source-path write-json-file source-slugs run-render run-compose)
+  (begin
+    (define *root* #f)
+    (define *catalog* #f)
+
+    (define (initialize directory)
+      (set! *root* (realpath directory))
+      (set! *catalog*
+        (json-decode (read-text (path *root* "docs/music/catalog.json")))))
+
+    (define (root) *root*)
+    (define (catalog) *catalog*)
+    (define (historical) (dict-ref *catalog* historical:))
+    (define (accepted) (dict-ref *catalog* accepted:))
+    (define (check condition message . details)
+      (unless condition (apply error message details)))
+
+    (define (field form key)
+      (let ((tail (member key form)))
+        (check (and tail (pair? (cdr tail))) "Missing field" key)
+        (cadr tail)))
+
+    (define (set-field form key value)
+      (cond
+        ((null? form) (error "Missing field" key))
+        ((equal? (car form) key) (cons key (cons value (cddr form))))
+        (else (cons (car form) (set-field (cdr form) key value)))))
+
+    (define (child form name)
+      (or (list-find (lambda (item) (and (pair? item) (eq? (car item) name))) form)
+          (error "Missing score section" name)))
+
+    (define (replace-child form name value)
+      (map (lambda (item)
+             (if (and (pair? item) (eq? (car item) name)) value item))
+           form))
+
+    (define (read-score file)
+      (call-with-input-file file
+        (lambda (port)
+          (let ((score (read port)))
+            (check (eof-object? (read port)) "Trailing score form" file)
+            score))))
+
+    (define (score-text score)
+      (define (emit value port)
+        (cond
+          ((list? value)
+           (display "(" port)
+           (let loop ((rest value))
+             (unless (null? rest)
+               (emit (car rest) port)
+               (unless (null? (cdr rest)) (display " " port))
+               (loop (cdr rest))))
+           (display ")" port))
+          ;; Generic write shortens floats; number->string preserves patch ratios.
+          ((number? value) (display (number->string value) port))
+          (else (write value port))))
+      (call-with-output-string (lambda (port) (emit score port) (newline port))))
+
+    (define (source-path slug)
+      (path *root* (dict-ref (dict-ref (historical) (string->keyword slug)) path:)))
+
+    (define (source-slugs)
+      (list-sort string<? (map keyword->string (dict-keys (historical)))))
+
+    (define (require-tool tool)
+      (check (command-exists? tool) "Required executable is unavailable" tool)
+      tool)
+
+    (define (run-tool argv)
+      ($ ,@(map (lambda (v) (if (number? v) (number->string v) v)) argv)))
+
+    (define (canonical motif source)
+      ;; out trims newlines; canonical .cts files always end in exactly one.
+      (str (out ,motif tune print ,source) "\n"))
+
+    (define (write-canonical motif destination score)
+      (ensure-directory (dirname destination))
+      (with-temp-dir work
+        (let ((raw (path work "score.cts")))
+          (write-text raw (score-text score))
+          (let ((text (canonical motif raw)))
+            (check (or (not (file-exists? destination))
+                       (equal? text (read-text destination)))
+                   "Refusing to overwrite a differing source" destination)
+            (unless (file-exists? destination) (write-text destination text))))))
+
+    (define (option-ref options name)
+      (let ((entry (assq name options)))
+        (and entry (cdr entry))))
+
+    (define (normalize-tracks args)
+      ;; Retain the old --tracks a b syntax; sigil args owns actual validation.
+      (let loop ((rest args) (tracks? #f) (result '()))
+        (cond
+          ((null? rest) (reverse result))
+          ((equal? (car rest) "--tracks")
+           (check (and (pair? (cdr rest))
+                       (not (starts-with? (cadr rest) "--")))
+                  "--tracks requires at least one name")
+           (loop (cdr rest) #t result))
+          ((and tracks? (not (starts-with? (car rest) "--")))
+           (loop (cdr rest) #t (cons (car rest) (cons "--track" result))))
+          (else (loop (cdr rest) #f (cons (car rest) result))))))
+
+    (define (cli name args extra handler)
+      (run-command
+        (command
+          name: name
+          description: "Crash soundtrack authoring and validation; see docs/music/tools/README.md."
+          options: (append
+                     (list
+                       (option name: 'motif long: "motif" value: "FILE"
+                               default: (or (getenv "MOTIF_BIN") "motif"))
+                       (option name: 'output long: "output" value: "DIR"
+                               default: (path *root* "build/music" name))
+                       (option name: 'tracks long: "track" value: "SLUG" multi: #t))
+                     extra)
+          handler: (lambda (opts positional)
+                     (check (null? positional) "Unexpected positional arguments" positional)
+                     (handler opts)))
+        (normalize-tracks args)))
+
+    (define (write-json-file filename data)
+      (write-text filename (str (json-encode data) "\n")))
+
+    (define (section-score source start end label)
+      (let* ((orders (cdr (child source 'order)))
+             (chosen (take (skip orders start) (- (or end (length orders)) start)))
+             (patterns
+               (map
+                 (lambda (pattern)
+                   (append (take pattern 5)
+                     (map (lambda (row)
+                            (append (take row 2)
+                              (map (lambda (cell)
+                                     (if (starts-with? (list-ref cell 4) "B")
+                                         (append (take cell 4) '("000"))
+                                         cell))
+                                   (cddr row))))
+                          (skip pattern 5))))
+                 (filter (lambda (p) (member (field p id:) chosen))
+                         (cdr (child source 'patterns)))))
+             (last-id (car (reverse chosen)))
+             (fixed
+               (map (lambda (p)
+                      (if (not (= (field p id:) last-id)) p
+                          (let* ((final (- (field p rows:) 1))
+                                 (rows (skip p 5))
+                                 (row (or (list-find (lambda (r) (= (cadr r) final)) rows)
+                                          (list 'row final)))
+                                 (cell (or (assoc 1 (cddr row)) '(1 "..." 0 0 "000")))
+                                 (new-cell (append (take cell 4) '("B00")))
+                                 (cells (if (assoc 1 (cddr row))
+                                            (map (lambda (c) (if (= (car c) 1) new-cell c))
+                                                 (cddr row))
+                                            (append (cddr row) (list new-cell))))
+                                 (new-row (append (take row 2) cells)))
+                            (append (take p 5)
+                              (list-sort (lambda (a b) (< (cadr a) (cadr b)))
+                                (cons new-row
+                                  (filter (lambda (r) (not (= (cadr r) final))) rows)))))))
+                    patterns))
+             (result (replace-child source 'patterns (cons 'patterns fixed))))
+        (set! result (replace-child result 'order (cons 'order chosen)))
+        (set! result (set-field result name: (str (field source name:) " / " label)))
+        (replace-child result 'history
+          (append (child source 'history)
+            (list (list "codex" "2026-09-21"
+                        (str label " standalone loop, derived by render.py")))))))
+
+    (define (ticks motif file channel)
+      (map (lambda (line)
+             (map string->number (filter (lambda (s) (not (equal? s "")))
+                                        (split (trim line) " "))))
+           (cdr (lines ,motif tune ticks ,file ,channel))))
+
+    (define (run-render args)
+      (cli "render" args
+        (list
+          (option name: 'format long: "format" value: "FORMAT"
+                  default: "wav" choices: '("wav" "ogg" "both"))
+          (option name: 'full-only long: "full-only")
+          (option name: 'prepare-only long: "prepare-only")
+          (option name: 'accepted long: "accepted"))
+        (lambda (opts)
+          (let* ((motif (require-tool (option-ref opts 'motif)))
+                 (output (option-ref opts 'output))
+                 (shipping? (option-ref opts 'accepted))
+                 (tracks (or (option-ref opts 'tracks)
+                             (map keyword->string
+                               (dict-keys (if shipping? (accepted)
+                                              (dict-ref *catalog* section_layouts:))))))
+                 (formats (if (equal? (option-ref opts 'format) "both")
+                              '("wav" "ogg") (list (option-ref opts 'format))))
+                 (commands '())
+                 (summaries '()))
+            (ensure-directory output)
+            (when (member "ogg" formats) (ensure-directory (path output "ogg")))
+            (each slug tracks
+              (let* ((entry (and shipping? (dict-ref (accepted) (string->keyword slug))))
+                     (reference (if entry (dict-ref entry source:) slug))
+                     (source (if entry (path *root* (dict-ref entry path:)) (source-path slug)))
+                     (score (read-score source))
+                     (layout (dict-ref (dict-ref *catalog* section_layouts:)
+                                       (string->keyword reference) #f))
+                     (intro (dict-ref (dict-ref *catalog* intro_loops:)
+                                      (string->keyword reference) #f))
+                     (sections (cond
+                                 ((option-ref opts 'full-only) '())
+                                 (intro (list (list "loop" intro #f)))
+                                 (layout (list (list "calm" 0 (array-ref layout 0))
+                                               (list "tense" (array-ref layout 1) #f)))
+                                 (else (error "Historical variation requires --full-only" slug))))
+                     (inputs (list (list "full" source))))
+                (check (equal? (read-text source) (canonical motif source))
+                       "Source is not canonical" source)
+                (each spec sections
+                  (let ((destination (path output (str slug "-" (car spec) ".cts"))))
+                    (write-canonical motif destination
+                      (section-score score (cadr spec) (caddr spec) (car spec)))
+                    (set! inputs (append inputs (list (list (car spec) destination))))))
+                (each input inputs
+                  ($ ,motif tune check ,(cadr input))
+                  (let ((info (out ,motif tune info ,(cadr input))))
+                    (set! summaries (append summaries (list (str slug " / " (car input) "\n" info)))))
+                  (each extension formats
+                    (set! commands
+                      (append commands
+                        (list (list motif "tune" "render" (cadr input) "-r" "44100" "-o"
+                                    (path (if (equal? extension "ogg") (path output "ogg") output)
+                                          (str slug "-" (car input) "." extension))))))))))
+            (write-json-file (path output "render-commands.json") (list->array commands))
+            (write-text (path output "tune-info.txt") (str (string-join summaries "\n\n") "\n"))
+            (write-text (path output "README-renders.txt")
+              "Native Motif, stereo 44.1 kHz. Commands are argv arrays in render-commands.json.\nFull renders include transitions. Independent sections start with fresh DSP state.\nOne traversal only; Bxx playback requires the player. No normalization.\n")
+            (unless (option-ref opts 'prepare-only) (each argv commands (run-tool argv)))
+            (println "Prepared ~a renders in ~a" (length commands) output)))))
+
+    (define (expand-composition recipe)
+      (let* ((header (cadr (child recipe 'header)))
+             (phrases (cdr (child recipe 'phrases)))
+             (patterns
+               (map
+                 (lambda (spec)
+                   (let ((rows '()))
+                     (each placement (cddr spec)
+                       (let ((fragment (assoc (cadr placement) phrases)))
+                         (check fragment "Unknown phrase" placement)
+                         (each row (cdr fragment)
+                           (let ((position (+ (car placement) (car row))))
+                             (check (< position (cadr spec)) "Phrase exceeds pattern" spec)
+                             (check (not (assoc position rows)) "Overlapping phrase rows" position)
+                             (set! rows (cons (cons position (cdr row)) rows))))))
+                     (append (list 'pattern id: (car spec) rows: (cadr spec))
+                       (map (lambda (r) (cons 'row r))
+                            (list-sort (lambda (a b) (< (car a) (car b))) rows)))))
+                 (cdr (child recipe 'placements)))))
+        (append header (list (cons 'patterns patterns))
+                (cdr (child recipe 'tail)))))
+
+    (define (run-compose family args)
+      (cli family args
+        (list (option name: 'revision long: "revision" value: "N" default: "1"
+                      choices: '("1" "2" "3" "4")))
+        (lambda (opts)
+          (let* ((motif (require-tool (option-ref opts 'motif)))
+                 (output (option-ref opts 'output))
+                 (revision (option-ref opts 'revision))
+                 (slugs
+                   (cond
+                     ((equal? family "compose-puzzle-pair") '("quiet-array" "dead-sector"))
+                     ((equal? family "compose-final-pair") '("obsidian-index" "clock-edge"))
+                     ((equal? family "compose-obsidian-ii") '("obsidian-index-v2"))
+                     ((equal? family "arrange-legacy")
+                      '("shadow-protocol-adaptive" "dirty-cache-adaptive" "breach-vector-adaptive"))
+                     ((equal? family "compose-black-glass-title")
+                      (list (str "black-glass-title" (if (equal? revision "1") "" (str "-v" revision)))))
+                     (else (error "Unknown composition family" family)))))
+            (each slug slugs
+              (let* ((recipe (read-score (path *root* "docs/music/recipes" (str slug ".sgl"))))
+                     (destination (path output (str slug ".cts"))))
+                (write-canonical motif destination (expand-composition recipe))
+                ($ ,motif tune check ,destination)
+                (println "Composed ~a" destination)))))))
+  ))

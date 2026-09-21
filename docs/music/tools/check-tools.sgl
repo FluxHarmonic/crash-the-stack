@@ -1,0 +1,37 @@
+#!/usr/bin/env sigil
+;;; Reproduce the old composers without a Python runtime or the Motif source tree.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/audit.sgl"))
+(import (crash soundtrack tools) (crash soundtrack audit) (sigil args) (sigil list))
+(initialize (path (script-dir) "../../.."))
+
+(define (must-fail thunk label)
+  (check (guard (e (else #t)) (thunk) #f) "Negative control passed unexpectedly" label))
+
+(cli "check-tools" (script-args) '()
+  (lambda (opts)
+    (let ((motif (require-tool (option-ref opts 'motif))))
+      (with-temp-dir work
+        (each family '("compose-puzzle-pair" "compose-final-pair" "compose-obsidian-ii" "arrange-legacy")
+          (run-compose family (list "--motif" motif "--output" work)))
+        (each revision '("1" "2" "3" "4")
+          (run-compose "compose-black-glass-title"
+            (list "--revision" revision "--motif" motif "--output" work)))
+        (let ((outputs (glob (path work "*.cts"))))
+          (check (= (length outputs) 12) "Missing composer output")
+          (each file outputs
+            (let ((slug (substring (basename file) 0 (- (string-length (basename file)) 4))))
+              (check (equal? (read-text file) (read-text (source-path slug)))
+                     "Composer no longer reproduces reference" slug))))
+        (let ((conflict (path work "quiet-array.cts")))
+          (write-text conflict "edited source\n")
+          (must-fail
+            (lambda ()
+              (run-compose "compose-puzzle-pair" (list "--motif" motif "--output" work)))
+            "Edited output must be protected")
+          (check (equal? (read-text conflict) "edited source\n") "Protected output was overwritten"))
+        (must-fail (lambda () (clock-audit (source-path "quiet-array") motif 0))
+                   "Wrong loop target must fail")
+        (must-fail (lambda () (require-tool (path work "absent-motif")))
+                   "Missing renderer must fail")
+        (println "PASS: 12 exact composer outputs; overwrite, loop and missing-tool controls.")))))

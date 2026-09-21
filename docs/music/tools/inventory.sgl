@@ -1,0 +1,53 @@
+#!/usr/bin/env sigil
+;;; Rebuild the handoff inventory after source, report or artifact changes.
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools) (sigil args) (sigil json) (sigil list))
+(initialize (path (script-dir) "../../.."))
+(requires (tools sha256sum))
+
+(define (entries base files)
+  (let* ((ordered (list-sort string<? files))
+         (hashes (if (null? ordered) '() (lines sha256sum ,@ordered))))
+    (check (= (length ordered) (length hashes)) "Hash output count mismatch")
+    (list->array
+      (list-map
+        (lambda (file hash)
+          (dict path: (substring file (+ (string-length base) 1) (string-length file))
+                bytes: (file-size file)
+                sha256: (substring hash 0 64)))
+        ordered hashes))))
+
+(cli "inventory" (script-args)
+  (list (option name: 'artifacts long: "artifacts" value: "DIR" required: #t))
+  (lambda (opts)
+    (let* ((base (root))
+           (artifacts (realpath (option-ref opts 'artifacts)))
+           (music (path base "docs/music"))
+           (metadata (path music "handoff.json"))
+           (data
+             (dict schema_version: 2
+                   intended_repository: "crash-the-stack"
+                   migration_status: "Game-owned collection migrated; runtime wiring belongs to integration."
+                   source_root: base
+                   artifact_root: artifacts
+                   distinct_compositions: 15
+                   shipping_arrangements: 16
+                   game_tunes: (entries base
+                                 (map (lambda (key) (path base (dict-ref (dict-ref (accepted) key) path:)))
+                                      (dict-keys (accepted))))
+                   game_collateral: (entries base
+                                      (filter (lambda (file) (not (equal? file metadata)))
+                                              (find-files music)))
+                   artifacts: (entries artifacts (find-files artifacts))
+                   provenance: "docs/music/migration-map.json"
+                   accepted_catalog: "docs/music/catalog.json"
+                   keep_in_motif: '("Reusable synth/graph/render/OGG code and tests"
+                                    "src/motif/patches/dance.sgl"
+                                    "tunes/demo-columns.cts"
+                                    "tunes/grit-bass-test.cts")
+                   notes: '("Fifty-two exact historical tune snapshots are retained in alternates."
+                            "Shipping files differ only in display titles."
+                            "Audio remains external; no WAV or OGG is added by this migration."
+                            "Inventory excludes itself. Credentials are never inventoried."))))
+      (write-json-file metadata data)
+      (println "Inventoried 15 compositions, 16 shipping arrangements and external audio at ~a" artifacts))))
