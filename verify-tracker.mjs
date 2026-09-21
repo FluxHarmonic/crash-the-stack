@@ -6,7 +6,11 @@
 // software WebGL and drives the page over the DevTools Protocol, as
 // verify.mjs does. Sub-arms, in order; each prints PASS / FAIL <name>:
 //
-//   open       ?tracker=spy: "crash: tracker open spy" then "crash: tune loaded spy"
+//   imports    tracker/crash-tracker.wasm imports only wasi + gl + sigil_wasm_gles3 +
+//              sigil_browser + sigil_wasm_audio (as the game's wasm; no env)
+//   sizes      the game's wasm is within 0.3 MB of master's 21,425,074 bytes
+//              (the tracker is not in it) and the tracker's within 20 MB
+//   open       /tracker/?tune=spy: "crash: tracker open spy" then "crash: tune loaded spy"
 //              (the page fetched assets/tunes/spy.cts and handed it over in chunks)
 //   render     the tracker's canvas is drawn: the header's text color and the
 //              cursor row's tint are both present, over many pixels
@@ -21,7 +25,9 @@
 //   fragment   a fresh navigation to that URL boots the tracker with the shared
 //              tune: "crash: tune loaded shared"; sharing again yields the same
 //              URL (deflate of identical text), so the round trip is exact
-//   door       /tracker/#t=... lands on ?tracker with the fragment kept and
+//   door       the game page at /?tracker=spy is just the game: it boots (its
+//              literal-check line) and never says "crash: tracker open" (the
+//              game's wasm carries no tracker; /tracker/ is the one entry)
 //              loads the same tune
 //   bar        (phone only) a synthetic touch on the bar's PLAY button starts playback
 //              ("crash: tracker play"), one on STOP stops it: the screen closes on touch
@@ -49,7 +55,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
 const results = [];
-const planned = ["open", "render", "play", "edit", "share", "fragment", "door", "bar", "console"];
+const planned = ["imports", "sizes", "open", "render", "play", "edit", "share", "fragment", "door", "worker", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -88,7 +94,7 @@ function shutdown(code) {
 }
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => shutdown(2));
 process.on("uncaughtException", (e) => { console.log("EXCEPTION " + (e && e.stack || e)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = 300000;
+const WHOLE_RUN_MS = 480000;   // the worker leg waits up to 95 s for the registration
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -197,8 +203,27 @@ async function readRegion(x, y, w, h) {
 const near = (px, i, c, tol = 40) => Math.abs(px[i] - c[0]) <= tol && Math.abs(px[i + 1] - c[1]) <= tol && Math.abs(px[i + 2] - c[2]) <= tol;
 const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
 
+// ---- imports + sizes ------------------------------------------------------------
+{
+  const wasmPath = path.join(ROOT, "tracker", "crash-tracker.wasm");
+  const gamePath = path.join(ROOT, "crash-the-stack.wasm");
+  try {
+    const mod = await WebAssembly.compile(fs.readFileSync(wasmPath));
+    const mods = {};
+    for (const imp of WebAssembly.Module.imports(mod)) mods[imp.module] = (mods[imp.module] || 0) + 1;
+    const names = Object.keys(mods).sort();
+    const want = ["gl", "sigil_browser", "sigil_wasm_audio", "sigil_wasm_gles3", "wasi_snapshot_preview1"];
+    if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
+    else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
+  } catch (e) { fail("imports", "compile: " + e.message); }
+  const BASE = 21425074, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;
+  const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
+  if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
+  else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
+}
+
 // ---- open ---------------------------------------------------------------------
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&tracker=spy` });
+await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace&tune=spy` });
 const opened = await waitLine(/^crash: tracker open spy$/, 0, 40000);
 if (!opened) timedOut("open");
 const loaded = await waitLine(/^crash: tune loaded spy$/, 0, 20000);
@@ -274,7 +299,7 @@ let firstURL = null;
 
 // ---- fragment -----------------------------------------------------------------
 if (firstURL) {
-  const target = firstURL.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${PORT}`).replace("?tracker#", "?tracker&trace#");
+  const target = firstURL.replace(/^https?:\/\/[^/]+/, `http://127.0.0.1:${PORT}`).replace("/tracker/#", "/tracker/?trace#");
   const from = consoleLines.length;
   await send("Page.navigate", { url: target });
   const loaded = await waitLine(/^crash: tune loaded shared$/, from, 40000);
@@ -288,16 +313,55 @@ if (firstURL) {
 } else fail("fragment", "no share URL to test");
 
 // ---- door ---------------------------------------------------------------------
-if (firstURL) {
-  const frag = /#t=[A-Za-z0-9_-]+/.exec(firstURL)[0];
+// David (2026-09-21): the game page carries no tracker code and honors no
+// ?tracker link; /tracker/ is the one entry. So /?tracker=spy is the game.
+{
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace${frag}` });
-  const loaded = await waitLine(/^crash: tune loaded shared$/, from, 40000);
-  const where = await evalJS("location.pathname + location.search + location.hash");
-  if (loaded && /\?tracker/.test(where) && where.endsWith(frag)) pass("door", `/tracker/ landed on ${where.slice(0, 40)}... with the fragment kept`);
-  else fail("door", `landed on ${where}, loaded ${!!loaded}`);
-} else fail("door", "no share URL to test");
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&tracker=spy` });
+  const game = await waitLine(/^crash: literal-check ok$/, from, 40000);
+  await sleep(1500);
+  const opened = consoleLines.slice(from).some((l) => /^crash: tracker open /.test(l));
+  const where = await evalJS("location.pathname + location.search");
+  if (game && !opened && !/\/tracker\//.test(where)) pass("door", `/?tracker=spy booted the game at ${where} and opened no tracker`);
+  else fail("door", `game ${game ? "booted" : "did not boot"}, tracker opened ${opened}, at ${where}`);
+}
 
+// ---- worker -------------------------------------------------------------------
+// sw.js answers every navigation with the cached root page (its fix is
+// proposed with P4a); the game page, landed at /tracker/ that way, fetches
+// the real tracker page and writes it in place. The game page just booted
+// registers the worker once its reveal is over (a key passes the gate) and
+// the menu is live ("crash: sw registered"); a fresh navigation is then
+// controlled; /tracker/ after that must still be the tracker.
+{
+  let from = consoleLines.length;
+  await press("Enter");   // the title gate
+  const registered = await waitLine(/^crash: sw registered$/, from, 95000);
+  let controlled = false;
+  if (registered) {
+    // active after its precache (the game's wasm and assets), then a fresh navigation is controlled
+    let active = false;
+    for (let i = 0; i < 240 && !active; i++) {
+      active = await evalJS("navigator.serviceWorker.getRegistration().then(function (r) { return !!(r && r.active); })");
+      if (!active) await sleep(250);
+    }
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+    for (let i = 0; i < 120 && !controlled; i++) {
+      controlled = await evalJS("!!(navigator.serviceWorker && navigator.serviceWorker.controller)");
+      if (!controlled) await sleep(250);
+    }
+  }
+  if (!controlled) fail("worker", registered ? "the worker registered but never controlled a fresh navigation within 30 s" : "no 'crash: sw registered' within 95 s of the gate");
+  else {
+    from = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace&tune=breaker` });
+    const opened = await waitLine(/^crash: tracker open breaker$/, from, 40000);
+    const loaded = await waitLine(/^crash: tune loaded breaker$/, from, 20000);
+    const served = await evalJS("document.documentElement.outerHTML.indexOf('crash-tracker') >= 0");
+    if (opened && loaded && served) pass("worker", "under a controlling service worker /tracker/?tune=breaker opened the tracker and loaded breaker");
+    else fail("worker", `opened ${!!opened}, loaded ${!!loaded}, tracker page served ${served}`);
+  }
+}
 // ---- bar (phone) --------------------------------------------------------------
 // The bar's five buttons share the width at the bottom 40 px: < PLAY STOP LOOP >.
 async function tap(vx, vy) {

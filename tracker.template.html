@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#06080f">
+  <title>Crash The Stack: tracker</title>
+  <!-- The tracker's own page (David, 2026-09-21: the tracker is its own wasm
+       behind /tracker/, so the game's wasm carries no editor). The stylesheet
+       is the game's (the build copies it here); the loader, the bridges and
+       crash-tracker.wasm are here; the tunes are fetched from the game's
+       assets/tunes/. The build (package.sgl, tracker-page) puts the loader's
+       mount and script tag at the marker and stamps __VERSION__. -->
+  <link rel="icon" href="../assets/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main>
+    <div id="board">
+      <canvas id="stage" width="640" height="400"></canvas>
+    </div>
+    <!--sigil:app-->
+  </main>
+
+  <script>
+    // The canvas backing resolution cap, as the game's page (P3c): pixel
+    // art gains nothing above dpr 2. ?dpr=N|native overrides.
+    var DPR_CAP = 2;
+    var realDpr = window.devicePixelRatio || 1;
+    (function () {
+      var want = new URLSearchParams(location.search).get("dpr");
+      var cap = want === "native" ? realDpr : (want && Number(want) > 0 ? Number(want) : DPR_CAP);
+      try {
+        Object.defineProperty(window, "devicePixelRatio", { configurable: true, get: function () { return Math.min(cap, realDpr); } });
+      } catch (e) { /* the property held */ }
+    })();
+
+    function withApp(fn) {
+      if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
+      document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
+    }
+
+    // The tune round trip. The share URL carries the tune text deflated
+    // (deflate-raw) as base64url in the fragment (#t=...), so no server sees
+    // it; the budget is TUNE_URL_MAX characters (pinned 16,384; a 3 minute
+    // tune is ~2,700). Above it the text is offered as a file.
+    var TUNE_URL_MAX = 16384;
+    function trackerFragment() {
+      var m = /(?:^|[#&])t=([A-Za-z0-9_-]+)/.exec(location.hash);
+      return m ? m[1] : null;
+    }
+    function b64urlToBytes(s) {
+      s = s.replace(/-/g, "+").replace(/_/g, "/");
+      while (s.length % 4) s += "=";
+      var bin = atob(s), out = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    function bytesToB64url(bytes) {
+      var s = "";
+      for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+      return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+    function pipeBytes(bytes, stream) {
+      return new Response(new Blob([bytes]).stream().pipeThrough(stream)).arrayBuffer().then(function (b) { return new Uint8Array(b); });
+    }
+    function trackerInflate(frag) {
+      if (typeof DecompressionStream === "undefined") return Promise.reject(new Error("no DecompressionStream"));
+      return pipeBytes(b64urlToBytes(frag), new DecompressionStream("deflate-raw")).then(function (bytes) { return new TextDecoder().decode(bytes); });
+    }
+    function trackerDeflate(text) {
+      if (typeof CompressionStream === "undefined") return Promise.reject(new Error("no CompressionStream"));
+      return pipeBytes(new TextEncoder().encode(text), new CompressionStream("deflate-raw")).then(bytesToB64url);
+    }
+    // the text to the tracker, 12 KB of base64 a chunk, then ("tune-done", name)
+    function sendTune(app, text, name) {
+      var bytes = new TextEncoder().encode(text), CHUNK = 12 * 1024, i = 0;
+      while (i < bytes.length) {
+        var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
+        for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
+        app.dispatch("tune-chunk", btoa(s));
+        i += CHUNK;
+      }
+      app.dispatch("tune-done", name);
+    }
+    function fetchTune(name) {
+      withApp(function (app) {
+        fetch("../assets/tunes/" + name + ".cts", { cache: "force-cache" }).then(function (r) {
+          if (!r.ok) throw new Error("tune " + r.status);
+          return r.text();
+        }).then(function (text) { sendTune(app, text, name); },
+                function (err) { console.log("crash: tune-fetch failed " + name + " " + err.message); sendTune(app, "", ""); });
+      });
+    }
+    function showTuneShare(name, text) {
+      var box = document.getElementById("share-overlay");
+      if (box) box.remove();
+      box = document.createElement("div"); box.id = "share-overlay";
+      box.style.cssText = "position:fixed;left:8px;top:8px;right:8px;max-height:80%;overflow:auto;background:#0d0a1a;color:#cce6ff;border:1px solid #4df2d9;padding:8px;font:12px monospace;z-index:20;white-space:pre-wrap;word-break:break-all;user-select:text;-webkit-user-select:text";
+      var close = document.createElement("button"); close.textContent = "close"; close.style.cssText = "float:right;margin-left:8px";
+      close.addEventListener("click", function () { box.remove(); });
+      box.appendChild(close);
+      var body = document.createElement("div"); box.appendChild(body);
+      document.body.appendChild(box);
+      var offerFile = function (why) {
+        body.textContent = why + "\n";
+        var a = document.createElement("a");
+        a.textContent = "download " + name + ".cts (" + text.length + " bytes)";
+        a.href = URL.createObjectURL(new Blob([text], { type: "text/plain" }));
+        a.download = name + ".cts";
+        body.appendChild(a);
+      };
+      trackerDeflate(text).then(function (data) {
+        var dir = location.pathname.replace(/[^/]*$/, "");   // /tracker/
+        var url = location.origin + dir + "#t=" + data;
+        console.log("crash: tune-url " + url.length + " chars");
+        if (url.length > TUNE_URL_MAX) { offerFile("the share URL would be " + url.length + " characters, over the " + TUNE_URL_MAX + " budget; the tune as a file instead:"); return; }
+        body.textContent = "share URL (" + url.length + " chars):\n" + url + "\n\n";
+        var copy = document.createElement("button"); copy.textContent = "copy URL";
+        copy.addEventListener("click", function () {
+          if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(function () { copy.textContent = "copied"; }, function () { copy.textContent = "select and copy"; });
+          else copy.textContent = "select and copy";
+        });
+        body.appendChild(copy);
+      }, function (err) { offerFile("no CompressionStream here (" + err.message + "); the tune as a file instead:"); });
+    }
+
+    // The loader drops every key event with Ctrl, Alt or Meta held; the
+    // tracker's chords (Ctrl-Z undo, Ctrl-E share, Alt-1..8 mute, ...) are
+    // forwarded here, with the browser's own bindings (Ctrl-S, Ctrl-O,
+    // Ctrl-N, Alt-digit tabs) prevented. This page is the tracker's alone,
+    // so there is no gate.
+    ["keydown", "keyup"].forEach(function (type) {
+      document.addEventListener(type, function (e) {
+        if (!(e.ctrlKey || e.altKey || e.metaKey)) return;
+        withApp(function (app) { app.dispatch(type, e.key); });
+        e.preventDefault();
+      }, true);
+    });
+
+    // The tracker's lines the page acts on (the rest go to the console as they are).
+    (function () {
+      var log = console.log;
+      console.log = function () {
+        var first = arguments[0];
+        if (typeof first === "string" && first.indexOf("crash: tune-share ") === 0) {
+          var rest = first.slice("crash: tune-share ".length), sp = rest.indexOf(" ");
+          var name = rest.slice(0, sp), b64 = rest.slice(sp + 1);
+          showTuneShare(name, new TextDecoder().decode(b64urlToBytes(b64)));
+          return log.call(console, "crash: tune-share " + name + " " + b64.length + " chars");   // the arm reads the line, not the payload
+        }
+        if (typeof first === "string" && first.indexOf("crash: tune-fetch ") === 0) {
+          fetchTune(first.slice("crash: tune-fetch ".length).trim());
+        }
+        return log.apply(console, arguments);
+      };
+    })();
+
+    // Every user gesture reaches the tracker as ("gesture", name), so it
+    // can resume its audio context whenever the browser suspended it.
+    ["pointerup", "touchend", "click", "keydown"].forEach(function (name) {
+      document.addEventListener(name, function () {
+        withApp(function (app) { app.dispatch("gesture", name); });
+      }, true);
+    });
+
+    withApp(function (app) {
+      var params = new URLSearchParams(location.search);
+      var coarse = matchMedia("(pointer: coarse)").matches;
+      if (params.has("trace")) app.dispatch("trace", "on");
+      if (coarse) app.dispatch("touch", "on");
+      app.dispatch("dpr", String(window.devicePixelRatio));
+      // ?tune=NAME opens a bundled tune; #t=... a shared one (the fragment wins)
+      var frag = trackerFragment();
+      if (frag) trackerInflate(frag).then(function (text) { sendTune(app, text, "shared"); },
+                                          function (err) { console.log("crash: tune-fragment failed " + err.message); sendTune(app, "", ""); });
+      else if (params.get("tune")) app.dispatch("tune", params.get("tune"));
+      app.dispatch("version", "__VERSION__");
+    });
+  </script>
+</body>
+</html>
