@@ -1,7 +1,9 @@
 # Living field candidates
 
 2026-09-21, `feat/codex-field-rules` in `task-codex-field-rules`.
-Three GPU rules for D55's per-deal pool: **cyclic**, **flow**, and **signal**.
+Five GPU rules for D55's per-deal pool: **cyclic**, **flow**, **signal**,
+**echo**, and **synapse**. David requested the latter pair after approving
+the first three.
 The revisions respond to David's feedback on the hosted preview: darker
 surfaces with small accents, no cells that look stuck, and Matrix/Hackers-inspired
 falling or rectilinear signals.
@@ -47,9 +49,36 @@ bands of different dither density looked like a pixel-spacing bug. The
 seeded grain removes those bands without adding flicker. The floor does
 not alter head transport or add another rendering pass.
 
-These offer three distinct motion patterns alongside Gray–Scott. Another
+**Echo** turns David's water/radio-wave idea into four staggered radial
+wave packets. Each travels at 0.19 cells per step and fades before its
+seeded center changes. Signed waves interfere; their absolute amplitude
+supplies the display above stationary dark grain. The shown byte eases
+32% toward its target per step and caps at 200, keeping strong overlaps
+small and avoiding abrupt ring changes. Centers do not wrap at the screen
+edges. This is an analytic interference field, not a fluid simulation.
+
+**Synapse** builds a seeded graph of jittered junctions, joined by sparse
+horizontal, vertical, and diagonal connections. It caches the wiring on
+the first step. Pulses then travel through eight-neighbor wire cells on
+every third field step. Junctions pause for two such beats before forwarding
+the pulse; refractory paths prevent immediate backtracking. A seeded
+junction receives a scheduled activation every 21 steps, supplemented by
+rare spontaneous activity. Faint wiring and stationary grain fill quiet
+areas; the activity trails fade as new branches light. The underlying graph
+stays fixed, so topology changes do not introduce another distraction.
+Both additions keep their normal cadence under ICE.
+
+The first synapse run passed both held checkpoints but briefly narrowed to
+three dark tones during live play. Its 42-step scheduled event could be
+ignored while the chosen node was refractory, leaving nearly invisible
+activity between events. The final local heartbeat runs every 21 steps
+(1.05 seconds) and restarts that one node even when resting. Other pulses
+still respect refractory paths. This keeps a visible source without raising
+the display cap or the network-wide speed.
+
+These offer five distinct motion patterns alongside Gray–Scott. Another
 chemical reaction would overlap REACTION's look; Brian's Brain would make a
-sparser spark field. All three candidates use the existing eight palette
+sparser spark field. All five candidates use the existing eight palette
 colors and 2×2 ordered dither, with no visible gradients or alpha blends.
 
 ## Packing, uniforms, and rendering
@@ -59,8 +88,10 @@ colors and 2×2 ordered dither, with no visible gradients or alpha blends.
 | cyclic | R = shown byte; G = phase 0…15; B = waiting age 0…23; A = 255 | `u_states=16`, `u_rate=550`, `u_max_age=24`; step key and agitation-driven `u_rain` |
 | flow | R = squared scalar for display; G unused; B/A = scalar high/low byte | `u_decay=0.997`; step count, seed phase, displacement rate, rain cell and rain gate |
 | signal | R = shown byte; G = downward head; B = rightward head; A = 255 | step key/count, seed hash, agitation-driven speed |
+| echo | R = eased interference display; G/B unused; A = 255 after first step | step count and seed hash |
+| synapse | R = shown byte; G = phase 0…17; B = empty/wire/node 0…2; A = initialized flag | step key/count and seed hash |
 
-The graphics library supplies `u_resolution`. All three need one
+The graphics library supplies `u_resolution`. All five need one
 880-fragment step pass. Presentation uses the unchanged 80×44 dither target
 and nearest upscale. Their ramp orders the existing roles as BG, BAR-A,
 BAR-B, STATIC-B, WIRE-DARK, BAR-C, MOSS, ARCHIVE. The last two are accents;
@@ -70,8 +101,7 @@ so the existing ring presentation and severed collapse apply directly.
 
 The original LIFE, FEED, REACTION, COLLAPSE, and VIEW source strings are
 unchanged. CPU LIFE/REACTION equations and their rule table remain intact.
-The additions are GPU-only; `cyclic-cpu`, `flow-cpu`, and `signal-cpu` do
-not silently run a different rule.
+The additions are GPU-only; the `-cpu` names for these additions do not silently run a different rule.
 
 ## Measurements that changed the implementation
 
@@ -106,14 +136,16 @@ colors rather than introducing transparency or additional colors.
 
 ## Validation
 
-Native compilation and `test-bg-gpu` plus `test-palette` passed: 103 tests.
+Native compilation and `test-bg-gpu` plus `test-palette` passed: 105 tests
+after adding echo and synapse.
 The legacy background run passed all 53 checks in 43m 30s. That run
 included the two original GPU seed checks; those now live in the separate
-`test-bg-gpu` file with signal's third check. No legacy test was removed.
+`test-bg-gpu` file with signal's third check. The same test loop now covers
+echo and synapse too. No legacy test was removed.
 Each final rule replays its held step-200 map exactly and passes the
 step-6000 palette/dither checkpoint. Cyclic also matches the integer oracle
 in all 3520 half cells. At step 200 bright accents occupy 0% of cyclic,
-0.09% of flow, and 3.41% of signal.
+0.09% of flow, 3.41% of signal, 0% of echo, and 0.11% of synapse.
 
 Five-minute live runs at the normal stride sample 20 frames, including ICE
 and burst agitation:
@@ -123,12 +155,16 @@ and burst agitation:
 | flow (`124b77c`) | 74.3% | 801 | pass |
 | cyclic (`216b75a`) | 60.9% | 1469 | pass |
 | signal (`9855446`) | 50.2% | 599 | pass |
+| echo (`c68e427`) | 41.8% | 2005 | pass |
+| synapse (`be2c3d3`) | 55.7% | 38 | pass |
 
 The browser regression run at `124b77c` passed all eight existing arms.
 LIFE and REACTION each matched all 3520 half cells of their CPU reference
 at step 12; REACTION also matched all 880 reconstructed dither levels.
-The subsequent changes touch only the new rules' display behavior; the
-original five shader strings still compare byte-identically to the base.
+The subsequent changes add or refine the GPU-only rules; the original five
+shader strings still compare byte-identically to the base.
+Adding echo and synapse also left the three approved shader strings
+byte-identical to `bef6669`.
 
 The browser harness checks repeated held maps at step 200, a step-6000
 checkpoint (`bgstride=1` shortens that wait), then five real minutes at the
@@ -150,11 +186,13 @@ node scripts/verify-field-rules.mjs build/hosted --rule signal --seconds 300 --p
 Final 640×400 nearest-neighbor captures: cyclic from application commit
 `216b75a76ef1`, unchanged flow from `124b77c7f7be`, and signal from
 `985544674f81`: [cyclic](cyclic.png), [flow](flow.png), [signal](signal.png).
+The extensions: [echo](echo.png) from `c68e4273e1d7` and
+[synapse](synapse.png) from `be2c3d341a50`.
 Setup: landscape phone emulation at DPR 3, board seed 7, background seed 1,
 held at step 200, from the committed hosted snapshot.
 
 ```sh
-for field_rule in cyclic flow signal; do
+for field_rule in cyclic flow signal echo synapse; do
   node scripts/shot-web.mjs build/hosted "docs/codex/field-rules/$field_rule.png" \
     --query "stack&fresh&seed=7&bg=$field_rule&bghold=200" \
     --do 'line:^crash: bg held 200$' --port 18077 --cdp 19477
@@ -176,16 +214,19 @@ Measurements of each final rule implementation:
 | flow | `124b77c` | 80.7 | 267 | 53.7 | 6.9 |
 | signal | `9855446` | 64.0 | 200 | 37.6 | 8.1 |
 | reaction | `124b77c` | 115.3 | 217 | 76.9 | 0.9 |
+| echo | `c68e427` | 53.7 | 200 | 28.5 | 9.4 |
+| synapse | `be2c3d3` | 36.7 | 83 | 15.2 | 9.1 |
 
 These are observations, not a phone speedup claim. Shared host load and
 software rendering dominate the timings, and the runs happened at different
-times. All three additions use one field step pass. Cyclic, flow, and
-REACTION are unchanged in the final application build `9855446`.
+times. All five additions use one field step pass. Cyclic, flow,
+signal, and REACTION are unchanged in the extended application build
+`be2c3d3`. Echo is unchanged since its measured build `c68e427`.
 
 ## Integration and review
 
 REACTION stays the default here. P4c owns the FIELD/LIFE removal and shell
-policy. `GPU-MODES` exposes the three new names for D55's pool. Both shells
+policy. `GPU-MODES` exposes the five new names for D55's pool. Both shells
 in this base branch still pass background seed **1**, independent of the
 board seed. The new rules accept any seed through `bg-new`/`bg-choose`, and
 the CPU tests cover same/different seeds. P4c should supply the board seed
@@ -196,6 +237,8 @@ worker, or publishing configuration changed.
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=flow&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=signal&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=reaction&ms`
+- `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=echo&ms`
+- `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=synapse&ms`
 
 Hosting is bound specifically to `10.11.0.2:8774`. `check-bind 8774` also
 sees an unrelated pre-existing `127.0.0.1:8774` listener from another
@@ -203,5 +246,5 @@ worktree and therefore returns failure. That process was left alone; our
 host's PID, cwd, exact WireGuard listener, and HTTP version are checked
 independently. No wildcard or LAN listener was created. The host is
 detached so it remains available after the session. The served application
-is `985544674f81`; the following documentation commit adds this report and
+is `be2c3d341a50`; the following documentation commit adds the report and
 captures without changing the application source.
