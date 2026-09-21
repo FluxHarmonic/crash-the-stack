@@ -3,11 +3,16 @@
 # home of the free web build: https://crashthestack.pages.dev/.
 #
 #   scripts/publish-web "<row>: <one line>"     deploy the current build/web
+#   scripts/publish-web --dry-run                stage and list only; nothing leaves the box
 #
 # Only the files a browser needs are sent: the page, the stylesheet, the
 # wasm, the bridge loader and its manifest, and assets/ (the test tile,
 # the PWA manifest and icons, the asset licence and manifest). bin/ and
-# native/ are build intermediates and stay home. The deploy is tagged
+# native/ are build intermediates and stay home. The tracker (P3b) is its
+# own page and wasm under tracker/: its index.html, crash-tracker.wasm, the
+# bridges, its stylesheet copy and the loader scripts under tracker/assets/,
+# nothing else, and a deploy refuses when any of them is missing (a FREE
+# PLAY row pointing at a 404 is the failure this guards). The deploy is tagged
 # with the current commit so the site says which tree it is.
 #
 # wrangler must be on PATH and logged in (it is, on this box). This script
@@ -15,11 +20,18 @@
 set -eu
 cd "$(dirname "$0")/.." || exit 1
 
+DRY=0; if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
 MESSAGE="${1:-}"
-[ -n "$MESSAGE" ] || { echo "publish-web: give the deploy a message: publish-web \"<row>: <one line>\""; exit 1; }
+[ -n "$MESSAGE" ] || [ "$DRY" = 1 ] || { echo "publish-web: give the deploy a message: publish-web \"<row>: <one line>\""; exit 1; }
 [ -f build/web/index.html ] || { echo "publish-web: build/web/index.html missing; build --config web first"; exit 1; }
 [ -f build/web/crash-the-stack.wasm ] || { echo "publish-web: build/web/crash-the-stack.wasm missing"; exit 1; }
-command -v wrangler > /dev/null || { echo "publish-web: wrangler not on PATH"; exit 1; }
+[ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "publish-web: wrangler not on PATH"; exit 1; }
+
+# Require the external soundtrack bundle so later publishes preserve the album.
+SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-build/web/soundtrack}"
+for f in index.html style.css player.js album.json; do
+  [ -f "$SOUNDTRACK/$f" ] || { echo "publish-web: soundtrack missing; set CRASH_SOUNDTRACK_DIR to the generated soundtrack/ directory"; exit 1; }
+done
 
 STAGE="$(mktemp -d /tmp/crash-publish-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
@@ -32,11 +44,21 @@ cp -r build/web/assets "$STAGE/assets"
 # shipped); refuse rather than publish it if a build ever leaves it in
 if [ -n "$(find "$STAGE/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "publish-web: build/web/assets/refs has files; the build task should have dropped it"; exit 1; fi
 rm -rf "$STAGE/assets/refs"
+# the tracker, behind /tracker/: exactly the files its page loads
+mkdir -p "$STAGE/tracker/assets"
+for f in index.html crash-tracker.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json styles.css \
+         assets/sigil-web-app.js assets/sigil-wasm-gles3.js assets/sigil-wasm-audio.js assets/sigil-browser.js; do
+  [ -f "build/web/tracker/$f" ] || { echo "publish-web: build/web/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
+  cp "build/web/tracker/$f" "$STAGE/tracker/$f"
+done
+grep -q "crash-tracker" "$STAGE/tracker/index.html" || { echo "publish-web: build/web/tracker/index.html is not the tracker page"; exit 1; }
+cp -r "$SOUNDTRACK" "$STAGE/soundtrack"
 # The published set, for the record; a deploy that grew or shrank is visible here.
 echo "publish-web: publishing $(find "$STAGE" -type f | wc -l) files from build/web ($(du -sh "$STAGE" | cut -f1)):"
 (cd "$STAGE" && find . -type f | sort | sed 's|^\./|  |')
-echo "publish-web: wasm sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16), page $(sha256sum build/web/index.html | cut -c1-16)"
+echo "publish-web: wasm sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16), page $(sha256sum build/web/index.html | cut -c1-16), tracker wasm $(sha256sum build/web/tracker/crash-tracker.wasm | cut -c1-16)"
 
+if [ "$DRY" = 1 ]; then echo "publish-web: dry run, nothing deployed"; exit 0; fi
 SHA="$(git rev-parse HEAD)"
 wrangler pages deploy "$STAGE" \
   --project-name crashthestack \
