@@ -91,3 +91,7 @@ at -90.3 dBFS for both tracks; WAV and decoded OGG pass the -1 dBTP delivery lim
 The full files retain natural tails. Technical checks do not establish listening
 approval; David's feedback on this pair remains open. Eight of fifteen complete
 album arrangements now exist, with seven still planned.
+
+Telegram acknowledged the complete Blind Spot album I OGG as message 1120 and
+Sector Drift album I as message 1121. Both full files were delivered once;
+listening feedback on this pair remains open.
