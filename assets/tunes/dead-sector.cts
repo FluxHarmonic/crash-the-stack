@@ -964,9 +964,11 @@
       (row 247 (6 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B05"))))
   (order 0 1 2 3 4 5 6 7 8)
+  (marks calm: 0 fill: 4 tense: 5)
   (history
     ("codex" "2026-09-21" "Dead Sector; original C# Phrygian-coloured suspense for Minesweeper; 108 BPM.")
     ("codex" "2026-09-21" "Calm order 0-3 (32 bars); transition 4 (4 bars); focused tense 5-8 (32 bars); B05 loops tense. Four composed eight-bar variants per region.")
     ("codex" "2026-09-21" "Straight sixteenth onsets; melodic notes on eighths. No thirty-second roll or noise riser. Transition percussion uses the main kit and leaves a final-beat breath.")
     ("codex" "2026-09-21" "C# pedal, dry relay snaps, short pitched clock contacts, an answering semitone probe motif. Focused section adds low pulses, faint upper-neighbour harmonic friction and replies.")
-    ("codex" "2026-09-21" "Game-owned original; existing soundtrack sources remain unchanged. Full audition includes the transition; render.py supplies independent calm/tense loops.")))
+    ("codex" "2026-09-21" "Game-owned original; existing soundtrack sources remain unchanged. Full audition includes the transition; render.py supplies independent calm/tense loops.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 4 tense: 5")))

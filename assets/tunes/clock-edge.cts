@@ -1467,10 +1467,12 @@
       (row 253 (4 "===" 0 0 "000") (6 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B06"))))
   (order 0 1 2 3 4 5 6 7 8 9 10)
+  (marks calm: 0 fill: 5 tense: 6)
   (history
     ("codex" "2026-09-21" "Clock Edge; original D# minor rhythmic pulse for the falling-block mode; 128 BPM.")
     ("codex" "2026-09-21" "Calm orders 0-4; transition 5; focused tense 6-10; B06 repeats tense. Eight-bar phrase variants and a four-bar transition.")
     ("codex" "2026-09-21" "Straight sixteenth onsets and eighth-grid melodies; unchanged tempo throughout. Fills use the main kit, with a final-beat breath and no noise swell.")
     ("codex" "2026-09-21" "Four-on-the-floor anchor, short pitched clap, narrow Reese pulse and interlocking minor signal hook. Two-bar reduction and final turn mark clear phrasing; focused section adds sixteenth detail and measured saturation.")
     ("codex" "2026-09-21" "Game-owned first audition. Full arrangement includes the transition; standalone calm and tense loops derive through render.py. Album arrangements remain a separate planned pass.")
-    ("codex" "2026-09-21" "Ambience audition: longer chord, lead and bell envelopes; increased selective reverb sends; slightly larger, darker shared room. Kick, bass, note levels and all pattern events preserved. Original Clock Edge retained.")))
+    ("codex" "2026-09-21" "Ambience audition: longer chord, lead and bell envelopes; increased selective reverb sends; slightly larger, darker shared room. Kick, bass, note levels and all pattern events preserved. Original Clock Edge retained.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 5 tense: 6")))

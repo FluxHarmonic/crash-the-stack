@@ -1775,6 +1775,7 @@
       (row 254 (2 "F#3" 2 30 "000") (3 "C-8" 3 17 "000") (6 "A-2" 16 24 "000") (8 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B06") (4 "===" 0 0 "000") (6 "===" 0 0 "000") (7 "===" 0 0 "000"))))
   (order 0 1 2 3 4 5 6 7 8 9 10)
+  (marks calm: 0 fill: 5 tense: 6)
   (history
     ("codex" "2026-09-21" "Basement Circuit; original house; key A minor.")
     ("codex" "2026-09-21" "calm: order 0-4; fill: 5; tense: 6-10; B06 loops tense.")
@@ -1788,4 +1789,5 @@
     ("codex" "2026-09-21" "Percussion identity pass from After Dark II: retain kick, bass, chords, pluck, acid lines, existing note times, fill snare, riser and bus. Boxier short clap, sandy closed hat and breathier open hat. Add sparse root-tuned 25 ms beeps and short low toms on channel 8, clear of the riser; leave the opening pattern and transition unchanged on that channel. More pip replies in tense. Original retained.")
     ("codex" "2026-09-21" "Gently integrate the retained snare with the accepted signal kit: reduce noise from 0.66 to 0.52, noise decay from 65 to 48 ms and send from 0.08 to 0.055. Apply consistently to ghosts, phrase endings and transition roll. Retain its pitch, body, every note and accent, all other patches and sections. Previous signal kit retained.")
     ("codex" "2026-09-21" "Reduce transition noise swell amplitude from 0.4 to 0.25 (-4.08 dB before the bus), consistently across the calm exit, fill and tense turnaround. Preserve the accepted Signal Kit II drums, every pattern cell, all other patches and settings. Prior versions retained.")
-    ("codex" "2026-09-21" "Ease the tense buzzy acid line back by about 0.8-1 dB in its note levels: 27/30/33/45 become 24/27/30/41, including slide notes; defaults 29 to 26. Preserve acid patch settings and filter progression, slides, pitches, clocks and gates. The velocity-sensitive acid filter follows the slightly reduced accents. Retain approved drums and III quieter swells. Prior versions retained.")))
+    ("codex" "2026-09-21" "Ease the tense buzzy acid line back by about 0.8-1 dB in its note levels: 27/30/33/45 become 24/27/30/41, including slide notes; defaults 29 to 26. Preserve acid patch settings and filter progression, slides, pitches, clocks and gates. The velocity-sensitive acid filter follows the slightly reduced accents. Retain approved drums and III quieter swells. Prior versions retained.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 5 tense: 6")))

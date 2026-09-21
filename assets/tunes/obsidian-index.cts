@@ -728,6 +728,7 @@
       (row 254 (6 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B05"))))
   (order 0 1 2 3 4 5 6 7 8)
+  (marks calm: 0 fill: 4 tense: 5)
   (history
     ("codex" "2026-09-21" "Obsidian Index; original E minor glass-and-frame-drum theme for Pyramid Solitaire; 84 BPM.")
     ("codex" "2026-09-21" "Calm orders 0-3; transition 4; focused tense 5-8; B05 repeats tense. Eight-bar phrase variants and a four-bar transition.")
@@ -738,4 +739,5 @@
     ("codex" "2026-09-21" "New E-B rising-leap theme and four complete phrase variants. Long E pedal under Em7 and C/G/B; 3+3+2, 3+2+1+2, 3+2+2+1 and 4+2+1+1 harmonic pacing. Suspended B/E/A voicing, inversions and tonic returns replace the transposed Quiet Array progression.")
     ("codex" "2026-09-21" "Two-bar pitched frame-drum phrase: first-bar 12/24, answer-bar 16/28. Focused bass subdivision and quiet lower counterline; main pad, glass, bass and kit patches preserved. Same-kit transition, no noise swell, eighth-grid melody and sixteenth-grid percussion.")
     ("codex" "2026-09-21" "David accepted Pedal II as distinctive. Add quiet beating/chorused upper harmonics to its unchanged triangle bass, keeping center and attacks stable. Spread existing chords slightly left and add faint upper additive-FM voicings on the right with slow chorus. Preserve the full arrangement and every original note onset, gate and dynamic. Move 24 short contact notes to gaps in the shaker channel to free channel 8 for 32 sustained side-pad notes. Retain the accepted Pedal II reference; no engine or master-bus change.")
-    ("codex" "2026-09-21" "David could not hear enough change in Waves III and requested a louder pad and more apparent bass motion. Raise all 32 side-pad levels 11 to 18 and carrier amplitudes by about 127 percent (combined approx +11.4 dB). Raise the moving upper bass layer from 0.45 to 0.95, strengthen its beating pair, double detuning to 2.012/3.018 ratios and increase slow chorus rate/depth/mix to 0.24/4/0.4. Original triangle core, all notes and gates, drums, melody, harmony, bus and form remain unchanged. Preserve II and III.")))
+    ("codex" "2026-09-21" "David could not hear enough change in Waves III and requested a louder pad and more apparent bass motion. Raise all 32 side-pad levels 11 to 18 and carrier amplitudes by about 127 percent (combined approx +11.4 dB). Raise the moving upper bass layer from 0.45 to 0.95, strengthen its beating pair, double detuning to 2.012/3.018 ratios and increase slow chorus rate/depth/mix to 0.24/4/0.4. Original triangle core, all notes and gates, drums, melody, harmony, bus and form remain unchanged. Preserve II and III.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 4 tense: 5")))

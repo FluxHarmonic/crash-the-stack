@@ -1818,6 +1818,7 @@
       (row 254 (2 "F#3" 2 30 "000") (3 "C-8" 3 17 "000") (8 "B-2" 24 27 "037"))
       (row 255 (1 "..." 0 0 "B06") (6 "===" 0 0 "000") (8 "===" 0 0 "000"))))
   (order 0 1 2 3 4 5 6 7 8 9 10)
+  (marks calm: 0 fill: 5 tense: 6)
   (history
     ("codex" "2026-09-21" "Relay Ghost; original electro; key E minor.")
     ("codex" "2026-09-21" "calm: order 0-4; fill: 5; tense: 6-10; B06 loops tense.")
@@ -1827,4 +1828,5 @@
     ("codex" "2026-09-21" "Timing revision 2: straight sixteenth drums/bass, eighth-note pluck and bell phrases, anchored lead; final thirty-second snare rolls retained. Pitches, voices, tempo and order unchanged.")
     ("codex" "2026-09-21" "After Dark experiment: E/E/A/B minor harmony, lower bass and chord registers, sparse descending bell answers, restrained plucks and minor arps. Drum cells, bass rhythm and fill retained.")
     ("codex" "2026-09-21" "Original timing-v2 source remains unchanged at tunes/electro.cts; this is a separate audition, not a replacement.")
-    ("codex" "2026-09-21" "After Dark II: complete melodic calls and answers with longer gates and release tails. Dark harmony, drums, bass, fill cells and loop structure preserved. Separate listening alternative; earlier sources unchanged.")))
+    ("codex" "2026-09-21" "After Dark II: complete melodic calls and answers with longer gates and release tails. Dark harmony, drums, bass, fill cells and loop structure preserved. Separate listening alternative; earlier sources unchanged.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 5 tense: 6")))

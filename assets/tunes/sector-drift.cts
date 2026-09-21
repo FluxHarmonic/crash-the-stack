@@ -979,9 +979,11 @@
       (row 254 (4 "===" 0 0 "000") (7 "===" 0 0 "000") (8 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B05"))))
   (order 0 1 2 3 4 5 6 7 8)
+  (marks calm: 0 fill: 4 tense: 5)
   (history
     ("codex" "2026-09-21" "Sector Drift; original reflective broken beat for Defrag; G minor.")
     ("codex" "2026-09-21" "calm: order 0-3; fill: 4; tense: 5-8; B05 loops tense.")
     ("codex" "2026-09-21" "Eight-bar phrase variants; four-bar restrained transition. All note onsets use straight sixteenths; melodic hooks use eighths. No thirty-second roll.")
     ("codex" "2026-09-21" "A complete melodic identity over dark low-end rhythm; the focused variation increases motion without a major-chord lift.")
-    ("codex" "2026-09-21" "Soundtrack drum-kit pilot: Softer kick, shorter low-noise snare body pitched up one octave for a woody rim character, and darker dusty hats. All drum placements, accent levels, melodic/bass instruments and cells, order, sections and bus retained. Existing approved version preserved; compare the full calm/transition/tense arrangement.")))
+    ("codex" "2026-09-21" "Soundtrack drum-kit pilot: Softer kick, shorter low-noise snare body pitched up one octave for a woody rim character, and darker dusty hats. All drum placements, accent levels, melodic/bass instruments and cells, order, sections and bus retained. Existing approved version preserved; compare the full calm/transition/tense arrangement.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 4 tense: 5")))

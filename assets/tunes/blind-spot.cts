@@ -638,9 +638,11 @@
       (row 244 (3 "C-7" 3 11 "000"))
       (row 255 (1 "..." 0 0 "B05"))))
   (order 0 1 2 3 4 5 6 7 8)
+  (marks calm: 0 fill: 4 tense: 5)
   (history
     ("codex" "2026-09-21" "Blind Spot; original minimal stealth overworld track; D minor, 96 BPM.")
     ("codex" "2026-09-21" "calm: order 0-3, 32 bars; quiet transition/fill: 4, four bars; watchful tense: 5-8, 32 bars; B05 loops tense.")
     ("codex" "2026-09-21" "Speed 3; eight rows per quarter. All note onsets lie on a straight sixteenth grid; melodic signals on eighths. No thirty-second roll.")
     ("codex" "2026-09-21" "Sparse low pulse, soft kick/rim, muted signals, occasional minor dyad. Alert variation adds quiet pulse/percussion instead of a bright lead or big drop.")
-    ("codex" "2026-09-21" "A separate alternative to spy.cts; the original is unchanged. Full audition includes the quiet transition.")))
+    ("codex" "2026-09-21" "A separate alternative to spy.cts; the original is unchanged. Full audition includes the quiet transition.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 4 tense: 5")))
