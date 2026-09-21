@@ -23,6 +23,8 @@
 //              URL (deflate of identical text), so the round trip is exact
 //   door       /tracker/#t=... lands on ?tracker with the fragment kept and
 //              loads the same tune
+//   bar        (phone only) a synthetic touch on the bar's PLAY button starts playback
+//              ("crash: tracker play"), one on STOP stops it: the screen closes on touch
 //   console    no error-level console entries or exceptions across the run
 //
 // Any FAIL exits 1; a wait that runs out prints TIMED-OUT and exits 2.
@@ -47,7 +49,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
 const results = [];
-const planned = ["open", "render", "play", "edit", "share", "fragment", "door", "console"];
+const planned = ["open", "render", "play", "edit", "share", "fragment", "door", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -295,6 +297,31 @@ if (firstURL) {
   if (loaded && /\?tracker/.test(where) && where.endsWith(frag)) pass("door", `/tracker/ landed on ${where.slice(0, 40)}... with the fragment kept`);
   else fail("door", `landed on ${where}, loaded ${!!loaded}`);
 } else fail("door", "no share URL to test");
+
+// ---- bar (phone) --------------------------------------------------------------
+// The bar's five buttons share the width at the bottom 40 px: < PLAY STOP LOOP >.
+async function tap(vx, vy) {
+  return evalJS(`(() => {
+    const c = document.getElementById("stage"); const r = c.getBoundingClientRect();
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const bx = ox + ${vx} * scale, by = oy + ${vy} * scale;
+    const cx = r.left + bx * r.width / c.width, cy = r.top + by * r.height / c.height;
+    c.dispatchEvent(new PointerEvent("pointerdown", { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true }));
+    return { cx, cy };
+  })()`);
+}
+if (PHONE) {
+  const from = consoleLines.length;
+  await tap(VW / 5 * 1.5, VH - 20);   // PLAY
+  const started = await waitLine(/^crash: tracker play (\d+) (\d+)$/, from, 5000);
+  await sleep(800);
+  const from2 = consoleLines.length;
+  await tap(VW / 5 * 2.5, VH - 20);   // STOP
+  const stopped = await waitLine(/^crash: tracker stop (\d+) (\d+)$/, from2, 5000);
+  if (started && stopped) pass("bar", `PLAY tap -> ${started.m[0]}; STOP tap -> ${stopped.m[0]}`);
+  else fail("bar", `play ${started ? "ok" : "missing"}, stop ${stopped ? "ok" : "missing"}`);
+} else pass("bar", "desktop: no bar (the keys are the controls)");
 
 // ---- console ------------------------------------------------------------------
 if (consoleErrors.length === 0) pass("console", "no errors");
