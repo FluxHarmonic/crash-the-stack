@@ -100,3 +100,7 @@ at -90.3 dBFS, and WAV/decoded OGG true peaks pass the -1 dBTP delivery ceiling.
 The full natural tails remain. These checks establish technical consistency,
 not musical acceptance. Twelve of fifteen album arrangements now exist, with
 Breach Vector, Clock Edge and Glass Current still planned.
+
+Telegram acknowledged the complete Dead Sector album I OGG as message 1124 and
+Obsidian Index album I as message 1125. David asked to begin Breach Vector and
+Clock Edge immediately after delivery; feedback on this pair remains open.
