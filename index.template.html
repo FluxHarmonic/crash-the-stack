@@ -259,6 +259,34 @@
         "\n" + line("page audio-callback-gap", audioOutput.gaps);
     }
 
+    // The live soundtrack (M1, D59): the game asks for a tune's text with
+    // one "crash: tune-fetch NAME" line; the page fetches assets/tunes/NAME.cts
+    // and hands it over in 12 KB base64 chunks then ("tune-done", NAME). A
+    // failure says "crash: tune-unavailable NAME" (a prefix this hook does not
+    // act on) after two retries for network-level failures, none for a 404.
+    function fetchTune(name, attempt) {
+      attempt = attempt || 1;
+      if (!/^[a-z0-9-]+$/.test(name)) { console.log("crash: tune-unavailable " + name + " (not a bundled name)"); return; }
+      withApp(function (app) {
+        fetch("assets/tunes/" + name + ".cts", { cache: "force-cache" }).then(function (r) {
+          if (!r.ok) throw new Error("tune " + r.status);
+          return r.text();
+        }).then(function (text) {
+          var bytes = new TextEncoder().encode(text), CHUNK = 12 * 1024, i = 0;
+          while (i < bytes.length) {
+            var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
+            for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
+            app.dispatch("tune-chunk", btoa(s));
+            i += CHUNK;
+          }
+          app.dispatch("tune-done", name);
+        }, function (err) {
+          if (attempt < 3 && !/tune 404/.test(err.message)) { setTimeout(function () { fetchTune(name, attempt + 1); }, 800); return; }
+          console.log("crash: tune-unavailable " + name + " " + err.message + " (try " + attempt + ")");
+        });
+      });
+    }
+
     // The stats summary (P3c): with ?ms a tap on the readout makes the
     // game print one "crash: clipboard TEXT" line (newlines as ~). This
     // hook copies it to the clipboard, or shows it in a selectable overlay
@@ -271,6 +299,7 @@
         if (typeof first === "string" && first.indexOf("crash: stats reset ") === 0) resetPageStats();
         // FREE PLAY > TRACKER: the tracker is its own page (P3b, David 2026-09-21)
         if (first === "crash: open tracker") location.assign("tracker/");
+        if (typeof first === "string" && first.indexOf("crash: tune-fetch ") === 0) fetchTune(first.slice("crash: tune-fetch ".length).trim());   // the live soundtrack (M1)
         if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
           var text = first.slice("crash: clipboard ".length).split("~").join("\n") + "\n" + pageStats();
           log.call(console, "crash: page-stats " + pageStats().split("\n").join("~"));
@@ -309,24 +338,6 @@
       if (params.has("fresh")) app.dispatch("fresh", "on");
       if (params.has("cards")) app.dispatch("cards", "on");
       if (params.has("stack")) app.dispatch("stack", "on");
-      // M1 spike (D59): ?live=NAME plays that tune live on the stack screen
-      // (motif's player in the game wasm) instead of the OGG model; the text
-      // lands as base64 chunks then ("tune-done", name). The measurement row;
-      // the model replaces this.
-      if (params.has("live")) {
-        app.dispatch("live", "on");
-        var liveName = params.get("live") || "shadow-protocol";
-        fetch("assets/tunes/" + liveName + ".cts", { cache: "force-cache" }).then(function (r) { return r.text(); }).then(function (text) {
-          var bytes = new TextEncoder().encode(text), CHUNK = 12 * 1024, i = 0;
-          while (i < bytes.length) {
-            var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
-            for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
-            app.dispatch("tune-chunk", btoa(s));
-            i += CHUNK;
-          }
-          app.dispatch("tune-done", liveName);
-        }, function (err) { console.log("crash: live tune failed " + err.message); });
-      }
       if (params.has("seed")) app.dispatch("seed", params.get("seed"));
       if (params.has("bg")) app.dispatch("bg", params.get("bg"));
       if (params.has("bghold")) app.dispatch("bghold", params.get("bghold"));
@@ -499,6 +510,16 @@
         }
       }, true);
     });
+
+    // The soundtrack's pump on the page's own clock (M1, D59): every 12 ms
+    // the game tops up the music's sink from the live player, so a gap
+    // between frames (the phone's rAF p95 was 93 ms, 2026-09-21) does not
+    // run it dry; a frame in flight is never interrupted (one thread), the
+    // timer fires between frames. ?pump=off leaves the tick as the only pump
+    // (the before/after measurement).
+    if (!/[?&]pump=off(&|$)/.test(location.search)) {
+      setInterval(function () { if (updates.app) updates.app.dispatch("pump", ""); }, 12);
+    }
     globalThis.__crashUpdates = updates;
 
     var canvas = document.getElementById("stage");

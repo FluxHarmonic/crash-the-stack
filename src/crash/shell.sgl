@@ -26,6 +26,7 @@
           (crash bg)
           (crash sfx)
           (crash audio)
+          (crash music live)
           (crash menu)
           (crash settings)
           (crash scores)
@@ -55,7 +56,7 @@
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code take-layer-cleared! credits-text!
           set-clock-source! now-second today
-          music-frame! music-fresh! music-off!
+          music-frame! music-fresh! music-off! music-readout
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
           daily-session? daily-deal?
           boot-session save-after-frame! run-after-frame! deal-run-after-frame!
@@ -212,7 +213,9 @@
     (define (apply-audio-settings!)
       (audio-set-music! (eq? (setting 'music) 'on))
       (audio-set-sfx! (eq? (setting 'sfx) 'on))
-      (audio-set-volume! (/ (setting 'volume) (* 1.0 VOLUME-MAX))))
+      (audio-set-volume! (/ (setting 'volume) (* 1.0 VOLUME-MAX)))
+      ;; the live soundtrack (M1): MUSIC x VOLUME on its source gain
+      (live-music-set-gain! (if (eq? (setting 'music) 'on) (/ (setting 'volume) (* 1.0 VOLUME-MAX)) 0.0)))
 
     ;; The bar's layout: A, zones, the one layout (B and its setting left
     ;; on 2026-09-21, D51); the tables still carry the name.
@@ -468,15 +471,55 @@
     (define *music-fresh* #f)
     (define *music-off* #f)
 
-    (define (music-fresh!) (set! *music-fresh* #t))
-    (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0))
+    (define (music-fresh!) (set! *music-fresh* #t) (live-music-fresh!))
+    (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0) (live-music-off!))
+    ;; The soundtrack live from .cts (M1, ruling D59): (crash music live)
+    ;; runs motif's player on the table's pick and moves between the
+    ;; track's sections with the trace's phase; the OGG model above is the
+    ;; fallback the measurement may choose for the web (stated in the row's
+    ;; note); LIVE? says which runs. The shells hand the board's seed for
+    ;; the pick.
+    (define LIVE? #t)
+
+    ;; The soundtrack's state as one readout line (?ms / --ms, and the
+    ;; stats header): the track, its position, the pull's cost per 1024
+    ;; frames, the sink's state and starved frames. A phone with no console
+    ;; says here whether the music runs (M1, the spike David heard nothing on).
+    ;;   MUSIC NAME P:R PULL 2.1 SINK RUNNING DRY 0/0 RATE 48000 SET ON/8
+    ;;   (DRY: the cues' sink, then the music's own; SET: the MUSIC setting and VOLUME)
+    ;;   MUSIC PENDING NAME | MUSIC OFF | MUSIC OGG
+    (define (upcase s) (list->string (map char-upcase (string->list s))))
+    (define (music-readout)
+      (string-append
+       "MUSIC "
+       (cond ((not LIVE?) "OGG")
+             ((live-music-playing?)
+              (let ((p (live-music-position)))
+                (string-append (upcase (symbol->string (live-music-name)))
+                               " " (if p (number->string (car p)) "-") ":" (if p (number->string (cdr p)) "-")
+                               " PULL " (number->string (/ (round (* 10 (live-music-chunk-ms))) 10.0)))))
+             ((live-music-pending?) "PENDING")
+             (else "OFF"))
+       " SINK " (upcase (symbol->string (or (audio-state) 'none)))
+       " DRY " (number->string (audio-underruns)) "/" (number->string (audio-source-underruns))
+       " RATE " (number->string (audio-rate))
+       " SET " (if (eq? (setting 'music) 'on) "ON" "OFF") "/" (number->string (setting 'volume))))
+    (define (music-frame! screen phase . rest)
+      (unless *music-off*
+        (if LIVE?
+            (let ((seed (and (pair? rest) (car rest)))
+                  (table (if (eq? screen 'cards) 'cards 'stack)))
+              (set! *music-fresh* #f)
+              (live-music-frame! screen phase table seed))
+            (ogg-music-frame! screen phase))))
+
 
     ;; A track wanted before it has landed (the web hands the tunes over
     ;; one after another; only the theme gates the boot) is not committed:
     ;; the players fade and the want is asked again next frame, so DEFRAG
     ;; opened before groove arrives gets its track when it does (the
     ;; review, 2026-09-21) rather than the theme over the table for good.
-    (define (music-frame! screen phase)
+    (define (ogg-music-frame! screen phase)
       (unless *music-off*
         (let ((want (music-track-for screen phase *music-fresh*)))
           (unless (equal? want *music-want*)

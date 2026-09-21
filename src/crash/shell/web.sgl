@@ -147,7 +147,7 @@
           (crash cards seeds)
           (crash gpu post)
           (crash music)
-          (crash music live))   ; M1 spike: the soundtrack live from .cts
+          (crash music live))   ; M1: the soundtrack live from .cts (D59)
 
   (export web-main web-dispatch)
 
@@ -230,8 +230,6 @@
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
     (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
-    (define *live* #f)            ; M1 spike: the soundtrack live from .cts (?live)
-    (define *live-text* #f)
     (define *tune-chunks* '())
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
@@ -326,7 +324,8 @@
                      " adepth " (number->string (audio-depth))
                      " atlas " (if (atlas-on?) "on" "off")
                      " copper " (if (number? *copper*) (number->string *copper*) (symbol->string *copper*))
-                     " phosphor " (symbol->string *phosphor*)))
+                     " phosphor " (symbol->string *phosphor*)
+                     " " (music-readout)))
 
     ;; The ring as text, to the page for the clipboard (a console line the
     ;; page's hook reads, newlines as ~, printed whether or not ?trace is
@@ -949,21 +948,9 @@
                         (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background) *copper*))))
         (ensure-texture! dt PORTRAITS-PATH)))
 
-    ;; M1 spike: J jumps the live track to order 8 (the documented fill) at once;
-    ;; every 120 frames a line with the player's pull cost per 1024 frames
-    (define *live-frames* 0)
-    (define (live-tick! f)
-      (when (live-music-playing?)
-        (when (memq 'j (input-frame-pressed f))
-          (live-music-jump! 8)
-          (say "music" "jump" 8))
-        (set! *live-frames* (+ *live-frames* 1))
-        (when (= 0 (modulo *live-frames* 120))
-          (let ((p (live-music-position)))
-            (say "music" "cost" (live-music-chunk-ms) "ms/1024" "at" (if p (car p) "-") (if p (cdr p) "-"))))))
 
     (define (stack-tick f dt)
-      (live-tick! f)
+
       ;; The boot lines wait for trace to be switched on, and repeat after
       ;; a new deal.
       (when (and *trace* (not *announced*))
@@ -1333,8 +1320,8 @@
           (say "ambient" "start"))
         (case *screen*
           ((menu) (music-frame! 'menu #f))
-          ((stack) (when *session* (music-frame! 'stack (trace-phase (session-trace *session*)))))
-          (else (when *deal* (music-frame! 'cards (trace-phase (deal-trace *deal*))))))))
+          ((stack) (when *session* (music-frame! 'stack (trace-phase (session-trace *session*)) (session-seed *session*))))
+          (else (when *deal* (music-frame! 'cards (trace-phase (deal-trace *deal*)) (deal-seed *deal*)))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
     ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
     ;; bookkeeping, the audio pump, and OTHER = the tick minus every timed
@@ -1616,10 +1603,6 @@
     (define (open-stack! resume?)
       (set! *screen* 'stack)
       (set-active-game! 'stack)   ; the table up is the one CONTINUE returns to (a ?stack boot after a DEFRAG deal had no CONTINUE)
-      ;; M1 spike: the live track starts with the table when its text has landed
-      (when (and *live* *live-text* (not (live-music-playing?)))
-        (live-music-open! *live-text* (audio-rate))
-        (say "music" "live" (live-music-title)))
       (set! *announced* #f)
       (unless (and resume? *session*) (music-fresh!))   ; a new deal: its rest track from the top (D50)
       (let ((lay (turtle-layout)))
@@ -1853,7 +1836,7 @@
         (draw-diag!)
         (when *ms*
           (let ((gpu (gpu-bg-ms)))
-            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text*)))
+            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text* (music-readout))))
         (set! *draw-ms* (- (now-ms) t1))
         (end-frame)
         (set! *flush-ms* (- (now-ms) t1 *draw-ms*)))
@@ -1861,6 +1844,10 @@
       (say-held!))
 
     (define (boot!)
+      ;; the live soundtrack (M1, D59): a tune's text comes from the page (one
+      ;; "crash: tune-fetch NAME" line per name; the text lands as tune-chunk/done)
+      (live-music-set-loader! (lambda (name) (println "~a" (string-append "crash: tune-fetch " (symbol->string name))) #f))
+      (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
       (set! *session* #f)
       (set! *deal* #f)
       ;; the field: ?bg= pins a rule for this boot (the dev door); else each
@@ -2011,19 +1998,23 @@
              (set! *track-transfer* (transfer-new (string->number payload)))
              0)
             ((string=? type "audio-chunk") (audio-chunk! payload))
-            ;; M1 spike: ?live hands one tune's text over in base64 chunks and the
-            ;; stack screen plays it on motif's player instead of the OGG model
-            ((string=? type "live") (param! (lambda () (set! *live* #t) (music-off!))))
+            ;; the live soundtrack (M1, D59): the page fetches a tune's text on
+            ;; "crash: tune-fetch NAME" and hands it over in base64 chunks then
+            ;; ("tune-done", NAME); (crash music live) opens it on the next frame
             ((string=? type "tune-chunk") (set! *tune-chunks* (cons (b64-decode payload) *tune-chunks*)) 0)
             ((string=? type "tune-done")
              (let ((text (utf8->string (apply bytevector-append (reverse *tune-chunks*)))))
                (set! *tune-chunks* '())
-               (set! *live-text* text)
-               (when (and *live* (eq? *screen* 'stack) (not (live-music-playing?)))
-                 (live-music-open! text (audio-rate))
-                 (say "music" "live" (live-music-title)))
+               (when (> (string-length payload) 0)
+                 (live-music-provide! (string->symbol payload) text)
+                 (say "music" "landed" payload (string-length text)))
                0))
             ((string=? type "gesture") (gesture! payload))
+            ;; the page's own pump timer (M1): the source's sink topped up between
+            ;; frames, so a rAF gap (p95 93 ms on David's phone, 2026-09-21) does
+            ;; not run the music dry; a frame in flight cannot be interrupted (one
+            ;; thread), so this only lands between frames. Answers the frames pushed.
+            ((string=? type "pump") (if *audio-ready* (audio-source-pump!) 0))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)
             ((string=? type "ambient") (when (string=? payload "off") (music-off!)) 0)
             ((string=? type "audio-done") (audio-done! payload))

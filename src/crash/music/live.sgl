@@ -1,62 +1,246 @@
 ;;; (crash music live) - The soundtrack live from .cts on motif's player (M1, D59)
 ;;;
-;;; The M1 spike (2026-09-21): one player on one track, mixed into the sink
-;;; through (crash audio)'s source hook the tracker uses, so the phone can
-;;; measure the frame cost and the wasm size of live playback against the
-;;; OGG build before the model is built on it. The model (pools, sections,
-;;; the trace's transitions) comes after the leader's ruling on the proposal.
+;;; One player at a time, mixed into the sink through (crash audio)'s source
+;;; hook the tracker uses. (crash music) is the data (the pools, the pick,
+;;; the section a phase asks for, the menu theme); this module runs it:
 ;;;
-;;;   (live-music-open! text sr)      the tune text; opens the player looping
-;;;   (live-music-jump! pos)          an immediate jump to an order position
-;;;   (live-music-stop!)
-;;;   (live-music-position)           (pos . row) under the listener, or #f
-;;;   (live-music-chunk-ms)           the last pull's wall time per 1024 frames
+;;;   (live-music-frame! screen phase table seed)   every frame the menu or a table is up
+;;;   (live-music-fresh!)                           a new deal: its pick from the calm mark, from the top
+;;;   (live-music-off!) / (live-music-stop!)               silence (the cascade, the severed screen)
+;;;   (live-music-provide! name text)                     a tune's text landed (the web page's fetch)
+;;;   (live-music-set-loader! proc)                       how a tune's text is asked for: (proc name) -> text | #f
+;;;
+;;; The moves: a new deal opens its pick from the calm mark, from the top;
+;;; CONTINUE or a return from the menu resumes where the track left off;
+;;; the menu theme resumes where IT left off; a switch fades the leaving
+;;; track ~0.5 s and the coming one in ~1 s (two source gains, one player
+;;; each way: the leaving player finishes its fade before the next opens,
+;;; so at most one player runs). The phase turning counter (the trace
+;;; crossed the ICE threshold) asks the player for the fill at the next
+;;; bar row and the tense region after it; the phase falling back asks
+;;; for calm at the next bar row with a 300 ms dip (no track has a
+;;; composed return fill yet). MUSIC / VOLUME apply on the source gain.
+;;;
+;;; Lines (say with ?trace / --trace):
+;;;   crash: music pick NAME seed N            the deal's track
+;;;   crash: music open NAME top|resume POS ROW
+;;;   crash: music section tense|calm asked at POS ROW   (the phase change)
+;;;   crash: music section tense|calm at POS ROW         (the landing, a bar row)
+;;;   crash: music fade out|in NAME
+;;;   crash: music playing NAME POS ROW        the sink pulled past the open position (heard, if the context runs)
 
 (define-library (crash music live)
-  (import (sigil time)
+  (import (sigil math)
+          (sigil time)
+          (sigil list)
           (motif tune)
           (motif tune player)
+          (crash music)
           (crash audio))
 
-  (export live-music-open! live-music-jump! live-music-stop! live-music-position
-          live-music-playing? live-music-chunk-ms live-music-title LIVE-GAIN)
+  (export live-music-frame! live-music-fresh! live-music-off! live-music-stop! live-music-provide!
+          live-music-set-loader! live-music-set-gain! live-music-set-say!
+          live-music-playing? live-music-title live-music-position live-music-chunk-ms
+          live-music-section live-music-pending? live-music-name
+          LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
   (begin
-    (define LIVE-GAIN 0.55)      ; TRACK-GAIN's value: the tracks' level under the cues
+    (define LIVE-GAIN 0.55)       ; the tracks' level under the cues (TRACK-GAIN's value)
+    (define FADE-OUT-MS 500)
+    (define FADE-IN-MS 1000)
+    (define RETURN-DIP-MS 300)
 
-    (define *player* #f)
-    (define *title* #f)
+    ;; --- state -------------------------------------------------------------------
+    (define *player* #f)          ; the one player, or #f
+    (define *name* #f)            ; the track it plays
+    (define *tune* #f)
+    (define *section* 'calm)      ; the section asked for last
+    (define *want* #f)            ; the track wanted now: NAME | #f (silence) | 'pending (text asked)
+    (define *want-fresh* #f)      ; the wanted track starts from its calm mark
+    (define *positions* '())      ; ((name . (pos . row)) ...): where each track left off
+    (define *last-pick* '())      ; the last track a deal picked, per table: ((table . name) ...)
+    (define *fresh* #f)           ; a new deal was dealt: the next pick is fresh and starts from the top
+    (define *restart* #f)         ; the wanted track is the playing one but a fresh deal wants it from the top
+    (define *texts* '())          ; ((name . text) ...): tune texts that landed
+    (define *loader* #f)          ; (proc name) -> text | #f; #f asks the page (a fetch line)
+    (define *asked* '())          ; names asked of the page
+    (define *gain* 1.0)           ; MUSIC x VOLUME, a factor on LIVE-GAIN
+    (define *fade* #f)            ; (from to start-ms dur-ms then) or #f: the source gain's ramp; then = 'close | #f
     (define *chunk-ms* 0.0)
+    (define *say* (lambda parts #f))
+    (define *landed-seen* #f)     ; the last landing reported (the arm reads the line once)
+    (define *opened-at* #f)       ; (pos . row) the track opened at; #f once "playing" was said (the sink pulled past it)
 
     (define (live-music-playing?) (and *player* #t))
+    (define (live-music-title) (and *tune* (tune-name *tune*)))
+    (define (live-music-name) *name*)
+    (define (live-music-section) *section*)
     (define (live-music-chunk-ms) *chunk-ms*)
-    (define (live-music-title) *title*)
+    (define (live-music-pending?) (eq? *want* 'pending))
+    (define (live-music-set-loader! proc) (set! *loader* proc))
+    (define (live-music-set-say! proc) (set! *say* proc))
+    (define (live-music-position)
+      (and *player* (player-position *player* (audio-source-depth))))
 
+    ;; MUSIC / VOLUME: a factor applied at once
+    (define (live-music-set-gain! g)
+      (set! *gain* (max 0.0 (min 1.0 g)))
+      (apply-gain! (current-fade-gain)))
+
+    ;; --- the source ----------------------------------------------------------------
     (define (pull! out byte-offset n)
       (let* ((t0 (current-milliseconds))
              (on (and *player* (player-pull! *player* out byte-offset n))))
         (let ((ms (- (current-milliseconds) t0)))
           (when (> n 0) (set! *chunk-ms* (/ (* 1024.0 ms) n))))
-        (if on
-            #t
-            (begin (live-music-stop!) #f))))
+        (if on #t (begin (close-player!) #f))))
 
-    (define (live-music-open! text sr)
-      (live-music-stop!)
-      (let ((t (read-tune-string text)))
-        (set! *title* (tune-name t))
-        (set! *player* (open-tune-player t sr loop: #t))
-        (audio-set-source! pull! LIVE-GAIN)
-        #t))
+    (define (apply-gain! fade-gain)
+      (when *player* (audio-set-source! pull! (* LIVE-GAIN *gain* fade-gain))))
 
-    (define (live-music-jump! pos)
-      (when *player* (player-jump! *player* pos 0)))
+    (define (current-fade-gain)
+      (if *fade*
+          (let* ((from (list-ref *fade* 0)) (to (list-ref *fade* 1))
+                 (start (list-ref *fade* 2)) (dur (list-ref *fade* 3))
+                 (k (min 1.0 (/ (- (current-milliseconds) start) (* 1.0 (max 1 dur))))))
+            (+ from (* k (- to from))))
+          1.0))
 
-    (define (live-music-stop!)
+    (define (fade! from to ms then)
+      (set! *fade* (list from to (current-milliseconds) ms then))
+      (apply-gain! from))
+
+    ;; a fade in flight moves every frame; a finished fade-out closes the player
+    (define (fade-frame!)
+      (when *fade*
+        (let ((g (current-fade-gain)))
+          (apply-gain! g)
+          (when (>= (- (current-milliseconds) (list-ref *fade* 2)) (list-ref *fade* 3))
+            (let ((then (list-ref *fade* 4)))
+              (set! *fade* #f)
+              (when (eq? then 'close) (close-player!)))))))
+
+    (define (close-player!)
       (when *player*
+        (let ((p (player-position *player* 0)))
+          (when (and p *name*)
+            (set! *positions* (cons (cons *name* p) (filter (lambda (e) (not (eq? (car e) *name*))) *positions*)))))
         (audio-set-source! #f 0.0)
         (player-close! *player*)
-        (set! *player* #f)))
+        (set! *player* #f)
+        (set! *name* #f)
+        (set! *tune* #f)
+        (set! *fade* #f)))
 
-    (define (live-music-position)
-      (and *player* (player-position *player* (audio-source-depth))))))
+    (define (live-music-stop!) (close-player!) (set! *want* #f))
+    (define (live-music-fresh!) (set! *fresh* #t))
+    (define (live-music-off!) (live-music-stop!))
+
+    ;; --- the texts ----------------------------------------------------------------
+    (define (live-music-provide! name text)
+      (set! *asked* (filter (lambda (n) (not (eq? n name))) *asked*))
+      (set! *texts* (cons (cons name text) (filter (lambda (e) (not (eq? (car e) name))) *texts*))))
+
+    ;; A tune's text: what landed, else the loader's answer (natively the
+    ;; file; on the web the page's fetch, which prints its own request line
+    ;; and answers #f until the text lands through live-music-provide!);
+    ;; a name is asked of the loader once.
+    (define (text-for name)
+      (let ((e (assq name *texts*)))
+        (cond (e (cdr e))
+              ((memq name *asked*) #f)
+              (*loader*
+               (set! *asked* (cons name *asked*))
+               (let ((text (*loader* name)))
+                 (when text (live-music-provide! name text))
+                 text))
+              (else #f))))
+
+    ;; --- opening a track -------------------------------------------------------------
+    (define (open! name fresh?)
+      (let ((text (text-for name)))
+        (if (not text)
+            'pending
+            (let* ((t (read-tune-string text))
+                   (calm (or (tune-mark t 'calm) 0))
+                   (left (assq name *positions*))
+                   (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
+                   (p (open-tune-player t (audio-rate) start: start loop: #t)))
+              (set! *player* p)
+              (set! *name* name)
+              (set! *tune* t)
+              (set! *section* 'calm)
+              (set! *landed-seen* #f)
+              (set! *opened-at* start)
+              (let ((r (assq 'calm (tune-mark-regions t))))
+                (when r (player-set-region! p (cadr r) (cddr r))))
+              (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start))
+              (fade! 0.0 1.0 FADE-IN-MS #f)
+              'open))))
+
+    ;; --- the frame ---------------------------------------------------------------------
+    ;; screen: menu | stack | cards; phase: trace | counter | severed | cleared | #f;
+    ;; table: the table the pick is for (stack | cards); seed: the board's;
+    ;; fresh?: a new deal (its pick from the top).
+    (define (live-music-frame! screen phase table seed)
+      (fade-frame!)
+      (let* ((fresh? (and *fresh* (not (eq? screen 'menu)) (not (memq phase '(cleared severed)))))
+             (want (cond ((eq? screen 'menu) MENU-THEME)
+                         ((memq phase '(cleared severed)) #f)
+                         (else (pick-for table seed fresh?)))))
+        (when fresh? (set! *fresh* #f) (set! *restart* #t))
+        (cond
+          ;; silence wanted: fade the playing track out
+          ((and (not want) *player* (not (fading-out?)))
+           (set! *want* #f)
+           (*say* "music" "fade" "out" (symbol->string *name*))
+           (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
+          ;; another track, or the same one from the top: fade out, then open
+          ((and want (or (not (eq? want *name*)) *restart*))
+           (cond ((and *player* (not (fading-out?)))
+                  (*say* "music" "fade" "out" (symbol->string *name*))
+                  (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
+                 ((not *player*)
+                  (let ((r (open! want *restart*)))
+                    (set! *restart* #f)
+                    (set! *want* (if (eq? r 'pending) 'pending want)))))))
+        ;; the first pull past the open position: the track is heard (once per open)
+        (when (and *player* *opened-at*)
+          (let ((p (live-music-position)))
+            (when (and p (not (equal? p *opened-at*)))
+              (set! *opened-at* #f)
+              (*say* "music" "playing" (symbol->string *name*) (car p) (cdr p)))))
+        ;; the section follows the phase, at the next bar row
+        (when (and *player* (not (eq? screen 'menu)) (eq? want *name*))
+          (let ((section (music-section phase)))
+            (unless (eq? section *section*)
+              (set! *section* section)
+              (let ((p (live-music-position)))
+                (*say* "music" "section" (symbol->string section) "asked" "at" (if p (car p) "-") (if p (cdr p) "-")))
+              (cond ((eq? section 'tense)
+                     (unless (player-jump-to-mark! *player* 'fill)
+                       (player-jump-to-mark! *player* 'tense)))
+                    (else
+                     (player-jump-to-mark! *player* 'calm)
+                     (player-dip! *player* RETURN-DIP-MS)))))
+          ;; the landing, once
+          (let ((l (player-landed *player*)))
+            (when (and l (not (equal? l *landed-seen*)))
+              (set! *landed-seen* l)
+              (*say* "music" "section" (symbol->string *section*) "at" (car l) (cadr l)))))))
+
+    (define (fading-out?) (and *fade* (eq? (list-ref *fade* 4) 'close)))
+
+    ;; the deal's pick, remembered per table while the deal lasts
+    (define *picked* '())   ; ((table seed . name) ...)
+    (define (pick-for table seed fresh?)
+      (let ((e (assq table *picked*)))
+        (if (and e (= (cadr e) (or seed 0)) (not fresh?))
+            (cddr e)
+            (let* ((last (let ((l (assq table *last-pick*))) (and l (cdr l))))
+                   (name (music-pick table seed last)))
+              (set! *picked* (cons (cons table (cons (or seed 0) name)) (filter (lambda (x) (not (eq? (car x) table))) *picked*)))
+              (set! *last-pick* (cons (cons table name) (filter (lambda (x) (not (eq? (car x) table))) *last-pick*)))
+              (*say* "music" "pick" (symbol->string name) "seed" (or seed 0))
+              name))))
+    ))
