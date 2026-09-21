@@ -4,6 +4,8 @@
 Six GPU rules for D55's per-deal pool: **cyclic**, **flow**, **signal**,
 **echo**, **synapse**, and **flame**. David requested the flame extension
 after approving the previous five.
+David approved keeping all six alongside REACTION, then requested that
+LIFE be removed entirely. These seven modes are the completed visual set.
 The revisions respond to David's feedback on the hosted preview: darker
 surfaces with small accents, no cells that look stuck, and Matrix/Hackers-inspired
 falling or rectilinear signals.
@@ -116,12 +118,15 @@ The graphics library supplies `u_resolution`. All six need one
 880-fragment step pass. Presentation uses the unchanged 80×44 dither target
 and nearest upscale. Their ramp orders the existing roles as BG, BAR-A,
 BAR-B, STATIC-B, WIRE-DARK, BAR-C, MOSS, ARCHIVE. The last two are accents;
-legacy LIFE/REACTION keep their original ordering. Palette uniforms change
+REACTION keeps its original ordering. Palette uniforms change
 only when the field is seeded. New fields store their shown byte in red,
 so the existing ring presentation and severed collapse apply directly.
 
-The original LIFE, FEED, REACTION, COLLAPSE, and VIEW source strings are
-unchanged. CPU LIFE/REACTION equations and their rule table remain intact.
+The original FEED, REACTION, COLLAPSE, and VIEW shaders are unchanged.
+REACTION's CPU equations remain intact. LIFE's CPU and GPU implementations,
+seed, shader resource, rule entry, and exclusive helpers have been removed.
+The shared collapse factor is now named `FIELD-COLLAPSE`; the shown-byte
+presentation and collapse still serve all six GPU additions.
 The additions are GPU-only; the `-cpu` names for these additions do not silently run a different rule.
 
 ## Measurements that changed the implementation
@@ -298,13 +303,22 @@ background simplification is justified by the startup maxima alone.
 
 ## Integration and review
 
-REACTION stays the default here. P4c owns the FIELD/LIFE removal and shell
-policy. `GPU-MODES` exposes the six new names for D55's pool. Both shells
+REACTION stays the default here. David's explicit removal request supersedes
+the initial instruction to leave LIFE for P4c: this branch now removes LIFE
+from the implementation and FIELD choices. A saved `field=life` value reads
+as the REACTION default through existing validation; `life` and `life-cpu`
+are rejected by the shared query/CLI mode selector, like any unknown name.
+Settings tests cover that migration and all seven remaining mode names.
+LIFE-only checks and performance-script entries are removed; shared schedule
+and phase tests now exercise REACTION, including its iteration cap.
+P4c still owns removal of the FIELD row and per-deal shell policy.
+`GPU-MODES` exposes the six new names for D55's pool. Both shells
 in this base branch still pass background seed **1**, independent of the
 board seed. The new rules accept any seed through `bg-new`/`bg-choose`, and
 the CPU tests cover same/different seeds. P4c should supply the board seed
-when wiring per-deal selection. No settings, menus, audio, tables, service
-worker, or publishing configuration changed.
+when wiring per-deal selection. The only settings change removes LIFE from
+the existing FIELD row; menus, audio, tables, service worker, and publishing
+configuration are untouched.
 
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=cyclic&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=flow&ms`

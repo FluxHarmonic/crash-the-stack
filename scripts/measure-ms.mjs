@@ -8,7 +8,7 @@
 // the STEP/PRESENT columns, the wasm's own issue time, are the honest
 // CPU-side figures; the MS column is the frame's wall time under that
 // rasterizer), at the desktop viewport (dpr 2) or the phone's (--phone:
-// 390x844 CSS, dpr 3, portrait). For each QUERY (e.g. "bg=life",
+// 390x844 CSS, dpr 3, portrait). For each QUERY (e.g. "bg=flow",
 // "bg=reaction&dpr=2") the page opens on the stack table with ?trace&ms,
 // and the game's own "crash: frame-ms MEAN MAX step MEAN present MEAN"
 // lines (one per 120 frames) are collected for N windows; the first
@@ -30,7 +30,7 @@ const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args
 const VALUED = ["--port", "--cdp", "--windows"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
 const ROOT = path.resolve(positional[0] && fs.existsSync(path.join(positional[0], "index.html")) ? positional.shift() : "build/web");
-const QUERIES = positional.length ? positional : ["bg=off", "bg=life", "bg=reaction", "bg=life-cpu", "bg=reaction-cpu"];
+const QUERIES = positional.length ? positional : ["bg=off", "bg=reaction", "bg=cyclic", "bg=flow", "bg=signal", "bg=echo", "bg=synapse", "bg=flame", "bg=reaction-cpu"];
 const PORT = parseInt(opt("--port", "8100"), 10);
 const CDP = parseInt(opt("--cdp", "9240"), 10);
 const WINDOWS = parseInt(opt("--windows", "3"), 10);

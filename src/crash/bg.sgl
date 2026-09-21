@@ -11,20 +11,10 @@
 ;;; cells over the board area; every cell holds a value in [0, 1) and
 ;;; the renderer maps it onto a ramp of RAMP palette tones with a 2x2
 ;;; ordered dither between neighboring tones (four levels per step, so
-;;; the surface reads as continuous at 8 px). The rules are a table,
-;;; RULES, one entry per rule (its name, how it seeds a field, how it
-;;; steps one, how a cell's state reads as a value), so a new rule is one
-;;; entry and a name in the switch; David, 2026-09-19: "the current
-;;; pattern is very close to what I had in mind", keep both selectable
-;;; and leave room for more. Two so far:
+;;; the surface reads as continuous at 8 px). The rule table,
+;;; RULES, holds the CPU reference for REACTION; GPU-MODES names the
+;;; six shader-only rules in (crash gpu rules).
 ;;;
-;;;   life      the voter model with mutation: at every field step each
-;;;             cell is visited with a probability set by the agitation
-;;;             (a fifth of the cells when calm); a visited cell copies
-;;;             one of its four neighbors' values, or once in LIFE-MUTATE
-;;;             visits drifts a little instead; values live on a ring of
-;;;             256 steps, so the ramp is cyclic and domains of one color
-;;;             grow, shrink, split and drift without ever settling.
 ;;;   reaction  Gray-Scott reaction-diffusion (two substances per cell, a
 ;;;             nine-point laplacian, feed and kill rates in the regime
 ;;;             that grows soft coral fronts) stepped a few times a field
@@ -40,10 +30,10 @@
 ;;; (every value decays toward the ground).
 ;;;
 ;;; Two implementations of one rule (P3c, ruling D35). The field's home
-;;; is the GPU: (crash gpu bg) runs the same two rules as fragment
+;;; is the GPU: (crash gpu bg) runs the field rules as fragment
 ;;; shaders over a pair of render targets, one step per pass, and the
 ;;; cell state never touches the CPU. This module is the rule's
-;;; definition and the oracle: the CPU field (`?bg=life-cpu`, the
+;;; definition and the oracle: the CPU field (`?bg=reaction-cpu`, the
 ;;; fallback) and the GPU field must agree cell for cell after any
 ;;; number of steps from one seed, and the browser arm holds them to it.
 ;;; So every rule here is a function each cell can compute alone from the
@@ -51,8 +41,7 @@
 ;;; sequence), but a hash of (step key, cell) per cell, and the step's own
 ;;; random choices (the rain and the kill patch of the reaction) drawn
 ;;; from the key on the CPU and handed to the shader as uniforms. The
-;;; state is stored as the GPU stores it: life as an 8-bit integer per
-;;; cell (the ring), reaction as two quantities quantized to 1/65535
+;;; REACTION state is stored as two quantities quantized to 1/65535
 ;;; after every iteration (the 16-bit packing of the RGBA8 target; 8 bits
 ;;; freeze Gray-Scott). The hash is lowbias32's shape on 31-bit words
 ;;; with 22-bit multipliers, so no value passes 2^31 and no product
@@ -82,13 +71,13 @@
 
   (export bg bg? bg-new bg-tick bg-field bg-sub bg-seed bg-ticks bg-steps bg-mode bg-gpu? bg-hold bg-stride bg-react-steps bg-iterations bg-iterations-at bg-step-agit bg-pending
           bg-agitation bg-burst bg-severed
-          bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean bg-flow
-          bg-held? bg-agit bg-visit-permille bg-step-key bg-rain bg-kill bg-shown-value
+          bg-with-phase bg-with-burst bg-with-hold bg-step bg-runs bg-canonical bg-dominant bg-mean
+          bg-held? bg-agit bg-step-key bg-rain bg-kill bg-shown-value
           bg-cell-tones
           hash31 mul31 add31
           CELL GRID-W GRID-H CELLS RAMP MODES GPU-MODES RULES STRIDE
           DOMINANT-CAP
-          LIFE-MUTATE LIFE-DRIFT-MAX LIFE-COLLAPSE
+          FIELD-COLLAPSE
           REACT-STEPS REACT-STEPS-MAX REACT-FEED REACT-KILL REACT-DA REACT-DB REACT-DT
           REACT-RAIN REACT-SEED REACT-KILL-EVERY REACT-SHOWN-SCALE REACT-SHOWN-MAX
           AGITATION-TRACE AGITATION-ICE AGITATION-BURST AGITATION-SEVERED
@@ -103,10 +92,7 @@
     (define RAMP 8)              ; palette tones in the ramp (crash render maps them)
     (define STRIDE 3)            ; ticks between steps of the field (the phone's budget)
     (define DOMINANT-CAP 0.9)    ; no tone may hold more of the half cells than this: a flat field is dead
-    (define LIFE-RATE 60)        ; cells visited per tick at agitation 1 (an expected count)
-    (define LIFE-MUTATE 12)      ; one visit in this many mutates instead of copying
-    (define LIFE-DRIFT-MAX 15)   ; a mutation moves the value at most this many ring steps (of 256) either way
-    (define LIFE-COLLAPSE 0.985) ; per step once severed, every value
+    (define FIELD-COLLAPSE 0.985) ; per step once severed, every value
     (define REACT-STEPS 2)       ; Gray-Scott iterations per field step at agitation 1
     (define REACT-STEPS-MAX 4)   ; and never more than this under the ICE
     (define REACT-FEED 0.046)    ; the regime measured 2026-09-19: fronts cover 25..50 % and keep moving
@@ -127,7 +113,6 @@
     (define BURST-TICKS 30)
 
     (define CELLS (* GRID-W GRID-H))
-    (define RING 256)            ; the life rule's values
     (define Q16 65535.0)         ; the reaction's quantum: 1/65535
 
     ;; --- 31-bit words ---------------------------------------------------------------
@@ -161,15 +146,15 @@
 
     ;; --- state ---------------------------------------------------------------------
 
-    ;; field: the value per cell, row-major: the ring integer (life) or the
-    ;; second substance (reaction); sub: the reaction's first substance
-    ;; (life keeps it unused). steps: field steps taken (the rule's clock,
+    ;; field: the value per cell, row-major: the second substance for
+    ;; REACTION or a GPU rule's seed; sub: REACTION's first substance.
+    ;; steps: field steps taken (the rule's clock,
     ;; and the GPU field's target). hold: a step count the field stops at,
     ;; or #f (the arm's door). gpu?: the cell work is the GPU's; this
     ;; struct keeps the schedule only, and the field holds the seed the
     ;; GPU draws once.
     (define-struct bg
-      (mode default: 'reaction)          ; the game's default rule (David, 2026-09-20); life stays selectable
+      (mode default: 'reaction)          ; the game's default rule (David, 2026-09-20)
       (gpu? default: #f)
       (field default: (vector))
       (sub default: (vector))
@@ -194,21 +179,6 @@
                   (bg-runs b))
         (/ (apply max (vector->list counts)) (* 4.0 CELLS))))
 
-    ;; The share of cells whose value equals a right or lower neighbor's
-    ;; exactly: the mark of the voter model's copies (a mutation-only field
-    ;; from smoothed noise has none), so the gate can tell flow from noise.
-    (define (bg-flow b)
-      (let ((f (bg-field b)))
-        (let loop ((i 0) (n 0))
-          (if (= i CELLS)
-              (/ n (* 1.0 CELLS))
-              (let* ((x (modulo i GRID-W))
-                     (y (quotient i GRID-W))
-                     (v (vector-ref f i))
-                     (r (vector-ref f (+ (modulo (+ x 1) GRID-W) (* y GRID-W))))
-                     (d (vector-ref f (+ x (* (modulo (+ y 1) GRID-H) GRID-W)))))
-                (loop (+ i 1) (if (or (= v r) (= v d)) (+ n 1) n)))))))
-
     ;; The mean shown value.
     (define (bg-mean b)
       (let loop ((i 0) (sum 0.0))
@@ -218,10 +188,9 @@
       (let ((rng (prng-next rng)))
         (cons (/ (prng-index rng 1000000) 1000000.0) rng)))
 
-    ;; A field seeded by the stream, through the rule's own seeder: life
-    ;; starts from smooth-ish noise (each cell a draw, then two smoothing
-    ;; passes, quantized to the ring); reaction from a full first substance
-    ;; with REACT-SPOTS spots of the second. The runs are built once here
+    ;; A field seeded by the stream, through the rule's own seeder:
+    ;; REACTION starts from a full first substance with REACT-SPOTS spots
+    ;; of the second. The CPU runs are built once here
     ;; and then at every step. rest: the mode, then gpu?.
     (define (bg-new seed . rest)
       (let* ((mode (if (and (pair? rest)
@@ -261,25 +230,6 @@
                                ((signal) (if (< (car u) 0.02) 1 0))
                                (else (car u))))
                 (loop (+ i 1) (cdr u)))))))
-
-    (define (seed-life mode rng)
-      (let ((field (make-vector CELLS 0.0))
-            (sub (make-vector CELLS 1.0)))
-        (let loop ((i 0) (rng rng))
-          (if (= i CELLS)
-              (bg mode: mode field: (quantize-ring (smooth (smooth field))) sub: sub)
-              (let ((u (draw-unit rng)))
-                (vector-set! field i (car u))
-                (loop (+ i 1) (cdr u)))))))
-
-    ;; [0, 1) floats onto the ring: k = floor(v * 256), 0..255.
-    (define (quantize-ring field)
-      (let ((out (make-vector CELLS 0)))
-        (let loop ((i 0))
-          (when (< i CELLS)
-            (vector-set! out i (min (- RING 1) (exact (floor (* RING (vector-ref field i))))))
-            (loop (+ i 1))))
-        out))
 
     ;; REACT-SPOTS 3x3 spots of the second substance in a full first: the
     ;; fronts grow out of them from the first tick (a dozen left the field
@@ -378,16 +328,6 @@
     (define (bg-step-key seed steps)
       (hash31 (add31 (hash31 (modulo seed TWO31)) (mul31 (modulo steps TWO31) 2047323))))   ; 0x1f3d5b
 
-    ;; A cell's hash for the step: key + its row-major index, mixed.
-    (define (cell-hash key x y)
-      (hash31 (add31 key (+ x (* y 64)))))
-
-    ;; Per mille of the cells visited at an agitation: the expected count
-    ;; of the old random visits (agit * LIFE-RATE * STRIDE) over the cells,
-    ;; capped at every cell.
-    (define (bg-visit-permille agit stride)
-      (min 1000 (exact (floor (/ (* agit LIFE-RATE stride 1000) CELLS)))))
-
     ;; The reaction's rain for a step: REACT-RAIN (x . y) cells from the key.
     (define (bg-rain key)
       (let loop ((k 0) (acc '()))
@@ -401,33 +341,6 @@
       (and (= 0 (modulo steps REACT-KILL-EVERY))
            (let ((h (hash31 (add31 key 200000))))
              (cons (modulo h GRID-W) (modulo (arithmetic-shift h -8) GRID-H)))))
-
-    ;; --- one step: life ------------------------------------------------------------------
-
-    ;; Every cell from the previous state: visited cells copy a neighbor
-    ;; (h's bits 10-11 pick which) or, one visit in LIFE-MUTATE, drift on
-    ;; the ring by up to LIFE-DRIFT-MAX either way (bits 16 and up).
-    (define (life-step field key permille)
-      (let ((out (vector-copy field)))
-        (let loop ((i 0))
-          (when (< i CELLS)
-            (let* ((x (modulo i GRID-W))
-                   (y (quotient i GRID-W))
-                   (h (cell-hash key x y)))
-              (when (< (modulo h 1000) permille)
-                (let ((dir (modulo (arithmetic-shift h -10) 4))
-                      (roll (modulo (arithmetic-shift h -12) LIFE-MUTATE))
-                      (drift (- (modulo (arithmetic-shift h -16) (+ 1 (* 2 LIFE-DRIFT-MAX))) LIFE-DRIFT-MAX)))
-                  (vector-set! out i
-                               (if (= roll 0)
-                                   (modulo (+ (vector-ref field i) drift) RING)
-                                   (case dir
-                                     ((0) (at field (+ x 1) y))
-                                     ((1) (at field (- x 1) y))
-                                     ((2) (at field x (+ y 1)))
-                                     (else (at field x (- y 1)))))))))
-            (loop (+ i 1))))
-        out))
 
     ;; --- one step: reaction -------------------------------------------------------------
 
@@ -485,24 +398,16 @@
 
     ;; --- one step -------------------------------------------------------------------------
 
-    ;; Severed: every value falls toward the ground. Life on the ring's
-    ;; integers (k' = floor(0.985 k), which reaches 0 and stays), the
-    ;; reaction's second substance on the grid.
+    ;; Severed: REACTION's second substance decays on the 16-bit grid.
     (define (collapse b)
       (let* ((f (bg-field b))
              (out (make-vector CELLS 0)))
         (let loop ((i 0))
           (when (< i CELLS)
             (vector-set! out i
-                         (if (eq? (bg-mode b) 'life)
-                             (exact (floor (* LIFE-COLLAPSE (vector-ref f i))))
-                             (q16 (* LIFE-COLLAPSE (vector-ref f i)))))
+                         (q16 (* FIELD-COLLAPSE (vector-ref f i))))
             (loop (+ i 1))))
         (bg b field: out)))
-
-    ;; One field step of the life rule.
-    (define (step-life b key)
-      (bg b field: (life-step (bg-field b) key (bg-visit-permille (bg-agit b) (bg-stride b)))))
 
     ;; One field step of the reaction: the feed, then REACT-STEPS Gray-
     ;; Scott iterations scaled by the agitation and capped.
@@ -522,12 +427,10 @@
     ;; maps a cell's stored state to the value in [0, 1) the dither maps.
     ;; Built with list, not quoted (the web build's literal hazard, see
     ;; (crash menu)).
-    (define (shown-life k) (/ k (inexact RING)))
     (define (shown-reaction v) (min REACT-SHOWN-MAX (* REACT-SHOWN-SCALE v)))
 
     (define RULES
-      (list (list 'life seed-life step-life shown-life)
-            (list 'reaction seed-reaction step-reaction shown-reaction)))
+      (list (list 'reaction seed-reaction step-reaction shown-reaction)))
 
     (define MODES (map car RULES))
 
