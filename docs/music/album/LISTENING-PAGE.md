@@ -157,3 +157,19 @@ Publication manifests, logs, scripts and raw HTTP verification are external in
 publication-mp3-i/, publication-r2-i/ and r2-preview-i/. The publisher safeguard
 and route change are committed on feat/codex-album; the coordinator must merge
 them before the next game deployment to retain the soundtrack page.
+
+## Cover and music license
+
+David requested a square cover based on the actual title screen and 8-bit Flux
+Harmonic logo, replacing the large introductory text. Cover I is recorded in
+art/ARTWORK.md with the input hashes, exact prompt and built-in image-generation
+provenance. The delivered image is 1254x1254 PNG; it is kept in Git and served
+from assets.crashthestack.com/soundtrack/art/cover-i.png. The page uses an
+accessible hidden heading, image description and compact runtime line.
+
+David also requested a CC-BY music notice. The footer links CC BY 4.0 and uses
+Flux Harmonic as the attribution credit, matching the publisher branding.
+MUSIC-LICENSE.md records its scope; existing software, art and logo terms are
+unchanged. CC BY allows sharing and adaptation with attribution, a license link
+and change notices. The notice is on the page; existing immutable MP3 objects
+are not retagged or re-encoded.
