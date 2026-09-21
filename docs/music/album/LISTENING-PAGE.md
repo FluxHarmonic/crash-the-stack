@@ -6,8 +6,9 @@ The static player presents all fifteen provisional album-level arrangements in
 the confirmed sequence: Black Glass first, Glass Current last. Runtime is
 55:09.297. Audio starts only after a playback action. Track selection, previous/
 next, native seek and volume controls, automatic progression and an end-of-album
-state are included. OGG is preferred where supported, with 256 kbps MP3 fallback
-encoded directly from each master WAV. No external fonts, scripts or services.
+state are included. David selected MP3-only delivery for the website: 256 kbps
+MP3 encoded directly from each master WAV. OGG/WAV/FLAC remain local album
+artifacts. The public audio set is fifteen MP3 files, 101.02 MiB total.
 
 ## Reproduce the public bundle
 
@@ -20,7 +21,7 @@ sigil docs/music/tools/album-listening-site.sgl \
 The output directory must be new and outside the repository. The tool validates
 all selected score snapshots against the canonical album scores and checks
 published audio durations, stereo/44.1 kHz format and the Pages per-asset limit.
-It copies the selected existing OGGs without re-encoding. Black Glass and Quiet
+It encodes MP3 directly from the selected WAVs. Black Glass and Quiet
 Array select the album-level pilot trials, not the matched-level comparisons.
 
 Only `soundtrack/` is public. Its sibling `build-report.json` contains local paths,
@@ -28,12 +29,14 @@ source/audio hashes and exact MP3 argv for provenance; do not publish that repor
 The selected album master WAV/FLAC files and all original render logs remain
 outside the public tree and outside Git. Source precision remains 16-bit.
 
-Initial bundle: ~/Ops/artifacts/crash-the-stack-album/listen-preview-i/.
+Initial two-format bundle, retained as history:
+~/Ops/artifacts/crash-the-stack-album/listen-preview-i/.
 The OGG total is 78,640,277 bytes (75.00 MiB); MP3 is 105,931,365 bytes
 (101.02 MiB). Largest asset: Black Glass MP3, 8,450,500 bytes (8.06 MiB).
 Cloudflare Pages permits 25 MiB per file and 20,000 files on the Free plan:
 https://developers.cloudflare.com/pages/platform/limits/ (checked 2026-09-21).
-There are thirty audio files plus four small page/data files.
+That initial bundle had thirty audio files plus four small page/data files;
+the final public delivery uses fifteen MP3s on R2 and four small files on Pages.
 
 ## Integration with the game site
 
@@ -114,3 +117,11 @@ The publisher safeguard remains applicable: CRASH_SOUNDTRACK_DIR now points to
 the R2 preview's small soundtrack/ directory. Future game deployments keep the
 page while leaving audio objects independently stored in R2. Merge the committed
 publisher and service-worker changes before the next coordinator publication.
+
+## MP3-only refinement
+
+David selected MP3 alone after the first R2-backed page deployed. The player
+and both packaging tools now omit OGG from public manifests and uploads. The
+selected MP3 objects already passed checksum, MIME, CORS and range checks; no
+re-encoding was needed. Final page bundle: r2-mp3-i/soundtrack/ beneath the
+external album artifact root. Local OGG/WAV/FLAC sources remain intact.

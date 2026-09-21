@@ -7,13 +7,11 @@ const status = document.querySelector('#status');
 let tracks = [];
 let selected = 0;
 let request = 0;
-let fallback = false;
 const time = seconds => { const rounded = Math.round(seconds); return `${Math.floor(rounded / 60)}:${String(rounded % 60).padStart(2, '0')}`; };
 
 function select(index) {
   request++;
   selected = index;
-  fallback = !audio.canPlayType('audio/ogg; codecs="vorbis"');
   audio.removeAttribute('src');
   audio.load();
   document.querySelector('#now-title').textContent = tracks[index].title;
@@ -32,7 +30,7 @@ function select(index) {
 }
 async function start() {
   if (!audio.getAttribute('src')) {
-    audio.src = tracks[selected][fallback ? 'mp3' : 'ogg'];
+    audio.src = tracks[selected].mp3;
     audio.load();
   }
   const current = request;
@@ -55,13 +53,7 @@ audio.addEventListener('ended', () => {
 });
 audio.addEventListener('error', () => {
   if (!tracks.length) return;
-  if (!fallback) {
-    fallback = true;
-    request++;
-    audio.src = tracks[selected].mp3;
-    audio.load();
-    start();
-  } else status.textContent = 'This track could not load. Check your connection and select it again to retry.';
+  status.textContent = 'This track could not load. Check your connection and select it again to retry.';
 });
 fetch('album.json').then(response => {
   if (!response.ok) throw new Error('Album unavailable');

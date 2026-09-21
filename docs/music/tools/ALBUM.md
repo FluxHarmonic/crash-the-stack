@@ -224,7 +224,7 @@ split into eight- and four-bar patterns to respect the native row limit.
 
 `album-listening-site.sgl --artifacts /absolute/album-render-root --output
 /absolute/new-preview` builds a static `soundtrack/` directory with the current
-fifteen album-level OGGs and MP3 fallback encodes. No credentials are required.
+fifteen album-level MP3 encodes. No credentials are required.
 Publish only that directory alongside the current game and tracker, never its
 private sibling provenance report. See [LISTENING-PAGE.md](../album/LISTENING-PAGE.md)
 for deployment integration, service-worker behavior and measurements.
