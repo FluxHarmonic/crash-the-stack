@@ -53,7 +53,8 @@
           (sigil graphics)
           (crash bg)
           (crash palette)
-          (crash gpu glsl))
+          (crash gpu glsl)
+          (crash gpu rules))
 
   (export gpu-bg-prepare! gpu-bg-blit! gpu-bg-prepared? gpu-bg-ms gpu-bg-steps gpu-bg-ready? gpu-bg-reset!
           RAMP-COLORS CATCH-UP)
@@ -285,6 +286,8 @@
     (define *life* #f)           ; the shaders
     (define *feed* #f)
     (define *reaction* #f)
+    (define *cyclic* #f)
+    (define *flow* #f)
     (define *collapse* #f)
     (define *view* #f)
     (define *shown* #f)          ; the dithered field at half-cell resolution, the frame's blit source
@@ -313,6 +316,11 @@
         (set! *life* (load-shader VERT-SOURCE LIFE-SOURCE 'none))
         (set! *feed* (load-shader VERT-SOURCE FEED-SOURCE 'none))
         (set! *reaction* (load-shader VERT-SOURCE REACTION-SOURCE 'none))
+        (set! *cyclic* (load-shader VERT-SOURCE CYCLIC-SOURCE 'none))
+        (set! *flow* (load-shader VERT-SOURCE FLOW-SOURCE 'none))
+        (set-shader-uniform *cyclic* 'u_states 16.0)
+        (set-shader-uniform *cyclic* 'u_rain 2.0)
+        (set-shader-uniform *flow* 'u_decay 0.997)
         (set! *collapse* (load-shader VERT-SOURCE COLLAPSE-SOURCE 'none))
         (set! *view* (load-shader VERT-SOURCE VIEW-SOURCE 'none))
         (set-shader-uniform *life* 'u_mutate (inexact LIFE-MUTATE))
@@ -337,18 +345,26 @@
     (define (seed! b)
       (let ((field (bg-field b))
             (sub (bg-sub b))
-            (life? (eq? (bg-mode b) 'life)))
+            (mode (bg-mode b)))
         (with-render-target *cur*
           (set-blend-mode 'none)
           (let loop ((i 0))
             (when (< i CELLS)
               (let ((x (modulo i GRID-W))
                     (y (quotient i GRID-W)))
-                (if life?
-                    (set-color (/ (vector-ref field i) 255.0) 0.0 0.0 1.0)
-                    (let ((u (packed (vector-ref sub i)))
-                          (v (packed (vector-ref field i))))
-                      (set-color (car u) (cdr u) (car v) (cdr v))))
+                (case mode
+                  ((life)
+                   (set-color (/ (vector-ref field i) 255.0) 0.0 0.0 1.0))
+                  ((cyclic)
+                   (let ((k (vector-ref field i)))
+                     (set-color (/ (* k 16) 255.0) (/ k 255.0) 0.0 1.0)))
+                  ((flow)
+                   (let ((v (packed (vector-ref field i))))
+                     (set-color 0.0 0.0 (car v) (cdr v))))
+                  (else
+                   (let ((u (packed (vector-ref sub i)))
+                         (v (packed (vector-ref field i))))
+                     (set-color (car u) (cdr u) (car v) (cdr v)))))
                 (draw-filled-rect (inexact x) (inexact y) 1.0 1.0))
               (loop (+ i 1)))))
         (set-blend-mode 'normal)
@@ -383,12 +399,28 @@
              (agit (car at))
              (severed? (cdr at)))
         (cond (severed?
-               (set-shader-uniform *collapse* 'u_rule (if (eq? (bg-mode b) 'life) 0.0 1.0))
+               (set-shader-uniform *collapse* 'u_rule (if (memq (bg-mode b) '(life cyclic)) 0.0 1.0))
                (pass! *collapse*))
               ((eq? (bg-mode b) 'life)
                (set-shader-uniform *life* 'u_key (list (inexact (quotient key 65536)) (inexact (modulo key 65536))))
                (set-shader-uniform *life* 'u_visit (inexact (bg-visit-permille agit (bg-stride b))))
                (pass! *life*))
+              ((memq (bg-mode b) GPU-MODES)
+               (let ((sh (if (eq? (bg-mode b) 'cyclic) *cyclic* *flow*)))
+                 (set-shader-uniform sh 'u_key
+                                     (list (inexact (quotient key 65536))
+                                           (inexact (modulo key 65536))))
+                 (if (eq? (bg-mode b) 'cyclic)
+                     (set-shader-uniform sh 'u_rate (min 1000.0 (* 550.0 agit)))
+                     (let ((rain (car (bg-rain key))))
+                       (set-shader-uniform sh 'u_rate (min 0.8 (* 0.35 agit)))
+                       (set-shader-uniform sh 'u_clock (inexact (modulo step 1000000)))
+                       (set-shader-uniform sh 'u_phase
+                                           (/ (modulo (hash31 (bg-seed b)) 6283) 1000.0))
+                       (set-shader-uniform sh 'u_rain
+                                           (list (inexact (car rain)) (inexact (cdr rain))))
+                       (set-shader-uniform sh 'u_wet (if (= 0 (modulo step 8)) 1.0 0.0))))
+                 (pass! sh)))
               (else
                (let ((rain (bg-rain key))
                      (kill (bg-kill key step))
@@ -448,7 +480,11 @@
       (let ((t0 (now-ms)))
         (sync! b)
         (let ((t1 (now-ms)))
-          (set-shader-uniform *view* 'u_rule (if (eq? (bg-mode b) 'life) 0.0 1.0))
+          (set-shader-uniform *view* 'u_rule (if (memq (bg-mode b) '(life cyclic)) 0.0 1.0))
+          (set-shader-uniform *view* 'u_shown
+                              (if (eq? (bg-mode b) 'flow)
+                                  (list 1.0 0.94)
+                                  (list REACT-SHOWN-SCALE REACT-SHOWN-MAX)))
           (with-render-target *shown*
             (with-shader *view*
               (draw-render-target *cur* 0.0 0.0 (inexact (* 2 GRID-W)) (inexact (* 2 GRID-H)))))

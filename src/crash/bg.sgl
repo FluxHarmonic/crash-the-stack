@@ -86,7 +86,7 @@
           bg-held? bg-agit bg-visit-permille bg-step-key bg-rain bg-kill bg-shown-value
           bg-cell-tones
           hash31 mul31 add31
-          CELL GRID-W GRID-H CELLS RAMP MODES RULES STRIDE
+          CELL GRID-W GRID-H CELLS RAMP MODES GPU-MODES RULES STRIDE
           DOMINANT-CAP
           LIFE-MUTATE LIFE-DRIFT-MAX LIFE-COLLAPSE
           REACT-STEPS REACT-STEPS-MAX REACT-FEED REACT-KILL REACT-DA REACT-DB REACT-DT
@@ -224,11 +224,35 @@
     ;; with REACT-SPOTS spots of the second. The runs are built once here
     ;; and then at every step. rest: the mode, then gpu?.
     (define (bg-new seed . rest)
-      (let* ((mode (if (and (pair? rest) (memq (car rest) MODES)) (car rest) 'reaction))
-             (gpu? (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-             (b ((rule-seed (rule-ref mode)) mode (prng-seed seed)))
+      (let* ((mode (if (and (pair? rest)
+                            (memq (car rest) (append MODES GPU-MODES)))
+                       (car rest)
+                       'reaction))
+             (gpu? (or (and (memq mode GPU-MODES) #t)
+                       (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+             (b (if (memq mode GPU-MODES)
+                    (seed-gpu mode (prng-seed seed))
+                    ((rule-seed (rule-ref mode)) mode (prng-seed seed))))
              (b (bg b seed: seed gpu?: gpu?)))
         (if gpu? b (bg b runs-held: (build-runs b)))))
+
+    ;; GPU-only additions keep MODES/RULES as the CPU oracle's table.
+    ;; Their seed vectors are drawn once by (crash gpu bg). Cyclic starts
+    ;; with independent phases; flow starts with smooth scalar islands.
+    (define GPU-MODES (list 'cyclic 'flow))
+
+    (define (seed-gpu mode rng)
+      (let ((field (make-vector CELLS 0)))
+        (let loop ((i 0) (rng rng))
+          (if (= i CELLS)
+              (bg mode: mode
+                  field: (if (eq? mode 'flow) (smooth (smooth field)) field))
+              (let ((u (draw-unit rng)))
+                (vector-set! field i
+                             (if (eq? mode 'cyclic)
+                                 (exact (floor (* 16 (car u))))
+                                 (car u)))
+                (loop (+ i 1) (cdr u)))))))
 
     (define (seed-life mode rng)
       (let ((field (make-vector CELLS 0.0))
@@ -509,7 +533,10 @@
 
     ;; A cell's stored state as the value the dither maps.
     (define (bg-shown-value b state)
-      ((rule-shown (rule-ref (bg-mode b))) state))
+      (case (bg-mode b)
+        ((cyclic) (/ state 16.0))
+        ((flow) (min 0.94 state))
+        (else ((rule-shown (rule-ref (bg-mode b))) state))))
 
     ;; One tick of the clock: the burst counts down every tick; the field
     ;; steps (and its runs are rebuilt) once every STRIDE ticks, collapsing

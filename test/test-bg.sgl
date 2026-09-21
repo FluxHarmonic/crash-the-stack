@@ -166,3 +166,31 @@
       (assert-equal 1 (bg-steps cpu1))
       (assert-equal 1000 (bg-visit-permille (car (bg-step-agit gpu1 0)) (bg-stride gpu1)))
       (assert-true (> (cells-changed cpu cpu1) (* 0.5 CELLS))))))
+
+;; D55 candidates live only on the GPU: the CPU owns their deterministic
+;; seed and schedule, never an accidental fallback to a different rule.
+(test-group "bg: additional GPU rules"
+  (for-each
+   (lambda (mode)
+     (test (string-append (symbol->string mode) ": deterministic seed and GPU schedule")
+       (let* ((b (bg-new 7 mode))
+              (same (bg-new 7 mode))
+              (other (bg-new 8 mode))
+              (held (bg-tick (bg-with-hold b 3) (* 10 STRIDE)))
+              (severed (bg-tick (bg-with-phase b 'severed) STRIDE)))
+         (assert-equal mode (bg-mode b))
+         (assert-true (bg-gpu? b))
+         (assert-equal (bg-canonical b) (bg-canonical same))
+         (assert-false (equal? (bg-canonical b) (bg-canonical other)))
+         (assert-equal CELLS (vector-length (bg-field b)))
+         (assert-true (every (lambda (v)
+                              (let ((shown (bg-shown-value b v)))
+                                (and (>= shown 0.0) (< shown 1.0))))
+                            (vector->list (bg-field b))))
+         (assert-equal 3 (bg-steps held))
+         (assert-equal (vector->list (bg-field b))
+                       (vector->list (bg-field held)))
+         (assert-equal '() (bg-runs held))
+         (assert-equal (cons AGITATION-SEVERED #t)
+                       (bg-step-agit severed 0)))))
+   GPU-MODES))

@@ -1,0 +1,96 @@
+;;; (crash gpu rules) - Additional field step shaders for D55's deal pool.
+;;; Both use the existing nearest RGBA8 ping-pong and palette-only view.
+;;; CYCLIC: R is the shown ring byte; G is the discrete phase (0..15).
+;;; FLOW: BA is a 16-bit scalar, high byte first; RG is unused.
+
+(define-library (crash gpu rules)
+  (import (crash gpu glsl))
+  (export CYCLIC-SOURCE FLOW-SOURCE)
+
+  (begin
+    (define FIELD-GLSL
+      (string-append
+       "uniform sampler2D iTexChannel0_iSmpChannel0;\n"
+       "uniform vec2 u_resolution;\n"
+       "uniform vec2 u_key;\n"
+       "uniform float u_rate;\n"
+       "in vec2 texUV;\n"
+       "in vec4 iColor;\n"
+       "out vec4 fragColor;\n"
+       "uint hash31(uint x) {\n"
+       "    x ^= x >> 16; x = (x * 0x2c9277u) & 0x7fffffffu;\n"
+       "    x ^= x >> 15; x = (x * 0x3a8f05u) & 0x7fffffffu;\n"
+       "    return x ^ (x >> 16);\n"
+       "}\n"
+       "uint stepkey() { return uint(u_key.x) * 65536u + uint(u_key.y); }\n"
+       "vec4 cell(ivec2 q) {\n"
+       "    ivec2 size = ivec2(u_resolution);\n"
+       "    q = (q % size + size) % size;\n"
+       "    return texelFetch(iTexChannel0_iSmpChannel0, q, 0);\n"
+       "}\n"))
+
+    (define CYCLIC-SOURCE
+      (string-append
+       GLSL-PREFIX
+       FIELD-GLSL
+       "uniform float u_states;\n"
+       "uniform float u_rain;\n"
+       "int phase(ivec2 q) { return int(floor(cell(q).g * 255.0 + 0.5)); }\n"
+       "void main() {\n"
+       "    ivec2 p = ivec2(gl_FragCoord.xy);\n"
+       "    int k = phase(p);\n"
+       "    int next = (k + 1) % int(u_states);\n"
+       "    bool advance = false;\n"
+       "    for (int y = -1; y <= 1; y++) {\n"
+       "        for (int x = -1; x <= 1; x++) {\n"
+       "            if ((x != 0 || y != 0) && phase(p + ivec2(x, y)) == next) advance = true;\n"
+       "        }\n"
+       "    }\n"
+       "    int vy = int(u_resolution.y) - 1 - p.y;\n"
+       "    uint h = hash31((stepkey() + uint(p.x) + uint(vy) * 64u) & 0x7fffffffu);\n"
+       "    // Rare spontaneous advances reopen a stalled front on this small torus.\n"
+       "    if (h % 1000u < uint(u_rain)) advance = true;\n"
+       "    if (advance && (h >> 10) % 1000u < uint(u_rate)) k = next;\n"
+       "    fragColor = vec4(float(k) * (256.0 / u_states) / 255.0, float(k) / 255.0, 0.0, 1.0);\n"
+       "}\n"))
+
+    (define FLOW-SOURCE
+      (string-append
+       GLSL-PREFIX
+       FIELD-GLSL
+       "uniform float u_clock;\n"
+       "uniform float u_phase;\n"
+       "uniform float u_decay;\n"
+       "uniform vec2 u_rain;\n"
+       "uniform float u_wet;\n"
+       "vec2 pack(float x) {\n"
+       "    float s = floor(clamp(x, 0.0, 1.0) * 65535.0 + 0.5);\n"
+       "    float hi = floor(s / 256.0);\n"
+       "    return vec2(hi, s - hi * 256.0) / 255.0;\n"
+       "}\n"
+       "float value(ivec2 q) {\n"
+       "    vec2 c = floor(cell(q).ba * 255.0 + 0.5);\n"
+       "    return (c.x * 256.0 + c.y) / 65535.0;\n"
+       "}\n"
+       "float sampleField(vec2 q) {\n"
+       "    ivec2 p = ivec2(floor(q));\n"
+       "    vec2 f = fract(q);\n"
+       "    return mix(mix(value(p), value(p + ivec2(1, 0)), f.x),\n"
+       "               mix(value(p + ivec2(0, 1)), value(p + ivec2(1, 1)), f.x), f.y);\n"
+       "}\n"
+       "void main() {\n"
+       "    vec2 p = floor(gl_FragCoord.xy);\n"
+       "    vec2 wave = 6.28318530718 / u_resolution;\n"
+       "    vec2 a = p * wave + vec2(u_phase + u_clock * 0.007, -u_clock * 0.009);\n"
+       "    // Curl of a periodic stream function: (d psi/dy, -d psi/dx).\n"
+       "    // The second harmonic breaks up closed orbits without a divergent source.\n"
+       "    vec2 velocity = vec2(sin(a.x) * cos(a.y), -cos(a.x) * sin(a.y) * wave.x / wave.y);\n"
+       "    velocity += 0.35 * vec2(cos(2.0 * a.y + u_clock * 0.004), sin(2.0 * a.x));\n"
+       "    float v = sampleField(p - u_rate * velocity) * u_decay;\n"
+       "    vec2 rain = vec2(u_rain.x, u_resolution.y - 1.0 - u_rain.y);\n"
+       "    vec2 d = abs(p - rain);\n"
+       "    d = min(d, u_resolution - d);\n"
+       "    // Seeded smooth rain feeds moving islands; no random choice uses wall time.\n"
+       "    if (u_wet > 0.5) v = max(v, 0.94 * exp(-dot(d, d) / 7.0));\n"
+       "    fragColor = vec4(0.0, 0.0, pack(v));\n"
+       "}\n"))))
