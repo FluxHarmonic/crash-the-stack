@@ -27,6 +27,8 @@
 //   fragment   a fresh navigation to that URL boots the tracker with the shared
 //              tune: "crash: tune loaded shared"; sharing again yields the same
 //              URL (deflate of identical text), so the round trip is exact
+//   missing    ?tune=nope: one fetch, one "crash: tune-unavailable" line and no more
+//              (the failure line never re-enters the fetch), the tune refused
 //   door       the game page at /?tracker=spy is just the game: it boots (its
 //              literal-check line) and never says "crash: tracker open" (the
 //              game's wasm carries no tracker; /tracker/ is the one entry)
@@ -61,7 +63,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
 const results = [];
-const planned = ["imports", "sizes", "open", "render", "play", "focus", "edit", "share", "fragment", "door", "menu", "worker", "bar", "console"];
+const planned = ["imports", "sizes", "open", "render", "play", "focus", "edit", "share", "fragment", "missing", "door", "menu", "worker", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -356,6 +358,25 @@ if (firstURL) {
   }
 } else fail("fragment", "no share URL to test");
 
+// ---- missing ------------------------------------------------------------------
+// A bundled name that does not exist (reviewer, 2026-09-21: the page once
+// re-fed its own failure line into the fetch and looped on the 404 forever):
+// one fetch line, one unavailable line, the count still after 3 s, the tune
+// unreadable and the tracker up on the blank tune.
+{
+  const from = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace&tune=nope` });
+  const opened = await waitLine(/^crash: tracker open nope$/, from, 40000);
+  const gone = await waitLine(/^crash: tune-unavailable nope /, from, 10000);
+  await sleep(3000);
+  const lines = consoleLines.slice(from);
+  const fetches = lines.filter((l) => /^crash: tune-fetch /.test(l)).length;
+  const fails = lines.filter((l) => /^crash: tune-unavailable /.test(l)).length;
+  const unreadable = lines.some((l) => /^crash: tune unreadable/.test(l));
+  if (opened && gone && fetches === 1 && fails === 1 && unreadable) pass("missing", `one fetch, one unavailable line, nothing more in 3 s; the tune refused (${lines.length} lines)`);
+  else fail("missing", `opened ${!!opened}, fetch lines ${fetches}, unavailable lines ${fails}, unreadable ${unreadable}`);
+}
+
 // ---- door ---------------------------------------------------------------------
 // David (2026-09-21): the game page carries no tracker code and honors no
 // ?tracker link; /tracker/ is the one entry. So /?tracker=spy is the game.
@@ -473,8 +494,9 @@ if (PHONE) {
 } else pass("bar", "desktop: no bar (the keys are the controls)");
 
 // ---- console ------------------------------------------------------------------
-if (consoleErrors.length === 0) pass("console", "no errors");
-else fail("console", consoleErrors.join(" | "));
+const errors = consoleErrors.filter((e) => !/tunes\/nope\.cts/.test(e));   // the missing leg's 404 is the point of that leg
+if (errors.length === 0) pass("console", `no errors (${consoleErrors.length - errors.length} expected 404 of the missing leg)`);
+else fail("console", errors.join(" | "));
 
 const failed = results.filter((r) => r[1] === "FAIL");
 if (failed.length) dump();

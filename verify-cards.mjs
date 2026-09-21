@@ -355,7 +355,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         else {
           free2 = parseMenu(freeLine.m[1]).entries;
           const rows = Object.keys(free2).map((k) => k.split("=")[0]);
-          if (rows.join(" ") !== "stack cards daily-stack daily-cards code scores version back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;
+          if (rows.join(" ") !== "stack cards daily-stack daily-cards code scores tracker version back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;   // TRACKER: P3b, a link the page follows
           else {
             // 32 px per row: the row under BACK is empty (above the band)
             await sleep(300);
