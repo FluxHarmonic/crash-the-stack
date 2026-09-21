@@ -1816,7 +1816,7 @@ async function downTo(order, id, at = 0) {
     await press("Escape");
     const p = await menuOn("pause", m0);
     if (!p) return { error: "Escape on the deal did not open the table's overlay" };
-    if (p.order.join(" ") !== "resume game-settings settings share back-to-menu") return { error: `DEFRAG's overlay rows are ${p.order.join(" ")}` };
+    if (p.order.join(" ") !== "resume game-settings settings back-to-menu") return { error: `DEFRAG's overlay rows are ${p.order.join(" ")}` };
     m0 = consoleLines.length;
     await downTo(p.order, "game-settings");
     await press("Enter");
@@ -1914,7 +1914,7 @@ async function downTo(order, id, at = 0) {
     const p = on && await menuOn("pause", m0);
     if (!on) detail = "Escape on the board said no \"crash: pause on\"";
     else if (!p) detail = "no overlay rows were said";
-    else if (p.order.join(" ") !== "resume settings share back-to-menu") detail = `the stack's overlay rows are ${p.order.join(" ")}`;
+    else if (p.order.join(" ") !== "resume settings back-to-menu") detail = `the stack's overlay rows are ${p.order.join(" ")}`;
     else {
       await sleep(2000);
       m0 = consoleLines.length;
@@ -1959,7 +1959,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("pause", detail);
-  else pass("pause", `Escape opened the stack's overlay (resume settings share back-to-menu); the clock held at ${on.m[1]} ticks over 2 s and ran on after RESUME (${on2.m[1]} at the button's second open); BACK TO MENU landed on CONTINUE, which booted the same board`);
+  else pass("pause", `Escape opened the stack's overlay (resume settings back-to-menu); the clock held at ${on.m[1]} ticks over 2 s and ran on after RESUME (${on2.m[1]} at the button's second open); BACK TO MENU landed on CONTINUE, which booted the same board`);
 }
 
 // run (D51, David 2026-09-21): a JACK IN layer's overlay carries DISCONNECT,
@@ -2003,7 +2003,7 @@ async function downTo(order, id, at = 0) {
     await press("Escape");
     const p = await menuOn("pause", m0);
     if (!p) detail = "no overlay on the run's layer";
-    else if (p.order.join(" ") !== "resume settings share disconnect") detail = `the run layer's overlay rows are ${p.order.join(" ")}`;
+    else if (p.order.join(" ") !== "resume settings disconnect") detail = `the run layer's overlay rows are ${p.order.join(" ")}`;
     else {
       m0 = consoleLines.length;
       await downTo(p.order, "disconnect");
@@ -2086,11 +2086,11 @@ async function downTo(order, id, at = 0) {
     await sleep(300);
     let m0 = consoleLines.length;
     const top = await toMenu("Escape");
-    const overlayRow = top && consoleLines.slice(m0, top.index).find((l) => /^crash: menu pause /.test(l));
-    const shareOk = overlayRow && overlayRow.includes(`share=${code.slice(0, 5)}-${code.slice(5)}`);
-    const line = top && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, m0, 2000);
+    const overlayCode = top && consoleLines.slice(m0, top.index).find((l) => /^crash: menu-code /.test(l));
+    const shareOk = overlayCode && overlayCode.includes(`${code.slice(0, 5)}-${code.slice(5)}`);
+    const line = top && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, top.index, 2000);
     if (!top) detail = toMenuDetail;
-    else if (!shareOk) detail = `the overlay's CODE row did not show ${code}: ${overlayRow}`;
+    else if (!shareOk) detail = `the overlay's code line did not show ${code}: ${overlayCode}`;
     else if (!line) detail = "the pause menu said no code line for the live deal";
     else if (line.m[1] !== `${code.slice(0, 5)}-${code.slice(5)}`) detail = `the pause menu's code is ${line.m[1]}, the deal's ${code}`;
     else if (!EXPECT_NO_SELECTION) {

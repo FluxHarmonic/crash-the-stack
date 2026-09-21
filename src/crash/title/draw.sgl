@@ -80,6 +80,8 @@
     (define *prepared* #f)
     (define (menu-prepare! m)
       (set! *prepared* #t)
+      (when (and (eq? (menu-screen m) 'credits) (menu-live? m))
+        (crawl-prepare! m 640 400))
       (when *bake*
         (when (menu-live? m)
           (items-bake! (if (eq? (menu-screen m) 'top)
@@ -535,10 +537,11 @@
       ;; the heading, in the ramp, where the logo was
       (let* ((heading (or (menu-heading m) ""))
              (tw (* ITEM-CELL (block-text-width heading)))
-             (tx (quotient (- vw tw) 2)))
+             (tx (quotient (- vw tw) 2))
+             (hy (+ HEADING-Y (menu-y-offset m))))
         (if (and *bake* *items-tex* (label-index heading))
-            (draw-item-row (label-index heading) 'ramp tx HEADING-Y tw)
-            (draw-block-text heading tx HEADING-Y ITEM-CELL 'ramp)))
+            (draw-item-row (label-index heading) 'ramp tx hy tw)
+            (draw-block-text heading tx hy ITEM-CELL 'ramp)))
       ;; the rows
       (let loop ((ids (menu-entries m)) (i 0))
         (unless (null? ids)
@@ -565,7 +568,7 @@
           (color! C-BAR-C)
           (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
           ;; the crawl's ground shows the backdrop through it (the band's treatment)
-          (if (eq? (menu-screen m) 'credits) (color-alpha! C-BG BAND-ALPHA) (color! C-BG))
+          (if (eq? (menu-screen m) 'credits) (color-alpha! C-BG PANEL-ALPHA) (color! C-BG))
           (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- panel-bottom 1 (- TEXT-Y 8)))))
       (case (menu-screen m)
         ((credits) (draw-credits m vw vh))
@@ -615,7 +618,6 @@
     ;; from above the heading to under the last row and its note; the
     ;; heading and rows as any sub-screen draws them. bottom (the HUD
     ;; bar's top) caps the panel.
-    (define OVERLAY-PAD 12)
     (define (draw-overlay m vw vh bottom)
       (let* ((n (length (menu-entries m)))
              (last (if (> n 0) (menu-entry-rect m (- n 1) vw vh) (list 0 SUB-ENTRIES-Y ENTRY-W 0)))
@@ -625,20 +627,30 @@
                             (else (loop (cdr ids))))))
              (w (+ (if wide? VALUE-ROW-W ENTRY-W) (* 2 OVERLAY-PAD)))
              (x (quotient (- vw w) 2))
-             (top (- HEADING-Y OVERLAY-PAD))
+             (top (+ (- HEADING-Y OVERLAY-PAD) (menu-y-offset m)))
              (note? (let loop ((ids (menu-entries m)))
                       (cond ((null? ids) #f)
                             ((and (not (menu-row-value m (car ids))) (menu-row-note m (car ids))) #t)
                             (else (loop (cdr ids))))))
-             (content-bottom (if (memq (menu-screen m) TEXT-SCREENS)
-                                 (+ (cadr last) (cadddr last))
-                                 (+ (cadr last) (cadddr last) (if note? 10 0))))
+             (code (code-line-rect m vw vh))
+             (content-bottom (cond ((memq (menu-screen m) TEXT-SCREENS) (+ (cadr last) (cadddr last)))
+                                   (code (+ (cadr code) (cadddr code)))
+                                   (else (+ (cadr last) (cadddr last) (if note? 10 0)))))
              (bot (min bottom (+ content-bottom OVERLAY-PAD))))
+        ;; the panel shows the paused table through it (David, 2026-09-21)
         (color! C-BAR-C)
         (draw-filled-rect x top w (- bot top))
-        (color! C-BG)
+        (color-alpha! C-BG PANEL-ALPHA)
         (draw-filled-rect (+ x 1) (+ top 1) (- w 2) (- bot top 2))
-        (draw-sub-screen m vw vh)))
+        (draw-sub-screen m vw vh)
+        ;; the live board's code under the rows, small, COPY by a tap on it (the web)
+        (when code
+          (let* ((line (string-append "CODE " (code-display (menu-code-line m)) (if (menu-copy m) "  [COPY]" "")))
+                 (cx (quotient (- vw (text-width line 1)) 2)))
+            (color! C-STATIC-B)
+            (text! line (+ cx 1) (+ (cadr code) 5) 1)
+            (color! C-LABEL-LIT)
+            (text! line cx (+ (cadr code) 4) 1)))))
 
     ;; --- the text screens ------------------------------------------------------------
 
@@ -652,64 +664,87 @@
     ;; The credits (D44): the page's lines, headings lit; the page
     ;; indicator under them.
     ;; The CREDITS crawl (D44 as amended 2026-09-21): the rows climb from
-    ;; under the panel's bottom edge to its top at the crawl's pace; a
-    ;; line in the 5x7 at scale 2 centered; a heading in the block
-    ;; alphabet slides in from the right over its first SLIDE-PX of
-    ;; travel with the logo's glitch (a jitter from the frame and the
-    ;; row, in the flat style) and settles centered in the ramp. Rows
-    ;; over the panel's edges are drawn and the edges painted back over
-    ;; them (there is no clip).
+    ;; under the box's bottom edge to its top at the crawl's pace; a line
+    ;; in the 5x7 at scale 2 centered; a section title in the block
+    ;; alphabet enters flat, and once its row is wholly inside the box it
+    ;; slides from the right to the center on a time-based ease (its
+    ;; travel is the crawl's, so no frame counter and no jitter: David's
+    ;; read of 2026-09-21, "wiggling back and forth as it appears") and
+    ;; settles in the ramp. The rows are drawn into a render target the
+    ;; size of the box by crawl-prepare! (from menu-prepare!, before the
+    ;; frame's passes), which clips them at the box's edges; the frame
+    ;; blits it over the translucent ground, so the backdrop shows through
+    ;; the box and a row never shows outside it.
     (define CRAWL-TOP TEXT-Y)
-    (define CRAWL-BOTTOM-INSET 8)   ; the panel runs to the bottom: the (C) band is off under the crawl
-    (define SLIDE-PX 60.0)
-    (define (draw-credits m vw vh)
-      (let* ((bottom (- vh CRAWL-BOTTOM-INSET))
-             (offset (menu-scroll m))
-             (frames (menu-frames m)))
-        (for-each
-         (lambda (row)
-           (let* ((kind (car row))
-                  (text (cadr row))
-                  (y (- (+ bottom (caddr row)) offset))
-                  (h (if (eq? kind 'heading) HEADING-H LINE-H)))
-             (when (and (< y bottom) (> (+ y h) CRAWL-TOP))
-               (if (eq? kind 'heading)
-                   (let* ((tw (* ITEM-CELL (block-text-width text)))
-                          (cx (quotient (- vw tw) 2))
-                          (t (min 1.0 (/ (- bottom y) SLIDE-PX)))
-                          (ease (- 1.0 (* (- 1.0 t) (- 1.0 t))))
-                          ;; the glitch on the way in: one cell either way, changing every 80 ms
-                          ;; (time, not the frame count: the same at 60 and 120 Hz, and never a
-                          ;; jump of two cells a frame, David's read of 2026-09-21)
-                          (jitter (if (< t 1.0) (* ITEM-CELL (- (modulo (+ (exact (floor (/ (menu-ms m) 80.0))) (caddr row)) 3) 1)) 0))
-                          (x (+ cx jitter (exact (round (* (- 1.0 ease) (- vw cx))))))
-                          (style (if (< t 1.0) 'flat 'ramp))
-                          (i (label-index text)))
-                     ;; from the baked sheet once it is there (menu-prepare! bakes
-                     ;; the titles with the screen's labels), else cell by cell
-                     (if (and *bake* i *items-tex*)
-                         (draw-item-row i style x (+ y 4) tw)
-                         (draw-block-text text x (+ y 4) ITEM-CELL style)))
-                   (begin
-                     (color! C-TEXT)
-                     (text! text (quotient (- vw (text-width text TEXT-SCALE)) 2) y TEXT-SCALE))))))
-         (menu-crawl-rows m))
-        ;; the edges back over the rows crossing them: the heading's strip and the bottom rule
-        ;; (opaque: a row half under a translucent strip would show through it)
-        (color! C-BG)
-        (draw-filled-rect 9 9 (- vw 18) (- CRAWL-TOP 9 2))
-        (color! C-BAR-C)
-        (draw-filled-rect 8 bottom (- vw 16) 1)
-        (color! C-BG)
-        (draw-filled-rect 9 (+ bottom 1) (- vw 18) (- vh bottom 1))
-        (let* ((heading "CREDITS")
-               (tw (* ITEM-CELL (block-text-width heading)))
-               (i (label-index heading)))
-          (if (and *bake* i *items-tex*)
-              (draw-item-row i 'ramp (quotient (- vw tw) 2) HEADING-Y tw)
-              (draw-block-text heading (quotient (- vw tw) 2) HEADING-Y ITEM-CELL 'ramp)))))
+    (define CRAWL-BOTTOM-INSET 8)
+    (define CRAWL-X 9)
+    (define SLIDE-PX 80.0)
+    (define *crawl-rt* #f)
+    (define *crawl-tex* #f)
+    (define *crawl-w* 0)
+    (define *crawl-h* 0)
+    (define (crawl-prepare! m vw vh)
+      (let* ((w (- vw (* 2 CRAWL-X)))
+             (h (- vh CRAWL-BOTTOM-INSET CRAWL-TOP))
+             (rows (menu-crawl-rows m))
+             (offset (menu-scroll m)))
+        (unless (and *crawl-rt* (= w *crawl-w*) (= h *crawl-h*))
+          (when *crawl-rt* (render-target-free! *crawl-rt*))
+          (set! *crawl-rt* (make-render-target (* BAKE-SCALE w) (* BAKE-SCALE h) 'nearest))
+          (set! *crawl-tex* (render-target->texture *crawl-rt*))
+          (set! *crawl-w* w)
+          (set! *crawl-h* h))
+        (with-render-target *crawl-rt*
+          (set-blend-mode 'normal)
+          (for-each
+           (lambda (row)
+             (let* ((kind (car row))
+                    (text (cadr row))
+                    (y (* BAKE-SCALE (- (+ h (caddr row)) offset)))   ; the row's top in the target, scaled
+                    (rh (* BAKE-SCALE (if (eq? kind 'heading) HEADING-H LINE-H))))
+               (when (and (< y (* BAKE-SCALE h)) (> (+ y rh) 0))
+                 (if (eq? kind 'heading)
+                     (let* ((cell (* BAKE-SCALE ITEM-CELL))
+                            (tw (* cell (block-text-width text)))
+                            (cx (quotient (- (* BAKE-SCALE w) tw) 2))
+                            ;; the slide begins once the row is wholly inside the box
+                            (inside (- (* BAKE-SCALE h) (+ y rh)))
+                            (t (max 0.0 (min 1.0 (/ inside (* BAKE-SCALE SLIDE-PX)))))
+                            (ease (- 1.0 (* (- 1.0 t) (- 1.0 t))))
+                            (x (+ cx (exact (round (* (- 1.0 ease) (- (* BAKE-SCALE w) cx))))))
+                            (style (if (< t 1.0) 'flat 'ramp))
+                            (i (label-index text)))
+                       (if (and *bake* i *items-tex*)
+                           (draw-item-row-scaled i style x (+ y (* BAKE-SCALE 4)) (* ITEM-CELL (block-text-width text)) BAKE-SCALE)
+                           (draw-block-text text x (+ y (* BAKE-SCALE 4)) cell style)))
+                     (begin
+                       (color! C-TEXT)
+                       (text! text
+                              (quotient (- (* BAKE-SCALE w) (text-width text (* BAKE-SCALE TEXT-SCALE))) 2)
+                              y
+                              (* BAKE-SCALE TEXT-SCALE)))))))
+           rows))
+        (set-blend-mode 'normal)))
 
-    ;; The build's commit for the version line: the shells set it.
+    ;; A sheet row drawn at scale (the crawl's target is BAKE-SCALE times the box).
+    (define (draw-item-row-scaled index style tx ty tw scale)
+      (let* ((sheet (list-ref *items-sheets* (quotient index SHEET-LABELS)))
+             (row (modulo index SHEET-LABELS))
+             (cy (* ROW-PITCH (+ (* 2 row) (if (eq? style 'ramp) 1 0))))
+             (cw (+ tw ITEM-CELL)))
+        (color! C-TEX-PLAIN)
+        (draw-texture-region (cdr sheet) tx ty (* scale cw) (* scale ITEM-H)
+                             0 (* BAKE-SCALE (- *items-h* cy)) (* BAKE-SCALE cw) (- (* BAKE-SCALE ITEM-H)))))
+
+    (define (draw-credits m vw vh)
+      (let ((w (- vw (* 2 CRAWL-X)))
+            (h (- vh CRAWL-BOTTOM-INSET CRAWL-TOP)))
+        (when *crawl-tex*
+          (color! C-TEX-PLAIN)
+          (draw-texture-region *crawl-tex* CRAWL-X CRAWL-TOP w h
+                               0 (* BAKE-SCALE h) (* BAKE-SCALE w) (- (* BAKE-SCALE h))))))
+
+    ;; The build's commit for the band's stamp: the shells set it.
     (define *stamp* "unversioned")
     (define (title-stamp! text) (set! *stamp* text))
 
@@ -851,7 +886,11 @@
     ;; fade in the game is since P3 (frame-begin! sets normal blending);
     ;; the palette gate is over the assets, not the composed frame.
     (define BAND-H 12)
-    (define BAND-ALPHA 0.8)
+    ;; one translucency for the band, the crawl's box and the overlay's
+    ;; panel: David's read of 2026-09-21 wanted the backdrop visible
+    ;; through them (at 0.8 over the dark art it read as opaque)
+    (define PANEL-ALPHA 0.65)
+    (define BAND-ALPHA PANEL-ALPHA)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)
       (let ((top (- vh BAND-H))
