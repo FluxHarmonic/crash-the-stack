@@ -100,3 +100,25 @@ section maps without altering the accepted pilot composer.
 See [OPENING-PAIR-I.md](../album/OPENING-PAIR-I.md) for the musical plan, section
 landmarks and verification results. No scripts read Telegram credentials during
 composition, rendering or mastering; sending remains a separate explicit step.
+
+## Signals pair: Closed Loop and Shadow Protocol
+
+```sh
+sigil docs/music/tools/album-compose-signals.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track closed-loop --track shadow-protocol --output /absolute/external/signals-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track closed-loop --track shadow-protocol --output /absolute/external/signals-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track closed-loop --gain 3 --output /absolute/external/signals-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track shadow-protocol --gain 2.5 --output /absolute/external/signals-pair-i
+```
+
+Set MOTIF_BIN or supply --motif for synthesis and compilation. The default batch
+selection remains Cold Boot and Relay Ghost; select this pair explicitly. The
+six-title audit now accounts for Shadow Protocol's native speed-6, sixteen-row
+bars. Its deliberate sixteenth syncopation and lead slides remain intact. Shared
+section maps derive duration from speed/tempo and bar length from the meter;
+an absent meter uses the native default (4 4). Use `phrase-rows` when authoring
+on that clock; the original `phrase` convenience remains thirty-two rows/bar.
+
+See [SIGNALS-PAIR-I.md](../album/SIGNALS-PAIR-I.md) for arrangement landmarks and
+checks. The new composer and the prior opening composer both reproduce their
+scores and maps byte-for-byte after the shared clock support was added.

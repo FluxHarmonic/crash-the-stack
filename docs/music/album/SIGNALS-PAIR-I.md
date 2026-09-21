@@ -72,3 +72,25 @@ Audio, snapshots, hashes, exact command manifests and raw measurements belong in
 ~/Ops/artifacts/crash-the-stack-album/signals-pair-i/. The renderer preserves
 native WAVs and exports full provisional WAV/FLAC/OGG files. The existing native
 export remains 16-bit; these are not high-resolution release masters.
+
+## Provisional mastering and render checks
+
+| Track | Native LUFS-I | Gain | WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Closed Loop | -20.1 | +3 dB | -17.1 | -17.0 | -1.7 dBTP | 3.5 LU |
+| Shadow Protocol | -20.8 | +2.5 dB | -18.3 | -18.2 | -1.4 dBTP | 11.8 LU |
+
+The pilot's four-times-oversampled limiter remains the processing recipe, with
+nominal -1.5 dB ceiling, 5 ms attack, 80 ms release and makeup disabled. Closed
+Loop sits below the heavy opening titles; Shadow Protocol remains quieter and
+closer to Quiet Array's album level. Native loudness ranges were 3.5 and 11.8 LU
+respectively, unchanged at reported precision after mastering. No new EQ,
+widening or reverb is added.
+
+Both new scores and section maps reproduce byte-for-byte from the composer.
+Native/master WAV, FLAC and OGG durations match their maps within one sample;
+master WAV and decoded FLAC PCM match exactly. Final master seconds peak at
+-84.3 dBFS and -90.3 dBFS respectively. WAV and decoded OGG true peaks pass the
+-1 dBTP delivery ceiling. These checks establish technical consistency, not
+listening approval. This pair brings the album to six full arrangements out
+of fifteen, pending David's feedback on the new pieces.

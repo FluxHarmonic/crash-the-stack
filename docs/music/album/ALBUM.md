@@ -12,8 +12,8 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 | 1 | Black Glass | Composition liked; album-level trial promising | 4:24 actual |
 | 2 | Cold Boot | Opening pair I ready for listening | 3:35 actual |
 | 3 | Relay Ghost | Opening pair I ready for listening | 3:27 actual |
-| 4 | Closed Loop | Planned | 3:15 |
-| 5 | Shadow Protocol | Planned | 3:45 |
+| 4 | Closed Loop | Signals pair I ready for listening | 3:16 actual |
+| 5 | Shadow Protocol | Signals pair I ready for listening | 3:50 actual |
 | 6 | Blind Spot | Planned | 3:00 |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
 | 8 | Sector Drift | Planned | 3:30 |

@@ -64,3 +64,13 @@ remain intact; preserve Cold Boot's integrated fill and Relay Ghost's complete
 returning bell phrases. See OPENING-PAIR-I.md. The pilot mastering recipe remains
 provisional; adjust gain per track from measured native renders, not by forcing
 all fifteen titles to one loudness. No game backport is proposed.
+
+## Signals pair I
+
+While listening to the opening pair, David authorized Closed Loop and Shadow
+Protocol. Six of fifteen album arrangements now exist. See SIGNALS-PAIR-I.md for
+section landmarks and measured provisional levels. Preserve Closed Loop's
+snap-click identity and Shadow Protocol's delicate pad/vibes and subtle tension.
+Shadow uses the older speed-6, sixteen-row bar clock; its off-eighth bass/lead
+notes and slides are intentional. The shared tools now account for that clock
+without changing the prior scores or maps. No game backport is proposed.
