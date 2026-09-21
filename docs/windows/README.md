@@ -11,8 +11,15 @@ went, and what nobody has tested yet.
 
     scripts/dev sigil build --config windows-amd64
 
-Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,864,598 bytes,
-`PE32+ executable for MS Windows 6.00 (GUI), x86-64`).
+Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,898,738 bytes on
+sigil 0.22.3, sha256 `96a7717b08687c36822b507fa251411bf7f4d39fa6ef994207d6564d221f6017`;
+`PE32+ executable for MS Windows 6.00 (GUI), x86-64`). The first builds
+were on 0.22.2 (44,071,862 bytes console-subsystem, 44,864,598 GUI); the
+0.22.3 relock moved only the ten sigil monorepo entries of `sigil.lock`
+(motif and sigil-dsp held at 0.6.2 and 0.3.2), the import list is
+byte-identical across the two runtimes, and the Wine drive below was
+repeated on the 0.22.3 exe (STACK: a mouse match 144 to 142; DEFRAG: the
+ace and a pull; the tracker).
 
 The config in `package.sgl` mirrors `release` (native backend, optimize 2,
 bundle) with `toolchain: 'zig`, `target: "x86_64-windows-gnu"`, `static?:
