@@ -139,3 +139,24 @@ use the speed-3 grid, with no off-sixteenth rhythmic attacks. The melodic signal
 are checked on eighths. See [AIR-PAIR-I.md](../album/AIR-PAIR-I.md) for arrangement
 landmarks and technical results. These additions only extend the registry;
 previous scores and mastering settings are unchanged.
+
+## Pocket pair: Dirty Cache and Basement Circuit
+
+```sh
+sigil docs/music/tools/album-compose-pocket.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track dirty-cache --track basement-circuit --output /absolute/external/pocket-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track dirty-cache --track basement-circuit --output /absolute/external/pocket-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track dirty-cache --gain -1.5 --output /absolute/external/pocket-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track basement-circuit --gain 0 --output /absolute/external/pocket-pair-i
+```
+
+Set MOTIF_BIN or supply --motif for compilation/synthesis. Explicitly select this
+pair; batch defaults remain Cold Boot and Relay Ghost. Dirty Cache joins Shadow
+Protocol's speed-6 clock policy, retaining legitimate sixteenth syncopation.
+Basement Circuit retains four intentional thirty-second roll hits in album
+pattern 7 and its acid portamento; only its bell is subject to the eighth-grid
+check. Dirty Cache's on-beat plucks receive that check on channel 7.
+
+See [POCKET-PAIR-I.md](../album/POCKET-PAIR-I.md) for full section landmarks and
+measurements. Both scores/maps regenerate exactly, and both banks/buses match
+the accepted game sources. No new Sigil shell or synth feature was required.

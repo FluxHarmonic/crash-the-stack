@@ -17,8 +17,8 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 | 6 | Blind Spot | Air pair I ready for listening | 3:15 actual |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
 | 8 | Sector Drift | Air pair I ready for listening | 3:36 actual |
-| 9 | Dirty Cache | Planned | 3:45 |
-| 10 | Basement Circuit | Planned | 3:45 |
+| 9 | Dirty Cache | Pocket pair I ready for listening | 3:43 actual |
+| 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
 | 11 | Dead Sector | Planned | 3:00 |
 | 12 | Obsidian Index | Planned | 4:00 |
 | 13 | Breach Vector | Planned | 3:30 |

@@ -87,3 +87,25 @@ on the eighth grid. Acid slides retain their native non-retriggering behavior.
 Audio, snapshots, command manifests, hashes and raw measurements belong in
 ~/Ops/artifacts/crash-the-stack-album/pocket-pair-i/. Native WAV export remains
 16-bit; these are provisional album-level auditions, not release masters.
+
+## Provisional mastering and full render results
+
+| Track | Native LUFS-I | Gain | WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Dirty Cache | -14.8 | -1.5 dB | -16.4 | -16.3 | -2.3 dBTP | 3.3 LU |
+| Basement Circuit | -16.2 | 0 dB | -16.2 | -16.2 | -2.4 dBTP | 4.6 LU |
+
+Dirty Cache's native level exceeds the heavier opening titles, so attenuation
+places it near Relay Ghost rather than pushing its bass forward. Basement's
+native level already suits this part of the sequence and receives no added gain.
+Both pass through the provisional pilot processing chain with no added EQ,
+reverb or widening. Native loudness ranges are 3.4 and 4.6 LU; the resulting
+3.3 and 4.6 LU retain the existing character at reported precision. Do not
+mistake the low LRA of a steady groove for heavy new mastering compression.
+
+All four native/master WAV/FLAC/OGG durations match the score maps within one
+sample. Master WAV and decoded FLAC PCM match exactly. Final master seconds peak
+at -90.3 dBFS for Dirty Cache and -84.3 dBFS for Basement; both WAVs and decoded
+OGGs pass the -1 dBTP ceiling. Technical checks establish consistency, not
+musical acceptance. Ten of fifteen full arrangements now exist; feedback on
+this pair and the preceding air pair remains open.

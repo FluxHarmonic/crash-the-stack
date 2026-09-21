@@ -84,3 +84,15 @@ arrangements. See AIR-PAIR-I.md. Blind Spot retains its complete spacious body
 with a new entrance and ending. Sector Drift adds a brief bass-and-dust break,
 a full calm reprise and a G-minor landing. Both retain their accepted banks,
 buses and onset grids. No game backport is proposed.
+
+## Pocket pair I
+
+David requested Dirty Cache and Basement Circuit while listening to the air pair;
+feedback on Blind Spot and Sector Drift remains open. Ten of fifteen full album
+arrangements now exist. See POCKET-PAIR-I.md for the new forms and checks.
+Preserve Dirty Cache's on-beat quiet pluck, corrected harmonic return and sparse
+calm texture; Basement retains Signal Kit IV's integrated drums, reduced swell
+and acid accents. The native clocks, slides and intentional fills are retained.
+No game backport is proposed. Dirty Cache's already strong native render calls
+for attenuation, while Basement's native level fits the provisional sequence
+without added gain. Keep per-title decisions rather than a universal target.
