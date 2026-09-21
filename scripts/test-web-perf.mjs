@@ -15,6 +15,14 @@ const context = {
   performance: { now: () => now },
   requestAnimationFrame: cb => queued.push(cb),
   updates: { app: { dispatch() {} } },
+  URLSearchParams, location: { search: '?ms' },
+  AudioContext: class {
+    state = 'running'; sampleRate = 48000;
+    createScriptProcessor() {
+      return { bufferSize: 2048, addEventListener(name, callback) { this.fire = callback; } };
+    }
+  },
+  AudioWorkletNode: class {},
 };
 context.window = context;
 vm.createContext(context);
@@ -43,6 +51,19 @@ assert.match(context.crashPageStats(), /page callback mean 7\.0/);
 assert.match(context.crashPageStats(), /raf-interval mean 16\.0/);
 assert.match(context.crashPageStats(), /page callbacks over 16\.7 ms 0 of 1/);
 console.log('PASS frame accounting: shared callbacks aggregate; reset excludes the old frame and its remaining callbacks');
+
+const outputContext = new context.AudioContext();
+const outputNode = outputContext.createScriptProcessor();
+now = 3000; outputNode.fire();
+now = 3043; outputNode.fire();
+assert.match(context.crashPageStats(), /audio node scriptprocessor state running rate 48000 block 2048/);
+assert.match(context.crashPageStats(), /audio-callback-gap mean 43.0/);
+vm.runInContext('resetPageStats()', context);
+now = 6000; outputNode.fire();
+assert.match(context.crashPageStats(), /audio-callback-gap \(no samples\)/);
+new context.AudioWorkletNode(outputContext, 'test');
+assert.match(context.crashPageStats(), /audio node worklet state running/);
+console.log('PASS audio output observations: actual node and state, callback gaps, reset excludes the old interval');
 
 const pcm = Float32Array.from({ length: 700001 }, (_, i) => Math.sin(i) * 1.2);
 const expected = Buffer.alloc(pcm.length * 2);

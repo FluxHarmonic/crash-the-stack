@@ -64,7 +64,16 @@ node scripts/verify-web-perf.mjs build/web --port 18081 --cdp 19481 --output /tm
 node scripts/verify-web-perf.mjs build/web --port 18081 --cdp 19481 --rate 4 --output /tmp/perf-final-4x.json
 ```
 
-## Browser measurements
+## Browser measurements (audio device was suspended)
+
+Correction after David reported tap-time pops: the original browser arm
+asserted the game's `ambient start` log but did not resume its AudioContext.
+That is insufficient to validate continuous output. The measurements below
+still describe loading/dispatch and reset behavior, but not active playback
+performance or audible quality. The revised arm resumes the device, asserts
+its running state and output backend, and offers a repeated selection and
+pair-removal probe. It resumes after loading to isolate interaction; it does
+not validate the complete startup audio sequence.
 
 Final application `a20578e20985` builds successfully and passes browser
 acceptance at normal speed and with fourfold CPU throttling. All three track
@@ -101,6 +110,79 @@ needed 30 seconds to start the theme and 75 seconds for all tracks under
 minute for all tracks. The final worker path takes 17.2 seconds for all three
 in the final 4× run, 6.3 seconds at normal speed. None of those intermediate
 candidates replaced the phone preview.
+
+## Pixel 2 XL follow-up
+
+David supplied a FLOW capture from `a20578e20985`, `window reset-1`, with
+228 samples over 6.9 seconds at DPR 2, stride 3, two reaction steps, atlas
+and phosphor on. [The complete report](phone-flow-reset.txt) preserves the
+device evidence for integration.
+
+| Measurement | Phone result |
+| --- | ---: |
+| Frame mean / p95 / max, ms | 30.2 / 34 / 34 |
+| Page interval mean / p95 / max, ms | 30.3 / 34.6 / 40.2 |
+| Page callback mean / p95 / max, ms | 29.3 / 33.4 / 39.0 |
+| Draw mean / p95, ms | 23.9 / 27 |
+| Field step / presentation mean, ms | 1.2 / 1.2 |
+| Audio upload mean / max, ms | 6.1 / 8.3 |
+| Audio publication max, ms | 0.8 |
+| Frames over 50 ms | 0 / 228 |
+
+The frame counters average roughly 33 frames per second. Drawing dominates
+the measured tick; the field step and presentation are small portions of
+that drawing cost, not additional costs to sum on top. The page agrees
+closely with the game's mean and sample count. There was one 11 ms GC pause.
+
+The window includes the tail of music loading: upload and publication
+samples survived this reset, and all three tracks were settled by capture
+time. David subsequently reported frequent audible pops, especially when
+tapping and triggering game logic, and said this was a regression from the
+previous day. The frame counters do not establish smooth or correct audio.
+This does not measure the complete startup, establish how long music took to
+start, or prove that the separate boot stall is fixed. The earlier FLOW
+report included startup, so its 59.9 ms mean is not a comparable baseline
+for claiming a twofold gameplay improvement. One further reset now that
+loading is finished can isolate settled gameplay; REACTION remains a useful
+second field comparison. No rendering or audio behavior was changed in
+response to this capture.
+
+## Tap-time pops: investigation remains open
+
+The user's audible regression report takes precedence over the quiet-window
+frame summary. The corrected browser arm found the original AudioContext was
+suspended (`0`) and now explicitly resumes it and asserts running (`1`).
+It observes which output node is created, samples ScriptProcessor callback
+gaps, and can exercise both the HTTP-style fallback and the isolated worklet
+path. The arm disables service workers to isolate audio; the actual HTTP VPN
+preview has no service worker. PWA behavior remains the general browser
+arm's responsibility.
+
+With the `a20578e20985` application, the 4× fallback interaction probe passed
+repeated selection and pair removal, with no runtime/GL errors. Its audio
+node used 2048 frames at 48000 Hz (42.7 ms per output block). Audio callbacks
+were separated by as much as 105.8 ms during the taps, yet the ring starvation
+counter remained zero. Ring occupancy alone cannot rule out delayed output
+on the main-thread fallback. This is a plausible mechanism for pops, not a
+proof of the exact cause on the phone.
+
+The older `a72e554edbea` snapshot also showed callback gaps during interaction
+(110.5 and 136.5 ms in two runs), but both runs failed overall because an
+unrelated texture fetch failed during boot. These are not clean baselines
+and do not establish when the reported regression began. The audio bridge
+and steady-state mixer are unchanged between those two application revisions.
+
+The new phone instrumentation observes the actual output backend and running
+state with `?ms`, reports rate/block size and secure/isolation flags, and
+resets callback-gap samples with the other counters. The game report adds
+starved output frames since reset. Callback gaps are scheduling observations,
+not a count of audible glitches. The starvation counter counts PCM frames,
+not events. No audio-engine fix is claimed by this measurement change.
+
+```sh
+node scripts/verify-web-perf.mjs build/web --rate 4 --interact --port 18081 --cdp 19481 --output /tmp/audio-fallback.json
+node scripts/verify-web-perf.mjs build/web --rate 4 --interact --isolated --port 18081 --cdp 19481 --output /tmp/audio-worklet.json
+```
 
 ## Phone measurement
 

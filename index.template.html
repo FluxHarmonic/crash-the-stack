@@ -172,12 +172,40 @@
     // upload). Aggregate their cost instead of treating each as another frame.
     var pageFrames = { cb: [], gap: [], stamp: null, start: 0, cost: 0, epoch: 0, ignore: null };
     var audioWork = { upload: [], finish: [], settled: 0, failed: 0, loading: "none" };
+    var audioOutput = { mode: "unobserved", context: null, block: 0, previous: null, gaps: [] };
     function remember(xs, value) { xs.push(value); if (xs.length > 3600) xs.shift(); }
+    // ?ms observes the actual output node, including a failed worklet's
+    // fallback. Ring starvation and late main-thread output are different:
+    // ScriptProcessor can miss its deadline while the PCM ring stays full.
+    (function () {
+      if (typeof AudioContext === "undefined" || !new URLSearchParams(location.search).has("ms")) return;
+      var create = AudioContext.prototype.createScriptProcessor;
+      AudioContext.prototype.createScriptProcessor = function () {
+        var node = create.apply(this, arguments);
+        audioOutput.mode = "scriptprocessor"; audioOutput.context = this; audioOutput.block = node.bufferSize;
+        node.addEventListener("audioprocess", function () {
+          var now = performance.now();
+          if (audioOutput.previous !== null) remember(audioOutput.gaps, now - audioOutput.previous);
+          audioOutput.previous = now;
+        });
+        return node;
+      };
+      if (typeof window.AudioWorkletNode === "function") {
+        window.AudioWorkletNode = new Proxy(window.AudioWorkletNode, {
+          construct: function (ctor, args) {
+            var node = Reflect.construct(ctor, args);
+            audioOutput.mode = "worklet"; audioOutput.context = args[0]; audioOutput.block = 0;
+            return node;
+          }
+        });
+      }
+    })();
     function resetPageStats() {
       pageFrames.ignore = pageFrames.stamp;
       pageFrames.stamp = null; pageFrames.start = 0; pageFrames.cost = 0;
       pageFrames.cb = []; pageFrames.gap = []; pageFrames.epoch++;
       audioWork.upload = []; audioWork.finish = [];
+      audioOutput.previous = null; audioOutput.gaps = [];
     }
     (function () {
       var raf = window.requestAnimationFrame;
@@ -213,9 +241,14 @@
         return name + " mean " + mean.toFixed(1) + " p50 " + pick(0.5).toFixed(1) + " p95 " + pick(0.95).toFixed(1) + " max " + s[s.length - 1].toFixed(1);
       };
       var over = pageFrames.cb.filter(function (c) { return c > 16.7; }).length;
+      var ctx = audioOutput.context;
       return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length +
         "\npage music settled " + audioWork.settled + "/3 failed " + audioWork.failed + " loading " + audioWork.loading +
-        "\n" + line("page audio-upload", audioWork.upload) + "\n" + line("page audio-finish", audioWork.finish);
+        "\n" + line("page audio-upload", audioWork.upload) + "\n" + line("page audio-finish", audioWork.finish) +
+        "\npage audio node " + audioOutput.mode + " state " + (ctx ? ctx.state : "unknown") +
+        " rate " + (ctx ? ctx.sampleRate : 0) + " block " + audioOutput.block +
+        " secure " + (window.isSecureContext ? "yes" : "no") + " isolated " + (window.crossOriginIsolated ? "yes" : "no") +
+        "\n" + line("page audio-callback-gap", audioOutput.gaps);
     }
 
     // The stats summary (P3c): with ?ms a tap on the readout makes the
