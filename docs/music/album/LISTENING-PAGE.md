@@ -174,3 +174,14 @@ MUSIC-LICENSE.md records its scope; existing software, art and logo terms are
 unchanged. CC BY allows sharing and adaptation with attribution, a license link
 and change notices. The notice is on the page; existing immutable MP3 objects
 are not retagged or re-encoded.
+
+Cover/license publication completed at https://73d56ef3.crashthestack.pages.dev
+(source 2895ebb). The live page now uses the cover and explicitly credits
+**David Wilson** for the CC BY 4.0 music. The cover was opened in swayimg at
+David's request. It decoded successfully from R2 in the browser; the 390px
+phone viewport had no horizontal overflow and retained all fifteen tracks.
+Final HTTP/hash checks verified the cover, HTML, CSS, player, album manifest,
+game page, tracker page and worker. The final attribution was verified in the
+served HTML; the shared browser restarted during the final screenshot attempt.
+Public verification and deployment logs are in the external
+publication-cover-license-ii/ directory. Audio objects and the game remain intact.
