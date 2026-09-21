@@ -1,19 +1,21 @@
 # Crash The Stack — Original Soundtrack
 
 Working album title and sequence, carried forward from [ALBUM-PLAN.md](../ALBUM-PLAN.md).
-These are standalone listening arrangements, separate from the game's adaptive tunes.
+David confirmed Black Glass as the opener, Cold Boot second and Glass Current
+as the closer. These are standalone listening arrangements, separate from the
+game's adaptive tunes.
 The album has fifteen titles; the title-screen arrangement belongs to Black Glass,
 not a sixteenth album track. Artist credit, artwork and release details remain open.
 
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|
-| 1 | Black Glass | Pilot in progress | 4:30 |
+| 1 | Black Glass | Pilot I ready for listening | 4:24 actual |
 | 2 | Cold Boot | Planned | 3:30 |
 | 3 | Relay Ghost | Planned | 3:30 |
 | 4 | Closed Loop | Planned | 3:15 |
 | 5 | Shadow Protocol | Planned | 3:45 |
 | 6 | Blind Spot | Planned | 3:00 |
-| 7 | Quiet Array | Pilot in progress | 3:45 |
+| 7 | Quiet Array | Pilot I ready for listening | 4:05 actual |
 | 8 | Sector Drift | Planned | 3:30 |
 | 9 | Dirty Cache | Planned | 3:45 |
 | 10 | Basement Circuit | Planned | 3:45 |
@@ -52,3 +54,7 @@ quiet and heavy material. Compare clean gain and gentle peak control before
 settling mastering policy. Do not normalize every title to the same loudness.
 Document source precision honestly: the existing native WAV exporter is 16-bit;
 converting that file to 24-bit does not create a high-resolution master.
+
+Pilot arrangements and verification: [PILOT-I.md](PILOT-I.md).
+Mastering process and engine follow-ups: [MASTERING.md](MASTERING.md).
+Reproduction commands: [tools/ALBUM.md](../tools/ALBUM.md).

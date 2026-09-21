@@ -1,0 +1,73 @@
+#!/usr/bin/env sigil
+;;; Check the actual audition encodes, including codec peaks and lossless parity.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                         (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (loudness output label)
+  (let ((text (read-text (path output (str label "-loudness.txt")))))
+    (dict integrated_lufs: (last-number text "    I:")
+          range_lu: (last-number text "    LRA:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define (pcm-hash file)
+  (out ffmpeg -v error -nostdin -i ,file -map "0:a:0"
+       -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "album-check-renders" (script-args) '()
+  (lambda (options)
+    (let* ((output (option-ref options 'output))
+           (tracks (or (option-ref options 'tracks) '("black-glass" "quiet-array")))
+           (reports '()))
+      (each slug tracks
+        (let* ((wav (path output (str slug ".wav")))
+               (flac (path output (str slug ".flac")))
+               (ogg (path output "ogg" (str slug ".ogg")))
+               (map-data
+                 (json-decode (read-text (path (root) "docs/music/album" (str slug "-map.json")))))
+               (duration (dict-ref map-data duration_seconds:))
+               (clean (loudness output slug))
+               (encoded (loudness output (str slug "-ogg"))))
+          (check (equal? (read-text (path output (str slug ".cts")))
+                         (read-text (path (root) "docs/music/album" (str slug ".cts"))))
+                 "Render snapshot does not match current score" slug)
+          (each file (list wav flac ogg)
+            (let* ((probe (json ffprobe -v error -show_format -show_streams -of json ,file))
+                   (stream (array-ref (dict-ref probe streams:) 0))
+                   (actual (string->number (dict-ref (dict-ref probe format:) duration:))))
+              (check (and (= (string->number (dict-ref stream sample_rate:)) 44100)
+                          (= (dict-ref stream channels:) 2))
+                     "Unexpected audio format" file)
+              (check (<= (abs (- actual duration)) (/ 1.0 44100))
+                     "Render length does not match finite score" file)))
+          (check (equal? (pcm-hash wav) (pcm-hash flac)) "FLAC differs from audition PCM" slug)
+          (each measurement (list clean encoded)
+            (check (<= (dict-ref measurement true_peak_dbtp:) -1.0)
+                   "Audition exceeds -1 dBTP review ceiling" slug))
+          (let* ((result ($? ffmpeg -hide_banner -nostats -sseof -1 -i ,wav
+                            -af volumedetect -f null -))
+                 (log (stderr-of result))
+                 (peak (and (ok? result) (last-number log "max_volume:"))))
+            (check (and peak (<= peak -70)) "Ending has not decayed" slug)
+            (write-text (path output (str slug "-ending.txt")) log)
+            (set! reports
+              (append reports
+                (list (dict title: (dict-ref map-data title:)
+                            duration_seconds: duration
+                            wav: clean
+                            ogg: encoded
+                            controlled_comparison: (loudness output (str slug "-controlled"))
+                            final_second_peak_dbfs: peak
+                            wav_flac_pcm_identical: #t)))))))
+      (write-json-file (path output "album-render-check.json") (list->array reports))
+      (println "Full WAV/FLAC/OGG durations, peaks, endings and lossless parity passed."))))

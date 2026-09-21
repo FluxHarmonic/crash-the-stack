@@ -31,3 +31,17 @@ David proposed Black Glass as the opener: the title theme makes the strongest
 immediate statement. Sequence now begins Black Glass, Cold Boot and ends Glass
 Current. Black Glass opens with the accepted title ignition and theme statement;
 the newly written distant-theme passage moves into the central breakdown.
+
+## Pilot I completion
+
+Black Glass now opens and Cold Boot follows; David also confirmed Glass Current
+as the closer. The first two complete arrangements and full OGG auditions are
+recorded in PILOT-I.md. Existing game phrases and patches remain protected.
+
+The mastering discussion clarified that these are pre-final-master auditions,
+with modest gain only beyond their existing mix bus. MASTERING.md preserves the
+proposed listening/measuring workflow, separate comparison levels, and verified
+Motif limiter/16-bit export limitations for the engine owner. No Sigil shell
+limitation blocks this workflow. Remaining thirteen arrangements are pending
+feedback on the quiet/heavy pilots; no release master or album publication is
+claimed.
