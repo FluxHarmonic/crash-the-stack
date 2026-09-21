@@ -45,6 +45,28 @@ extern void sigil__gc_pop_temp_root(SigilVM *vm);
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <stdio.h>
+/* The Windows build links as a GUI-subsystem program (windows-amd64's
+ * link-flags: no console window opens beside the game from Explorer;
+ * David, 2026-09-22), so it starts with no standard streams. From a
+ * terminal, attach to the parent's console and point stdout/stderr at
+ * it, so the diagnostics (crash: ..., sigil-desktop:, miniaudio) print
+ * there as on Linux; from Explorer there is no parent console and this
+ * does nothing. A console-subsystem build already owns a console and
+ * AttachConsole fails harmlessly. */
+static void attach_parent_console(void)
+{
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+        setvbuf(stdout, NULL, _IONBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+}
+#endif
+
 #ifndef __wasm__
 /* stb_vorbis is linked already: sigil-audio's audio.c includes the
  * implementation with external linkage (a second copy here clashed at
@@ -166,6 +188,9 @@ static Value native_decode_ogg(SigilVM *vm, int argc, Value *args)
 
 void sigil__init_crash_native_module(SigilVM *vm)
 {
+#ifdef _WIN32
+    attach_parent_console();
+#endif
     SigilModule *module = sigil_begin_module(vm, "(crash native)");
     if (!module) return;
     sigil_module_register_native(vm, "%mix-track!", native_mix_track, SIGIL_ARITY_EXACT(8),

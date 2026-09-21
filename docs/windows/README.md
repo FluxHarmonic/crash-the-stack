@@ -11,8 +11,8 @@ went, and what nobody has tested yet.
 
     scripts/dev sigil build --config windows-amd64
 
-Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,849,607 bytes,
-`PE32+ executable for MS Windows 6.00 (console), x86-64`).
+Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,863,822 bytes,
+`PE32+ executable for MS Windows 6.00 (GUI), x86-64`).
 
 The config in `package.sgl` mirrors `release` (native backend, optimize 2,
 bundle) with `toolchain: 'zig`, `target: "x86_64-windows-gnu"`, `static?:
@@ -64,11 +64,20 @@ code, not the game. OpenGL (`opengl32.dll`) and the audio stack
 (`ole32`/`mmdevapi` for WASAPI) are loaded by name at run time by
 sigil-graphics' GL loader and miniaudio, so they do not appear as imports.
 
-The game reads its assets relative to the current directory (`assets/`),
-as on Linux, and `link-assets` puts them at `build/windows-amd64/assets/`:
-run it from that directory. Double-clicking `bin\crash-the-stack.exe` in
-Explorer starts it with `bin\` as the current directory and no assets; a
-release layout or a launcher has to account for that.
+The game reads its assets by paths relative to the current directory
+(`assets/...`), and `link-assets` puts them at `build/windows-amd64/assets/`.
+Since 2026-09-22 the native shell moves the process to the exe's parent
+directory at startup when `assets/` is not under the current directory
+but is under `<exe dir>/..` (sigil's own bundle layout, the one `(sigil
+resources)` expects), so double-clicking `bin\crash-the-stack.exe` in
+Explorer, which starts it with `bin\` as the current directory, works.
+Measured under Wine: from `bin\` the three tracks decode (`crash: track
+spy 3748500` ...); the exe copied to a directory with no `../assets`
+prints `crash: track spy 0` and `crash: credits missing
+assets/credits.txt`, the failure the move prevents. The Linux dev binary
+launched from `build/dev/bin/` behaves the same. One consequence: a
+relative `--tune`/`--edit` path given on such a launch resolves against
+the install directory, not the shell's.
 
 Saves: `(crash store)` resolves its directory from `XDG_DATA_HOME`, then
 `APPDATA`, then `$HOME/.local/share`, then `.`; `(crash tracker files)`
@@ -152,13 +161,13 @@ the real one (Wine passes the Unix environment to the program).
   resolution outside Wine, DPI scaling (`content-scale` above 1: GLFW's
   `GLFW_SCALE_FRAMEBUFFER` is on; on Win32 the framebuffer size equals the
   client size and the cursor is scaled the same way), and the console
-  window: the exe is a console-subsystem program, so launching it from
-  Explorer opens a console beside the game. Linking with
-  `-Wl,--subsystem,windows` removes it and also loses everything the game
-  prints to stdout (`crash: ...` lines, the sigil-desktop and miniaudio
-  diagnostics) unless the program attaches to the parent console
-  (`AttachConsole(ATTACH_PARENT_PROCESS)`) or output is redirected;
-  `FreeConsole()` closes the console after the loader has already opened
-  it. Neither is done here.
+  handling: the exe links as a GUI-subsystem program
+  (`-Wl,--subsystem,windows` in the config's `link-flags:`), so Explorer
+  opens no console beside the game, and `crash-native.c` calls
+  `AttachConsole(ATTACH_PARENT_PROCESS)` at module init and reopens
+  stdout/stderr on `CONOUT$` when that succeeds, so a launch from
+  `cmd`/PowerShell should still print the diagnostics. Under Wine the
+  GUI exe's output reached the Unix stdout as before (measured); what
+  a real console does with it is untested.
 - Windows 7/8.1 (UCRT api-sets, see above).
 - A code-signing story: none. SmartScreen will warn on an unsigned exe.
