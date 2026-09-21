@@ -21,19 +21,17 @@
 (when (directory-exists? ROOT) (process-run "rm" "-rf" ROOT))
 
 (test-group "settings: the rows"
-  (test "nine rows in the ruled order, each with a default among its values"
-    (assert-equal '(draw scoring hud field music sfx volume scanlines veil) SETTING-IDS)
+  (test "seven rows in the ruled order, each with a default among its values"
+    (assert-equal '(draw scoring music sfx volume scanlines veil) SETTING-IDS)
     (for-each (lambda (st) (assert-true (setting-value? st (setting-default st)))) SETTINGS))
-  (test "the defaults: pull 1, BOUNTY, zones, reaction, music and sfx on, volume 10, both cosmetics off (on|off symbols, never booleans)"
+  (test "the defaults: pull 1, BOUNTY, music and sfx on, volume 10, scanlines on (David's phone read, 2026-09-21), the veil off (on|off symbols, never booleans)"
     (let ((d (settings-defaults)))
       (assert-equal 1 (settings-value d 'draw))
       (assert-equal 'vegas (settings-value d 'scoring))
-      (assert-equal 'zones (settings-value d 'hud))
-      (assert-equal 'reaction (settings-value d 'field))
       (assert-equal 'on (settings-value d 'music))
       (assert-equal 'on (settings-value d 'sfx))
       (assert-equal VOLUME-MAX (settings-value d 'volume))
-      (assert-equal 'off (settings-value d 'scanlines))
+      (assert-equal 'on (settings-value d 'scanlines))
       (assert-equal 'off (settings-value d 'veil))))
   (test "the value labels"
     (assert-equal "BOUNTY" (setting-value-label 'scoring 'vegas))
@@ -41,9 +39,15 @@
     (assert-equal "ON" (setting-value-label 'music 'on))
     (assert-equal "OFF" (setting-value-label 'veil 'off))
     (assert-equal "3" (setting-value-label 'draw 3))
-    (assert-equal "10" (setting-value-label 'volume 10))
-    (assert-equal "REACTION" (setting-value-label 'field 'reaction))
-    (assert-equal "STRIP" (setting-value-label 'hud 'strip)))
+    (assert-equal "10" (setting-value-label 'volume 10)))
+  (test "the split (D51): the general five on the main menu, DEFRAG's two in its overlay, none for the stack"
+    (assert-equal '(music sfx volume scanlines veil) (settings-group 'general))
+    (assert-equal '(draw scoring) (settings-group 'cards))
+    (assert-equal '() (settings-group 'stack))
+    (assert-equal '() (settings-group 'nothing))
+    (assert-equal 'next-deal (setting-when 'draw))
+    (assert-equal 'next-deal (setting-when 'scoring))
+    (assert-equal 'now (setting-when 'volume)))
   (test "every label is set in the block alphabet's characters (A-Z, 0-9, space)"
     (for-each (lambda (st)
                 (for-each (lambda (c) (assert-true (or (char-alphabetic? c) (char-numeric? c) (char=? c #\space))))
@@ -61,8 +65,6 @@
       (assert-equal 3 (settings-value s 'draw))
       (assert-equal 1 (settings-value (settings-step s 'draw 1) 'draw))
       (assert-equal 3 (settings-value (settings-step d 'draw -1) 'draw))
-      (assert-equal 'off (settings-value (settings-step d 'field -1) 'field))
-      (assert-equal 'life (settings-value (settings-step d 'field 1) 'field))
       (assert-equal 0 (settings-value (settings-step d 'volume 1) 'volume))
       (assert-equal 9 (settings-value (settings-step d 'volume -1) 'volume))))
   (test "a value outside the row is refused by settings-with; an unknown id changes nothing"
@@ -70,7 +72,7 @@
       (assert-equal d (settings-with d 'draw 2))
       (assert-equal d (settings-with d 'nothing 1))
       (assert-equal d (settings-step d 'nothing 1))
-      (assert-equal 'strip (settings-value (settings-with d 'hud 'strip) 'hud)))))
+      (assert-equal 'standard (settings-value (settings-with d 'scoring 'standard) 'scoring)))))
 
 (test-group "settings: the store round trip (gate leg 4, native)"
   (test "a fresh root reads as the defaults"
@@ -84,21 +86,21 @@
                      (loop (cdr ids) s))))))
       (assert-false (equal? s (settings-defaults)))
       (assert-equal s (settings-load))
-      ;; the hud key holds the plain symbol the ?hud= door writes
-      (assert-equal 'strip (store-read-datum "hud"))
+      ;; each key holds the plain datum
+      (assert-equal 'standard (store-read-datum "scoring"))
       (assert-equal 3 (store-read-datum "draw"))
       (assert-equal 'off (store-read-datum "music"))
       (assert-equal 0 (store-read-datum "volume"))))
   (test "a key holding garbage or a value outside the row reads as the default; the others keep theirs"
     (store-set! "draw" "(not a number")
-    (store-write-datum! "field" 'plasma)
+    (store-write-datum! "scoring" 'plasma)
     (store-write-datum! "volume" 11)
     (let ((s (settings-load)))
       (assert-equal 1 (settings-value s 'draw))
-      (assert-equal 'reaction (settings-value s 'field))
+      (assert-equal 'vegas (settings-value s 'scoring))
       (assert-equal VOLUME-MAX (settings-value s 'volume))
-      (assert-equal 'standard (settings-value s 'scoring))
-      (assert-equal 'on (settings-value s 'scanlines))))
+      ;; the scanlines were stepped off above and the store keeps it: a stored off wins the new default
+      (assert-equal 'off (settings-value s 'scanlines))))
   (test "the detector: a store that loses a write reads the default, not the stepped value"
     (let ((s (settings-step (settings-defaults) 'veil 1)))
       (store-remove! "veil")

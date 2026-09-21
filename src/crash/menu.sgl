@@ -42,6 +42,7 @@
           menu-title menu-with-title menu-settings menu-with-settings
           menu-version menu-code-line menu-with-code-line menu-copy menu-code menu-page
           menu-scores menu-with-scores menu-run menu-open-run-done
+          menu-new-overlay menu-home menu-table menu-row-note
           menu-step menu-entry-rect menu-hit menu-cues menu-live?
           menu-label menu-row-value menu-row-kind menu-heading menu-code-display
           code-line-rect keypad-cells keypad-rect keypad-hit
@@ -71,24 +72,44 @@
             (list 'code "CODE")
             (list 'scores "SCORES")
             (list 'version "VERSION")
-            (list 'back "BACK")))
+            (list 'back "BACK")
+            ;; the table's overlay (ruling D51)
+            (list 'resume "RESUME")
+            (list 'game-settings "GAME SETTINGS")
+            (list 'share "CODE")
+            (list 'disconnect "DISCONNECT")
+            (list 'back-to-menu "BACK TO MENU")))
 
     ;; The screens: each with its entries in order and its heading (the
     ;; top screen has the logo instead).
     (define SCREENS
       (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update)
             (list 'free "FREE PLAY" 'stack 'cards 'daily-stack 'daily-cards 'code 'scores 'version 'back)
-            (list 'settings "SETTINGS" 'draw 'scoring 'hud 'field 'music 'sfx 'volume 'scanlines 'veil 'back)
+            (list 'settings "SETTINGS" 'music 'sfx 'volume 'scanlines 'veil 'back)   ; the general five (D51)
             (list 'credits "CREDITS" 'back)
             (list 'scores "SCORES" 'back)
             (list 'code "ENTER CODE" 'back)
-            (list 'run-done "RUN COMPLETE" 'back)))
+            (list 'run-done "RUN COMPLETE" 'back)
+            ;; the table's overlay (D51): its own home screen over the paused
+            ;; table; the exit row is disconnect in a run, back-to-menu else
+            (list 'pause "PAUSED" 'resume 'game-settings 'settings 'share 'disconnect 'back-to-menu)
+            ;; GAME SETTINGS: the table's rows, filled per table by open-screen
+            (list 'pause-game "GAME SETTINGS" 'back)))
 
     (define CREDITS-PAGES 2)
 
     (define (screen-entries screen)
       (let ((e (assq screen SCREENS)))
         (if e (cddr e) '())))
+
+    ;; The overlay's home rows for a table in or out of a run: the exit
+    ;; row by context, and GAME SETTINGS only where the table has rows
+    ;; (DEFRAG; the stack has none).
+    (define (pause-entries table run?)
+      (filter (lambda (id)
+                (and (not (eq? id (if run? 'back-to-menu 'disconnect)))
+                     (or (not (eq? id 'game-settings)) (pair? (settings-group table)))))
+              (screen-entries 'pause)))
 
     (define (menu-heading m)
       (let ((e (assq (menu-screen m) SCREENS)))
@@ -132,6 +153,8 @@
       (scores default: #f)       ; the scoreboard for the SCORES screen, or #f
       (run default: #f)          ; the finished run for the RUN COMPLETE screen (ledger, seed), or #f
       (title default: #f)        ; the title's reveal state, (crash title)
+      (home default: 'top)       ; the screen a sub-screen closes to: top, or pause for the table's overlay
+      (table default: #f)        ; the overlay's table (stack | cards): its GAME SETTINGS rows
       (frames default: 0))       ; menu frames so far, for the cursor's blink
 
     (define (menu-with-title m t) (menu m title: t))
@@ -151,24 +174,52 @@
               ((setting-ref id) (setting-name (setting-ref id)))
               (else "?"))))
 
-    ;; item (a choice) or value (a row that steps).
+    ;; item (a choice) or value (a row that steps). The overlay's exit row
+    ;; and its CODE row show a value but pick as items.
     (define (menu-row-kind m id)
       (if (or (eq? id 'version) (setting-ref id)) 'value 'item))
 
-    ;; The value a row shows, as text, or #f for an item.
+    ;; The value a row shows, as text, or #f for a plain item.
     (define (menu-row-value m id)
       (cond ((eq? id 'version) (if (eq? (menu-version m) 'original) "ORIGINAL" "HACKER"))
             ((setting-ref id) (setting-value-label id (settings-value (menu-settings m) id)))
+            ((eq? id 'share) (let ((c (menu-code-line m))) (if c (dashed c) "NONE")))
             (else #f)))
+
+    ;; The note on a row, in the small font: beside a GAME SETTINGS value,
+    ;; when the change takes; on the overlay's exit row, what leaving
+    ;; keeps, so DISCONNECT never reads as loss (D51; a block-font value
+    ;; beside BACK TO MENU would not fit the row).
+    (define (menu-row-note m id)
+      (cond ((eq? id 'disconnect) "RUN HELD. CONTINUE RESUMES THE LAYER.")
+            ((eq? id 'back-to-menu) "BOARD SAVED. CONTINUE RESUMES IT.")
+            ((and (eq? (menu-screen m) 'pause-game) (setting-ref id))
+             (if (eq? (setting-when id) 'next-deal) "NEXT DEAL" "NOW"))
+            (else #f)))
+
+    (define (dashed code)
+      (if (> (string-length code) 5)
+          (string-append (substring code 0 5) "-" (substring code 5 (string-length code)))
+          code))
 
     ;; The CODE screen's text as shown: the typed characters with a dash
     ;; after the fifth.
-    (define (menu-code-display m)
-      (let* ((code (menu-code m))
-             (n (string-length code)))
-        (if (> n 5)
-            (string-append (substring code 0 5) "-" (substring code 5 n))
-            code)))
+    (define (menu-code-display m) (dashed (menu-code m)))
+
+    ;; The table's overlay (ruling D51): RESUME, GAME SETTINGS, SETTINGS,
+    ;; CODE and the context's exit row over a paused table. No title; the
+    ;; settings in force; the live board's code (copy? on the web).
+    (define (menu-new-overlay table run? settings code-line copy?)
+      (let ((ids (pause-entries table run?)))
+        (menu screen: 'pause
+              entries: ids
+              top-entries: ids
+              highlight: 0
+              home: 'pause
+              table: table
+              settings: settings
+              code-line: code-line
+              copy: copy?)))
 
     ;; The top screen over the ids that are shown (unknown ids dropped,
     ;; the canonical order kept), highlighting the first of them, or the
@@ -199,7 +250,7 @@
       (let* ((top? (eq? (menu-screen m) 'top))
              (ids (menu-entries m))
              (id (and (< index (length ids)) (list-ref ids index)))
-             (value? (and id (eq? (menu-row-kind m id) 'value)))
+             (value? (and id (menu-row-value m id) #t))
              (w (if value? VALUE-ROW-W ENTRY-W)))
         (list (quotient (- vw w) 2)
               (+ (cond (top? ENTRIES-Y)
@@ -284,11 +335,18 @@
         (and (or (not t) (title-settled? t))
              (boot-done?))))
 
-    ;; A sub-screen opened over the top screen, its first row highlighted.
+    ;; A sub-screen opened over the home screen, its first row highlighted;
+    ;; GAME SETTINGS takes the overlay's table's rows.
     (define (open-screen m screen)
-      (menu m screen: screen entries: (screen-entries screen) highlight: 0 code: "" page: 0))
+      (menu m screen: screen
+              entries: (if (eq? screen 'pause-game)
+                           (append (settings-group (or (menu-table m) 'stack)) (list 'back))
+                           (screen-entries screen))
+              highlight: 0
+              code: ""
+              page: 0))
 
-    ;; Back to the top screen, the item that opened the sub-screen highlighted.
+    ;; Back to the home screen, the item that opened the sub-screen highlighted.
     (define (close-screen m)
       (let ((opener (case (menu-screen m)
                       ((free) 'free-play)
@@ -296,8 +354,9 @@
                       ((credits) 'credits)
                       ((scores code) 'free-play)
                       ((run-done) 'jack-in)
+                      ((pause-game) 'game-settings)
                       (else #f))))
-        (menu m screen: 'top
+        (menu m screen: (menu-home m)
               entries: (menu-top-entries m)
               highlight: (index-of opener (menu-top-entries m)))))
 
@@ -319,6 +378,9 @@
               ((eq? (menu-row-kind m id) 'value) (step-value m id 1))
               ((eq? id 'free-play) (cons (open-screen m 'free) #f))
               ((eq? id 'settings) (cons (open-screen m 'settings) #f))
+              ((eq? id 'game-settings) (cons (open-screen m 'pause-game) #f))
+              ;; the overlay's CODE row: COPY where the page can (the web), else nothing
+              ((eq? id 'share) (cons m (and (menu-copy m) (menu-code-line m) 'copy)))
               ((eq? id 'credits) (cons (open-screen m 'credits) #f))
               ((eq? id 'scores) (cons (open-screen m 'scores) #f))
               ((eq? id 'code) (cons (open-screen m 'code) #f))
@@ -401,7 +463,7 @@
              (t (and t (title-step t)))
              (m (menu m title: t frames: (+ 1 (menu-frames m))))
              (click (input-frame-click f))
-             (top? (eq? (menu-screen m) 'top)))
+             (top? (eq? (menu-screen m) (menu-home m))))   ; the home screen: top, or the overlay's pause
         (cond ((and t (title-gated? t) (or click (pair? (input-frame-pressed f))))
                ;; the gate (D42): the first tap or key opens the line, nothing else
                (cons (menu m title: (title-ungate t)) #f))
@@ -428,8 +490,11 @@
                    (step-highlighted m 1)))
               ((or (pressed? f 'return) (pressed? f 'space)) (pick m))
               ((or (pressed? f 'escape) (and (pressed? f 'backspace) (not top?)))
+               ;; on the home screen Escape is CONTINUE (the pause menu, D14) or
+               ;; RESUME (the table's overlay, D51)
                (cond ((not top?) (cons (close-screen m) #f))
                      ((memq 'continue (menu-entries m)) (cons m 'continue))
+                     ((memq 'resume (menu-entries m)) (cons m 'resume))
                      (else (cons m #f))))
               (else (cons m #f)))))
 

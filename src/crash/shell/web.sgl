@@ -171,6 +171,7 @@
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
     (define *screen* 'menu)  ; menu | stack | cards
+    (define *overlay* #f)    ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
     (define *menu* #f)       ; the first screen, (crash menu)
     (define *update* #f)     ; waiting | prompt | #f: the page's word on a new version
     (define *update-chosen* #f) ; the player took APPLY; the page's poll reads it
@@ -1285,33 +1286,95 @@
         (case *screen*
           ((menu) (menu-tick f dt))
           ((stack)
-           (cond ((or (menu-frame? f)
+           (cond (*overlay* (overlay-tick f))
+                 ((or (menu-frame? f)
                       (jack-out? *session* f VW VH (geometry-hud-h *geom*)))
                   (open-menu!))
                  (else
                   (stack-tick f dt)
-                  ;; the session's request: the MENU tool, or NEXT / RETRY
-                  ;; inside a run (the dealt board is replaced by the run's)
+                  ;; the session's request: Escape or the bar's MENU button
+                  ;; (the table's overlay, D51), or NEXT / RETRY inside a run
+                  ;; (the dealt board is replaced by the run's)
                   (let ((request (session-request *session*)))
                     (when request
                       (set! *session* (session-clear-request *session*))
                       (case request
-                        ((menu) (open-menu!))
+                        ((menu) (open-overlay!))
                         ((next retry) (run-request! request 'stack))
                         (else #f)))))))
           (else
-           (if (or (menu-frame? f)
-                   (jack-out-tap? *deal* f *card-geom*))
-               (open-menu!)
-               (begin
-                 (cards-tick f dt)
-                 (let ((request (deal-request *deal*)))
-                   (when request
-                     (set! *deal* (deal-clear-request *deal*))
-                     (case request
-                       ((menu) (open-menu!))
-                       ((next retry) (run-request! request 'cards))
-                       (else #f))))))))))
+           (cond (*overlay* (overlay-tick f))
+                 ((or (menu-frame? f)
+                      (jack-out-tap? *deal* f *card-geom*))
+                  (open-menu!))
+                 (else
+                  (cards-tick f dt)
+                  (let ((request (deal-request *deal*)))
+                    (when request
+                      (set! *deal* (deal-clear-request *deal*))
+                      (case request
+                        ((menu) (open-overlay!))
+                        ((next retry) (run-request! request 'cards))
+                        (else #f))))))))))
+
+    ;; --- the table's overlay (ruling D51) ------------------------------------------
+    ;;
+    ;; Escape or the bar's MENU button pauses the table under its own menu:
+    ;; the table's tick is skipped (the trace, the timers, the ICE, the
+    ;; field and the save clock all stop), every face draws hidden, and
+    ;; the overlay takes the keys and taps. RESUME, Escape or the button
+    ;; again returns; the exit row (DISCONNECT in a run, BACK TO MENU in
+    ;; free play) lands on the main menu with CONTINUE.
+    ;;   crash: pause on|off                  the overlay opened or closed
+    (define (open-overlay!)
+      (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
+        (when (and *session* (eq? table 'stack))
+          (set-board-selected! (session-board *session*) #f))   ; nothing to come back to
+        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t))
+        (set! *menu-said* #f)
+        (say "pause" "on")))
+
+    (define (close-overlay!)
+      (set! *overlay* #f)
+      (say "pause" "off"))
+
+    ;; A tap on the bar's MENU button while the overlay is up: RESUME.
+    (define (overlay-button-tap? f)
+      (let ((click (input-frame-click f)))
+        (and click
+             (eq? 'menu
+                  (if (eq? *screen* 'cards)
+                      (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click))
+                      (hit-control *geom* (session-hud *session*) (car click) (cdr click)))))))
+
+    (define (overlay-tick f)
+      (when *trace* (say-menu *overlay*))
+      (let* ((r (if (or (menu-frame? f) (overlay-button-tap? f))
+                    (cons *overlay* 'resume)
+                    (menu-step *overlay* f VW VH)))
+             (choice (cdr r)))
+        (set! *overlay* (car r))
+        (when choice (say "menu" "chose" choice))
+        (cond ((not choice) #f)
+              ((pair? choice)
+               (when (eq? (car choice) 'set) (apply-setting! (cadr choice) (cddr choice))))
+              ((eq? choice 'resume) (close-overlay!))
+              ((eq? choice 'copy) (copy-code!))
+              ((memq choice (list 'disconnect 'back-to-menu))
+               (close-overlay!)
+               (open-menu!))
+              (else #f)))
+      ;; the frame: the table hidden under the overlay's panel
+      (when *overlay*
+        (present! #f
+                  (lambda ()
+                    (if (eq? *screen* 'cards)
+                        (begin
+                          (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
+                          (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*))))
+                        (begin
+                          (draw-session *session* *geom* *fx* (background) *copper* #t)
+                          (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -1323,13 +1386,15 @@
     ;; here sees every one of them.
     ;; The live board's share code for the pause menu, or #f.
     (define (live-code)
-      (case (active-game)
+      ;; the table up, else the one the store names (the pause menu after a table)
+      (case (if (memq *screen* (list 'stack 'cards)) *screen* (active-game))
         ((stack) (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
         ((cards) (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
         (else #f)))
 
     (define (open-menu!)
       (set! *screen* 'menu)
+      (set! *overlay* #f)
       (set! *menu-said* #f)      ; the arm reads the rows on every opening
       (phosphor-reset!)          ; a cascade left behind blends with nothing on return
       (set! *announced* #f)
@@ -1354,8 +1419,19 @@
 
     ;; A fresh stack from a spec (P4: a FREE PLAY deal in a version, the
     ;; daily, a share code, a run's layer).
+    ;; The field for a new deal (not a continued board): the pool's rule
+    ;; for the seed, the field itself seeded by it too, unless ?bg= pinned one.
+    ;;   crash: field RULE SEED
+    (define (field-for-deal! seed)
+      (unless *bg-asked*
+        (let ((rule (field-pick! seed)))
+          (set! *bg-mode* rule)
+          (set! *bg* (bg-choose rule seed *bg-hold*))
+          (say "field" rule seed))))
+
     (define (open-stack-spec! sp)
       (music-fresh!)   ; a new deal: its rest track from the top (D50)
+      (field-for-deal! (spec-seed sp))
       (set! *no-save* #f)   ; the demo's flag holds for the demo's board only
       (set! *screen* 'stack)
       (set! *announced* #f)
@@ -1378,6 +1454,7 @@
 
     (define (open-cards-spec! sp)
       (music-fresh!)
+      (field-for-deal! (spec-seed sp))
       (set! *no-save* #f)
       (set! *screen* 'cards)
       (set! *announced* #f)
@@ -1411,6 +1488,7 @@
               (set! *demo* #f)
               (say "demo" "cleared" "stack"))
             (set! *restored* (cdr booted))
+            (unless *restored* (field-for-deal! (session-seed *session*)))
             (set! *fx* (fx-new))))))
 
     (define (open-cards! resume?)
@@ -1429,6 +1507,7 @@
                (d (car booted)))
           (set! *deal* (deal-with-tools-touch (if *touch* (deal d labels-shown: #f) d) *touch*))
           (set! *restored* (cdr booted))
+          (unless *restored* (field-for-deal! (deal-seed *deal*)))
           (set! *card-fx* (card-fx-new)))))
 
     ;; FREE PLAY's next board on a table: the seed after the one in
@@ -1509,9 +1588,6 @@
         ((hud)
          (when *session* (set! *session* (session-with-hud *session* v)))
          (when *deal* (set! *deal* (deal-with-hud *deal* v))))
-        ((field)
-         (set! *bg-mode* v)
-         (set! *bg* (bg-choose v 1 *bg-hold*)))
         ((scanlines) (post-set-scanlines! (eq? v 'on)))
         ((veil) (post-set-veil! (eq? v 'on)))
         (else #f)))
@@ -1543,12 +1619,7 @@
                ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
                ((daily-cards) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'cards)))
                ((update) (update-chosen!))
-               ((copy)
-                (let ((code (live-code)))
-                  (when code
-                    (store-set! "code" (code-display code))
-                    (set! *copy-asked* #t)
-                    (say "copy" (code-display code)))))
+               ((copy) (copy-code!))
                ((code-refused) (say "code" "refused" (menu-code *menu*)))
                (else #f)))))
 
@@ -1558,6 +1629,15 @@
       (let* ((day (today))
              (d (daily-date day)))
         (say "daily" day (str (car d) "-" (cadr d) "-" (caddr d)))))
+
+    ;; COPY: the live board's code to the page (it reads the store's "code"
+    ;; key and writes the clipboard on its next poll).
+    (define (copy-code!)
+      (let ((code (live-code)))
+        (when code
+          (store-set! "code" (code-display code))
+          (set! *copy-asked* #t)
+          (say "copy" (code-display code)))))
 
     ;; The page's poll for a COPY: 1 once, then 0.
     (define *copy-asked* #f)
@@ -1596,6 +1676,9 @@
         (atlas-ensure!)
         (when (and (eq? *screen* 'stack) *session* *geom*)
           (tiles-ensure! *geom*))
+        ;; the menu's and the overlay's bakes, before the passes (they are passes)
+        (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
+              (*overlay* (menu-prepare! *overlay*)))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
         ;; the phosphor's compose pass first, then the frame (or the composed
         ;; target) to the swap chain, through the scanline pass when that
@@ -1628,8 +1711,9 @@
     (define (boot!)
       (set! *session* #f)
       (set! *deal* #f)
-      ;; the field: ?bg= for this boot when given, else the FIELD setting (P4)
-      (unless *bg-asked* (set! *bg-mode* (setting 'field)))
+      ;; the field: ?bg= pins a rule for this boot (the dev door); else each
+      ;; deal picks from the pool by its seed (field-for-deal!), and the menu
+      ;; before the first deal shows the default rule
       (set! *bg* (bg-choose *bg-mode* 1 *bg-hold*))
       (apply-audio-settings!)
       (post-set-scanlines! (eq? (setting 'scanlines) 'on))

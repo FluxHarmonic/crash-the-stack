@@ -539,18 +539,20 @@
         (let ((sides (lambda (id face x y w h selected?)
                        (draw-sides-primitives g x y w h)))
               (bodies (lambda (id face x y w h selected?)
-                        (draw-face-body g face x y w h selected?
-                                        (lock-state b id now)
+                        (draw-face-body g face x y w h (and selected? (not *hidden*))
+                                        (and (not *hidden*) (lock-state b id now))
                                         (not (blocked-right? b id))
                                         glow)))
               (edges (lambda (id face x y w h selected?)
-                       (unless selected?
-                         (draw-free-edges b id x y w h (lock-state b id now)))))
+                       (unless (and selected? (not *hidden*))
+                         (draw-free-edges b id x y w h (and (not *hidden*) (lock-state b id now))))))
               (glyphs (lambda (id face x y w h selected?)
-                        (draw-face-glyph-part g look face x y w h selected?
-                                              (and (tile-scrambled? b id) (cons ticks id)))))
+                        (unless *hidden*
+                          (draw-face-glyph-part g look face x y w h selected?
+                                                (and (tile-scrambled? b id) (cons ticks id))))))
               (locks (lambda (id face x y w h selected?)
-                       (draw-face-lock x y w h (lock-state b id now)))))
+                       (unless *hidden*
+                         (draw-face-lock x y w h (lock-state b id now))))))
           (let loop ((layer 0))
             (when (< layer (layout-layer-count lay))
               (each-on-layer layer sides)
@@ -561,14 +563,15 @@
               (loop (+ layer 1)))))
         (draw-ghosts g look x)
         (draw-particles g look x)
-        (when highlight (draw-ring g highlight C-HIGHLIGHT 1.0))
-        (let ((hint (session-hint s))
-              (partner (session-hint-partner s))
-              (ring-alpha (fx-ring-alpha x)))
-          (when (and hint (tile-present? b hint))
-            (draw-ring g hint C-LABEL-LIT ring-alpha))
-          (when (and partner (tile-present? b partner))
-            (draw-ring g partner C-LABEL-LIT ring-alpha)))))
+        (when (and highlight (not *hidden*)) (draw-ring g highlight C-HIGHLIGHT 1.0))
+        (unless *hidden*
+          (let ((hint (session-hint s))
+                (partner (session-hint-partner s))
+                (ring-alpha (fx-ring-alpha x)))
+            (when (and hint (tile-present? b hint))
+              (draw-ring g hint C-LABEL-LIT ring-alpha))
+            (when (and partner (tile-present? b partner))
+              (draw-ring g partner C-LABEL-LIT ring-alpha))))))
 
     ;; The match ghosts: a face rising off the table and fading, in the
     ;; primitives style whatever the render mode (the burst is the point).
@@ -1446,12 +1449,19 @@
     ;; x: the frame's effects from (crash fx), already advanced; bg: the
     ;; living background, already stepped, or #f; copper: when the raster
     ;; draws over the field (draw-background).
-    (define (draw-session s g x bg copper)
+    ;; The table hidden (ruling D51, the overlay up): every tile is its
+    ;; body alone, no glyph, tag, ring, lock mark or selection, so the
+    ;; layout still reads as a board and nothing on it can be read.
+    (define *hidden* #f)
+
+    ;; rest: hidden? (the overlay is up), default #f.
+    (define (draw-session s g x bg copper . rest)
+      (set! *hidden* (and (pair? rest) (car rest) #t))
       (let ((cleared (fx-cleared x))
             (glitch (fx-glitch x)))
         (draw-background g (if cleared (* cleared 400.0) 0.0) bg copper)
         (draw-tiles s g x)
-        (when (and (eq? (session-model s) 'hint) (session-labels-shown s))
+        (when (and (not *hidden*) (eq? (session-model s) 'hint) (session-labels-shown s))
           (draw-hint-labels s g))
         (when glitch (draw-glitch g x glitch))
         (when (trace-severed? (session-trace s)) (draw-severed g x))

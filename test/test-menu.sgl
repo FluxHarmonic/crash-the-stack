@@ -53,7 +53,7 @@
               MENU-ENTRIES))
   (test "the removed prototype entries are not entries any more (rulings D32, D34, D48)"
     (assert-equal '(jack-in) (menu-entries (menu-new '(look hud depth jack-in))))
-    (assert-equal 14 (length MENU-ENTRIES)))
+    (assert-equal 19 (length MENU-ENTRIES)))
   (test "the top screen opens with no code line and the settings' defaults"
     (let ((m (menu-new TOP)))
       (assert-equal 'top (menu-screen m))
@@ -142,44 +142,93 @@
         (assert-false (cdr r))
         (assert-equal 'original (menu-version (car r)))))))
 
-(test-group "SETTINGS"
+(test-group "SETTINGS (the general five, D51)"
   (let* ((m (menu-new TOP 'settings))
          (s (car (step m '(return)))))
-    (test "ten rows under the heading, every setting a value row showing its default, BACK last; the last row ends above the band"
+    (test "six rows under the heading: the general five as value rows showing their defaults, BACK last"
       (assert-equal 'settings (menu-screen s))
-      (assert-equal (append SETTING-IDS '(back)) (menu-entries s))
+      (assert-equal (append (settings-group 'general) '(back)) (menu-entries s))
+      (assert-equal '(music sfx volume scanlines veil back) (menu-entries s))
       (for-each (lambda (id)
                   (assert-equal 'value (menu-row-kind s id))
+                  (assert-false (menu-row-note s id))   ; no NOW/NEXT DEAL note on the main menu
                   (assert-equal (setting-value-label id (settings-value (settings-defaults) id)) (menu-row-value s id)))
-                SETTING-IDS)
+                (settings-group 'general))
       (assert-equal 'item (menu-row-kind s 'back))
-      (assert-true (<= (+ (cadr (menu-entry-rect s 9 VW VH)) ENTRY-H) 376)))
-    (test "Enter on PULL steps it and the choice is (set draw . 3); right steps, left steps back; the row shows the value"
+      (assert-true (<= (+ (cadr (menu-entry-rect s 5 VW VH)) ENTRY-H) 376)))
+    (test "PULL and SCORING are not on it (they live in DEFRAG's overlay)"
+      (assert-false (memq 'draw (menu-entries s)))
+      (assert-false (memq 'scoring (menu-entries s))))
+    (test "Enter on MUSIC steps it and the choice is (set music . off); right steps, left steps back; the row shows the value"
       (let* ((r1 (step s '(return)))
              (r2 (step (car r1) '(right)))
              (r3 (step (car r2) '(left))))
-        (assert-equal '(set draw . 3) (cdr r1))
-        (assert-equal "3" (menu-row-value (car r1) 'draw))
-        (assert-equal '(set draw . 1) (cdr r2))
-        (assert-equal '(set draw . 3) (cdr r3))))
-    (test "SCORING steps BOUNTY -> AUDIT; VOLUME steps down and wraps; the cosmetics step OFF -> ON"
-      (let ((sc (step* s 'down))
-            (vol (step* s 'down 'down 'down 'down 'down 'down))
+        (assert-equal '(set music . off) (cdr r1))
+        (assert-equal "OFF" (menu-row-value (car r1) 'music))
+        (assert-equal '(set music . on) (cdr r2))
+        (assert-equal '(set music . off) (cdr r3))))
+    (test "VOLUME steps down and wraps; the cosmetics step from their defaults"
+      (let ((vol (step* s 'down 'down))
             (scan (step* s 'up 'up 'up)))
-        (assert-equal '(set scoring . standard) (cdr (step sc '(return))))
-        (assert-equal "AUDIT" (menu-row-value (car (step sc '(return))) 'scoring))
         (assert-equal 'volume (list-ref (menu-entries vol) (menu-highlight vol)))
         (assert-equal '(set volume . 9) (cdr (step vol '(left))))
         (assert-equal '(set volume . 0) (cdr (step vol '(right))))
         (assert-equal 'scanlines (list-ref (menu-entries scan) (menu-highlight scan)))
-        (assert-equal '(set scanlines . on) (cdr (step scan '(return))))))
+        (assert-equal '(set scanlines . off) (cdr (step scan '(return))))))
     (test "a tap on a value row steps it forward"
       (let ((r (menu-step s (click-frame (center s 1)) VW VH)))
-        (assert-equal '(set scoring . standard) (cdr r))))
+        (assert-equal '(set sfx . off) (cdr r))))
     (test "BACK closes to the top screen with SETTINGS highlighted"
       (let ((b (step (step* s 'up) '(return))))
         (assert-equal 'top (menu-screen (car b)))
         (assert-equal 'settings (list-ref (menu-entries (car b)) (menu-highlight (car b))))))))
+
+(test-group "the table's overlay (ruling D51)"
+  (let ((o (menu-new-overlay 'cards #f (settings-defaults) "3800008R8B" #t))
+        (r (menu-new-overlay 'stack #t (settings-defaults) "19DHXVNFNW" #f)))
+    (test "free play on DEFRAG: RESUME, GAME SETTINGS, SETTINGS, CODE, BACK TO MENU; a run on the stack: no GAME SETTINGS (the stack has no rows), DISCONNECT instead"
+      (assert-equal 'pause (menu-screen o))
+      (assert-equal 'pause (menu-home o))
+      (assert-equal '(resume game-settings settings share back-to-menu) (menu-entries o))
+      (assert-equal '(resume settings share disconnect) (menu-entries r))
+      (assert-equal "PAUSED" (menu-heading o))
+      (assert-true (menu-live? o)))
+    (test "the exit row's note says what leaving keeps; CODE shows the live code"
+      (assert-false (menu-row-value o 'back-to-menu))
+      (assert-equal "BOARD SAVED. CONTINUE RESUMES IT." (menu-row-note o 'back-to-menu))
+      (assert-equal "RUN HELD. CONTINUE RESUMES THE LAYER." (menu-row-note r 'disconnect))
+      (assert-equal "38000-08R8B" (menu-row-value o 'share))
+      (assert-equal 'item (menu-row-kind o 'share))
+      (assert-equal 'item (menu-row-kind r 'disconnect)))
+    (test "Enter on RESUME resumes; Escape on the home screen resumes; Enter on the exit row is the exit choice"
+      (assert-equal 'resume (cdr (step o '(return))))
+      (assert-equal 'resume (cdr (step o '(escape))))
+      (assert-equal 'back-to-menu (cdr (step (step* o 'up) '(return))))
+      (assert-equal 'disconnect (cdr (step (step* r 'up) '(return)))))
+    (test "CODE: COPY where the page can (the web), nothing natively"
+      (assert-equal 'copy (cdr (step (step* o 'down 'down 'down) '(return))))
+      (assert-false (cdr (step (step* r 'down 'down) '(return)))))
+    (test "GAME SETTINGS on DEFRAG: PULL and SCORING with their NEXT DEAL note, BACK; a step is the (set ...) choice; BACK returns to the overlay"
+      (let ((g (car (step (step* o 'down) '(return)))))
+        (assert-equal 'pause-game (menu-screen g))
+        (assert-equal '(draw scoring back) (menu-entries g))
+        (assert-equal "NEXT DEAL" (menu-row-note g 'draw))
+        (assert-equal "NEXT DEAL" (menu-row-note g 'scoring))
+        (assert-equal '(set draw . 3) (cdr (step g '(return))))
+        (let ((b (step (step* g 'up) '(return))))
+          (assert-equal 'pause (menu-screen (car b)))
+          (assert-equal 'game-settings (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
+        (assert-equal 'pause (menu-screen (car (step g '(escape)))))))
+    (test "SETTINGS from the overlay is the general five and closes to the overlay"
+      (let ((s (car (step (step* r 'down) '(return)))))
+        (assert-equal 'settings (menu-screen s))
+        (assert-equal '(music sfx volume scanlines veil back) (menu-entries s))
+        (assert-equal 'pause (menu-screen (car (step s '(escape)))))))
+    (test "the rows sit under the heading at the sub-screen pitch, the value rows wide"
+      (assert-equal SUB-ENTRIES-Y (cadr (menu-entry-rect o 0 VW VH)))
+      (assert-equal ENTRY-W (caddr (menu-entry-rect o 0 VW VH)))
+      (assert-equal VALUE-ROW-W (caddr (menu-entry-rect o 3 VW VH)))
+      (assert-equal ENTRY-W (caddr (menu-entry-rect o 4 VW VH))))))
 
 (test-group "CREDITS and SCORES"
   (let* ((c (car (step (menu-new TOP 'credits) '(return)))))

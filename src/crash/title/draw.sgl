@@ -31,7 +31,7 @@
           (crash run)
           (only (crash code) code-display CODE-LENGTH))   ; (crash code) has an ALPHABET too, the string; the title's is the glyph vector
 
-  (export title-draw draw-title draw-menu-item draw-menu-items draw-bottom-band title-stamp!
+  (export title-draw draw-title draw-menu-item draw-menu-items draw-overlay draw-bottom-band title-stamp! menu-prepare!
           title-covers? title-bake! title-diag! title-diag-dial!
           TITLE-CELL TITLE-X TITLE-Y TITLE-H
           BACKDROP-W BACKDROP-H)
@@ -67,6 +67,42 @@
     (define *bake* #t)
     (define *diag* #f)
     (define (title-bake! on?) (set! *bake* on?))
+
+    ;; The bakes run before the frame's passes, not inside them: a bake is
+    ;; a render-target pass, and a pass cannot nest (sokol asserts). With
+    ;; SCANLINES on the whole frame draws inside the post pass (P4), so a
+    ;; sheet, the logo or a row baked at draw time crashed the process
+    ;; (2026-09-21, the first overlay drive with scanlines on by default).
+    ;; The shells call menu-prepare! from present!'s prep step for the
+    ;; menu or the overlay they are about to draw; once it has run, the
+    ;; draw paths bake nothing and fall back to cells for anything not yet
+    ;; baked (the next frame's prepare catches it).
+    (define *prepared* #f)
+    (define (menu-prepare! m)
+      (set! *prepared* #t)
+      (when *bake*
+        (when (menu-live? m)
+          (items-bake! (if (eq? (menu-screen m) 'top)
+                           (map menu-label (menu-entries m))
+                           (screen-labels m))))
+        (let ((t (and (eq? (menu-screen m) 'top) (menu-title m))))
+          (when (and t (not (title-gated? t)) (not (title-in-card? t)))
+            (if (and (title-settled? t) (null? (title-live-glitches t)))
+                (logo-bake! t TITLE-CELL)
+                (rows-prepare! t TITLE-CELL))))))
+
+    ;; Every completed row with no live glitch on it, baked (the draw's rule).
+    (define (rows-prepare! t cell)
+      (let ((live (title-live-glitches t))
+            (drawn (title-drawn-count t)))
+        (let rows ((y 0))
+          (when (< y LOGO-H)
+            (let* ((extent (title-row-extent y))
+                   (width (cdr extent))
+                   (in-row (max 0 (min width (- drawn (title-row-start y))))))
+              (when (and (= in-row width) (> width 0) (not (row-content-live? y live)))
+                (row-bake! t y cell)))
+            (rows (+ y 1))))))
     (define (title-diag! on?) (set! *diag* on?))
     (define *logo-bakes* 0)
     (define *items-bakes* 0)
@@ -128,7 +164,8 @@
             (set! *logo-key* key)))
         *logo-rt*))
     (define (title-draw t x0 y0 cell)
-      (if (and *bake* (title-settled? t) (null? (title-live-glitches t)))
+      (if (and *bake* (title-settled? t) (null? (title-live-glitches t))
+               (or (not *prepared*) (equal? (cons cell (title-shear t)) *logo-key*)))
           (let ((rt (logo-bake! t cell))
                 (w (+ (* LOGO-W cell) BAKE-MARGIN))
                 (h (* LOGO-H cell)))
@@ -220,7 +257,8 @@
                    (dx (title-row-shift y live))
                    (shear-px (exact (round (* cell (title-row-shear t y)))))
                    (py (+ y0 (* y cell))))
-              (if (and rows-rt? (= in-row width) (> width 0) (not (row-content-live? y live)))
+              (if (and rows-rt? (= in-row width) (> width 0) (not (row-content-live? y live))
+                       (or (not *prepared*) (vector-ref (row-rts) y)))
                   (let ((entry (row-bake! t y cell))
                         (w (* LOGO-W cell)))
                     (color! C-TEX-PLAIN)
@@ -446,7 +484,7 @@
 
     (define (draw-top-screen m vw vh)
       (let ((labels (map menu-label (menu-entries m))))
-        (when *bake* (items-bake! labels))
+        (when (and *bake* (not *prepared*)) (items-bake! labels))
         (let loop ((ls labels) (i 0))
           (unless (null? ls)
             (draw-menu-item (car ls)
@@ -482,7 +520,7 @@
                             ids)))))
 
     (define (draw-sub-screen m vw vh)
-      (when *bake* (items-bake! (screen-labels m)))
+      (when (and *bake* (not *prepared*)) (items-bake! (screen-labels m)))
       ;; the heading, in the ramp, where the logo was
       (let* ((heading (or (menu-heading m) ""))
              (tw (* ITEM-CELL (block-text-width heading)))
@@ -498,8 +536,14 @@
                  (lit? (= i (menu-highlight m)))
                  (value (menu-row-value m id)))
             (if value
-                (draw-value-row (menu-label id) value rect lit? (menu-frames m))
-                (draw-menu-item (menu-label id) rect lit? (menu-frames m) (label-index (menu-label id)))))
+                (draw-value-row (menu-label id) value rect lit? (menu-frames m) (menu-row-note m id))
+                (begin
+                  (draw-menu-item (menu-label id) rect lit? (menu-frames m) (label-index (menu-label id)))
+                  ;; an item's note (the overlay's exit row: what leaving keeps) under it, centered
+                  (let ((note (menu-row-note m id)))
+                    (when note
+                      (color! C-TEXT-DIM)
+                      (text! note (quotient (- vw (text-width note 1)) 2) (+ (cadr rect) (cadddr rect) 1) 1))))))
           (loop (cdr ids) (+ i 1))))
       ;; the screen's content, on a panel in the band's style where it is text
       ;; (solid C-BG with a C-BAR-C rule: the backdrop is busy under the
@@ -519,8 +563,14 @@
     ;; A value row: the name at the row's left, the value right-aligned
     ;; at its right, both in the ramp when highlighted, the cursor at the
     ;; name's left.
-    (define (draw-value-row name value rect lit? frames)
-      (let* ((x (car rect)) (y (cadr rect)) (w (caddr rect)) (h (cadddr rect))
+    ;; note: a word in the 5x7 beside the value (GAME SETTINGS says when
+    ;; a change takes: NEXT DEAL or NOW), or #f.
+    (define (draw-value-row name value rect lit? frames . rest)
+      (let* ((note (and (pair? rest) (car rest)))
+             (x (car rect))
+             (y (cadr rect))
+             (w (caddr rect))
+             (h (cadddr rect))
              (th (* ITEM-CELL ALPHABET-H))
              (ty (+ y (quotient (- h th ITEM-CELL) 2)))
              (nw (* ITEM-CELL (block-text-width name)))
@@ -535,10 +585,25 @@
                            (draw-block-text label tx ty ITEM-CELL style))))))
         (draw name nx nw)
         (draw value vx vw*)
+        (when note
+          (color! C-TEXT-DIM)
+          (text! note (- vx (text-width note 1) 12) (+ ty (quotient (- th GLYPH-H) 2)) 1))
         (when (and lit? (cursor-on? frames))
           (color! C-SELECTED)
           (draw-filled-rect (- nx (* 3 ITEM-CELL) (* ALPHABET-W ITEM-CELL)) ty
                             (* ALPHABET-W ITEM-CELL) th))))
+
+    ;; The table's overlay (ruling D51): the paused table's own menu on a
+    ;; solid panel (the text screens' style: C-BG with a C-BAR-C rule) from
+    ;; the top of the viewport to bottom (the HUD bar's top: the bar stays
+    ;; visible with its meter frozen), the heading and rows as any
+    ;; sub-screen draws them.
+    (define (draw-overlay m vw vh bottom)
+      (color! C-BAR-C)
+      (draw-filled-rect 8 8 (- vw 16) (- bottom 12))
+      (color! C-BG)
+      (draw-filled-rect 9 9 (- vw 18) (- bottom 14))
+      (draw-sub-screen m vw vh))
 
     ;; --- the text screens ------------------------------------------------------------
 
