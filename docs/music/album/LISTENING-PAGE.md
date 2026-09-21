@@ -200,3 +200,16 @@ WAV-to-MP3 pipeline was also exercised on Black Glass and passed its automatic
 metadata, artwork, format and duration checks. ID3v2.3 is used; no ID3v1 footer.
 R2 publication uses soundtrack/preview-i-tagged/ to avoid old immutable caches.
 The page supplies the same artist and cover through the Media Session API.
+
+Tagged publication completed at https://e0a59eea.crashthestack.pages.dev
+(source c797d75). All fifteen public MP3 objects passed byte-range, length,
+content type, CORS and ETag checks against the local tagged files. Results are
+in the external r2-tagged-i/public-verification.json; deployment records are in
+publication-tagged-i/. The existing game, tracker and worker were preserved.
+
+The live browser successfully played the tagged Black Glass MP3. Media Session
+reported Black Glass, artist Crash The Stack, the album title and cover artwork;
+the page retained all fifteen tracks. Playback was muted and paused after this
+functional check; physical phone player behavior has not been tested.
+New object URLs bypass old immutable audio caches. Reload the page and select a
+track to use them; previously downloaded files must be downloaded again.
