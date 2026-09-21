@@ -131,15 +131,23 @@
     (define (audio-source-depth) (if *src-stream* (audio-stream-depth *src-stream*) 0))
     ;; The source sink's cumulative starved frames (the music ran dry).
     (define (audio-source-underruns) (+ *src-underruns* (if *src-stream* (audio-stream-underruns *src-stream*) 0)))
-    ;; The source's pump: up to SOURCE-PUSH-MAX frames toward SOURCE-DEPTH,
-    ;; pulled from the source; #f from it ends the source and closes its sink.
+    ;; The source's pump: toward SOURCE-DEPTH, at most SOURCE-PUSH-MAX frames
+    ;; per pump, or SOURCE-PUSH-RAMP while the sink holds under SOURCE-RAMP-BELOW
+    ;; (a fresh sink, or one that ran dry): the fill then spreads over
+    ;; pumps of ~21 ms of audio each instead of four of 85 ms in the first
+    ;; frames (David's phone, 2026-09-21: "hangs for half a second right
+    ;; when it starts"); at 1024 frames per 12 ms timer tick the sink still
+    ;; gains on real time. #f from the source ends it and closes its sink.
     ;; Answers the frames pushed.
+    (define SOURCE-PUSH-RAMP 1024)
+    (define SOURCE-RAMP-BELOW 4096)
     (define (audio-source-pump!) (pump-source!))
     (define (pump-source!)
       (if (and *source* *src-stream*)
-          (let ((n (min SOURCE-PUSH-MAX
-                        (audio-stream-room *src-stream*)
-                        (- SOURCE-DEPTH (audio-stream-depth *src-stream*)))))
+          (let* ((depth (audio-stream-depth *src-stream*))
+                 (n (min (if (< depth SOURCE-RAMP-BELOW) SOURCE-PUSH-RAMP SOURCE-PUSH-MAX)
+                         (audio-stream-room *src-stream*)
+                         (- SOURCE-DEPTH depth))))
             (cond ((<= n 0) 0)
                   ((*source* *src* 0 n) (push-audio-samples *src-stream* *src* n))
                   (else (set! *source* #f) (close-source-stream!) 0)))

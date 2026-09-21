@@ -23,7 +23,7 @@
 ;;;
 ;;; Lines (say with ?trace / --trace):
 ;;;   crash: music pick NAME seed N            the deal's track
-;;;   crash: music open NAME top|resume POS ROW
+;;;   crash: music open NAME top|resume POS ROW ms N   (N: the open's cost, the compile and the voice graphs)
 ;;;   crash: music section tense|calm asked at POS ROW   (the phase change)
 ;;;   crash: music section tense|calm at POS ROW         (the landing, a bar row)
 ;;;   crash: music fade out|in NAME
@@ -37,13 +37,13 @@
           (motif tune player)
           (crash music)
           (crash audio)
-          (only (crash native) %upsample!))
+          (crash music resample))
 
   (export live-music-frame! live-music-fresh! live-music-off! live-music-stop! live-music-provide!
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
           live-music-section live-music-pending? live-music-name
-          live-music-rate live-music-rate-set? live-music-set-rate! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
+          live-music-rate live-music-rate-set? live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
   (begin
@@ -86,7 +86,7 @@
            (player-position *player*
                             (if (resampling?)
                                 ;; the sink's frames in the player's rate, plus what the upsampler holds unread
-                                (exact (round (+ (* (audio-source-depth) (rs-ratio)) (- *rs-have* *rs-pos*))))
+                                (exact (round (+ (* (audio-source-depth) (rs-ratio)) (resampler-unread *rs*))))
                                 (audio-source-depth)))))
 
     ;; MUSIC / VOLUME: a factor applied at once
@@ -113,6 +113,8 @@
     (define RATES '(32000 24000 22050))   ; below the device's rate, in order
     (define MUSIC-FLOOR 22050)
     (define MUSIC-BUDGET-MS 4.0)          ; the steady pull cost per 60 fps frame a device may spend
+    (define *budget* MUSIC-BUDGET-MS)     ; --music-budget MS / ?music-budget=MS: the arm's door to force the ladder
+    (define (live-music-set-budget! ms) (when (and (number? ms) (> ms 0)) (set! *budget* (* 1.0 ms))))
     (define LADDER-PULLS 60)              ; pulls measured at a rate before a step (about a second)
     (define LADDER-SKIP 30)               ; pulls after an open not measured (the boot's own work around them)
     (define *ladder-skip* LADDER-SKIP)
@@ -120,11 +122,7 @@
     (define *rate-pinned* #f)
     (define *ladder-pulls* 0)
     (define *ladder-ms* 0.0)              ; the sum of ms per 1024 device frames over those pulls
-    (define *rs-buf* #f)                  ; the render at *rate*: stereo f32, RS-FRAMES frames
-    (define *rs-have* 0)                  ; frames valid in *rs-buf*
-    (define *rs-pos* 0.0)                 ; the upsampler's read position in it, fractional frames
-    (define RS-FRAMES (+ SOURCE-PUSH-MAX 16))
-    (define *rate-said* #f)
+    (define *rs* (make-resampler))       ; the render at *rate* and its read position ((crash music resample))
 
     ;; never above the device's rate: the upsampler only goes up
     (define (live-music-rate) (if *rate* (min *rate* (audio-rate)) (audio-rate)))
@@ -146,17 +144,12 @@
               (else (loop (cdr rs))))))
     (define (resampling?) (and *rate* (< (live-music-rate) (audio-rate))))
     (define (rs-ratio) (/ (* 1.0 (live-music-rate)) (audio-rate)))
-    (define (rs-reset!)
-      (unless *rs-buf* (set! *rs-buf* (make-bytevector (* 8 RS-FRAMES) 0)))
-      ;; one silent frame of history before the first rendered one
-      (let loop ((i 0)) (when (< i 8) (bytevector-u8-set! *rs-buf* i 0) (loop (+ i 1))))
-      (set! *rs-have* 1)
-      (set! *rs-pos* 1.0))
     (define (open-player t start)
       (set! *ladder-skip* LADDER-SKIP)
       (set! *ladder-pulls* 0)
       (set! *ladder-ms* 0.0)
-      (rs-reset!)
+      (resampler-reset! *rs*)
+      (set! *player-rate* (live-music-rate))
       (open-tune-player t (live-music-rate) start: start loop: #t))
 
     ;; The ladder, once a frame: after LADDER-PULLS pulls at this rate, the
@@ -169,7 +162,7 @@
                (next (rate-below (live-music-rate))))
           (set! *ladder-pulls* 0)
           (set! *ladder-ms* 0.0)
-          (when (and (not *rate-pinned*) (> per-frame MUSIC-BUDGET-MS) next)
+          (when (and (not *rate-pinned*) (> per-frame *budget*) next)
             (set! *rate* next)
             (*say* "music" "rate" next "per-frame-ms" (/ (round (* 10 per-frame)) 10.0))
             (when *remember* (*remember* next))
@@ -179,16 +172,45 @@
 
     ;; The same track, from its audible position, at the rate now in force;
     ;; the section and its region kept; the source's sink stays open.
+    ;; The same track at the rate now in force, continuing exactly where
+    ;; the old player's render stopped: the sink already holds up to
+    ;; SOURCE-DEPTH frames of it ahead of the ear, so a reopen at the
+    ;; AUDIBLE position played those frames twice (David's phone,
+    ;; 2026-09-21: every ladder step stuttered). The render head is the
+    ;; old player's frames rendered less what the resampler holds unread;
+    ;; the timeline gives the row that head is in and its start sample, and
+    ;; the new player skips the head's offset into that row at its own
+    ;; rate. The section and its region are kept; the source's sink stays open.
     (define (reopen!)
-      (let* ((pos (or (live-music-position) (cons 0 0)))
+      (let* ((old *player*)
+             (old-rate (player-rate-of old))
+             (head (- (player-rendered old) (if (resampling?) (resampler-unread *rs*) 0)))
+             (entry (let loop ((es (player-timeline old)))   ; newest first: #(pos row start)
+                      (cond ((null? es) #f)
+                            ((<= (vector-ref (car es) 2) head) (car es))
+                            (else (loop (cdr es))))))
+             (pos (if entry (cons (vector-ref entry 0) (vector-ref entry 1)) (or (live-music-position) (cons 0 0))))
+             (skip (if entry (max 0 (exact (round (* (- head (vector-ref entry 2)) (/ (live-music-rate) (* 1.0 old-rate)))))) 0))
              (p (open-player *tune* pos))
              (r (assq *section* (tune-mark-regions *tune*))))
-        (player-close! *player*)
+        (player-close! old)
         (set! *player* p)
+        (set! *player-rate* (live-music-rate))
         (when r (player-set-region! p (cadr r) (cddr r)))
+        (discard! p skip)
         (set! *landed-seen* #f)
         (set! *opened-at* #f)
         (apply-gain! (current-fade-gain))))
+    (define *player-rate* #f)   ; the rate the player was opened at
+    (define (player-rate-of p) (or *player-rate* (audio-rate)))
+    (define *scratch* #f)
+    (define (discard! p frames)
+      (unless *scratch* (set! *scratch* (make-bytevector (* 8 SOURCE-PUSH-MAX) 0)))
+      (let loop ((left frames))
+        (when (> left 0)
+          (let ((n (min left SOURCE-PUSH-MAX)))
+            (player-pull! p *scratch* 0 n)
+            (loop (- left n))))))
 
     ;; --- the source ----------------------------------------------------------------
     ;; n stereo f32 frames at the device's rate into out from byte-offset:
@@ -215,20 +237,8 @@
         (if on #t (begin (close-player!) #f))))
 
     (define (pull-resampled! out byte-offset n)
-      (let* ((ratio (rs-ratio))
-             (keep-from (max 0 (- (exact (floor *rs-pos*)) 1))))
-        (when (> keep-from 0)
-          (bytevector-copy! *rs-buf* 0 *rs-buf* (* 8 keep-from) (* 8 *rs-have*))
-          (set! *rs-have* (- *rs-have* keep-from))
-          (set! *rs-pos* (- *rs-pos* keep-from)))
-        (let* ((want (+ (exact (ceiling (+ *rs-pos* (* n ratio)))) 3))
-               (need (min (- want *rs-have*) (- RS-FRAMES *rs-have*))))
-          (if (and (> need 0) (not (player-pull! *player* *rs-buf* (* 8 *rs-have*) need)))
-              #f
-              (begin
-                (when (> need 0) (set! *rs-have* (+ *rs-have* need)))
-                (set! *rs-pos* (%upsample! out byte-offset n *rs-buf* *rs-have* *rs-pos* ratio))
-                #t)))))
+      (let ((p *player*))
+        (resampler-pull! *rs* (lambda (buf off frames) (player-pull! p buf off frames)) out byte-offset n (rs-ratio))))
 
     (define (apply-gain! fade-gain)
       (when *player* (audio-set-source! pull! (* LIVE-GAIN *gain* fade-gain))))
@@ -300,7 +310,9 @@
                    (calm (or (tune-mark t 'calm) 0))
                    (left (assq name *positions*))
                    (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
-                   (p (open-player t start)))
+                   (t0 (current-milliseconds))
+                   (p (open-player t start))
+                   (open-ms (- (current-milliseconds) t0)))
               (set! *player* p)
               (set! *name* name)
               (set! *tune* t)
@@ -309,7 +321,7 @@
               (set! *opened-at* start)
               (let ((r (assq 'calm (tune-mark-regions t))))
                 (when r (player-set-region! p (cadr r) (cddr r))))
-              (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start))
+              (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
               (fade! 0.0 1.0 FADE-IN-MS #f)
               'open))))
 

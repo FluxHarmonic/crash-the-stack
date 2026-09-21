@@ -1,0 +1,92 @@
+;;; The live soundtrack's render cost by component (M1, D59): what a
+;;; pull of the player costs per 1024 frames for a tune as written, with
+;;; the reverb bus off, with the compressor off, with both off, and with
+;;; each channel alone (its cells only; the other channels silent, their
+;;; instruments unbuilt). The title theme and one dense track, at 32000
+;;; and at 48000. A measurement, printed, not an assertion: the numbers
+;;; go to investigations/crash-the-stack-m1 and decide what a "lite"
+;;; render for a slow phone may drop.
+;;;
+;;;   scripts/dev sigil test bench/bench-music.sgl   (out of the suite: a minute of renders)
+
+(import (sigil test)
+        (sigil math)
+        (sigil io)
+        (sigil fs)
+        (sigil time)
+        (sigil list)
+        (sigil struct)
+        (motif tune)
+        (motif tune player))
+
+(define TUNES '("black-glass-title" "breach-vector"))
+(define RATES '(32000 48000))
+(define SECONDS 8)          ; of audio rendered per measurement, after a second of warm-up
+(define REPEATS 2)          ; the least of the repeats is the number (the box is shared)
+
+(define (tune-of name) (read-tune-string (read-file-string (string-append "assets/tunes/" name ".cts"))))
+
+;; the bus alist with keys dropped (reverb gone: no bus reverb at all) or set
+(define (bus-without t keys)
+  (let ((b (or (tune-bus t) '())))
+    (filter (lambda (e) (not (memq (car e) keys))) b)))
+(define (bus-with t pairs)
+  (append pairs (filter (lambda (e) (not (assq (car e) pairs))) (or (tune-bus t) '()))))
+(define REVERB-KEYS '(reverb size damp mix))
+
+(define (no-reverb t) (tune t bus: (bus-without t REVERB-KEYS)))
+(define (comp-off t) (tune t bus: (bus-with t '((comp . off)))))
+
+;; only channel ch's cells
+(define (channel-alone t ch)
+  (tune t patterns: (map (lambda (p)
+                           (tune-pattern p cells: (filter (lambda (c) (= (cell-channel c) ch)) (tune-pattern-cells p))))
+                         (tune-patterns t))))
+
+;; ms per 1024 frames over SECONDS of audio from the calm mark (the first second discarded)
+(define (cost t rate)
+  (let* ((p (open-tune-player t rate start: (cons (or (tune-mark t 'calm) 0) 0) loop: #t))
+         (chunk 1024)
+         (bv (make-bytevector (* 8 chunk) 0)))
+    (let warm ((n 0)) (when (< n rate) (player-pull! p bv 0 chunk) (warm (+ n chunk))))
+    (let ((t0 (current-milliseconds)))
+      (let loop ((n 0)) (when (< n (* SECONDS rate)) (player-pull! p bv 0 chunk) (loop (+ n chunk))))
+      (let ((ms (- (current-milliseconds) t0)))
+        (player-close! p)
+        (/ (* 1024.0 ms) (* SECONDS rate))))))
+
+(define (least-cost t rate)
+  (let loop ((k REPEATS) (best #f))
+    (if (= k 0) best
+        (let ((c (cost t rate)))
+          (loop (- k 1) (if (or (not best) (< c best)) c best))))))
+
+(define (tenth x) (/ (round (* 10 x)) 10.0))
+
+(define (line . parts) (for-each display parts) (newline))
+
+(test-group "bench: the render cost by component"
+  (for-each
+   (lambda (name)
+     (let ((t (tune-of name)))
+       (for-each
+        (lambda (rate)
+          (line "== " name " at " rate " (ms per 1024 frames, least of " REPEATS ")")
+          (let ((full (least-cost t rate)))
+            (line "  full            " (tenth full))
+            (line "  no reverb       " (tenth (least-cost (no-reverb t) rate)))
+            (line "  comp off        " (tenth (least-cost (comp-off t) rate)))
+            (line "  neither         " (tenth (least-cost (comp-off (no-reverb t)) rate)))
+            (let loop ((ch 1))
+              (when (<= ch (tune-channels t))
+                (let* ((alone (channel-alone t ch))
+                       (inst (let find ((cells (apply append (map tune-pattern-cells (tune-patterns alone)))))
+                               (cond ((null? cells) #f)
+                                     ((> (cell-inst (car cells)) 0) (let ((id (cell-inst (car cells)))) (let f ((is (tune-instruments t))) (cond ((null? is) #f) ((= (tune-instrument-id (car is)) id) (car is)) (else (f (cdr is)))))))
+                                     (else (find (cdr cells))))))
+                       (kind (if inst (symbol->string (tune-instrument-kind inst)) "-")))
+                  (line "  channel " ch " alone  " (tenth (least-cost (no-reverb (comp-off alone)) rate)) "   (" kind ", no bus)"))
+                (loop (+ ch 1))))))
+        RATES)))
+   TUNES)
+  (test "printed" (assert-true #t)))
