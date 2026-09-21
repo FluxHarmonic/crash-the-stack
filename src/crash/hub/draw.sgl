@@ -1,0 +1,227 @@
+;;; (crash hub draw) - One static screen of a layer, for David's look
+;;; (P5 phase 1), and the tile bake phase 2 will draw the world with.
+;;;
+;;; The tiles of (crash hub tiles) are baked once into a 'nearest render
+;;; target (the tile sheet's pattern in (crash render): a bake is a pass,
+;;; so it runs from the shells' prepare step, never inside the frame's
+;;; pass) in their ramp colors, and a cell of the world is then one
+;;; draw-texture-region at 16 px. The field draws behind the grid; the
+;;; void shows it, the floor's dither half hides it. Daemons and the
+;;; runner are tiles too; a daemon's sight fan is a dither of ICE dots
+;;; over the cells it sees (dither, no alpha: the style bible). A gate
+;;; and its key node carry the key's number in the 5x7 font. One status
+;;; line at the bottom. No input, no beats: the debug doors (?hub=SEED
+;;; on the web, --hub SEED natively) show layer 1 of run seed SEED.
+
+(define-library (crash hub draw)
+  (import (sigil math)
+          (sigil list)
+          (sigil graphics)
+          (crash palette)
+          (crash font)
+          (crash render)
+          (crash hub tiles)
+          (crash hub world)
+          (crash hub gen)
+          (crash hub rules))
+
+  (export hub-door! hub-door-seed hub-door-world hub-door-prepare! hub-door-draw!
+          hub-tiles-ensure! draw-hub-world
+          VIEW-W VIEW-H)
+
+  (begin
+    (define VIEW-W 40)                ; cells across the 640 px view
+    (define VIEW-H 22)                ; cells down the 352 px board area
+    (define BAND-H 48)                ; the status band below, the HUD's height
+
+    ;; --- the door --------------------------------------------------------------
+
+    (define *door-seed* #f)
+    (define *door-world* #f)
+
+    ;; ?hub=SEED / --hub SEED: arm the door with a run seed (a non-number disarms it).
+    (define (hub-door! text)
+      (let ((n (and (string? text) (string->number text))))
+        (set! *door-world* #f)
+        (set! *door-seed* (and n (exact? n) (integer? n) (>= n 0) (max 1 n)))))
+
+    (define (hub-door-seed) *door-seed*)
+
+    ;; The door's world, built on first use.
+    (define (hub-door-world)
+      (when (and *door-seed* (not *door-world*))
+        (set! *door-world* (hub-new *door-seed*)))
+      *door-world*)
+
+    ;; Before the frame's passes: the bake.
+    (define (hub-door-prepare!)
+      (when *door-seed* (hub-tiles-ensure!)))
+
+    ;; Inside the frame: the screen, or #f when the door is shut so the
+    ;; shell draws its own.
+    (define (hub-door-draw! vw vh bg)
+      (and *door-seed*
+           (let ((w (hub-door-world)))
+             (draw-hub-world w vw vh bg)
+             #t)))
+
+    ;; --- the bake --------------------------------------------------------------
+
+    (define *rt* #f)
+    (define *tex* #f)
+
+    (define (ramp-color digit)
+      (let ((entry (assq (string->symbol (vector-ref TILE-RAMP (- digit 1))) PALETTE)))
+        (if entry (cdr entry) C-TEXT)))
+
+    ;; The rows of a tile with only one digit's cells lit, in the font's # format.
+    (define (rows-of-tone rows digit)
+      (let ((c (integer->char (+ digit (char->integer #\0)))))
+        (map (lambda (row)
+               (string-map (lambda (ch) (if (char=? ch c) #\# #\.)) row))
+             rows)))
+
+    ;; Every tile once, side by side, at scale 1.
+    (define (hub-tiles-ensure!)
+      (unless *rt*
+        (let* ((n (vector-length TILES))
+               (rt (make-render-target (* n TILE-SIZE) TILE-SIZE 'nearest)))
+          (with-render-target rt
+            (set-blend-mode 'none)
+            (let tiles ((i 0))
+              (when (< i n)
+                (let ((rows (vector-ref TILES i)))
+                  (let tones ((d 1))
+                    (when (<= d 8)
+                      (color! (ramp-color d))
+                      (draw-rows (rows-of-tone rows d) (* i TILE-SIZE) 0 1 TILE-SIZE)
+                      (tones (+ d 1)))))
+                (tiles (+ i 1)))))
+          (set-blend-mode 'normal)
+          (set! *rt* rt)
+          (set! *tex* (render-target->texture rt)))))
+
+    ;; Tile i at (x, y), upright (the target is bottom-up: the flip (crash atlas) documents).
+    (define (draw-tile i x y)
+      (when *tex*
+        (set-color 1.0 1.0 1.0 1.0)
+        (draw-texture-region *tex*
+                             x y TILE-SIZE TILE-SIZE
+                             (* i TILE-SIZE) TILE-SIZE TILE-SIZE (- TILE-SIZE))))
+
+    (define (draw-tile-named name x y)
+      (let ((i (tile-index name)))
+        (when i (draw-tile i x y))))
+
+    ;; --- the world -------------------------------------------------------------
+
+    (define (walkable-at? l x y)
+      (and (in-bounds? x y (layer-width l) (layer-height l))
+           (cell-walkable? (layer-cell l (idx x y (layer-width l))))))
+
+    ;; The tile name for a cell of the world (#f for void).
+    (define (tile-for w i)
+      (let* ((l (world-layer w))
+             (kind (layer-cell l i))
+             (x (idx-x i (layer-width l)))
+             (y (idx-y i (layer-width l))))
+        (cond ((eq? kind 'void) #f)
+              ((eq? kind 'barrier) "barrier")
+              ((eq? kind 'floor) "floor")
+              ((eq? kind 'link)
+               (if (or (walkable-at? l (- x 1) y) (walkable-at? l (+ x 1) y)) "link-h" "link-v"))
+              ((eq? kind 'gate) (if (memv i (world-opened w)) "floor" "gate"))
+              ((eq? kind 'node)
+               (let* ((n (layer-node-at l i))
+                      (live (and n (world-node w (node-index n)))))
+                 (if (and live (eq? (node-state live) 'cleared)) "node-cleared" "node")))
+              ((eq? kind 'market) "market")
+              ((eq? kind 'cache) (if (memv i (world-taken w)) "floor" "cache"))
+              ((eq? kind 'ice) (if (assv i (world-dark w)) "floor" "ice"))
+              ((eq? kind 'shadow) "shadow")
+              ((eq? kind 'ladder-up) "ladder-up")
+              ((eq? kind 'ladder-down) "ladder-down")
+              (else "floor"))))
+
+    ;; The key's number on a gate or a key node: 1..4 in KEY-COLORS order.
+    (define (key-number color)
+      (let loop ((cs KEY-COLORS) (k 1))
+        (cond ((null? cs) #f)
+              ((eq? (car cs) color) k)
+              (else (loop (cdr cs) (+ k 1))))))
+
+    (define (key-label-for w i)
+      (let* ((l (world-layer w))
+             (kind (layer-cell l i)))
+        (cond ((eq? kind 'gate) (key-number (layer-gate-color l i)))
+              ((eq? kind 'node)
+               (let ((n (layer-node-at l i)))
+                 (and n (node-key n) (key-number (node-key n)))))
+              (else #f))))
+
+    ;; A dither of ICE dots over a seen cell: one dot every 4 px, offset by row.
+    (define (draw-sight-cell x y)
+      (color! C-ICE)
+      (let rows ((r 0))
+        (when (< r 4)
+          (let cols ((c 0))
+            (when (< c 4)
+              (draw-filled-rect (+ x (* c 4) (if (odd? r) 2 0)) (+ y (* r 4) 1) 1 1)
+              (cols (+ c 1))))
+          (rows (+ r 1)))))
+
+    (define (clamp v lo hi) (max lo (min v hi)))
+
+    ;; The window of VIEW-W x VIEW-H cells around the runner (the whole
+    ;; layer when it fits), the field behind it, the status line below.
+    (define (draw-hub-world w vw vh bg)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (top (- vh BAND-H))
+             (r (world-runner w))
+             (ox (clamp (- (idx-x (runner-cell r) width) (quotient VIEW-W 2)) 0 (max 0 (- width VIEW-W))))
+             (oy (clamp (- (idx-y (runner-cell r) width) (quotient VIEW-H 2)) 0 (max 0 (- height VIEW-H))))
+             (sight (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w)))
+             (daemon-cells (map daemon-cell (world-daemons w))))
+        ;; the ground: C-BG for the static screen (the field's own passes need the
+        ;; shell's prepare, which the menu frame does not run; phase 2 draws it behind)
+        (color! C-BG)
+        (draw-filled-rect 0 0 vw vh)
+        (let rows ((y 0))
+          (when (< y (min VIEW-H height))
+            (let cols ((x 0))
+              (when (< x (min VIEW-W width))
+                (let* ((i (idx (+ x ox) (+ y oy) width))
+                       (px (* x TILE-SIZE))
+                       (py (* y TILE-SIZE))
+                       (name (tile-for w i)))
+                  (when name (draw-tile-named name px py))
+                  (when (and (memv i sight) (memq (layer-cell l i) (list 'floor 'link 'shadow 'ice 'cache)))
+                    (draw-sight-cell px py))
+                  (let ((k (key-label-for w i)))
+                    (when k
+                      (color! C-ICE)
+                      (draw-text (number->string k) (+ px 2) (+ py 2) 1)))
+                  (when (memv i daemon-cells) (draw-tile-named "daemon" px py))
+                  (when (= i (runner-cell r)) (draw-tile-named "runner" px py)))
+                (cols (+ x 1))))
+            (rows (+ y 1))))
+        ;; the band
+        (color! C-BG)
+        (draw-filled-rect 0 top vw BAND-H)
+        (color! C-BAR-C)
+        (draw-filled-rect 0 top vw 1)
+        (color! C-TEXT)
+        (draw-text (string-append "LAYER " (number->string (world-depth w)) "/" (number->string (layer-count))
+                                  "  TRACE " (number->string (world-trace w)) "/" (number->string (descriptor-budget (hub-descriptor w)))
+                                  "  CR " (number->string (world-credits w))
+                                  "  BEAT " (number->string (world-beat w))
+                                  "  SEED " (number->string (world-run-seed w)))
+                   8 (+ top 8) 2)
+        (color! C-TEXT-DIM)
+        (draw-text (string-append "HUB DOOR: LAYER " (number->string (world-depth w)) " OF RUN SEED " (number->string (world-run-seed w))
+                                  " AT " (number->string width) "X" (number->string height)
+                                  ", " (number->string (length (world-daemons w))) " DAEMONS, "
+                                  (number->string (length (layer-gates l))) " GATES")
+                   8 (+ top 28) 1)))))
