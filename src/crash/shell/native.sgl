@@ -26,6 +26,7 @@
 ;;;                   [--audio-depth N]   frames kept ahead of the output (6144: the cue latency and the stall headroom)
 ;;;                   with --log-keys, alt+m prints the last minute's frame stats to stdout
 ;;;   crash-the-stack --edit PATH        the layout editor on PATH (loaded if it exists)
+;;;   crash-the-stack --tune PATH        the tracker on a .cts file; --tracker a blank tune (P3b)
 ;;;
 ;;; The game opens on the menu (P2: STACK / CARDS / CONTINUE; ruling D14's
 ;;; placeholder until P4's real one); --cards skips it straight to the
@@ -62,6 +63,10 @@
           (crash geometry)
           (crash input)
           (crash editor)
+          (crash tracker)
+          (crash tracker model)
+          (crash tracker keys)
+          (crash tracker files)
           (crash tween)
           (crash fx)
           (crash render)
@@ -888,6 +893,77 @@
                          (else (loop e #f x)))))))))
         (gfx-shutdown)))
 
+    ;; --- the tracker (P3b) ------------------------------------------------------
+    ;;
+    ;; --tune PATH boots into the tracker on that file (or a blank tune with
+    ;; --tracker); Ctrl-S saves to the player's tunes folder, Ctrl-O opens the
+    ;; next tune file (the shipped ones under assets/tunes first), Ctrl-E
+    ;; prints the canonical text (the share form natively), Escape with
+    ;; nothing playing and edit mode off leaves. Its own poll: the FT2 key
+    ;; set and the four modifiers, not the games' key list.
+
+    (define (poll-tracker)
+      (list (filter key-pressed? TRACKER-KEYS)
+            (filter key-down? TRACKER-MODIFIERS)
+            (and (mouse-pressed? 'left) (window->virtual (mouse-x) (mouse-y)))))
+
+    (define (tracker-boot path)
+      (cond ((and path (file-exists? path))
+             (let ((s (tracker-open-text (read-file-string path) (tune-file-name path))))
+               (if (tracker-error s)
+                   (begin (display "tune: ") (display (tracker-error s)) (newline)
+                          (tracker-blank))
+                   s)))
+            (path (display "tune not found: ") (display path) (newline) (tracker-blank))
+            (else (tracker-blank))))
+
+    (define (tracker-shell-request s req)
+      (case req
+        ((save)
+         (let ((path (tune-save-file! s)))
+           (display "tune: saved ") (display path) (newline)
+           (tracker-with-message s "SAVED")))
+        ((open)
+         (let ((next (next-tune-file (tstate-name s))))
+           (if next
+               (let ((s2 (tracker-open-text (read-file-string next) (tune-file-name next))))
+                 (if (tracker-error s2)
+                     (tracker-with-message s "UNREADABLE")
+                     (tracker-with-message s2 (string-upcase (tune-file-name next)))))
+               (tracker-with-message s "NO TUNES"))))
+        ((share)
+         (display "crash: tune-share") (newline)
+         (display (tracker-text s))
+         (tracker-with-message s "PRINTED"))
+        ((new) (tracker-blank))
+        (else s)))
+
+    (define (tracker-loop path)
+      (lambda ()
+        (gfx-setup)
+        (set-viewport VW VH)
+        (set-letterbox-color 0.0 0.0 0.0)
+        (open-audio! #f)
+        (audio-set-ambient! #f AMBIENT-RATE)
+        (let loop ((s (tracker-boot path)))
+          (wait-frame)
+          (let* ((p (poll-tracker))
+                 ;; the wheel scrolls the cursor row, three rows a notch (sigil-desktop 0.10.2; + is away = up)
+                 (w (mouse-wheel))
+                 (s (if (= w 0.0) s (tracker-apply s (list 'scroll (* -3 (if (> w 0.0) 1 -1))))))
+                 (r (tracker-frame s (car p) (cadr p) (caddr p) VW VH #f))
+                 (s (car r))
+                 (req (cdr r))
+                 (s (if (memq req '(save open share new)) (tracker-shell-request s req) s)))
+            (frame-begin!)
+            (tracker-draw s VW VH #f)
+            (end-frame)
+            (audio-pump!)
+            (cond ((eq? req 'leave) (request-quit))
+                  ((quit-requested?) #t)
+                  (else (loop s)))))
+        (gfx-shutdown)))
+
     (define (draw-frame-editor e canvas)
       (frame-begin!)
       (draw-editor e canvas)
@@ -953,6 +1029,8 @@
              (mute? (and (member "--mute" args) #t))
              (edit-path (arg-value args "--edit" #f))
              (code-arg (arg-value args "--code" #f))
+             (tune-path (arg-value args "--tune" #f))
+             (tracker? (or tune-path (and (member "--tracker" args) #t)))
              (bench-arg (arg-value args "--bench-probe" #f)))
         (set! *copper* (let ((r (arg-value args "--raster" #f)))
                          (if r
@@ -981,10 +1059,14 @@
         (when bench-arg
           (bench-probe! (or (string->number bench-arg) 20))
           (exit 0))
-        (run-game (if edit-path "Crash The Stack - Editor" "Crash The Stack")
+        (run-game (cond (edit-path "Crash The Stack - Editor")
+                        (tracker? "Crash The Stack - Tracker")
+                        (else "Crash The Stack"))
                   WINDOW-W
                   WINDOW-H
-                  (if edit-path
-                      (editor-loop edit-path)
-                      (stage-loop seed model log-keys? fresh? cards? bg-mode bg-hold mute?)))
+                  (cond
+                    (edit-path (editor-loop edit-path))
+                    (tracker? (tracker-loop tune-path))
+                    (else
+                     (stage-loop seed model log-keys? fresh? cards? bg-mode bg-hold mute?))))
         0))))

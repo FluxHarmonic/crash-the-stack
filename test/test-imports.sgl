@@ -136,3 +136,64 @@
       (assert-equal 4 (length bad)))
     (test "with (sigil app) allowed the helper is clean: the checker can stand down"
       (assert-equal '() (check-modules CONTROL-ROOT '((crash stack helper)) '((sigil core) (sigil app)))))))
+
+;; --- the tracker family (P3b): a clean boundary from the games ------------
+;;
+;; (crash tracker ...) ships standalone (its own wasm behind /tracker/), so it imports no board, card,
+;; menu, HUD, render or shell module: only sigil, motif, and the three crash
+;; modules named here (the font, the palette, the audio sink), which are
+;; leaves of this walk: their own imports are theirs. The walk follows the
+;; family's modules and reports every import outside the two lists.
+
+(define TRACKER-MODULES
+  '((crash tracker)
+    (crash tracker model)
+    (crash tracker keys)
+    (crash tracker draw)
+    (crash tracker play)
+    (crash tracker files)
+    (crash tracker web)
+    (crash tracker main)))
+
+(define TRACKER-ALLOWLIST
+  '((sigil core) (sigil struct) (sigil math) (sigil list) (sigil string)
+    (sigil io) (sigil fs) (sigil path) (sigil process) (sigil time)
+    (sigil graphics) (sigil browser gles3)
+    (motif tune) (motif tune compile) (motif tune player) (motif render) (motif track) (motif synth)
+    (crash font) (crash palette) (crash audio)))
+
+(define (check-family root family allowlist)
+  (let loop ((todo family) (seen '()) (bad '()))
+    (cond ((null? todo) (reverse bad))
+          ((member (car todo) seen) (loop (cdr todo) seen bad))
+          (else
+           (let* ((name (car todo))
+                  (imports (library-imports (module-path root name)))
+                  (violations (filter (lambda (i) (not (or (member i allowlist) (member i family))))
+                                      imports))
+                  (followups (filter (lambda (i) (member i family)) imports)))
+             (loop (append (cdr todo) followups)
+                   (cons name seen)
+                   (append (reverse (map (lambda (v) (cons name v)) violations)) bad)))))))
+
+(test-group "the tracker family imports only sigil, motif, font, palette and audio"
+  (let ((bad (check-family "." TRACKER-MODULES TRACKER-ALLOWLIST)))
+    (test "no import outside the tracker allowlist (no board, cards, menu, hud, render, shell)"
+      (assert-equal '() bad))
+    (test "every tracker module exists"
+      (assert-true (every (lambda (m) (file-exists? (module-path "." m))) TRACKER-MODULES)))
+    (test "the real model was read: it imports motif's tune model"
+      (assert-true (and (member '(motif tune) (library-imports (module-path "." '(crash tracker model)))) #t)))))
+
+(test-group "positive control: a planted tracker module is caught"
+  (let ((bad (check-family CONTROL-ROOT
+                           '((crash tracker planted) (crash tracker model))
+                           TRACKER-ALLOWLIST)))
+    (test "the planted (crash render) import is named"
+      (assert-true (and (member '((crash tracker planted) . (crash render)) bad) #t)))
+    (test "the planted (crash stack rules) import is named"
+      (assert-true (and (member '((crash tracker planted) . (crash stack rules)) bad) #t)))
+    (test "the planted (crash cards rules) inside cond-expand is named"
+      (assert-true (and (member '((crash tracker planted) . (crash cards rules)) bad) #t)))
+    (test "nothing else is reported"
+      (assert-equal 3 (length bad)))))

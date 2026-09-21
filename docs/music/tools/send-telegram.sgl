@@ -1,0 +1,118 @@
+#!/usr/bin/env sigil
+;;; No machine-specific credential location. No automatic upload retries.
+(import (sigil args) (sigil json) (sigil list))
+
+(define (config-quote text)
+  (str "\"" (string-replace (string-replace text "\\" "\\\\") "\"" "\\\"") "\""))
+
+(define (credential-value text)
+  (let ((value (trim text)))
+    (cond
+      ((starts-with? value "\"")
+       (let ((port (open-input-string value)))
+         (let ((result (read port)))
+           (unless (and (string? result)
+                        (let* ((rest (read-string 10000 port))
+                               (tail (if (eof-object? rest) "" (trim rest))))
+                          (or (equal? tail "") (starts-with? tail "#"))))
+             (error "Malformed credential entry"))
+           result)))
+      ((starts-with? value "'")
+       (let ((end (string-index-of value "'" 1)))
+         (unless end (error "Malformed credential entry"))
+         (let ((tail (trim (substring value (+ end 1) (string-length value)))))
+           (unless (or (equal? tail "") (starts-with? tail "#"))
+             (error "Malformed credential entry")))
+         (substring value 1 end)))
+      (else (trim (car (split value " #")))))))
+
+(define (string-index-of text needle start)
+  (let loop ((i start))
+    (cond
+      ((> (+ i (string-length needle)) (string-length text)) #f)
+      ((equal? (substring text i (+ i (string-length needle))) needle) i)
+      (else (loop (+ i 1))))))
+
+(define (credentials filename)
+  (if filename
+      (let ((values '()))
+        (each line (split (read-text filename) "\n")
+          (let* ((clean (trim line))
+                 (clean (if (starts-with? clean "export ")
+                            (trim (substring clean 7 (string-length clean))) clean))
+                 (at (string-index-of clean "=" 0)))
+            (when at
+              (let ((key (trim (substring clean 0 at))))
+                (when (member key '("TELEGRAM_BOT_TOKEN" "TELEGRAM_CHAT_ID"
+                                    "COURIER_TELEGRAM_TOKEN" "COURIER_TELEGRAM_CHAT_ID"))
+                  (set! values
+                    (cons (cons key (credential-value (substring clean (+ at 1) (string-length clean))))
+                          values)))))))
+        (define (lookup primary compatible)
+          (let ((entry (or (assoc primary values) (assoc compatible values))))
+            (and entry (cdr entry))))
+        (list (lookup "TELEGRAM_BOT_TOKEN" "COURIER_TELEGRAM_TOKEN")
+              (lookup "TELEGRAM_CHAT_ID" "COURIER_TELEGRAM_CHAT_ID")))
+      (list (getenv "TELEGRAM_BOT_TOKEN") (getenv "TELEGRAM_CHAT_ID"))))
+
+(define (valid-secret? text punctuation)
+  (and (string? text) (> (string-length text) 0)
+       (every (lambda (c)
+                (or (char-alphabetic? c) (char-numeric? c) (member c punctuation)))
+              (string->list text))))
+
+(define (send-files opts files)
+  (unless (pair? files) (error "Choose at least one audio file"))
+  (let ((paths (map (lambda (p)
+                     (unless (and (file? p) (> (file-size p) 0))
+                       (error "Upload input must be a nonempty file" p))
+                     (realpath p)) files)))
+    (let loop ((rest paths) (seen '()))
+      (unless (null? rest)
+        (when (member (car rest) seen) (error "Duplicate upload input"))
+        (loop (cdr rest) (cons (car rest) seen))))
+    (if (cdr (assq 'dry-run opts))
+        (each file paths (println "Would send ~a" file))
+        (let* ((private
+                 (guard (e (else (error "Could not read credential configuration")))
+                   (credentials (cdr (assq 'env-file opts)))))
+               (token (car private))
+               (chat (cadr private)))
+          (unless (and (valid-secret? token '(#\: #\- #\_))
+                       (contains? token ":")
+                       (valid-secret? chat '(#\- #\_ #\@)))
+            (error "Provide TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or --env-file"))
+          (requires (tools curl))
+          (each file paths
+            ;; Feed secrets on stdin. Even the outcome's argv contains no token.
+            ;; Curl does not follow redirects unless explicitly requested.
+            (let* ((configuration
+                     (str "url = " (config-quote (str "https://api.telegram.org/bot" token "/sendDocument")) "\n"
+                          "form-string = " (config-quote (str "chat_id=" chat)) "\n"
+                          "form-string = " (config-quote (str "caption=Crash soundtrack: " (basename file))) "\n"
+                          "form = " (config-quote (str "document=@" (config-quote file))) "\n"))
+                   (result ($? curl --silent --show-error --fail-with-body
+                               --proto "=https" --max-redirs 0 --max-time 180
+                               --config "-" in: ,configuration timeout: 185)))
+              (unless (ok? result)
+                (eprintln "UNCONFIRMED ~a: transport/API error; check Telegram before retrying." (basename file))
+                (exit 1))
+              (let ((receipt
+                      (guard (e (else #f))
+                        (let ((response (json-decode (stdout-of result))))
+                          (and (dict-ref response ok: #f)
+                               (dict-ref (dict-ref response result:) message_id:))))))
+                (unless receipt
+                  (eprintln "UNCONFIRMED ~a: invalid API acknowledgement; not retried." (basename file))
+                  (exit 1))
+                (println "SENT ~a (message ~a)" (basename file) receipt))))))))
+
+(run-command
+  (command
+    name: "send-telegram"
+    description: "Send chosen full auditions. Credentials come from environment or explicit --env-file."
+    options: (list
+               (option name: 'env-file long: "env-file" value: "FILE")
+               (option name: 'dry-run long: "dry-run"))
+    handler: send-files)
+  (script-args))

@@ -1,0 +1,76 @@
+;;; (crash tracker files) - Tune files natively: the shipped ones and the player's
+;;;
+;;; The shipped soundtrack lives under assets/tunes/ (the repo root when
+;;; the game runs natively); the player's own under
+;;; $XDG_DATA_HOME/crash-the-stack/tunes/ (~/.local/share by default),
+;;; made on the first save. (tune-files) lists both, shipped first;
+;;; (tune-save! s) writes <name>.cts canonically into the player's
+;;; folder and (tune-load path) reads one. The web shell never imports
+;;; this module (the page holds its files); it is native only.
+
+(define-library (crash tracker files)
+  (import (sigil list)
+          (sigil string)
+          (sigil fs)
+          (sigil path)
+          (sigil process)
+          (motif tune)
+          (crash tracker model))
+
+  (export SHIPPED-TUNES-DIR user-tunes-dir tune-files tune-file-name
+          tune-load-file tune-save-file! next-tune-file)
+
+  (begin
+    (define SHIPPED-TUNES-DIR "assets/tunes")
+
+    (define (user-tunes-dir)
+      (let ((xdg (getenv "XDG_DATA_HOME"))
+            (home (or (getenv "HOME") ".")))
+        (path-join (or xdg (path-join home ".local/share")) "crash-the-stack/tunes")))
+
+    (define (cts? name)
+      (let ((n (string-length name)))
+        (and (> n 4) (string=? (substring name (- n 4) n) ".cts"))))
+
+    (define (files-in dir)
+      (if (directory-exists? dir)
+          (map (lambda (f) (path-join dir f))
+               (list-sort string<? (filter cts? (directory-list dir))))
+          '()))
+
+    ;; Every tune file, the shipped ones first.
+    (define (tune-files)
+      (append (files-in SHIPPED-TUNES-DIR) (files-in (user-tunes-dir))))
+
+    ;; "assets/tunes/spy.cts" -> "spy"
+    (define (tune-file-name path)
+      (let* ((base (path-basename path))
+             (n (string-length base)))
+        (if (cts? base) (substring base 0 (- n 4)) base)))
+
+    (define (tune-load-file path)
+      (tracker-new (read-tune-file path) (tune-file-name path)))
+
+    ;; Save into the player's folder; answers the path written.
+    (define (tune-save-file! s)
+      (let* ((dir (user-tunes-dir))
+             (path (path-join dir (string-append (tstate-name s) ".cts"))))
+        (unless (directory-exists? dir)
+          (let ((parent (path-dirname dir)))
+            (unless (directory-exists? parent) (make-directory parent))
+            (make-directory dir)))
+        (write-tune-file (tstate-tune s) path)
+        path))
+
+    ;; The file after `name` in the list (wrapping), or #f with no files.
+    (define (next-tune-file name)
+      (let ((files (tune-files)))
+        (if (null? files)
+            #f
+            (let loop ((fs files))
+              (cond ((null? fs) (car files))
+                    ((string=? (tune-file-name (car fs)) name)
+                     (if (null? (cdr fs)) (car files) (cadr fs)))
+                    (else (loop (cdr fs))))))))
+
+    ))
