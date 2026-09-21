@@ -29,7 +29,7 @@ The selected album master WAV/FLAC files and all original render logs remain
 outside the public tree and outside Git. Source precision remains 16-bit.
 
 Initial bundle: ~/Ops/artifacts/crash-the-stack-album/listen-preview-i/.
-The OGG total is 78,640,277 bytes (75.00 MiB); MP3 is 105,931,357 bytes
+The OGG total is 78,640,277 bytes (75.00 MiB); MP3 is 105,931,365 bytes
 (101.02 MiB). Largest asset: Black Glass MP3, 8,450,500 bytes (8.06 MiB).
 Cloudflare Pages permits 25 MiB per file and 20,000 files on the Free plan:
 https://developers.cloudflare.com/pages/platform/limits/ (checked 2026-09-21).
