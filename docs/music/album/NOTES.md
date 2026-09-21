@@ -54,3 +54,13 @@ processing review from proposed album playback levels. See MASTER-TRIAL-I.md
 for listening landmarks, provenance and checks. No composition or game asset is
 changed. The next arrangement pair is Cold Boot and Relay Ghost; mastering
 preferences remain pending the trial listen.
+
+## Opening pair I
+
+David found the album-level pilots promising and authorized the next tracks
+while continuing to listen for details. Cold Boot and Relay Ghost receive new
+finite arrangements in positions 2/3. Their accepted instrument banks and buses
+remain intact; preserve Cold Boot's integrated fill and Relay Ghost's complete
+returning bell phrases. See OPENING-PAIR-I.md. The pilot mastering recipe remains
+provisional; adjust gain per track from measured native renders, not by forcing
+all fifteen titles to one loudness. No game backport is proposed.

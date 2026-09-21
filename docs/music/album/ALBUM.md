@@ -9,13 +9,13 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|
-| 1 | Black Glass | Composition liked; mastering trial I | 4:24 actual |
-| 2 | Cold Boot | Planned | 3:30 |
-| 3 | Relay Ghost | Planned | 3:30 |
+| 1 | Black Glass | Composition liked; album-level trial promising | 4:24 actual |
+| 2 | Cold Boot | Opening pair I, rendering | 3:35 actual |
+| 3 | Relay Ghost | Opening pair I, rendering | 3:27 actual |
 | 4 | Closed Loop | Planned | 3:15 |
 | 5 | Shadow Protocol | Planned | 3:45 |
 | 6 | Blind Spot | Planned | 3:00 |
-| 7 | Quiet Array | Composition liked; mastering trial I | 4:05 actual |
+| 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
 | 8 | Sector Drift | Planned | 3:30 |
 | 9 | Dirty Cache | Planned | 3:45 |
 | 10 | Basement Circuit | Planned | 3:45 |
