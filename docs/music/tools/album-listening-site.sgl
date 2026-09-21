@@ -2,7 +2,8 @@
 ;;; Package the selected album auditions beneath soundtrack/ in an external tree.
 (import (sigil args) (sigil json))
 (load (path (script-dir) "lib/core.sgl"))
-(import (crash soundtrack tools))
+(load (path (script-dir) "lib/album-metadata.sgl"))
+(import (crash soundtrack tools) (crash soundtrack album metadata))
 (initialize (path (script-dir) "../../.."))
 (requires (tools ffmpeg ffprobe sha256sum))
 
@@ -23,6 +24,13 @@
     ("clock-edge" "edge-pair-i")
     ("glass-current" "closer-i")))
 (define MAX-ASSET-BYTES (* 25 1024 1024))
+
+(define (album-track-number slug)
+  (let loop ((remaining TRACKS) (number 1))
+    (check (pair? remaining) "Unknown album track" slug)
+    (if (equal? (caar remaining) slug)
+        number
+        (loop (cdr remaining) (+ number 1)))))
 
 (define (probe file)
   (json ffprobe -v error -show_format -show_streams -of json ,file))
@@ -60,7 +68,10 @@
                                 (str (root) "/")))
              "Output must remain outside the repository")
       (ensure-directory audio)
-      (each spec TRACKS
+      (each spec
+        (map (lambda (slug)
+               (or (assoc slug TRACKS) (error "Unknown album track" slug)))
+             (or (option-ref options 'tracks) (map car TRACKS)))
         (let* ((slug (car spec))
                (directory (path artifacts (cadr spec)))
                (suffix (if (equal? (cadr spec) "master-trial-i")
@@ -77,15 +88,22 @@
                      (path (root) "docs/music/album" (str slug "-map.json")))))
                (title (dict-ref section-map title:))
                (seconds (dict-ref section-map duration_seconds:))
-               (argv (list "ffmpeg" "-v" "error" "-nostdin" "-n"
-                           "-i" wav "-map" "0:a:0" "-c:a" "libmp3lame"
-                           "-b:a" "256k" "-metadata" (str "title=" title)
-                           mp3-target)))
+               (argv
+                 (append
+                   (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                         "-i" wav
+                         "-i" (path (root) "docs/music/album/art/cover-i.png")
+                         "-map" "0:a:0" "-map" "1:v:0"
+                         "-c:a" "libmp3lame" "-b:a" "256k" "-c:v" "copy")
+                   (music-tags title (album-track-number slug) (length TRACKS))
+                   (mp3-art-tags)
+                   (list mp3-target))))
           (check (equal? (read-text source) (read-text snapshot))
                  "Album source has changed since this render" slug)
           (check (file? wav) "Missing master WAV" wav)
           (run-tool argv)
           (check-audio mp3-target seconds)
+          (check-mp3-tags mp3-target title (album-track-number slug) (length TRACKS))
           (set! duration (+ duration seconds))
           (set! mp3-bytes (+ mp3-bytes (file-size mp3-target)))
           (set! manifest

@@ -185,3 +185,18 @@ game page, tracker page and worker. The final attribution was verified in the
 served HTML; the shared browser restarted during the final screenshot attempt.
 Public verification and deployment logs are in the external
 publication-cover-license-ii/ directory. Audio objects and the game remain intact.
+
+## Phone metadata
+
+David requested artist **Crash The Stack**, individual song titles, embedded
+cover artwork and automated MP3 production. David Wilson remains the CC BY
+attribution name; artist and attribution are distinct fields. Both new exports
+and existing-file retagging use the shared Sigil metadata module.
+
+All fifteen existing MP3s were stream-copied to tagged-preview-i/soundtrack/.
+Checks confirm each title, artist, album artist, album, track number, attribution
+and attached picture, with identical decoded PCM before/after. The fresh
+WAV-to-MP3 pipeline was also exercised on Black Glass and passed its automatic
+metadata, artwork, format and duration checks. ID3v2.3 is used; no ID3v1 footer.
+R2 publication uses soundtrack/preview-i-tagged/ to avoid old immutable caches.
+The page supplies the same artist and cover through the Media Session API.

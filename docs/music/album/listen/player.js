@@ -25,7 +25,12 @@ function select(index) {
   play.textContent = 'Play track';
   status.textContent = 'Ready to play.';
   if ('mediaSession' in navigator) {
-    navigator.mediaSession.metadata = new MediaMetadata({title: tracks[index].title, album: 'Crash The Stack — Original Soundtrack'});
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: tracks[index].title,
+      artist: 'Crash The Stack',
+      album: 'Crash The Stack — Original Soundtrack',
+      artwork: [{src: 'https://assets.crashthestack.com/soundtrack/art/cover-i.png', sizes: '1254x1254', type: 'image/png'}]
+    });
   }
 }
 async function start() {

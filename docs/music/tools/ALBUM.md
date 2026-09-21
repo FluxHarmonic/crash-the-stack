@@ -235,3 +235,40 @@ Pages player with absolute asset URLs and a private R2 upload plan. Supply
 the prefix and ends in /. `--stage upload --output ...` uses Wrangler's existing
 authentication and resumes from successful per-object hash receipts. Revised
 audio needs a new version prefix because published objects are immutable-cached.
+
+## Automatic MP3 metadata and cover artwork
+
+Generate a complete new MP3 listening bundle from the selected album masters:
+
+```sh
+sigil docs/music/tools/album-listening-site.sgl \
+  --artifacts /absolute/crash-the-stack-album \
+  --output /absolute/new-tagged-listening-bundle
+```
+
+This encodes all fifteen masters at 256 kbps, embeds Cover I as front-cover art,
+and writes ID3v2.3 tags: artist/album artist **Crash The Stack**, individual song
+title, album title, track number out of fifteen, year, CC BY 4.0 license and
+**David Wilson** attribution. Each output is probed for tags, attached artwork,
+audio format and expected duration. `--track black-glass` (repeatable) limits a
+check or partial export while retaining the track's full-album number.
+
+To add the same metadata to existing MP3s without re-encoding their audio:
+
+```sh
+sigil docs/music/tools/album-tag-mp3.sgl \
+  --bundle /absolute/existing-local-bundle/soundtrack \
+  --output /absolute/new-tagged-bundle
+```
+
+The input manifest must reference local `audio/*.mp3` files. This copies the MP3
+audio packets, attaches the original PNG cover and validates tags and artwork.
+Every result must decode to the exact same PCM hash as its input. Commands and
+per-track checks are recorded outside the public soundtrack/ directory.
+The original MP3s remain intact. Cover I is embedded without resizing, so each
+file includes its 2.84 MB PNG; no additional lossy image conversion is introduced.
+
+Both paths use `(crash soundtrack album metadata)` in lib/album-metadata.sgl.
+Use the existing album-r2.sgl prepare/upload steps with a **new prefix** when
+publishing changed tags. The player's Media Session metadata also supplies the
+artist, title, album and cover for phone browser playback controls.
