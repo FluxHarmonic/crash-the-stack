@@ -1,0 +1,162 @@
+#!/usr/bin/env sigil
+;;; Package the prepared pilot masters for full-length, matched-volume review.
+(import (sigil args) (sigil json) (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum git))
+
+(define ALBUM "Crash The Stack — Original Soundtrack")
+(define PILOTS '(("black-glass" "Black Glass" 1)
+                 ("quiet-array" "Quiet Array" 7)))
+(define VARIANTS
+  '(("matched" "-controlled-matched.wav" "wav" "Volume-matched mastering comparison")
+    ("album-level" "-controlled-comparison.wav" "controlled_comparison" "Provisional album-level master")))
+
+(define (last-number text marker)
+  (let ((matches
+          (filter (lambda (line) (contains? line marker))
+                  (split text "\n"))))
+    (check (pair? matches) "Missing audio measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+    -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          range_lu: (last-number text "    LRA:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define (probe file duration)
+  (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,file))
+         (stream (array-ref (dict-ref data streams:) 0))
+         (actual (string->number (dict-ref (dict-ref data format:) duration:))))
+    (check (and (= (string->number (dict-ref stream sample_rate:)) 44100)
+                (= (dict-ref stream channels:) 2)
+                (<= (abs (- duration actual)) (/ 1.0 44100)))
+           "Unexpected duration or audio format"
+           file)
+    data))
+
+(define (pcm-hash file)
+  (out ffmpeg -v error -nostdin -i ,file
+       -map "0:a:0" -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "album-master-trial" (script-args)
+  (list (option name: 'input long: "input" value: "PILOT-DIR"))
+  (lambda (options)
+    (let* ((input-option (option-ref options 'input))
+           (output (option-ref options 'output))
+           (commands '())
+           (reports '())
+           (hashes '()))
+      (check input-option "Supply --input with the verified pilot directory")
+      (check (not (option-ref options 'tracks)) "The trial packages both pilot titles")
+      (check (and (starts-with? output "/")
+                  (not (starts-with? output (str (root) "/"))))
+             "Use an absolute external --output directory")
+      (check (not (file-exists? (path output "README-renders.txt")))
+             "Choose a fresh trial directory; existing evidence is protected")
+      (let* ((input (realpath input-option))
+             (checks
+               (array->list
+                 (json-decode (read-text (path input "album-render-check.json"))))))
+        ;; Validate all source snapshots and inputs before creating any exports.
+        (each spec PILOTS
+          (let* ((slug (car spec))
+                 (reference (list-find (lambda (r) (equal? (dict-ref r title:) (cadr spec))) checks)))
+            (check reference "Pilot measurements missing" slug)
+            (check (equal? (read-text (path input (str slug ".cts")))
+                           (read-text (path (root) "docs/music/album" (str slug ".cts"))))
+                   "Pilot score no longer matches the album arrangement"
+                   slug)
+            (each variant VARIANTS
+              (let ((source (path input (str slug (cadr variant)))))
+                (probe source (dict-ref reference duration_seconds:))
+                (set! hashes (append hashes (list (out sha256sum ,source))))))))
+        (ensure-directory output)
+        (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+               "Output resolves inside the repository")
+        (ensure-directory (path output "ogg"))
+        (define (run argv)
+          (set! commands (append commands (list (list->array argv))))
+          (write-json-file (path output "export-commands.json") (list->array commands))
+          (run-tool argv))
+        (write-text (path output "README-renders.txt")
+          (str "Mastering trial I: full Black Glass and Quiet Array arrangements.\n"
+               "Reproduce from the album worktree:\n"
+               "  sigil docs/music/tools/album-master-trial.sgl --input /path/to/pilot-i --output /absolute/external/master-trial-version\n"
+               "Prerequisites: album-render, album-check-renders and album-compare outputs in the input folder.\n"
+               "Exact export argv: export-commands.json. Input hashes: input-audio.sha256. Checks: trial-check.json.\n"
+               "MATCHED: limiter candidate attenuated to the original clean audition's loudness; compare against the previous clean OGG at unchanged player volume.\n"
+               "ALBUM-LEVEL: the same candidate at proposed album playback level. These are provisional, not release masters.\n"
+               "No arrangement, mix balance, EQ, widening, added reverb or tail edits.\n"
+               "Candidate processing already in inputs: clean gain plus 2 dB, 4x oversampling, limiter ceiling -1.5 dB, attack 5 ms, release 80 ms, auto-level off, latency compensated.\n"
+               "Matched attenuation: Black Glass -1.9 dB; Quiet Array -2 dB. Expected effect on Quiet Array is mostly gain.\n"
+               "Exports: stereo 44.1 kHz; WAV/FLAC 16-bit with triangular dither; OGG Vorbis quality 7 from the same WAV.\n"
+               "Float processing inputs derive from native 16-bit audio; they do not restore high-resolution source precision.\n"
+               "Each complete WAV/OGG is measured for LUFS/LRA/true peak. Decode durations and lossless PCM parity are checked.\n"
+               "The last second must remain below -70 dBFS. Delivery true peak must be at most -1 dBTP.\n"))
+        (write-text (path output "input-audio.sha256") (str (string-join hashes "\n") "\n"))
+        (write-text (path output "source-revision.txt") (str (out git rev-parse HEAD cwd: ,(root)) "\n"))
+        (each spec PILOTS
+          (let* ((slug (car spec))
+                 (reference (list-find (lambda (r) (equal? (dict-ref r title:) (cadr spec))) checks)))
+            (write-text (path output (str slug ".cts")) (read-text (path input (str slug ".cts"))))
+            (each variant VARIANTS
+              (let* ((kind (car variant))
+                     (source (path input (str slug (cadr variant))))
+                     (label (str slug "-master-trial-i-" kind))
+                     (wav (path output (str label ".wav")))
+                     (flac (path output (str label ".flac")))
+                     (ogg (path output "ogg" (str label ".ogg")))
+                     (expected (dict-ref reference (string->keyword (caddr variant))))
+                     (tags
+                       (list "-metadata" (str "title=" (cadr spec))
+                             "-metadata" (str "album=" ALBUM)
+                             "-metadata" (str "track=" (caddr spec) "/15")
+                             "-metadata" (str "comment=Mastering trial I: " (cadddr variant)))))
+                (run (append
+                       (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" source
+                             "-af" "aresample=osf=s16:dither_method=triangular"
+                             "-c:a" "pcm_s16le")
+                       tags
+                       (list wav)))
+                (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                           "-map_metadata" "0" "-c:a" "flac" flac))
+                (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                           "-map_metadata" "0" "-c:a" "libvorbis" "-q:a" "7" ogg))
+                (each file (list wav flac ogg)
+                  (write-json-file (path output (str (basename file) "-probe.json"))
+                    (probe file (dict-ref reference duration_seconds:))))
+                (check (equal? (pcm-hash wav) (pcm-hash flac)) "WAV/FLAC PCM mismatch" label)
+                (let* ((clean (measure wav (path output (str label "-wav-loudness.txt"))))
+                       (encoded (measure ogg (path output (str label "-ogg-loudness.txt"))))
+                       (ending ($? ffmpeg -hide_banner -nostats -sseof -1 -i ,wav
+                                    -af volumedetect -f null -))
+                       (ending-log (stderr-of ending)))
+                  (check (ok? ending) "Ending measurement failed" label)
+                  (write-text (path output (str label "-ending.txt")) ending-log)
+                  (check (<= (last-number ending-log "max_volume:") -70) "Ending has not decayed" label)
+                  (each measurement (list clean encoded)
+                    (check (<= (dict-ref measurement true_peak_dbtp:) -1.0)
+                           "Delivery exceeds -1 dBTP; revise the candidate before sending"
+                           label)
+                    (check (<= (abs (- (dict-ref measurement integrated_lufs:)
+                                      (dict-ref expected integrated_lufs:))) 0.2)
+                           "Loudness no longer matches the prepared candidate"
+                           label))
+                  (set! reports
+                    (append reports
+                      (list (dict title: (cadr spec)
+                                  variant: kind
+                                  duration_seconds: (dict-ref reference duration_seconds:)
+                                  wav: clean
+                                  ogg: encoded
+                                  ending_peak_dbfs: (last-number ending-log "max_volume:")
+                                  wav_flac_pcm_identical: #t)))))
+                (write-json-file (path output "trial-check.json") (list->array reports))
+                (println "Verified full trial: ~a" label)))))))))

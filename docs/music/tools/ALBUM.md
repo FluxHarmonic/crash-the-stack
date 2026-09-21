@@ -55,3 +55,18 @@ sigil docs/music/tools/send-telegram.sgl --env-file /path/to/private.env /absolu
 See [album sequence](../album/ALBUM.md), [mastering decisions](../album/MASTERING.md)
 and [pilot report](../album/PILOT-I.md). All audio, comparison files and raw logs
 stay under the external album artifact folder.
+
+## Sending the mastering trial
+
+After `album-compare` has prepared both full comparison variants, package them in
+a fresh external directory:
+
+```sh
+sigil docs/music/tools/album-master-trial.sgl --input /absolute/external/pilot-i --output /absolute/external/master-trial-i
+```
+
+This produces full `matched` and `album-level` WAV/FLAC/OGG versions with clear
+filenames and draft-master comments. Both retain the exact soundtrack title in
+metadata. All four encodes are checked before manual selection for Telegram;
+the tool itself never sends messages or reads credentials. See
+[the trial listening guide](../album/MASTER-TRIAL-I.md).

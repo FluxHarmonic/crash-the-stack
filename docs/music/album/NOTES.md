@@ -45,3 +45,12 @@ Motif limiter/16-bit export limitations for the engine owner. No Sigil shell
 limitation blocks this workflow. Remaining thirteen arrangements are pending
 feedback on the quiet/heavy pilots; no release master or album publication is
 claimed.
+
+## Mastering trial I
+
+David liked both pilot compositions and approved comparing restrained mastering
+before the remaining arrangements. Four full auditions separate matched-volume
+processing review from proposed album playback levels. See MASTER-TRIAL-I.md
+for listening landmarks, provenance and checks. No composition or game asset is
+changed. The next arrangement pair is Cold Boot and Relay Ghost; mastering
+preferences remain pending the trial listen.

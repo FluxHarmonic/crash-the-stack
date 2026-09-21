@@ -79,3 +79,9 @@ belongs in the album tooling, not as a new global game-render default.
 
 These are Motif/DSP findings, not a Sigil-shell blocker. Sigil successfully drives
 composition, validation, native rendering, encoding, measurement and delivery.
+
+David approved testing these candidates after accepting the pilot compositions.
+The first complete listening package is documented in
+[MASTER-TRIAL-I.md](MASTER-TRIAL-I.md), with both matched-volume comparisons and
+provisional album-level exports. This advances the listening trial, not final
+release approval.
