@@ -23,7 +23,7 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
 | 13 | Breach Vector | Edge pair I ready for listening | 3:30 actual |
 | 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |
-| 15 | Glass Current | Planned | 4:00 |
+| 15 | Glass Current | Closer I ready for listening | 3:57 actual |
 
 Durations guide the form, not the number of repetitions. First establish the
 quiet and heavy extremes with Quiet Array and Black Glass, then use listening

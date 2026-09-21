@@ -120,3 +120,15 @@ Breach retains the accepted smooth opening balance, spaced middle plucks and
 adaptive grit/pipe development on its native speed-4 clock. Clock Edge retains
 Room II's body and selective ambience. All game sources and both instrument
 banks/buses remain intact. No game backport or new synth feature is proposed.
+
+## Closer I and listening preview
+
+Glass Current completes all fifteen full arrangements. Its exposed theme,
+lower-register development and calm return lead to a composed harmonic ending.
+The accepted Paper Kit II bank and balance are unchanged. See CLOSER-I.md.
+No game backport is proposed. Completion does not imply listening acceptance
+for the most recently delivered pieces or final release approval.
+
+David requested a public listening page at crashthestack.com/soundtrack/ for
+the current album. Package the provisional album-level OGGs with MP3 fallbacks,
+without moving audio artifacts into Git. Preserve the existing game deployment.

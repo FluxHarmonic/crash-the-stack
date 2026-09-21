@@ -204,3 +204,18 @@ sixteenth attacks, and eighth-grid bell answers; its lead uses finer subdivision
 See [EDGE-PAIR-I.md](../album/EDGE-PAIR-I.md). Both composers' scores/maps reproduce
 exactly; sound banks and buses equal the accepted sources. Only Glass Current
 remains unarranged. Rhythm-game chart generation is outside this album pass.
+
+## Closer: Glass Current
+
+```sh
+sigil docs/music/tools/album-compose-closer.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --track glass-current --output /absolute/external/closer-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --track glass-current --output /absolute/external/closer-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track glass-current --gain 0 --output /absolute/external/closer-i
+```
+
+Supply --motif or MOTIF_BIN for native validation, compilation and synthesis.
+See [CLOSER-I.md](../album/CLOSER-I.md). All fifteen standalone album scores
+now exist. Glass preserves the original four thirty-second fill hits in album
+pattern 9 and checks both answering voices on eighths. Its twelve-bar coda is
+split into eight- and four-bar patterns to respect the native row limit.
