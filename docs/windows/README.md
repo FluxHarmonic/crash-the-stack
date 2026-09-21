@@ -11,7 +11,7 @@ went, and what nobody has tested yet.
 
     scripts/dev sigil build --config windows-amd64
 
-Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,863,822 bytes,
+Output: `build/windows-amd64/bin/crash-the-stack.exe` (44,864,598 bytes,
 `PE32+ executable for MS Windows 6.00 (GUI), x86-64`).
 
 The config in `package.sgl` mirrors `release` (native backend, optimize 2,
@@ -164,10 +164,17 @@ the real one (Wine passes the Unix environment to the program).
   handling: the exe links as a GUI-subsystem program
   (`-Wl,--subsystem,windows` in the config's `link-flags:`), so Explorer
   opens no console beside the game, and `crash-native.c` calls
-  `AttachConsole(ATTACH_PARENT_PROCESS)` at module init and reopens
-  stdout/stderr on `CONOUT$` when that succeeds, so a launch from
-  `cmd`/PowerShell should still print the diagnostics. Under Wine the
-  GUI exe's output reached the Unix stdout as before (measured); what
-  a real console does with it is untested.
+  `AttachConsole(ATTACH_PARENT_PROCESS)` at module init and, only for a
+  standard stream the process does not already have (so a redirect such
+  as `crash-the-stack.exe > log.txt` is kept), reopens it on `CONOUT$`,
+  so a launch from `cmd`/PowerShell should still print the diagnostics.
+  Untested on a real console: under Wine `AttachConsole` has no Windows
+  parent console to attach to, and the exe's output reached the Unix
+  stdout through the inherited handles as before (measured; that path
+  does not exercise the attach). The flag sits on the config, and a
+  config's link flags reach every bundle of that config (every bundle
+  links every native archive, so a library-level flag reaches them
+  too): `motif.exe` is GUI-subsystem as well, one more reason it is not
+  part of the artifact.
 - Windows 7/8.1 (UCRT api-sets, see above).
 - A code-signing story: none. SmartScreen will warn on an unsigned exe.
