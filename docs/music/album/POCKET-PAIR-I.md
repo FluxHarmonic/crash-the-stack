@@ -109,3 +109,7 @@ at -90.3 dBFS for Dirty Cache and -84.3 dBFS for Basement; both WAVs and decoded
 OGGs pass the -1 dBTP ceiling. Technical checks establish consistency, not
 musical acceptance. Ten of fifteen full arrangements now exist; feedback on
 this pair and the preceding air pair remains open.
+
+Telegram acknowledged the complete Dirty Cache album I OGG as message 1122 and
+Basement Circuit album I as message 1123. Both full files were delivered once;
+listening feedback remains open.
