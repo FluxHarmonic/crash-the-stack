@@ -228,3 +228,10 @@ fifteen album-level OGGs and MP3 fallback encodes. No credentials are required.
 Publish only that directory alongside the current game and tracker, never its
 private sibling provenance report. See [LISTENING-PAGE.md](../album/LISTENING-PAGE.md)
 for deployment integration, service-worker behavior and measurements.
+
+`album-r2.sgl --stage prepare` splits the built listening bundle into a small
+Pages player with absolute asset URLs and a private R2 upload plan. Supply
+--bundle, --output, --bucket, --prefix and --asset-base; the base URL includes
+the prefix and ends in /. `--stage upload --output ...` uses Wrangler's existing
+authentication and resumes from successful per-object hash receipts. Revised
+audio needs a new version prefix because published objects are immutable-cached.

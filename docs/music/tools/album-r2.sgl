@@ -1,0 +1,99 @@
+#!/usr/bin/env sigil
+;;; Separate the listening page from resumable, versioned public audio uploads.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(cli "album-r2" (script-args)
+  (list (option name: 'stage long: "stage" value: "STAGE"
+                default: "prepare" choices: '("prepare" "upload"))
+        (option name: 'bundle long: "bundle" value: "DIR")
+        (option name: 'bucket long: "bucket" value: "NAME")
+        (option name: 'prefix long: "prefix" value: "PREFIX"
+                default: "soundtrack/preview-i")
+        (option name: 'asset-base long: "asset-base" value: "URL"))
+  (lambda (options)
+    (let* ((output (option-ref options 'output))
+           (stage (option-ref options 'stage))
+           (plan-file (path output "upload-plan.json")))
+      (check (and (starts-with? output "/")
+                  (not (starts-with? output (str (root) "/"))))
+             "Supply an external absolute output directory")
+      (if (equal? stage "prepare")
+          (let* ((bundle (option-ref options 'bundle))
+                 (base (option-ref options 'asset-base))
+                 (prefix (option-ref options 'prefix))
+                 (bucket (option-ref options 'bucket))
+                 (album (json-decode (read-text (path bundle "album.json"))))
+                 (tracks (array->list (dict-ref album tracks:)))
+                 (site (path output "soundtrack"))
+                 (uploads '())
+                 (public-tracks '()))
+            (check (and base (starts-with? base "https://") (ends-with? base "/"))
+                   "Supply an HTTPS --asset-base URL ending in /; it must include the prefix")
+            (check (and bucket (not (equal? prefix ""))
+                        (not (contains? prefix ".."))
+                        (not (starts-with? prefix "/")))
+                   "Supply a bucket and relative object prefix")
+            (check (not (file-exists? output)) "Use a fresh output directory")
+            (ensure-directory site)
+            (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+                   "Output resolves inside the repository")
+            (each track tracks
+              (let ((links '()))
+                (each format '(ogg: mp3:)
+                  (let* ((relative (dict-ref track format))
+                         (filename (basename relative))
+                         (source (path bundle relative))
+                         (key (str prefix "/" filename))
+                         (hash (car (split (out sha256sum ,source) " "))))
+                    (set! uploads
+                      (append uploads
+                        (list (dict source: source
+                                    key: key
+                                    sha256: hash
+                                    bytes: (file-size source)
+                                    type: (if (eq? format ogg:) "audio/ogg" "audio/mpeg")))))
+                    (set! links (append links (list (str base filename))))))
+                (set! public-tracks
+                  (append public-tracks
+                    (list (dict title: (dict-ref track title:)
+                                duration_seconds: (dict-ref track duration_seconds:)
+                                ogg: (car links)
+                                mp3: (cadr links)))))))
+            (each filename '("index.html" "style.css" "player.js")
+              (copy-file
+                (path (root) "docs/music/album/listen" filename)
+                (path site filename)))
+            (write-json-file (path site "album.json")
+              (dict title: (dict-ref album title:)
+                    version: (dict-ref album version:)
+                    duration_seconds: (dict-ref album duration_seconds:)
+                    tracks: (list->array public-tracks)))
+            (write-json-file plan-file
+              (dict bucket: bucket
+                    asset_base: base
+                    uploads: (list->array uploads)))
+            (display (str "Prepared page and upload plan in " output "\n")))
+          (let* ((plan (json-decode (read-text plan-file)))
+                 (bucket (dict-ref plan bucket:))
+                 (receipts (path output "receipts")))
+            (require-tool "wrangler")
+            (ensure-directory receipts)
+            (each item (array->list (dict-ref plan uploads:))
+              (let* ((source (dict-ref item source:))
+                     (key (dict-ref item key:))
+                     (hash (dict-ref item sha256:))
+                     (receipt (path receipts (str (basename key) ".sha256"))))
+                (check (equal? hash (car (split (out sha256sum ,source) " ")))
+                       "Source changed since preparation" source)
+                (if (and (file? receipt) (equal? (trim (read-text receipt)) hash))
+                    (display (str "Already uploaded " key "\n"))
+                    (begin
+                      (display (str "Uploading " key "\n"))
+                      ($ wrangler r2 object put ,(str bucket "/" key)
+                         --file ,source --content-type ,(dict-ref item type:)
+                         --cache-control "public, max-age=31536000, immutable"
+                         --remote)
+                      (write-text receipt (str hash "\n")))))))))))

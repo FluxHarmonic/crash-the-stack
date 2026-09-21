@@ -51,12 +51,13 @@ for the soundtrack. Preserve the current tracker route when integrating this
 small guard. Existing installed clients need to accept the normal game update;
 do not force service-worker activation or interrupt a game in progress.
 
-A proposed publisher safeguard requires `CRASH_SOUNDTRACK_DIR` (or the built
+The approved publisher safeguard requires `CRASH_SOUNDTRACK_DIR` (or the built
 `build/web/soundtrack` directory), then copies the bundle into the staging tree.
 It refuses to publish without the bundle so later game deployments cannot
-silently remove the album. Automatic approval review requested explicit user
-confirmation of this future deployment behavior. No publisher change or public
-upload was made while that confirmation was pending.
+silently remove the album. David explicitly approved this behavior and publication on 2026-09-21.
+The safeguard is committed on feat/codex-album; merge it into the coordinator
+branch before the next game publication. Set CRASH_SOUNDTRACK_DIR to the
+generated soundtrack/ directory when publishing.
 
 ## Verification
 
@@ -70,3 +71,46 @@ A focused service-worker harness checks that soundtrack navigation and audio
 bypass interception, while game navigation and game audio retain their paths.
 Safari and a physical phone are not yet tested. Browser functional checks were
 muted and do not represent listening approval or final mastering review.
+
+## R2 asset hosting (selected for publication)
+
+David selected assets.crashthestack.com as a reusable public assets host after
+the all-audio Pages upload encountered repeated ECONNRESET errors. The original
+Pages upload was stopped before deployment. Its limits were not the cause.
+The player remains at crashthestack.com/soundtrack/; audio now lives in the
+new crashthestack-assets R2 bucket under soundtrack/preview-i/.
+
+Prepare a Pages-only player and upload plan from the checked listening bundle:
+
+```sh
+sigil docs/music/tools/album-r2.sgl --stage prepare \
+  --bundle /absolute/listen-preview-i/soundtrack \
+  --output /absolute/new-r2-preview \
+  --bucket crashthestack-assets \
+  --prefix soundtrack/preview-i \
+  --asset-base https://assets.crashthestack.com/soundtrack/preview-i/
+sigil docs/music/tools/album-r2.sgl --stage upload \
+  --output /absolute/new-r2-preview
+```
+
+The upload stage uses existing Wrangler authentication, one object at a time,
+and records a source-hash receipt after each successful upload. Repeating it
+resumes the remaining files. It rejects source changes after plan creation.
+Use a new prefix for revised audio: versioned objects have a one-year immutable
+cache lifetime. Do not overwrite a published version with changed bytes.
+Only the four small files under this output's soundtrack/ belong in Pages.
+The upload plan, local paths, receipts and logs are private provenance outside
+that public directory. No master WAV/FLAC is uploaded.
+
+The R2 domain uses TLS 1.2 minimum. Bucket CORS allows GET/HEAD from
+https://crashthestack.com, the Range request header, and exposes Content-Length,
+Content-Range and ETag. The audio element uses crossorigin="anonymous" so these
+requests also work under the game's Cross-Origin-Embedder-Policy: require-corp.
+Other browser origins need a deliberate CORS addition; the files themselves
+are public. The initially proposed wildcard CORS policy was rejected by automatic
+review; the restricted policy was approved and applied instead.
+
+The publisher safeguard remains applicable: CRASH_SOUNDTRACK_DIR now points to
+the R2 preview's small soundtrack/ directory. Future game deployments keep the
+page while leaving audio objects independently stored in R2. Merge the committed
+publisher and service-worker changes before the next coordinator publication.
