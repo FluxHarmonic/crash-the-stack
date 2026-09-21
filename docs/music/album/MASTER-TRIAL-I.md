@@ -81,3 +81,8 @@ ranges remain 14.9 LU and 9.9 LU; Vorbis reports 10.0 LU for Quiet Array. Final
 WAV seconds peak at -84.3 and -90.3 dBFS respectively. Every delivery OGG retains
 at least 1 dB of measured true-peak margin. A repository output path and an
 existing trial directory are both rejected before exports or evidence writes.
+
+Telegram acknowledged all four full OGG deliveries: matched Black Glass 1112,
+matched Quiet Array 1113, album-level Black Glass 1114, album-level Quiet Array
+1115. The external telegram-receipts.txt preserves the tool acknowledgements.
+Mastering preference remains pending David's listening feedback.
