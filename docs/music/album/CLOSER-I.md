@@ -47,3 +47,5 @@ at -84.3 dBFS. Native source precision is 16-bit.
 Renders, commands, hashes and raw checks live externally in
 ~/Ops/artifacts/crash-the-stack-album/closer-i/. These measurements establish
 technical consistency; listening feedback and final release mastering remain open.
+
+Telegram acknowledged the full Glass Current album I OGG as message 1128.

@@ -97,6 +97,9 @@ self.addEventListener("fetch", function (event) {
   if (req.method !== "GET") return;
   var url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // The listening page streams its own audio; preserve Range requests and
+  // keep album files out of the game's offline cache and navigation fallback.
+  if (/^\/soundtrack(?:\/|$)/.test(url.pathname)) return;
   if (req.mode === "navigate") {
     event.respondWith(
       caches.open(CACHE).then(function (cache) {

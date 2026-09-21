@@ -219,3 +219,12 @@ See [CLOSER-I.md](../album/CLOSER-I.md). All fifteen standalone album scores
 now exist. Glass preserves the original four thirty-second fill hits in album
 pattern 9 and checks both answering voices on eighths. Its twelve-bar coda is
 split into eight- and four-bar patterns to respect the native row limit.
+
+## Listening page
+
+`album-listening-site.sgl --artifacts /absolute/album-render-root --output
+/absolute/new-preview` builds a static `soundtrack/` directory with the current
+fifteen album-level OGGs and MP3 fallback encodes. No credentials are required.
+Publish only that directory alongside the current game and tracker, never its
+private sibling provenance report. See [LISTENING-PAGE.md](../album/LISTENING-PAGE.md)
+for deployment integration, service-worker behavior and measurements.
