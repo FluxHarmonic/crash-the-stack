@@ -189,8 +189,9 @@ and burst agitation:
 The browser regression run at `124b77c` passed all eight existing arms.
 LIFE and REACTION each matched all 3520 half cells of their CPU reference
 at step 12; REACTION also matched all 880 reconstructed dither levels.
-The subsequent changes add or refine the GPU-only rules; the original five
-shader strings still compare byte-identically to the base.
+The subsequent additions preserved the original five shader strings until
+David's final LIFE removal. The four retained original shaders still
+compare byte-identically at the GLSL level to the approved build.
 Adding echo and synapse also left the three approved shader strings
 byte-identical to `bef6669`. Adding flame preserved all ten existing shader
 strings byte-identically to `23f1e3a`.
@@ -320,6 +321,40 @@ when wiring per-deal selection. The only settings change removes LIFE from
 the existing FIELD row; menus, audio, tables, service worker, and publishing
 configuration are untouched.
 
+After LIFE removal (`addc03a`), the browser regression suite passes all
+seven remaining arms. REACTION matches its CPU reference at all 3520
+half cells and all 880 reconstructed dither levels at step 12. Each of
+CYCLIC, FLOW, SIGNAL, ECHO, SYNAPSE, and FLAME also matches the approved
+`a72e554` build at every half cell at step 200 (board seed 7, field seed 1,
+landscape phone emulation at DPR 3). Both retired query names boot without
+a field. No runtime or GL errors occurred. The temporary comparison server
+initially failed to resolve its build subdirectories; after correcting
+that harness path, the complete comparison passed.
+
+The optional native test backend stopped before executing tests because
+its runner requires a `build-fn` callback that this repository does not
+provide. Validation uses the normal bytecode test backend instead.
+The full targeted run passes **145 tests** across `test-bg` (26),
+`test-bg-gpu` (6), `test-settings` (13), and `test-palette` (100), in
+13m 59.68s. The four-seed REACTION stress test reports no frozen steps
+and eight tones after 3600 ticks for every seed; phase, burst-end, severed
+collapse, and CPU/GPU schedule checks pass. The shorter three-file run
+also passed its 119 checks while the stress test was computing.
+
+Both the optimized web build and native release build complete.
+`scripts/verify-field-native --display :98` passes all three remaining
+arms: desktop GL shader compilation, REACTION GPU/CPU capture comparison
+(AE 0 over 1280×704 at step 12), and no GL errors. The isolated display
+and native game processes are cleaned up by the harness.
+
+```sh
+scripts/dev sigil test test/test-bg.sgl test/test-bg-gpu.sgl test/test-settings.sgl test/test-palette.sgl
+scripts/dev sigil build --config web
+scripts/dev sigil build --config release
+node verify-field.mjs build/web --port 18079 --cdp 19479
+scripts/verify-field-native --display :98
+```
+
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=cyclic&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=flow&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=signal&ms`
@@ -334,5 +369,6 @@ worktree and therefore returns failure. That process was left alone; our
 host's PID, cwd, exact WireGuard listener, and HTTP version are checked
 independently. No wildcard or LAN listener was created. The host is
 detached so it remains available after the session. The served application
-is `a72e554edbea`; the following documentation commit adds the report and
-captures without changing the application source.
+is `addc03a5f78c`; the following documentation commit records validation
+without changing the application source. The existing captures remain
+representative: all six added modes match their approved frames exactly.
