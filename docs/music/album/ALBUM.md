@@ -1,0 +1,54 @@
+# Crash The Stack — Original Soundtrack
+
+Working album title and sequence, carried forward from [ALBUM-PLAN.md](../ALBUM-PLAN.md).
+These are standalone listening arrangements, separate from the game's adaptive tunes.
+The album has fifteen titles; the title-screen arrangement belongs to Black Glass,
+not a sixteenth album track. Artist credit, artwork and release details remain open.
+
+| # | Title | Arrangement status | Initial duration guide |
+|---|---|---|---|
+| 1 | Cold Boot | Planned | 3:30 |
+| 2 | Relay Ghost | Planned | 3:30 |
+| 3 | Closed Loop | Planned | 3:15 |
+| 4 | Shadow Protocol | Planned | 3:45 |
+| 5 | Blind Spot | Planned | 3:00 |
+| 6 | Quiet Array | Pilot in progress | 3:45 |
+| 7 | Sector Drift | Planned | 3:30 |
+| 8 | Dirty Cache | Planned | 3:45 |
+| 9 | Basement Circuit | Planned | 3:45 |
+| 10 | Dead Sector | Planned | 3:00 |
+| 11 | Obsidian Index | Planned | 4:00 |
+| 12 | Breach Vector | Planned | 3:30 |
+| 13 | Clock Edge | Planned | 3:30 |
+| 14 | Black Glass | Pilot in progress | 4:30 |
+| 15 | Glass Current | Planned | 4:00 |
+
+Durations guide the form, not the number of repetitions. First establish the
+quiet and heavy extremes with Quiet Array and Black Glass, then use listening
+feedback to guide the remaining titles in small batches.
+
+## Pilot direction
+
+Quiet Array preserves the accepted four calm and four focused phrases. Add a
+small entrance, an exposed harmonic bridge, a calm reprise and a resolved ending.
+Keep the ceramic/brush kit and mallet attack intact. No large noise transition.
+
+Black Glass combines the accepted Main Theme IV hook and tracker chord stabs
+with the original game's low-pressure groove and gritty rhythmic variations.
+Retain the title's reduced gritty-bass balance. Give the middle enough space
+for the final return to matter, then unwind into a composed F-minor ending.
+
+## Production boundaries
+
+One canonical .cts file per title here. Git preserves arrangement revisions.
+All WAV/OGG/FLAC files, source snapshots, render logs and measurements belong in
+~/Ops/artifacts/crash-the-stack-album/, with exact commands in README-renders.txt.
+No game assets or runtime code are changed. Possible game improvements go in
+[NOTES.md](NOTES.md).
+
+These pilots are arrangement auditions, not final release masters. Measure
+integrated loudness, loudness range and true peak; preserve differences between
+quiet and heavy material. Compare clean gain and gentle peak control before
+settling mastering policy. Do not normalize every title to the same loudness.
+Document source precision honestly: the existing native WAV exporter is 16-bit;
+converting that file to 24-bit does not create a high-resolution master.
