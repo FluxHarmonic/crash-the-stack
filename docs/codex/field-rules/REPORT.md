@@ -1,9 +1,9 @@
 # Living field candidates
 
 2026-09-21, `feat/codex-field-rules` in `task-codex-field-rules`.
-Five GPU rules for D55's per-deal pool: **cyclic**, **flow**, **signal**,
-**echo**, and **synapse**. David requested the latter pair after approving
-the first three.
+Six GPU rules for D55's per-deal pool: **cyclic**, **flow**, **signal**,
+**echo**, **synapse**, and **flame**. David requested the flame extension
+after approving the previous five.
 The revisions respond to David's feedback on the hosted preview: darker
 surfaces with small accents, no cells that look stuck, and Matrix/Hackers-inspired
 falling or rectilinear signals.
@@ -76,9 +76,19 @@ activity between events. The final local heartbeat runs every 21 steps
 still respect refractory paths. This keeps a visible source without raising
 the display cap or the network-wide speed.
 
-These offer five distinct motion patterns alongside Gray–Scott. Another
+**Flame** feeds a heat field from the bottom edge. Slow, spatially uneven
+fuel and sideways gusts form rising tongues; four nearest samples implement
+bilinear upward advection at 0.42 cells per step. Heat cools on the way up,
+and vertical samples clamp at the edges so fuel never wraps from bottom
+to top. BA retains the heat as 16 bits. The squared heat supplies a dark
+shown value above stationary grain, eased by 35% per step and capped at
+200. The existing cool palette makes this feel like a flame inside the
+system, with sparse hot pockets near the base rather than an orange wash.
+Its cadence stays steady under ICE.
+
+These offer six distinct motion patterns alongside Gray–Scott. Another
 chemical reaction would overlap REACTION's look; Brian's Brain would make a
-sparser spark field. All five candidates use the existing eight palette
+sparser spark field. All six candidates use the existing eight palette
 colors and 2×2 ordered dither, with no visible gradients or alpha blends.
 
 ## Packing, uniforms, and rendering
@@ -90,8 +100,9 @@ colors and 2×2 ordered dither, with no visible gradients or alpha blends.
 | signal | R = shown byte; G = downward head; B = rightward head; A = 255 | step key/count, seed hash, agitation-driven speed |
 | echo | R = eased interference display; G/B unused; A = 255 after first step | step count and seed hash |
 | synapse | R = shown byte; G = phase 0…17; B = empty/wire/node 0…2; A = initialized flag | step key/count and seed hash |
+| flame | R = eased squared heat display; G unused; B/A = heat high/low byte | step count and seed hash |
 
-The graphics library supplies `u_resolution`. All five need one
+The graphics library supplies `u_resolution`. All six need one
 880-fragment step pass. Presentation uses the unchanged 80×44 dither target
 and nearest upscale. Their ramp orders the existing roles as BG, BAR-A,
 BAR-B, STATIC-B, WIRE-DARK, BAR-C, MOSS, ARCHIVE. The last two are accents;
@@ -136,16 +147,17 @@ colors rather than introducing transparency or additional colors.
 
 ## Validation
 
-Native compilation and `test-bg-gpu` plus `test-palette` passed: 105 tests
-after adding echo and synapse.
+Native compilation and `test-bg-gpu` plus `test-palette` passed: 106 tests
+after adding flame.
 The legacy background run passed all 53 checks in 43m 30s. That run
 included the two original GPU seed checks; those now live in the separate
 `test-bg-gpu` file with signal's third check. The same test loop now covers
-echo and synapse too. No legacy test was removed.
+echo, synapse, and flame too. No legacy test was removed.
 Each final rule replays its held step-200 map exactly and passes the
 step-6000 palette/dither checkpoint. Cyclic also matches the integer oracle
 in all 3520 half cells. At step 200 bright accents occupy 0% of cyclic,
-0.09% of flow, 3.41% of signal, 0% of echo, and 0.11% of synapse.
+0.09% of flow, 3.41% of signal, 0% of echo, 0.11% of synapse, and
+0.03% of flame.
 
 Five-minute live runs at the normal stride sample 20 frames, including ICE
 and burst agitation:
@@ -157,6 +169,7 @@ and burst agitation:
 | signal (`9855446`) | 50.2% | 599 | pass |
 | echo (`c68e427`) | 41.8% | 2005 | pass |
 | synapse (`be2c3d3`) | 55.7% | 38 | pass |
+| flame (`9f6a1fc`) | 46.4% | 1032 | pass |
 
 The browser regression run at `124b77c` passed all eight existing arms.
 LIFE and REACTION each matched all 3520 half cells of their CPU reference
@@ -164,7 +177,8 @@ at step 12; REACTION also matched all 880 reconstructed dither levels.
 The subsequent changes add or refine the GPU-only rules; the original five
 shader strings still compare byte-identically to the base.
 Adding echo and synapse also left the three approved shader strings
-byte-identical to `bef6669`.
+byte-identical to `bef6669`. Adding flame preserved all ten existing shader
+strings byte-identically to `23f1e3a`.
 
 The browser harness checks repeated held maps at step 200, a step-6000
 checkpoint (`bgstride=1` shortens that wait), then five real minutes at the
@@ -188,11 +202,12 @@ Final 640×400 nearest-neighbor captures: cyclic from application commit
 `985544674f81`: [cyclic](cyclic.png), [flow](flow.png), [signal](signal.png).
 The extensions: [echo](echo.png) from `c68e4273e1d7` and
 [synapse](synapse.png) from `be2c3d341a50`.
+The [flame capture](flame.png) is from `9f6a1fcd62bf`.
 Setup: landscape phone emulation at DPR 3, board seed 7, background seed 1,
 held at step 200, from the committed hosted snapshot.
 
 ```sh
-for field_rule in cyclic flow signal echo synapse; do
+for field_rule in cyclic flow signal echo synapse flame; do
   node scripts/shot-web.mjs build/hosted "docs/codex/field-rules/$field_rule.png" \
     --query "stack&fresh&seed=7&bg=$field_rule&bghold=200" \
     --do 'line:^crash: bg held 200$' --port 18077 --cdp 19477
@@ -216,17 +231,17 @@ Measurements of each final rule implementation:
 | reaction | `124b77c` | 115.3 | 217 | 76.9 | 0.9 |
 | echo | `c68e427` | 53.7 | 200 | 28.5 | 9.4 |
 | synapse | `be2c3d3` | 36.7 | 83 | 15.2 | 9.1 |
+| flame | `9f6a1fc` | 43.0 | 250 | 21.2 | 7.9 |
 
 These are observations, not a phone speedup claim. Shared host load and
 software rendering dominate the timings, and the runs happened at different
-times. All five additions use one field step pass. Cyclic, flow,
-signal, and REACTION are unchanged in the extended application build
-`be2c3d3`. Echo is unchanged since its measured build `c68e427`.
+times. All six additions use one field step pass. Every previously measured
+mode is unchanged in the flame application build `9f6a1fc`.
 
 ## Integration and review
 
 REACTION stays the default here. P4c owns the FIELD/LIFE removal and shell
-policy. `GPU-MODES` exposes the five new names for D55's pool. Both shells
+policy. `GPU-MODES` exposes the six new names for D55's pool. Both shells
 in this base branch still pass background seed **1**, independent of the
 board seed. The new rules accept any seed through `bg-new`/`bg-choose`, and
 the CPU tests cover same/different seeds. P4c should supply the board seed
@@ -239,6 +254,7 @@ worker, or publishing configuration changed.
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=reaction&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=echo&ms`
 - `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=synapse&ms`
+- `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=flame&ms`
 
 Hosting is bound specifically to `10.11.0.2:8774`. `check-bind 8774` also
 sees an unrelated pre-existing `127.0.0.1:8774` listener from another
@@ -246,5 +262,5 @@ worktree and therefore returns failure. That process was left alone; our
 host's PID, cwd, exact WireGuard listener, and HTTP version are checked
 independently. No wildcard or LAN listener was created. The host is
 detached so it remains available after the session. The served application
-is `be2c3d341a50`; the following documentation commit adds the report and
+is `9f6a1fcd62bf`; the following documentation commit adds the report and
 captures without changing the application source.
