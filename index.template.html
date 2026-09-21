@@ -146,7 +146,8 @@
     //          from the baked atlas: the oracle of the atlas leg.
     //   ms: also keeps the last minute of frame samples; a tap on the readout
     //          (top right) copies the summary to the clipboard, or shows it
-    //          in a selectable overlay when the clipboard is refused.
+    //          in a selectable overlay when the clipboard is refused. Reset & close
+    //          starts a fresh measurement window; wait, then tap the readout again.
     //   adepth=N: frames the audio keeps ahead of the output (6144: the
     //          cue latency and the stall a frame may take; 3072 was P3's).
     //   ms: the frame's wall time in the corner (MS n), David's own
@@ -167,21 +168,42 @@
     // gave it; the rest of the interval is the browser's (compositing,
     // the GPU, other tabs, a throttled rAF). David's phone at 9f897bc:
     // 49 ms frames of which the wasm timers saw 17; this is the hole.
-    var pageFrames = { cb: [], gap: [], last: 0 };
+    // Multiple callbacks can share one animation frame (including an audio
+    // upload). Aggregate their cost instead of treating each as another frame.
+    var pageFrames = { cb: [], gap: [], stamp: null, start: 0, cost: 0, epoch: 0, ignore: null };
+    var audioWork = { upload: [], finish: [], settled: 0, failed: 0, loading: "none" };
+    function remember(xs, value) { xs.push(value); if (xs.length > 3600) xs.shift(); }
+    function resetPageStats() {
+      pageFrames.ignore = pageFrames.stamp;
+      pageFrames.stamp = null; pageFrames.start = 0; pageFrames.cost = 0;
+      pageFrames.cb = []; pageFrames.gap = []; pageFrames.epoch++;
+      audioWork.upload = []; audioWork.finish = [];
+    }
     (function () {
       var raf = window.requestAnimationFrame;
       window.requestAnimationFrame = function (cb) {
-        return raf.call(window, function (t) {
+        return raf.call(window, function (stamp) {
+          if (stamp === pageFrames.ignore) return cb(stamp);
           var t0 = performance.now();
-          if (pageFrames.last) { pageFrames.gap.push(t0 - pageFrames.last); if (pageFrames.gap.length > 3600) pageFrames.gap.shift(); }
-          pageFrames.last = t0;
-          var r = cb(t);
-          pageFrames.cb.push(performance.now() - t0); if (pageFrames.cb.length > 3600) pageFrames.cb.shift();
-          return r;
+          if (stamp !== pageFrames.stamp) {
+            if (pageFrames.stamp !== null) {
+              remember(pageFrames.gap, t0 - pageFrames.start);
+              remember(pageFrames.cb, pageFrames.cost);
+            }
+            pageFrames.stamp = stamp; pageFrames.start = t0; pageFrames.cost = 0;
+          }
+          var epoch = pageFrames.epoch;
+          try { return cb(stamp); }
+          finally { if (epoch === pageFrames.epoch) pageFrames.cost += performance.now() - t0; }
         });
       };
     })();
     window.crashPageStats = function () { return pageStats(); };
+    window.crashResetStats = function () {
+      if (!updates.app) return false;
+      updates.app.dispatch("stats", "reset");
+      return true;
+    };
     function pageStats() {
       var line = function (name, xs) {
         if (!xs.length) return name + " (no samples)";
@@ -191,7 +213,9 @@
         return name + " mean " + mean.toFixed(1) + " p50 " + pick(0.5).toFixed(1) + " p95 " + pick(0.95).toFixed(1) + " max " + s[s.length - 1].toFixed(1);
       };
       var over = pageFrames.cb.filter(function (c) { return c > 16.7; }).length;
-      return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length;
+      return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length +
+        "\npage music settled " + audioWork.settled + "/3 failed " + audioWork.failed + " loading " + audioWork.loading +
+        "\n" + line("page audio-upload", audioWork.upload) + "\n" + line("page audio-finish", audioWork.finish);
     }
 
     // The stats summary (P3c): with ?ms a tap on the readout makes the
@@ -203,6 +227,7 @@
       var log = console.log;
       console.log = function () {
         var first = arguments[0];
+        if (typeof first === "string" && first.indexOf("crash: stats reset ") === 0) resetPageStats();
         if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
           var text = first.slice("crash: clipboard ".length).split("~").join("\n") + "\n" + pageStats();
           log.call(console, "crash: page-stats " + pageStats().split("\n").join("~"));
@@ -213,7 +238,11 @@
             box.style.cssText = "position:fixed;left:8px;top:8px;right:8px;max-height:80%;overflow:auto;background:#0d0a1a;color:#cce6ff;border:1px solid #4df2d9;padding:8px;font:12px monospace;z-index:20;white-space:pre-wrap;user-select:text;-webkit-user-select:text";
             var close = document.createElement("button"); close.textContent = "close"; close.style.cssText = "float:right;margin-left:8px";
             close.addEventListener("click", function () { box.remove(); });
-            box.appendChild(close); box.appendChild(document.createTextNode(why + text));
+            var reset = document.createElement("button"); reset.textContent = "Reset & close";
+            reset.style.cssText = "float:right;margin-left:8px";
+            reset.addEventListener("click", function () { if (window.crashResetStats()) box.remove(); });
+            box.appendChild(close); box.appendChild(reset);
+            box.appendChild(document.createTextNode(why + text));
             document.body.appendChild(box);
           };
           if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -304,15 +333,16 @@
     // fetch, decoded by the browser (decodeAudioData on an offline context
     // at the tune's rate, so no resampling), and handed to the game as
     // s16le mono PCM in base64 chunks through the dispatch: ("track",
-    // NAME) opens one, ("audio-chunk", b64) appends, ("audio-done", n)
+    // NAME) opens one, ("audio-size", bytes) reserves its PCM buffer,
+    // ("audio-chunk", b64) fills it, ("audio-done", n)
     // closes it; ("audio-done", 0) after ("track", NAME) means that tune
     // was given up. The menu theme (spy) goes first: the boot's audio step
     // waits for it (D40); the others land while the menu is up. Fetched
     // once swReady resolves, outside the service worker's activation
     // window, and never fatal: no tune means sound effects alone. One
-    // 512 KB chunk per animation frame (the game decodes it in C; the
-    // ambient's 16 KB a frame would take a 7.5 MB tune 460 frames, minutes
-    // on a slow box, and the boot waits on the theme).
+    // adaptive conversion/delivery batch per frame, targeting 4 ms of work.
+    // Conversion stays inside each batch; there is no whole-track conversion
+    // before the first yield, and the receiver needs no final concatenation.
     var TRACKS = ["spy", "groove", "breaker"];
     var ambientSettled = null;
     window.crashAmbientSettled = new Promise(function (resolve) { ambientSettled = resolve; });
@@ -321,25 +351,47 @@
       if (index >= TRACKS.length) return;
       var name = TRACKS[index];
       var TRIES = 3, tries = 0;
-      function settled() { if (index === 0) ambientSettled(); fetchTracks(app, index + 1); }
+      audioWork.loading = name;
+      function settled(failed) {
+        audioWork.settled++; if (failed) audioWork.failed++;
+        audioWork.loading = "none";
+        if (index === 0) ambientSettled();
+        fetchTracks(app, index + 1);
+      }
       function deliver(pcm) {
-        // float32 mono at the tune's rate -> s16le, 16 KB a frame
-        var n16 = pcm.length, bytes = new Uint8Array(n16 * 2);
-        for (var i = 0; i < n16; i++) {
-          var v = Math.max(-1, Math.min(1, pcm[i])), s = v < 0 ? v * 32768 : v * 32767;
-          var u = s < 0 ? s + 65536 : s;
-          bytes[2 * i] = u & 255; bytes[2 * i + 1] = (u >> 8) & 255;
-        }
-        var CHUNK = 512 * 1024, i2 = 0, n = 0;
+        var offset = 0, n = 0, batch = 32768; // samples: 64 KB initially
         app.dispatch("track", name);
-        (function next() {
-          if (i2 >= bytes.length) { app.dispatch("audio-done", String(n)); settled(); return; }
-          var part = bytes.subarray(i2, Math.min(i2 + CHUNK, bytes.length)), s = "";
-          for (var k = 0; k < part.length; k += 8192) s += String.fromCharCode.apply(null, part.subarray(k, Math.min(k + 8192, part.length)));
-          app.dispatch("audio-chunk", btoa(s));
-          i2 += CHUNK; n++;
+        var allocationStart = performance.now();
+        app.dispatch("audio-size", String(pcm.length * 2));
+        remember(audioWork.upload, performance.now() - allocationStart);
+        function next() {
+          if (offset >= pcm.length) {
+            var finishStart = performance.now();
+            app.dispatch("audio-done", String(n));
+            remember(audioWork.finish, performance.now() - finishStart);
+            settled(false);
+            return;
+          }
+          var started = performance.now();
+          var end = Math.min(offset + batch, pcm.length);
+          var bytes = new Uint8Array((end - offset) * 2);
+          for (var i = offset, o = 0; i < end; i++, o += 2) {
+            var v = Math.max(-1, Math.min(1, pcm[i])), sample = v < 0 ? v * 32768 : v * 32767;
+            var u = sample < 0 ? sample + 65536 : sample;
+            bytes[o] = u & 255; bytes[o + 1] = (u >> 8) & 255;
+          }
+          var text = "";
+          for (var k = 0; k < bytes.length; k += 8192)
+            text += String.fromCharCode.apply(null, bytes.subarray(k, Math.min(k + 8192, bytes.length)));
+          app.dispatch("audio-chunk", btoa(text));
+          offset = end; n++;
+          var elapsed = performance.now() - started;
+          remember(audioWork.upload, elapsed);
+          // Limit growth to 2x, keep samples whole, and bound transient work.
+          batch = Math.max(4096, Math.min(131072, Math.floor(batch * Math.min(2, 4 / Math.max(0.1, elapsed)))));
           requestAnimationFrame(next);
-        })();
+        }
+        requestAnimationFrame(next);
       }
       (function attempt() {
         tries++;
@@ -356,7 +408,7 @@
         }).catch(function (err) {
           console.log("crash: track " + name + " failed " + err.message + " (try " + tries + ")");
           if (tries < TRIES) setTimeout(attempt, 1500);
-          else { app.dispatch("track", name); app.dispatch("audio-done", "0"); settled(); }   // D40: the boot's audio step does not wait on a lost fetch
+          else { app.dispatch("track", name); app.dispatch("audio-done", "0"); settled(true); }   // D40: the boot's audio step does not wait on a lost fetch
         });
       })();
     }

@@ -1,0 +1,43 @@
+;;; A web music transfer fills one s16 PCM buffer a chunk at a time.
+;;; Publishing a complete track returns that buffer without a final copy.
+
+(define-library (crash audio transfer)
+  (import (sigil struct)
+          (sigil math))
+
+  (export transfer-new transfer-append transfer-finish)
+
+  (begin
+    (define-struct transfer-state
+      (bytes)
+      (written default: 0)
+      (chunks default: 0))
+
+    (define (transfer-new size)
+      (and (integer? size)
+           (exact? size)
+           (>= size 0)
+           (even? size)
+           (transfer-state bytes: (make-bytevector size 0))))
+
+    ;; The buffer belongs to this in-progress transfer. Only a complete
+    ;; buffer is published to the player; an overflow invalidates it.
+    (define (transfer-append state chunk)
+      (and state
+           (let* ((at (transfer-state-written state))
+                  (end (+ at (bytevector-length chunk)))
+                  (bytes (transfer-state-bytes state)))
+             (and (<= end (bytevector-length bytes))
+                  (begin
+                    (bytevector-copy! bytes at chunk)
+                    (transfer-state state
+                                    written: end
+                                    chunks: (+ 1 (transfer-state-chunks state))))))))
+
+    (define (transfer-finish state chunks)
+      (and state
+           (integer? chunks)
+           (= chunks (transfer-state-chunks state))
+           (= (transfer-state-written state)
+              (bytevector-length (transfer-state-bytes state)))
+           (transfer-state-bytes state)))))

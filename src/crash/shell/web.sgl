@@ -134,6 +134,7 @@
           (crash stats)
           (crash sfx)
           (crash audio)
+          (crash audio transfer)
           (crash shell)
           (crash code)
           (crash run)
@@ -217,9 +218,12 @@
     (define *frame-n* 0)     ; frames presented (the probe alternates on it)
     (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
     (define *frame-ms* 0.0)   ; the frame's wall dt, ms
+    (define *ms-reset-pending* #f)
+    (define *ms-window* 0)
+    (define *ms-skip* 1)     ; the first tick has no previous frame to sample
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
-    (define *ambient-chunks* '()) ; the ambient PCM's decoded chunks, newest first
+    (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
@@ -297,11 +301,15 @@
                            *part-step* *part-save* *part-cues*
                            (/ (- (cadddr now) (cadddr was)) 1000000.0)
                            (- (+ (car now) (cadr now)) (+ (car was) (cadr was)))
-                           *tick-ms* *pump-ms* (other-ms)))))
+                           *tick-ms* *pump-ms* (other-ms)
+                           *flush-ms* *boot-ms* *count-ms*))))
 
     ;; The summary's first line: the build, the mode, the doors in force.
     (define (stats-header)
       (string-append "crash-the-stack " (or *version* "unversioned")
+                     " window " (if (= *ms-window* 0)
+                                      "startup"
+                                      (string-append "reset-" (number->string *ms-window*)))
                      " bg " (if *bg* (string-append (symbol->string (bg-mode *bg*)) (if (bg-gpu? *bg*) "" "-cpu")) "off")
                      " dpr " *dpr*
                      " stride " (number->string (if *bg* (bg-stride *bg*) 0))
@@ -320,6 +328,35 @@
       (let ((text (stats-summary (stats-header))))
         (println "~a" (string-append "crash: clipboard " (string-replace text "\n" "~")))
         (say "stats" "copied" (stats-count))))
+
+    ;; Apply a requested reset at a frame boundary, outside the input and
+    ;; report callbacks. Skip the old frame and the reset-bearing frame.
+    (define (reset-ms!)
+      (stats-reset!)
+      (set! *ms-reset-pending* #f)
+      (set! *ms-window* (+ 1 *ms-window*))
+      (set! *ms-skip* 2)
+      (set! *ms-n* 0)
+      (set! *ms-sum* 0.0)
+      (set! *ms-max* 0.0)
+      (set! *ms-step* 0.0)
+      (set! *ms-present* 0.0)
+      (set! *ms-sim* 0.0)
+      (set! *ms-draw* 0.0)
+      (set! *ms-flush* 0.0)
+      (set! *ms-tick* 0.0)
+      (set! *ms-pump* 0.0)
+      (set! *ms-other* 0.0)
+      (set! *ms-boot* 0.0)
+      (set! *ms-count* 0.0)
+      (set! *worst* #f)
+      (set! *worst-text* "")
+      (set! *gc-frame* (gc-snapshot))
+      (set! *gc-last* *gc-frame*)
+      (set! *gc-tick* 0)
+      (set! *underruns-last* (audio-underruns))
+      ;; The page resets its callback and audio-load samples on this line.
+      (println "crash: stats reset ~a" *ms-window*))
 
     (define (count-frame! dt)
       (let ((ms (* 1000.0 dt)))
@@ -435,7 +472,8 @@
     ;; The page fetches and decodes each tune under assets/audio/ (there is
     ;; no bytes fetch in the bridges the wasm has; the page has fetch and
     ;; decodeAudioData) and hands the PCM over as ("track", name), then
-    ;; ("audio-chunk", base64) dispatches, then ("audio-done", count): see
+    ;; ("audio-size", byte-count), ("audio-chunk", base64) dispatches, then
+    ;; ("audio-done", count): see
     ;; the music below. Decoded here into one s16le bytevector a track.
     ;;   crash: audio open|closed             the context and sink at boot
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
@@ -444,13 +482,14 @@
     ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a 7.5 MB
     ;; tune decoded in Sigil a character at a time cost whole frames per
     ;; 16 KB chunk (2026-09-20, the ambient's delivery; the tune is six
-    ;; times the ambient), so the page now hands 512 KB a frame and the
-    ;; decode is under a millisecond.
+    ;; times the ambient). The page now adapts small conversion/delivery
+    ;; batches to a time budget; the receiver copies into one track buffer.
     (define (b64-decode text) (%b64-decode text))
 
     ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
     ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
-    ;; ("audio-chunk", b64) appends, ("audio-done", n) closes it into the
+    ;; ("audio-size", bytes) reserves its buffer, ("audio-chunk", b64) fills
+    ;; it, and ("audio-done", n) publishes the complete buffer to the
     ;; player. The menu theme (spy) is what the boot's audio step waits for
     ;; (the ambient's old place, and its lines: the arms read them):
     ;;   crash: track NAME FRAMES             a track landed (0: given up)
@@ -460,17 +499,19 @@
 
     (define (track! payload)
       (set! *track-name* (string->symbol payload))
-      (set! *ambient-chunks* '())
+      (set! *track-transfer* #f)
       0)
 
     (define (audio-chunk! payload)
-      (set! *ambient-chunks* (cons (b64-decode payload) *ambient-chunks*))
+      (set! *track-transfer*
+            (transfer-append *track-transfer* (b64-decode payload)))
       0)
 
     (define (audio-done! payload)
-      (let ((bytes (apply bytevector-append (reverse *ambient-chunks*)))
+      (let ((bytes (or (transfer-finish *track-transfer* (string->number payload))
+                       (bytevector)))
             (name *track-name*))
-        (set! *ambient-chunks* '())
+        (set! *track-transfer* #f)
         ;; no chunks: the page gave the track up (a failed fetch); the
         ;; boot's audio step does not wait on the theme then
         (when (> (bytevector-length bytes) 0)
@@ -1254,6 +1295,15 @@
     ;; the page measures around the callback and appends to the summary.
     (define (web-tick dt)
       (set! *tick-start* (now-ms))
+      (when *ms-reset-pending* (reset-ms!))
+      ;; Sample the completed previous tick before replacing any phase
+      ;; timings with this tick's work. dt is the interval it occupied.
+      (let ((t0 (now-ms)))
+        (when *ms*
+          (if (> *ms-skip* 0)
+              (set! *ms-skip* (- *ms-skip* 1))
+              (count-frame! dt)))
+        (set! *count-ms* (- (now-ms) t0)))
       (unless *booted* (boot!))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
@@ -1266,9 +1316,6 @@
         (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
         (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
         (set! *boot-ms* (- (now-ms) t0)))
-      (let ((t0 (now-ms)))
-        (when *ms* (count-frame! dt))
-        (set! *count-ms* (- (now-ms) t0)))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
       (set! *draw-ms* 0.0)
@@ -1726,6 +1773,11 @@
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "hud") (param! (lambda () (set! *hud* (if (string=? payload "strip") 'strip 'zones)) (set-stored-hud! *hud*))))
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) (title-stamp! payload) 0)
+            ((string=? type "stats")
+             (cond ((string=? payload "reset")
+                    (when *ms* (set! *ms-reset-pending* #t)))
+                   ((string=? payload "copy") (copy-stats!)))
+             0)
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             ;; ?baud=N: the title reveal's pace (P3d)
             ((string=? type "baud") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (title-baud! n))))))
@@ -1749,6 +1801,9 @@
             ;; the page polls for a COPY (1 once): it reads the store's "code" key then
             ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
             ((string=? type "track") (track! payload))
+            ((string=? type "audio-size")
+             (set! *track-transfer* (transfer-new (string->number payload)))
+             0)
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)

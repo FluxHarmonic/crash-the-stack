@@ -1,0 +1,28 @@
+(import (sigil test)
+        (crash audio transfer))
+
+(test-group "audio transfer: incremental PCM delivery"
+  (test "ordered chunks publish exactly the original bytes, without a final copy"
+    (let* ((first (transfer-append (transfer-new 6) (bytevector 0 128)))
+           (complete (transfer-append first (bytevector 255 127 42 0)))
+           (bytes (transfer-finish complete 2)))
+      (assert-equal (bytevector 0 128 255 127 42 0) bytes)
+      (assert-true (eq? bytes (transfer-finish complete 2)))))
+  (test "partial data and an incorrect chunk count cannot become a track"
+    (let ((partial (transfer-append (transfer-new 6) (bytevector 1 2))))
+      (assert-false (transfer-finish partial 1)))
+    (let ((complete (transfer-append (transfer-new 2) (bytevector 1 2))))
+      (assert-false (transfer-finish complete 2))))
+  (test "overflow invalidates the transfer; a fresh retry is independent"
+    (let ((bad (transfer-append (transfer-new 2) (bytevector 1 2 3))))
+      (assert-false bad)
+      (assert-false (transfer-append bad (bytevector 4)))
+      (assert-false (transfer-finish bad 1)))
+    (assert-equal (bytevector 5 6)
+                  (transfer-finish
+                   (transfer-append (transfer-new 2) (bytevector 5 6))
+                   1)))
+  (test "invalid PCM lengths are refused and an empty transfer is empty"
+    (for-each (lambda (size) (assert-false (transfer-new size)))
+              (list #f -2 3 2.5))
+    (assert-equal (bytevector) (transfer-finish (transfer-new 0) 0))))
