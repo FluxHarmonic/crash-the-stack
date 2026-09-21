@@ -4,6 +4,7 @@
 // five minutes of live motion and console/GL errors. Use measure-ms.mjs for costs.
 // Uses a landscape phone viewport at DPR 3 and headless SwiftShader.
 import http from "node:http";
+import { cyclicAt } from "../docs/codex/field-rules/sweep-cyclic.mjs";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
@@ -11,7 +12,7 @@ import { spawn } from "node:child_process";
 const args = process.argv.slice(2);
 const ruleAt = args.indexOf('--rule');
 const RULE = ruleAt < 0 ? 'cyclic' : args[ruleAt + 1];
-if (!['cyclic', 'flow'].includes(RULE)) throw new Error('Expected --rule cyclic|flow');
+if (!['cyclic', 'flow', 'signal'].includes(RULE)) throw new Error('Expected --rule cyclic|flow|signal');
 const secondsAt = args.indexOf('--seconds');
 const SECONDS = secondsAt < 0 ? 300 : Number(args[secondsAt + 1]);
 const errors = [];
@@ -93,8 +94,8 @@ async function evalJS(expr) {
   return r.result.value;
 }
 
-const TONES = [[13,10,26], [23,18,46], [46,28,77], [92,77,140],
-               [74,90,43], [31,58,77], [42,45,58], [33,23,61]];
+const TONES = [[13,10,26], [23,18,46], [33,23,61], [42,45,58],
+               [31,58,77], [46,28,77], [74,90,43], [92,77,140]];
 async function waitLine(re, from = 0, ms = 60000) {
   const started = Date.now();
   while (Date.now() - started < ms) {
@@ -134,11 +135,12 @@ function tones(samples) {
 function stats(map) {
   const counts = TONES.map((_, i) => map.filter(t => t === i).length);
   return {tones: counts.filter(n => n > 0).length, dominant: Math.max(...counts) / map.length,
+          accents: (counts[6] + counts[7]) / map.length,
           outside: map.filter(t => t < 0).length};
 }
 function check(map) {
   const s = stats(map);
-  if (s.outside || s.tones < 4 || s.dominant > 0.9) throw new Error('Field not alive/palette-only: ' + JSON.stringify(s));
+  if (s.outside || s.tones < 4 || s.dominant > 0.9 || s.accents > 0.15) throw new Error('Field not alive/palette-only: ' + JSON.stringify(s));
   // Bottom-left is always the base of the existing ordered dither.
   for (let y = 0; y < 44; y += 2) for (let x = 0; x < 80; x += 2) {
     const b = map[(y + 1) * 80 + x], u = (b + 1) % 8;
@@ -152,6 +154,11 @@ const changed = (a, b) => a.reduce((n, v, i) => n + (v !== b[i]), 0);
 await boot(7, 200);
 const initial = tones(await read());
 console.log('PASS ' + RULE + ' step 200 ' + JSON.stringify(check(initial)));
+if (RULE === 'cyclic') {
+  const mismatches = changed(initial, cyclicAt(1, 200).tones);
+  if (mismatches) throw new Error(mismatches + ' cyclic half cells differ from the integer oracle');
+  console.log('PASS cyclic integer oracle: all 3520 half cells match');
+}
 await boot(7, 200);
 if (changed(initial, tones(await read()))) throw new Error('Field is not repeatable at step 200');
 console.log('PASS ' + RULE + ' deterministic replay at step 200');
