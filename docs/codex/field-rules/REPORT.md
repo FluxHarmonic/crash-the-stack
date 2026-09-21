@@ -229,7 +229,8 @@ Performance uses `scripts/measure-ms.mjs --phone --windows 3`, three
 buffer from portrait phone emulation (390×844 CSS, DPR 3). This is headless
 SwiftShader on a shared machine; STEP/PRESENT measure CPU submission and
 driver stalls, not GPU timer queries. The actual phone's `?ms` reading is
-the useful hardware comparison. No phone timing data has been supplied yet.
+the useful hardware comparison. The first actual phone measurements follow
+the software-renderer table below.
 
 Measurements of each final rule implementation:
 
@@ -249,6 +250,51 @@ times. All six additions use one field step pass. Every previously measured
 mode except flame is unchanged in the taller-flame build `a72e554`.
 The flame timing predates its cooling-only height adjustment; the shader
 structure, resolution, and number of passes are unchanged.
+
+### Pixel 2 XL phone measurements
+
+David supplied these seven copied `?ms` summaries on 2026-09-21, in the
+listed order, from application `a72e554edbea`. All report DPR 2, stride 3,
+rsteps 2, audio depth 6144, atlas on, copper roll, and phosphor on. Browser
+and orientation were not supplied. Values below are milliseconds except
+sample count and window seconds.
+
+| Rule | Samples / seconds | Frame mean / p50 / p95 / max | Step mean / p50 / p95 | Present mean | Draw mean / p50 | Frames over 50 ms |
+| --- | --- | --- | --- | ---: | --- | --- |
+| cyclic | 134 / 7.1 | 52.8 / 34 / 101 / 1300 | 2.5 / 2 / 6 | 1.8 | 26.6 / 25 | 27 / 134 |
+| flow | 82 / 4.9 | 59.9 / 34 / 135 / 1300 | 2.9 / 2 / 7 | 1.8 | 24.8 / 18 | 19 / 82 |
+| signal | 126 / 7.6 | 60.1 / 34 / 135 / 1234 | 3.2 / 2 / 8 | 2.0 | 29.9 / 27 | 36 / 126 |
+| echo | 118 / 7.4 | 63.0 / 34 / 184 / 1472 | 2.8 / 2 / 6 | 1.8 | 28.4 / 27 | 35 / 118 |
+| synapse | 171 / 7.5 | 43.7 / 34 / 100 / 1300 | 2.1 / 1 / 5 | 1.6 | 23.4 / 20 | 20 / 171 |
+| flame | 75 / 5.0 | 66.7 / 34 / 167 / 1133 | 3.5 / 3 / 10 | 2.2 | 30.8 / 28 | 25 / 75 |
+| reaction | 69 / 5.1 | 74.2 / 50 / 233 / 1251 | 8.1 / 6 / 23 | 1.7 | 34.2 / 30 | 28 / 69 |
+
+All six new modes have lower measured mean and median step times than
+REACTION. SYNAPSE has the lowest measured mean step and whole-frame time;
+FLAME has the highest mean step among the additions, still below REACTION.
+The common 34 ms frame median is approximately a 29 fps cadence; REACTION's
+50 ms median is a 20 fps cadence. These are median intervals, not average
+FPS or proof of steady performance. STEP includes CPU background advance
+and GPU submission/stalls; PRESENT is also a CPU wall-clock measurement,
+not a GPU timer query. Do not sum phase percentiles or treat STEP as a
+complete measure of GPU cost.
+
+David observed a spike whenever the background music began. Every sample
+contains a 1.1–1.5 second maximum frame, consistent with a shared startup
+event, but aggregate summaries cannot identify its precise cause. The
+regular audio pump averages only 0.1–0.3 ms. Music startup runs in the
+shell's boot timing section, which the copied summary does not expose
+separately; low PUMP timing does not exclude startup audio work.
+
+The requested three-second settling delay did not exclude startup: both
+`crash/stats` and the page callback instrumentation retain up to 3600
+frames, with no automatic warm-up exclusion. These short captures include
+their initial frames. Means, tails, and maxima therefore mix startup and
+ongoing play; the unequal windows also give startup unequal weight. This
+is useful initial hardware evidence, not a controlled settled ranking.
+For a follow-up, a fresh measurement window after music starts would
+separate ongoing rendering cost from the reported startup hitch. No
+background simplification is justified by the startup maxima alone.
 
 ## Integration and review
 
