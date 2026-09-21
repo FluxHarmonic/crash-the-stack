@@ -503,15 +503,7 @@
                             (menu-cursor-on? m)
                             (label-index (car ls)))
             (loop (cdr ls) (+ i 1))))
-        ;; the live board's share code (P4), with COPY on the web
-        (let ((r (code-line-rect m vw vh)))
-          (when r
-            (let* ((line (string-append "CODE " (code-display (menu-code-line m)) (if (menu-copy m) "  [COPY]" "")))
-                   (x (quotient (- vw (text-width line 1)) 2)))
-              (color! C-STATIC-B)
-              (text! line (+ x 1) (+ (cadr r) 5) 1)
-              (color! C-LABEL-LIT)
-              (text! line x (+ (cadr r) 4) 1))))))
+        ))
 
     ;; The labels a sub-screen's sheet holds: the heading, every row's
     ;; name, and every value a row can show, so stepping a value never
@@ -553,11 +545,12 @@
                 (draw-value-row (menu-label id) value rect lit? (menu-cursor-on? m) (menu-row-note m id))
                 (begin
                   (draw-menu-item (menu-label id) rect lit? (menu-cursor-on? m) (label-index (menu-label id)))
-                  ;; an item's note (the overlay's exit row: what leaving keeps) under it, centered
+                  ;; an item's note (the overlay's exit row: what leaving keeps) a row's
+                  ;; height under it, centered
                   (let ((note (menu-row-note m id)))
                     (when note
                       (color! C-TEXT-DIM)
-                      (text! note (quotient (- vw (text-width note 1)) 2) (+ (cadr rect) (cadddr rect) 1) 1))))))
+                      (text! note (quotient (- vw (text-width note 1)) 2) (+ (cadr rect) (cadddr rect) UNDER-ROW-GAP) 1))))))
           (loop (cdr ids) (+ i 1))))
       ;; the screen's content, on a panel in the band's style where it is text
       ;; (solid C-BG with a C-BAR-C rule: the backdrop is busy under the
@@ -565,11 +558,15 @@
       (when (memq (menu-screen m) (list 'credits 'scores 'code 'run-done 'run-layer))
         ;; the crawl has no rows under it: its panel runs to the bottom
         (let ((panel-bottom (if (eq? (menu-screen m) 'credits) (- vh CRAWL-BOTTOM-INSET) (- TEXT-ROWS-Y 11))))
-          (color! C-BAR-C)
-          (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
-          ;; the crawl's ground shows the backdrop through it (the band's treatment)
-          (if (eq? (menu-screen m) 'credits) (color-alpha! C-BG PANEL-ALPHA) (color! C-BG))
-          (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- panel-bottom 1 (- TEXT-Y 8)))))
+          ;; the crawl's box shows the backdrop through it; the other text
+          ;; screens keep a solid ground under their columns of text
+          (if (eq? (menu-screen m) 'credits)
+              (draw-panel 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
+              (begin
+                (color! C-BAR-C)
+                (draw-filled-rect 8 (- TEXT-Y 9) (- vw 16) (- panel-bottom (- TEXT-Y 9)))
+                (color! C-BG)
+                (draw-filled-rect 9 (- TEXT-Y 8) (- vw 18) (- panel-bottom 1 (- TEXT-Y 8)))))))
       (case (menu-screen m)
         ((credits) (draw-credits m vw vh))
         ((scores) (draw-scores m vw vh))
@@ -618,6 +615,20 @@
     ;; from above the heading to under the last row and its note; the
     ;; heading and rows as any sub-screen draws them. bottom (the HUD
     ;; bar's top) caps the panel.
+    ;; A translucent panel: the C-BG fill at PANEL-ALPHA, then a 1-px
+    ;; C-BAR-C frame as four lines. The first cut drew the frame as a
+    ;; filled rect UNDER the fill, so the fill blended with C-BAR-C, not
+    ;; the backdrop: David's "not translucent at all" (2026-09-21), and
+    ;; the probe agreed: every pixel under the box was one constant.
+    (define (draw-panel x y w h)
+      (color-alpha! C-BG PANEL-ALPHA)
+      (draw-filled-rect x y w h)
+      (color! C-BAR-C)
+      (draw-filled-rect x y w 1)
+      (draw-filled-rect x (+ y h -1) w 1)
+      (draw-filled-rect x y 1 h)
+      (draw-filled-rect (+ x w -1) y 1 h))
+
     (define (draw-overlay m vw vh bottom)
       (let* ((n (length (menu-entries m)))
              (last (if (> n 0) (menu-entry-rect m (- n 1) vw vh) (list 0 SUB-ENTRIES-Y ENTRY-W 0)))
@@ -635,13 +646,10 @@
              (code (code-line-rect m vw vh))
              (content-bottom (cond ((memq (menu-screen m) TEXT-SCREENS) (+ (cadr last) (cadddr last)))
                                    (code (+ (cadr code) (cadddr code)))
-                                   (else (+ (cadr last) (cadddr last) (if note? 10 0)))))
+                                   (else (+ (cadr last) (cadddr last) (if note? (+ UNDER-ROW-GAP NOTE-H) 0)))))
              (bot (min bottom (+ content-bottom OVERLAY-PAD))))
         ;; the panel shows the paused table through it (David, 2026-09-21)
-        (color! C-BAR-C)
-        (draw-filled-rect x top w (- bot top))
-        (color-alpha! C-BG PANEL-ALPHA)
-        (draw-filled-rect (+ x 1) (+ top 1) (- w 2) (- bot top 2))
+        (draw-panel x top w (- bot top))
         (draw-sub-screen m vw vh)
         ;; the live board's code under the rows, small, COPY by a tap on it (the web)
         (when code
@@ -889,7 +897,7 @@
     ;; one translucency for the band, the crawl's box and the overlay's
     ;; panel: David's read of 2026-09-21 wanted the backdrop visible
     ;; through them (at 0.8 over the dark art it read as opaque)
-    (define PANEL-ALPHA 0.65)
+    (define PANEL-ALPHA 0.55)
     (define BAND-ALPHA PANEL-ALPHA)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)

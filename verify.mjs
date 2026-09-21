@@ -2085,14 +2085,12 @@ async function downTo(order, id, at = 0) {
     // the overlay's CODE row shows the code (D51); then the main menu's code line, and COPY
     await sleep(300);
     let m0 = consoleLines.length;
-    const top = await toMenu("Escape");
-    const overlayCode = top && consoleLines.slice(m0, top.index).find((l) => /^crash: menu-code /.test(l));
-    const shareOk = overlayCode && overlayCode.includes(`${code.slice(0, 5)}-${code.slice(5)}`);
-    const line = top && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, top.index, 2000);
-    if (!top) detail = toMenuDetail;
-    else if (!shareOk) detail = `the overlay's code line did not show ${code}: ${overlayCode}`;
-    else if (!line) detail = "the pause menu said no code line for the live deal";
-    else if (line.m[1] !== `${code.slice(0, 5)}-${code.slice(5)}`) detail = `the pause menu's code is ${line.m[1]}, the deal's ${code}`;
+    await press("Escape");
+    const on = await waitLine(/^crash: pause on /, m0, 3000);
+    const line = on && await waitLine(/^crash: menu-code ([0-9A-Z]{5}-[0-9A-Z]{5}) (-?[\d.]+) (-?[\d.]+)$/, m0, 2000);
+    if (!on) detail = "Escape on the deal did not open the overlay";
+    else if (!line) detail = "the overlay said no code line for the live deal";
+    else if (line.m[1] !== `${code.slice(0, 5)}-${code.slice(5)}`) detail = `the overlay's code is ${line.m[1]}, the deal's ${code}`;
     else if (!EXPECT_NO_SELECTION) {
       m0 = consoleLines.length;
       await tap(parseFloat(line.m[2]), parseFloat(line.m[3]));
@@ -2103,6 +2101,13 @@ async function downTo(order, id, at = 0) {
         copied = await evalJS(`localStorage.getItem("code")`);
         if (copied !== line.m[1]) detail = `after COPY the page's code key holds ${JSON.stringify(copied)}, not ${line.m[1]}`;
       }
+      // the main menu carries no code line (David, 2026-09-21)
+      m0 = consoleLines.length;
+      await press("Escape");
+      if (!(await waitLine(/^crash: pause off /, m0, 3000))) detail = detail || "Escape did not resume";
+      const top = !detail && await toMenu("Escape");
+      if (!detail && !top) detail = toMenuDetail;
+      else if (!detail && consoleLines.slice(top.index).some((l) => /^crash: menu-code /.test(l))) detail = "the main menu still says a code line";
     }
   }
   if (!detail) {
@@ -2175,7 +2180,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("code", detail);
-  else pass("code", `${table} seed ${seed} -> ${code}; the pause menu shows it${copied ? " and COPY handed it to the page" : ""}; ?code= and the CODE screen deal seed ${seed} again; ${flipped} (one character flipped) refused by both`);
+  else pass("code", `${table} seed ${seed} -> ${code}; the overlay shows it${copied ? " and COPY handed it to the page" : ""} (the main menu does not); ?code= and the CODE screen deal seed ${seed} again; ${flipped} (one character flipped) refused by both`);
 }
 
 // daily: the seed for a fixed date is the pinned value (gate leg 3).
