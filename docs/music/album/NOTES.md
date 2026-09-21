@@ -26,3 +26,8 @@ boundaries, finite playback and released gates. Preserve intentional syncopation
 Measure actual full renders for loudness, peaks and decay. Numeric checks do not
 establish musical quality: David's listening feedback remains the acceptance
 criterion. Send full OGG auditions including bridges and endings.
+
+David proposed Black Glass as the opener: the title theme makes the strongest
+immediate statement. Sequence now begins Black Glass, Cold Boot and ends Glass
+Current. Black Glass opens with the accepted title ignition and theme statement;
+the newly written distant-theme passage moves into the central breakdown.

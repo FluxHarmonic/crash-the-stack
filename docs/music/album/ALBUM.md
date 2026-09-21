@@ -7,20 +7,20 @@ not a sixteenth album track. Artist credit, artwork and release details remain o
 
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|
-| 1 | Cold Boot | Planned | 3:30 |
-| 2 | Relay Ghost | Planned | 3:30 |
-| 3 | Closed Loop | Planned | 3:15 |
-| 4 | Shadow Protocol | Planned | 3:45 |
-| 5 | Blind Spot | Planned | 3:00 |
-| 6 | Quiet Array | Pilot in progress | 3:45 |
-| 7 | Sector Drift | Planned | 3:30 |
-| 8 | Dirty Cache | Planned | 3:45 |
-| 9 | Basement Circuit | Planned | 3:45 |
-| 10 | Dead Sector | Planned | 3:00 |
-| 11 | Obsidian Index | Planned | 4:00 |
-| 12 | Breach Vector | Planned | 3:30 |
-| 13 | Clock Edge | Planned | 3:30 |
-| 14 | Black Glass | Pilot in progress | 4:30 |
+| 1 | Black Glass | Pilot in progress | 4:30 |
+| 2 | Cold Boot | Planned | 3:30 |
+| 3 | Relay Ghost | Planned | 3:30 |
+| 4 | Closed Loop | Planned | 3:15 |
+| 5 | Shadow Protocol | Planned | 3:45 |
+| 6 | Blind Spot | Planned | 3:00 |
+| 7 | Quiet Array | Pilot in progress | 3:45 |
+| 8 | Sector Drift | Planned | 3:30 |
+| 9 | Dirty Cache | Planned | 3:45 |
+| 10 | Basement Circuit | Planned | 3:45 |
+| 11 | Dead Sector | Planned | 3:00 |
+| 12 | Obsidian Index | Planned | 4:00 |
+| 13 | Breach Vector | Planned | 3:30 |
+| 14 | Clock Edge | Planned | 3:30 |
 | 15 | Glass Current | Planned | 4:00 |
 
 Durations guide the form, not the number of repetitions. First establish the
