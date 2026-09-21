@@ -171,11 +171,13 @@ if (flag('--interact')) {
   const start=await evaluate('({at:performance.now(),under:SigilWasmAudio.sinkUnderruns(1),callbacks:audioOutput.callbacks.length})');
   const logStart=consoleLines.length;
   async function tap(x,y) {
+    const beforeTap=consoleLines.length;
     await evaluate(`(()=>{const c=document.getElementById('stage'),r=c.getBoundingClientRect();
       const scale=Math.min(c.width/640,c.height/400);
       const cx=r.left+((c.width-640*scale)/2+${x}*scale)*r.width/c.width;
       const cy=r.top+((c.height-400*scale)/2+${y}*scale)*r.height/c.height;
       c.dispatchEvent(new PointerEvent('pointerdown',{clientX:cx,clientY:cy,bubbles:true,cancelable:true,pointerType:'touch',isPrimary:true}));})()`);
+    await waitFor(()=>consoleLines.slice(beforeTap).some(l=>/^crash: (select |deselect|removed )/.test(l)), "tile tap acknowledgement");
     await sleep(350);
   }
   for(let i=0;i<6;i++) await tap(boot[4],boot[5]);
@@ -183,7 +185,7 @@ if (flag('--interact')) {
   await sleep(1500);
   interaction=await evaluate('({at:performance.now(),under:SigilWasmAudio.sinkUnderruns(1),callbacks:audioOutput.callbacks.slice('+start.callbacks+')})');
   interaction.start=start; interaction.logs=consoleLines.slice(logStart);
-  if (!interaction.logs.some(l=>l.startsWith('crash: removed '))) throw new Error('Interaction probe did not remove its pair');
+  if (!interaction.logs.some(l=>l.startsWith('crash: removed '))) { if (OUTPUT) fs.writeFileSync(OUTPUT, JSON.stringify({interaction,consoleLines,browserErrors},null,2)); throw new Error('Interaction probe did not remove its pair'); }
   console.log('PASS interaction probe: repeated selection and pair removal');
 }
 const data=await evaluate('({events:window.audioProfile,gl:window.glProfile,stats:window.crashPageStats(),audio:window.audioOutput,underruns:SigilWasmAudio.sinkUnderruns(1),isolated:crossOriginIsolated})');
@@ -231,5 +233,7 @@ for (const kind of ['audio-size','audio-chunk','audio-done']) {
  const samples=data.events.filter(e=>e.kind===kind).map(e=>e.ms);
  if (samples.length) console.log(kind+' count '+samples.length+' mean '+(samples.reduce((a,b)=>a+b,0)/samples.length).toFixed(1)+' max '+Math.max(...samples).toFixed(1));
 }
+console.log('MEASURE audio backend '+data.audio.nodes.map(n=>n.mode).join(', '));
+if (data.interaction) console.log('MEASURE starved PCM frames during interaction '+(data.interaction.under-data.interaction.start.under));
 console.log('PASS no runtime or GL errors');
 shutdown(0);

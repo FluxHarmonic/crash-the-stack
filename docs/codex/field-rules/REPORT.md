@@ -378,4 +378,6 @@ representative: all six added modes match their approved frames exactly.
 David subsequently requested investigation of the Pixel 2 XL music-start
 hitch. [PERFORMANCE.md](PERFORMANCE.md) records the audio delivery changes,
 fresh measurement windows, browser evidence, remaining startup cost, and
-phone instructions. The current preview is application `a20578e20985`.
+phone instructions. David's subsequent tap-time audio-pop report remains
+unresolved; the current diagnostic preview is application `bd1de228630c`.
+The revised browser arm resumes the actual audio device and exercises taps.

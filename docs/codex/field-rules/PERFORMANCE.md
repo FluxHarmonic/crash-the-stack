@@ -184,6 +184,31 @@ node scripts/verify-web-perf.mjs build/web --rate 4 --interact --port 18081 --cd
 node scripts/verify-web-perf.mjs build/web --rate 4 --interact --isolated --port 18081 --cdp 19481 --output /tmp/audio-worklet.json
 ```
 
+### Diagnostic build validation
+
+Application `bd1de228630c` builds successfully. Normal-speed browser checks
+pass running output, acknowledged repeated selection and pair removal,
+the new report fields, and two resets on both fallback and worklet paths,
+with no runtime or GL errors. The first fixed-delay synthetic-input run
+failed its pair-removal assertion; the verifier now waits for each tap's
+acknowledgement before sending the next. The JavaScript observation/reset
+and PCM tests pass as well.
+
+These functional passes do **not** certify uninterrupted sound. In the final
+fallback run, interaction callback gaps reached 81.6 ms with zero starved
+PCM frames. Its subsequent quiet window had a 110.6 ms callback gap, also
+with zero starvation. In the final worklet run, the interaction window
+accumulated **8192 starved PCM frames** at 48000 Hz (about 171 ms), alongside
+main-thread tasks of 190–219 ms. The subsequent quiet reset window had zero
+starvation. Thus the investigation must cover both delayed fallback output
+and producer starvation under interaction load; switching output backends
+alone is not established as a complete fix.
+
+The bridge asset and theme OGG hashes match the earlier snapshot, and the
+steady-state mixer source is unchanged. This narrows the source comparison
+but does not identify the reported regression. Rendering/input work, load
+behavior and the actual phone output environment still need correlation.
+
 ## Phone measurement
 
 Open `http://10.11.0.2:8774/?stack&fresh&seed=7&bg=flow&ms`.
@@ -193,6 +218,11 @@ the report says `page music settled 3/3 failed 0 loading none`, press
 The second report should say `window reset-1`. REACTION makes a useful second
 comparison. There is no need to recapture all seven to investigate the shared
 startup path.
+
+For the tap-time pops, use the new `bd1de228630c` preview, reset after loading,
+then select and match tiles for 5–10 seconds while the pops occur and copy
+the report. Preserve the `audio state ... starved-frames` and `page audio`
+lines. A quiet window is not a substitute for the reported interaction.
 
 ## Integration and remaining work
 
@@ -208,7 +238,7 @@ The worker path deliberately spreads delivery across frames, so music can
 arrive later on a slow device even while individual interruptions shrink.
 Phone feedback is still needed to judge that tradeoff and audible continuity.
 
-The tested application is hosted from `build/hosted` at
-`http://10.11.0.2:8774/`, version `a20578e20985`. The subsequent documentation
-commit does not alter that build. The unrelated localhost listener on 8774
+The diagnostic application is hosted from `build/hosted` at
+`http://10.11.0.2:8774/`, version `bd1de228630c`. The subsequent documentation
+and test-only commit does not alter that build. The unrelated localhost listener on 8774
 is left alone; the preview binds specifically to the WireGuard address.
