@@ -31,7 +31,7 @@
           (crash hub world)
           (crash hub gen))
 
-  (export hub-new hub-step hub-launch hub-return hub-descend hub-severed-layer hub-with-layer
+  (export hub-new hub-step hub-launch hub-return hub-descend hub-severed-layer hub-with-layer outcome-valid?
           hub-enter-layer hub-descriptor
           hub-alert hub-tense? hub-tempo hub-trace-fraction hub-pulse?
           hub-passable? hub-daemon-passable? hub-can-descend? hub-at-market? hub-can-buy?
@@ -72,7 +72,9 @@
              events: '()))
 
     (define (hub-enter-layer w depth attempt)
-      (hub-with-layer w (generate-layer (world-run-seed w) depth attempt) depth attempt))
+      (let ((l (generate-layer (world-run-seed w) depth attempt)))
+        (unless l (error "hub: no layer built for this run seed, depth and attempt" (world-run-seed w) depth attempt))
+        (hub-with-layer w l depth attempt)))
 
     ;; A run from its seed, on layer 1.
     (define (hub-new run-seed)
@@ -84,8 +86,10 @@
       (let ((budget (descriptor-budget (hub-descriptor w))))
         (if (<= budget 0) 1.0 (/ (world-trace w) budget))))
 
+    ;; A daemon hunting the runner or an alerted node counts; one held by a
+    ;; decoy does not (the decoy is the runner's move, not the layer's alarm).
     (define (any-daemon-alert? w)
-      (any (lambda (d) (and (daemon-alert d) #t)) (world-daemons w)))
+      (any (lambda (d) (and (daemon-alert d) (memq (daemon-hunting d) (list 'runner 'node)) #t)) (world-daemons w)))
 
     (define (hub-tense? w)
       (or (>= (hub-trace-fraction w) TENSE-AT) (any-daemon-alert? w)))
@@ -263,6 +267,12 @@
     (define (add-event w e)
       (world w events: (cons e (world-events w))))
 
+    ;; The first key of that color leaves the ring (a hand-built layer may hold two).
+    (define (remove-one x lst)
+      (cond ((null? lst) '())
+            ((eq? (car lst) x) (cdr lst))
+            (else (cons (car lst) (remove-one x (cdr lst))))))
+
     (define (inventory-add inv tool n)
       (let ((count (+ n (let ((e (assq tool inv))) (if e (cdr e) 0)))))
         (cons (cons tool count)
@@ -309,7 +319,7 @@
                       (w (if gate?
                              (add-event (world w
                                                opened: (cons to (world-opened w))
-                                               keys: (remove color (world-keys w)))
+                                               keys: (remove-one color (world-keys w)))
                                         (list 'gate-opened to color))
                              w)))
                  (pick-up (world w
@@ -432,13 +442,13 @@
     (define (step-daemon w d)
       (let* ((width (layer-width (world-layer w)))
              (decoy (decoy-in-sight w d))
-             (d (if decoy (daemon d alert: (cons (car decoy) (cdr decoy)) returning?: #f) d))
+             (d (if decoy (daemon d alert: (cons (car decoy) (cdr decoy)) hunting: 'decoy returning?: #f) d))
              (alert (daemon-alert d)))
         (cond (alert
                (let ((target (car alert))
                      (ttl (cdr alert)))
                  (if (or (= (daemon-cell d) target) (<= ttl 0))
-                     (daemon d alert: #f returning?: #t)
+                     (daemon d alert: #f hunting: #f returning?: #t)
                      (let ((next (step-toward w (daemon-cell d) target)))
                        (daemon (if next (moved d next width) d)
                                alert: (cons target (- ttl 1)))))))
@@ -472,15 +482,16 @@
             w)))
 
     ;; Every daemon that sees the runner hunts his cell. The trace spikes
-    ;; once per beat, on a sighting by a daemon that was not hunting
-    ;; already (a hunter keeps him in view without spiking again: one
-    ;; spike per detection, the design's "detection is a trace spike")
-    ;; or on contact (his cell), and the ledger counts the beat as one
-    ;; sighting.
+    ;; once per beat, on a sighting by a daemon not already hunting HIM (a
+    ;; hunter keeps him in view without spiking again: one spike per
+    ;; detection, the design's "detection is a trace spike"; a daemon held
+    ;; by a decoy or an alerted node has not seen him and spikes when it
+    ;; does) or on contact (his cell), and the ledger counts the beat as
+    ;; one sighting.
     (define (detection-phase w)
       (let* ((c (runner-cell (world-runner w)))
              (seen (filter (lambda (d) (not (hub-runner-hidden? w d))) (world-daemons w)))
-             (spiking (filter (lambda (d) (or (= (daemon-cell d) c) (not (daemon-alert d)))) seen)))
+             (spiking (filter (lambda (d) (or (= (daemon-cell d) c) (not (eq? (daemon-hunting d) 'runner)))) seen)))
         (if (null? seen)
             w
             (let* ((spike (fold-left (lambda (best d)
@@ -494,7 +505,7 @@
                              ledger: (if (null? spiking) (world-ledger w) (ledger-add (world-ledger w) 'seen 1))
                              daemons: (map (lambda (d)
                                              (if (memq d seen)
-                                                 (daemon d alert: (cons c ALERT-BEATS) returning?: #f)
+                                                 (daemon d alert: (cons c ALERT-BEATS) hunting: 'runner returning?: #f)
                                                  d))
                                            (world-daemons w)))))
               (fold-left (lambda (w d) (add-event w (list (if (= (daemon-cell d) c) 'contact 'seen) (daemon-index d))))
@@ -581,11 +592,11 @@
                                      (world-inventory w)
                                      consumed)))
 
-    ;; The nearest daemon hunts the cell.
+    ;; The nearest daemon hunts the cell (an alerted node: D23).
     (define (alert-nearest w c)
       (let ((d (hub-nearest-daemon w c)))
         (if d
-            (replace-daemon w (daemon d alert: (cons c ALERT-BEATS) returning?: #f))
+            (replace-daemon w (daemon d alert: (cons c ALERT-BEATS) hunting: 'node returning?: #f))
             w)))
 
     ;; A node's subsystem effect on clear: dark (its ICE cells, for good),
@@ -609,9 +620,26 @@
     ;;   (cleared beats moves trace-fraction consumed)
     ;;   (severed consumed)
     ;; consumed: alist tool -> count the board used.
+    ;; An outcome the shell may hand back: its tag and its arity, nothing else.
+    (define (outcome-valid? outcome)
+      (and (list? outcome)
+           (pair? outcome)
+           (or (and (eq? (car outcome) 'cleared) (= (length outcome) 5)
+                    (every (lambda (x) (and (number? x) (>= x 0))) (list (cadr outcome) (caddr outcome) (cadddr outcome)))
+                    (list? (list-ref outcome 4)))
+               (and (eq? (car outcome) 'severed) (= (length outcome) 2)
+                    (list? (cadr outcome))))))
+
+    ;; A board's finishing trace can reach the budget on its own: the
+    ;; link is cut there and then, not on the next beat.
+    (define (sever-if-over w)
+      (if (>= (world-trace w) (descriptor-budget (hub-descriptor w)))
+          (add-event (world w request: 'severed) 'severed)
+          w))
+
     (define (hub-return w outcome)
       (let ((n (live-node-here w)))
-        (if (not (and (eq? (world-request w) 'launch) n (pair? outcome)))
+        (if (not (and (eq? (world-request w) 'launch) n (outcome-valid? outcome)))
             w
             (let ((w (world w request: #f events: '())))
               (if (eq? (car outcome) 'cleared)
@@ -630,7 +658,7 @@
                                    ledger: (ledger-add (ledger-add (world-ledger w) 'beats beats) 'moves moves)))
                          (w (if (>= fraction 0.5) (alert-nearest w (node-cell n)) w))
                          (w (consume w consumed)))
-                    (add-event w (list 'cleared (node-index n))))
+                    (sever-if-over (add-event w (list 'cleared (node-index n)))))
                   (let* ((consumed (cadr outcome))
                          (budget (descriptor-budget (hub-descriptor w)))
                          (w (replace-node w (node n state: 'alerted attempts: (+ 1 (node-attempts n)))))
@@ -639,8 +667,7 @@
                                    trace: (max (world-trace w) (exact (floor (* HIGH budget))))
                                    ledger: (ledger-add (world-ledger w) 'reconnects 1)))
                          (w (consume w consumed)))
-                    (add-event (add-event w (list 'severed-board (node-index n))) 'gibson)))))))
-
+                    (sever-if-over (add-event (add-event w (list 'severed-board (node-index n))) 'gibson))))))))
 
     ;; The ladder down: the layer's credits bank, the ledger counts the
     ;; layer, and the next layer begins; past the last the run is done.
