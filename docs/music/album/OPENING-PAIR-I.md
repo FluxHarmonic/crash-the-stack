@@ -90,3 +90,29 @@ All audio, source snapshots, exact command manifests and raw measurements live
 outside the repository at ~/Ops/artifacts/crash-the-stack-album/opening-pair-i/.
 Only the two full album-level OGGs are intended for this listening batch; prior
 pilots and matched comparisons remain preserved alongside this directory.
+
+## Render and provisional mastering results
+
+| Track | Native LUFS-I | Input gain | Master WAV LUFS-I | OGG LUFS-I | OGG true peak | Master LRA |
+|---|---:|---:|---:|---:|---:|---:|
+| Cold Boot | -17.4 | +1.5 dB | -15.9 | -15.8 | -1.3 dBTP | 3.3 LU |
+| Relay Ghost | -15.9 | -0.5 dB | -16.4 | -16.4 | -1.8 dBTP | 12.1 LU |
+
+Relay Ghost already renders louder, so its level is eased back rather than
+boosted to match the heavier pieces. Cold Boot remains a steady techno pulse;
+its lower loudness range was already present in the native render (3.3 LU),
+not produced by heavy mastering compression. Relay Ghost's native range is
+12.2 LU, becoming 12.1 LU in the master. These are provisional album levels,
+not a decision that every track should reach the same number.
+
+All four native/master WAV/FLAC/OGG format/duration checks pass per title, with
+lossless master PCM identity. Final master seconds peak at -90.3 dBFS (Cold Boot)
+and -84.3 dBFS (Relay Ghost). The new composer reproduced both committed scores
+byte-for-byte; instrument banks and buses equal their accepted game sources
+exactly. The extended audit also passes on Black Glass and Quiet Array, retaining
+their original 2,327/840 attacks and zero clock error. Existing-master rejection
+was exercised without changing prior artifacts.
+
+These exports bring the album to four full arrangements out of fifteen. The
+remaining eleven are still planned; this pair awaits listening feedback. The
+user's ongoing detailed review of the first two tracks remains open.

@@ -1,0 +1,126 @@
+#!/usr/bin/env sigil
+;;; Separate fresh synthesis from provisional album-level mastering.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define ALBUM "Crash The Stack — Original Soundtrack")
+(define TRACKS '(("cold-boot" "Cold Boot" 2) ("relay-ghost" "Relay Ghost" 3)))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker)) (split text "\n"))))
+    (check (pair? matches) "Measurement missing" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+    -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          range_lu: (last-number text "    LRA:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define (pcm-hash file)
+  (out ffmpeg -v error -nostdin -i ,file
+       -map "0:a:0" -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "album-batch-render" (script-args)
+  (list (option name: 'stage long: "stage" value: "STAGE"
+                default: "native" choices: '("native" "master"))
+        (option name: 'gain long: "gain" value: "DB"))
+  (lambda (options)
+    (let* ((output (option-ref options 'output))
+           (stage (option-ref options 'stage))
+           (slugs (or (option-ref options 'tracks) (map car TRACKS)))
+           (gain (and (option-ref options 'gain) (string->number (option-ref options 'gain)))))
+      (check (and (starts-with? output "/")
+                  (not (starts-with? output (str (root) "/"))))
+             "Supply an absolute external artifact directory")
+      (when (equal? stage "master")
+        (check (and gain (<= -12 gain 12)) "Master stage requires --gain DB within +/-12 dB"))
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Output resolves inside the repository")
+      (each slug slugs
+        (let* ((spec (assoc slug TRACKS))
+               (source (path (root) "docs/music/album" (str slug ".cts")))
+               (snapshot (path output (str slug ".cts")))
+               (raw (path output (str slug "-native.wav")))
+               (wav (path output (str slug "-album-i.wav")))
+               (flac (path output (str slug "-album-i.flac")))
+               (ogg (path output "ogg" (str slug "-album-i.ogg")))
+               (commands '()))
+          (check spec "Unknown opening-pair title" slug)
+          (define (run argv)
+            (set! commands (append commands (list (list->array argv))))
+            (write-json-file (path output (str slug "-" stage "-commands.json"))
+                             (list->array commands))
+            (run-tool argv))
+          (if (equal? stage "native")
+              (let ((motif (require-tool (option-ref options 'motif))))
+                (check (not (file-exists? raw)) "Preserve existing native render; use a fresh directory" raw)
+                (check (equal? (read-text source) (canonical motif source)) "Noncanonical score" source)
+                ($ ,motif tune check ,source)
+                (write-text snapshot (read-text source))
+                (write-text (path output (str slug "-source.sha256")) (str (out sha256sum ,source) "\n"))
+                (write-text (path output (str slug "-renderer.sha256")) (str (out sha256sum ,motif) "\n"))
+                (write-text (path output (str slug "-info.txt")) (str (out ,motif tune info ,source) "\n"))
+                (run (list motif "tune" "render" source "-r" "44100" "-o" raw))
+                (write-json-file (path output (str slug "-native-levels.json"))
+                  (measure raw (path output (str slug "-native-loudness.txt")))))
+              (begin
+                (check (not (file-exists? wav)) "Preserve existing master; use a fresh directory" wav)
+                (check (equal? (read-text source) (read-text snapshot)) "Source changed after rendering" slug)
+                (ensure-directory (path output "ogg"))
+                (let* ((filter (str "volume=" (number->string gain)
+                                   "dB,aresample=176400,alimiter=limit=0.841395:attack=5:release=80:level=false:latency=true,aresample=44100:osf=s16:dither_method=triangular"))
+                       (tags (list "-metadata" (str "title=" (cadr spec))
+                                   "-metadata" (str "album=" ALBUM)
+                                   "-metadata" (str "track=" (caddr spec) "/15")
+                                   "-metadata" "comment=Album opening pair I; provisional mastering")))
+                  (run (append
+                         (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" raw
+                               "-af" filter "-c:a" "pcm_s16le")
+                         tags (list wav)))
+                  (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                             "-map_metadata" "0" "-c:a" "flac" flac))
+                  (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                             "-map_metadata" "0" "-c:a" "libvorbis" "-q:a" "7" ogg))
+                  (let* ((duration (dict-ref
+                                     (json-decode (read-text
+                                       (path (root) "docs/music/album" (str slug "-map.json"))))
+                                     duration_seconds:))
+                         (lossless (measure wav (path output (str slug "-wav-loudness.txt"))))
+                         (encoded (measure ogg (path output (str slug "-ogg-loudness.txt"))))
+                         (ending ($? ffmpeg -hide_banner -nostats -sseof -1 -i ,wav
+                                      -af volumedetect -f null -)))
+                    (each file (list raw wav flac ogg)
+                      (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,file))
+                             (stream (array-ref (dict-ref data streams:) 0))
+                             (actual (string->number (dict-ref (dict-ref data format:) duration:))))
+                        (check (and (= (string->number (dict-ref stream sample_rate:)) 44100)
+                                    (= (dict-ref stream channels:) 2)
+                                    (<= (abs (- actual duration)) (/ 1.0 44100)))
+                               "Incorrect duration or format" file)
+                        (write-json-file (path output (str (basename file) "-probe.json")) data)))
+                    (check (equal? (pcm-hash wav) (pcm-hash flac)) "WAV/FLAC differ" slug)
+                    (each levels (list lossless encoded)
+                      (check (<= (dict-ref levels true_peak_dbtp:) -1.0)
+                             "Encoded peak exceeds review ceiling; revise before sending" slug))
+                    (check (ok? ending) "Ending measurement failed" slug)
+                    (write-text (path output (str slug "-ending.txt")) (stderr-of ending))
+                    (check (<= (last-number (stderr-of ending) "max_volume:") -70)
+                           "Ending has not decayed" slug)
+                    (write-json-file (path output (str slug "-master-check.json"))
+                      (dict title: (cadr spec)
+                            duration_seconds: duration
+                            gain_db: gain
+                            wav: lossless
+                            ogg: encoded
+                            wav_flac_pcm_identical: #t
+                            ending_peak_dbfs: (last-number (stderr-of ending) "max_volume:")))))))
+          (println "Finished ~a: ~a" stage slug))))))

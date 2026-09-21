@@ -70,3 +70,33 @@ filenames and draft-master comments. Both retain the exact soundtrack title in
 metadata. All four encodes are checked before manual selection for Telegram;
 the tool itself never sends messages or reads credentials. See
 [the trial listening guide](../album/MASTER-TRIAL-I.md).
+
+## Opening pair: Cold Boot and Relay Ghost
+
+The next pair uses a shared finite-arrangement helper and a renderer with separate
+native and master stages, allowing gain decisions after measuring synthesis.
+
+```sh
+sigil docs/music/tools/album-compose-opening.sgl --output docs/music/album
+sigil docs/music/tools/album-audit.sgl --output /absolute/external/opening-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage native --output /absolute/external/opening-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track cold-boot --gain 1.5 --output /absolute/external/opening-pair-i
+sigil docs/music/tools/album-batch-render.sgl --stage master --track relay-ghost --gain -0.5 --output /absolute/external/opening-pair-i
+```
+
+Supply MOTIF_BIN or --motif for compilation/synthesis. The default two tracks are
+Cold Boot and Relay Ghost. Stage master requires an explicit gain and matching
+native source snapshot. It preserves the native WAV and refuses to overwrite an
+existing master. The full OGG filenames end in -album-i.ogg; WAV and FLAC use the
+same album-i label. Do not run both stages concurrently for the same title.
+
+The new `album-audit` also accepts --track black-glass and --track quiet-array;
+it carries explicit policies for all four completed arrangements. This extends
+the pilot audit to retain the opening pair's intentional transition rolls rather
+than quantizing them away. The new `(crash soundtrack album arrangement)` module
+shares the original composer's pattern transformations, canonical writing and
+section maps without altering the accepted pilot composer.
+
+See [OPENING-PAIR-I.md](../album/OPENING-PAIR-I.md) for the musical plan, section
+landmarks and verification results. No scripts read Telegram credentials during
+composition, rendering or mastering; sending remains a separate explicit step.
