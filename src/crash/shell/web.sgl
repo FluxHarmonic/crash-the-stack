@@ -156,6 +156,8 @@
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
     (define *trap-armed* #f)  ; ?trap: every dispatch after the arming fires the trap door (%fatal!)
+    (define *skip* (quote ()))  ; ?skip=audio,draw,frame,sim: parts of the tick left out (the soak's bisection door)
+    (define (skip? part) (and (memq part *skip*) #t))
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
@@ -914,13 +916,14 @@
         (set! *announced* #t))
       (let* ((before *session*)
              (t0 (now-ms))
-             (x (fx-frame *fx* dt))
+             (x (if (skip? (quote sim)) *fx* (fx-frame *fx* dt)))
              (t1 (now-ms))
-             (stepped (if *demo-armed*
-                          (begin (set! *demo-armed* #f) (session-demo-finish before))
-                          (session-step before f *geom*)))
+             (stepped (cond ((skip? (quote sim)) before)
+                            (*demo-armed*
+                             (begin (set! *demo-armed* #f) (session-demo-finish before)))
+                            (else (session-step before f *geom*))))
              (t2 (now-ms))
-             (advanced (session-advance stepped (clock-steps (fx-clock x))))
+             (advanced (if (skip? (quote sim)) stepped (session-advance stepped (clock-steps (fx-clock x)))))
              (t3 (now-ms))
              (after (save-session-after-frame! before advanced))
              (t4 (now-ms))
@@ -1281,7 +1284,7 @@
       ;; the pump first: the ring is fed for the frame before the boot's steps and the
       ;; draw can run long (it was last, after everything); PUMP is both pumps' time
       (let ((t0 (now-ms)))
-        (audio-pump!)
+        (unless (skip? (quote audio)) (audio-pump!))
         (set! *pump-ms* (- (now-ms) t0)))
       (let ((t0 (now-ms)))
         (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
@@ -1297,7 +1300,7 @@
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
       (let ((t0 (now-ms)))
-        (audio-pump!)   ; and again after the draw: a cue queued this frame goes out now
+        (unless (skip? (quote audio)) (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
         (set! *pump-ms* (+ *pump-ms* (- (now-ms) t0))))
       (set! *tick-ms* (- (now-ms) *tick-start*)))
 
@@ -1735,6 +1738,9 @@
     ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
+      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? (quote draw)) (lambda () #f) draw))))
+
+    (define (present-frame! cascading? draw)
       (set! *sim-ms* (- (now-ms) *tick-t0*))
       (let ((t1 (now-ms)))
         (frame-begin!)
@@ -1937,6 +1943,12 @@
             ;; next frame tick (the gles3 loop's path, where Trev's died). Once
             ;; armed, EVERY dispatch fires it: the count of FATAL lines after the
             ;; first is the count of dispatches that reached the dead instance.
+            ;; ?skip=a,b: parts of the tick left out, the soak's bisection door: audio (the
+            ;; pump), draw (the frame's draw thunk), frame (frame-begin!/end-frame too), sim
+            ;; (fx-frame, session-step, session-advance)
+            ((string=? type "skip")
+             (set! *skip* (map string->symbol (string-split payload ",")))
+             0)
             ((string=? type "trap")
              (set! *trap-armed* #t)
              (when (string=? payload "now") (%fatal!))
