@@ -23,7 +23,7 @@ for (const rain of rains) for (let seed = 1; seed <= 8; seed++) {
     rng = rng * 48271 % 2147483647;
     current[i] = Math.floor((rng % 1000000) / 1000000 * 16);
   }
-  let peak = 0, peakStep = 0, minimumChanged = CELLS;
+  let peak = 0, peakStep = 0, minimumChanged = CELLS, minimumTones = 8;
   for (let step = 0; step < STEPS; step++) {
     const key = hash31((hash31(seed) + Math.imul(step, 2047323)) & 0x7fffffff);
     let changed = 0;
@@ -38,10 +38,11 @@ for (const rain of rains) for (let seed = 1; seed <= 8; seed++) {
       if (next[i] % 2) { counts[tone] += 2; counts[(tone + 1) % 8] += 2; }
       else counts[tone] += 4;
     }
+    minimumTones = Math.min(minimumTones, counts.filter(n => n > 0).length);
     minimumChanged = Math.min(minimumChanged, changed);
     const dominant = Math.max(...counts) / (4 * CELLS);
     if (dominant > peak) { peak = dominant; peakStep = step + 1; }
     [current, next] = [next, current];
   }
-  console.log(JSON.stringify({rain, seed, peak, peakStep, minimumChanged}));
+  console.log(JSON.stringify({rain, seed, peak, peakStep, minimumChanged, minimumTones}));
 }

@@ -51,6 +51,7 @@ function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { 
 let exiting = false;
 function shutdown(code) {
   if (exiting) return; exiting = true;
+  process.exitCode = code;
   try { server.close(); } catch { /* not listening */ }
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 800).unref();
@@ -174,6 +175,13 @@ while (Date.now() - started < SECONDS * 1000) {
   console.log(RULE + ' live ' + ((Date.now() - started) / 1000).toFixed(1) + 's ' + JSON.stringify(s));
 }
 const glErrors = lines.filter(l => /sokol\[level=[01]\]|shader.*(fail|error)/i.test(l));
-if (errors.length || glErrors.length) throw new Error(JSON.stringify({errors, glErrors}));
+const runtimeErrors = lines.filter(l => /^(Error: |Scheme error|crash: texture missing)/.test(l));
+// Match verify-field.mjs: navigation can abort an image fetch. Only the
+// known bridge warning is recoverable, and never when a texture stays missing.
+const raced = errors.filter(e => /sigil-wasm-gles3: image fetch failed:/.test(e));
+const realErrors = errors.filter(e => !raced.includes(e));
+if (raced.length) console.log('note: ' + raced.length + ' image fetch warning(s) during reloads');
+if (realErrors.length || runtimeErrors.length || glErrors.length)
+  throw new Error(JSON.stringify({errors: realErrors, runtimeErrors, glErrors}));
 console.log('PASS ' + RULE + ' ' + SECONDS + 's, samples ' + samples + ', largest tone share ' + largest.toFixed(3) + ', minimum changed half cells ' + minChanged);
 shutdown(0);
