@@ -16,9 +16,35 @@
     ("blind-spot" "Blind Spot" #f (6))
     ("sector-drift" "Sector Drift" #f (6 7))
     ("dirty-cache" "Dirty Cache" #f (7))
-    ("basement-circuit" "Basement Circuit" 7 (7))))
+    ("basement-circuit" "Basement Circuit" 7 (7))
+    ("dead-sector" "Dead Sector" #f (6 7))
+    ("obsidian-index" "Obsidian Index" #f (6 7))))
 (define (attack? cell)
   (not (member (cadr cell) '("..." "==="))))
+
+;;; Obsidian's side pad must follow the main harmony and release before changes.
+(define (audit-veil-row row position previous-off)
+  (let ((left (assoc 5 (cddr row)))
+        (right (assoc 8 (cddr row))))
+    (check (equal? (if left (cadr left) #f)
+                   (if right (cadr right) #f))
+           "Obsidian pad root/gate mismatch"
+           position)
+    (cond
+      ((not left) previous-off)
+      ((equal? (cadr left) "===") position)
+      (else
+       (check (and previous-off (>= (- position previous-off) 6))
+              "Obsidian pad release gap below six rows"
+              position)
+       (check (= (caddr right)
+                 (cond ((= (caddr left) 6) 16)
+                       ((= (caddr left) 7) 17)
+                       ((= (caddr left) 10) 18)
+                       (else -1)))
+              "Obsidian pad voicing mismatch"
+              position)
+       #f))))
 
 (define (audit motif slug)
   (let* ((file (path (root) "docs/music/album" (str slug ".cts")))
@@ -35,6 +61,7 @@
          (numerator (* 44100 5 (field score speed:)))
          (denominator (* 2 (field score tempo:)))
          (offset 0)
+         (pad-off -6)
          (count 0)
          (worst 0)
          (odd-onsets '()))
@@ -51,6 +78,8 @@
       (let ((p (list-find (lambda (p) (= (field p id:) ident)) patterns)))
         (check p "Missing ordered pattern" ident)
         (each r (skip p 5)
+          (when (equal? slug "obsidian-index")
+            (set! pad-off (audit-veil-row r (+ offset (cadr r)) pad-off)))
           (each c (cddr r)
             (let ((ch (car c))
                   (fx (list-ref c 4)))
