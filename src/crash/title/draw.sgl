@@ -541,8 +541,14 @@
                  (rect (menu-entry-rect m i vw vh))
                  (lit? (= i (menu-highlight m)))
                  (value (menu-row-value m id)))
-            (if value
-                (draw-value-row (menu-label id) value rect lit? (menu-cursor-on? m) (menu-row-note m id))
+            (cond
+              ;; the pause panel's rows in the 5x7 at 2x, the heading alone in the
+              ;; block alphabet (David, 2026-09-21: headings and items told apart by size)
+              ((eq? (menu-home m) 'pause)
+               (draw-small-row (menu-label id) value rect lit? (menu-cursor-on? m) (menu-row-note m id) vw))
+              (value
+                (draw-value-row (menu-label id) value rect lit? (menu-cursor-on? m) (menu-row-note m id)))
+              (else
                 (begin
                   (draw-menu-item (menu-label id) rect lit? (menu-cursor-on? m) (label-index (menu-label id)))
                   ;; an item's note (the overlay's exit row: what leaving keeps) a row's
@@ -550,7 +556,7 @@
                   (let ((note (menu-row-note m id)))
                     (when note
                       (color! C-TEXT-DIM)
-                      (text! note (quotient (- vw (text-width note 1)) 2) (+ (cadr rect) (cadddr rect) UNDER-ROW-GAP) 1))))))
+                      (text! note (quotient (- vw (text-width note 1)) 2) (+ (cadr rect) (cadddr rect) UNDER-ROW-GAP) 1)))))))
           (loop (cdr ids) (+ i 1))))
       ;; the screen's content, on a panel in the band's style where it is text
       ;; (solid C-BG with a C-BAR-C rule: the backdrop is busy under the
@@ -574,6 +580,35 @@
         ((run-done) (draw-run-done m vw vh))
         ((run-layer) (draw-run-layer m vw vh))
         (else #f)))
+
+    ;; The pause panel's row in the 5x7 at scale 2 (a heading in the block
+    ;; alphabet, the rows smaller): an item centered, a value row with the
+    ;; name left and the value right, the lit row in C-LABEL-LIT with the
+    ;; blinking block cursor at its left, the note in the small font under.
+    (define SMALL-SCALE 2)
+    (define (draw-small-row name value rect lit? blink? note vw)
+      (let* ((x (car rect))
+             (y (cadr rect))
+             (w (caddr rect))
+             (h (cadddr rect))
+             (th (* SMALL-SCALE GLYPH-H))
+             (ty (+ y (quotient (- h th) 2)))
+             (nw (text-width name SMALL-SCALE))
+             (nx (if value (+ x (* 11 ITEM-CELL)) (+ x (quotient (- w nw) 2)))))
+        (color! (if lit? C-SELECTED C-LABEL-LIT))   ; the lit row in the ramp's teal, the rest the items' orange
+        (text! name nx ty SMALL-SCALE)
+        (when value
+          (color! (if lit? C-SELECTED C-TEXT))
+          (text! value (- (+ x w) (text-width value SMALL-SCALE)) ty SMALL-SCALE)
+          (when note
+            (color! C-TEXT-DIM)
+            (text! note (- (+ x w) (text-width value SMALL-SCALE) (text-width note 1) 12) (+ ty (quotient (- th GLYPH-H) 2)) 1)))
+        (when (and (not value) note)
+          (color! C-TEXT-DIM)
+          (text! note (quotient (- vw (text-width note 1)) 2) (+ y h UNDER-ROW-GAP) 1))
+        (when (and lit? blink?)
+          (color! C-SELECTED)
+          (draw-filled-rect (- nx 12 (* SMALL-SCALE GLYPH-W)) ty (* SMALL-SCALE GLYPH-W) th))))
 
     ;; A value row: the name at the row's left, the value right-aligned
     ;; at its right, both in the ramp when highlighted, the cursor at the
@@ -620,8 +655,8 @@
     ;; filled rect UNDER the fill, so the fill blended with C-BAR-C, not
     ;; the backdrop: David's "not translucent at all" (2026-09-21), and
     ;; the probe agreed: every pixel under the box was one constant.
-    (define (draw-panel x y w h)
-      (color-alpha! C-BG PANEL-ALPHA)
+    (define (draw-panel x y w h . rest)
+      (color-alpha! C-BG (if (pair? rest) (car rest) PANEL-ALPHA))
       (draw-filled-rect x y w h)
       (color! C-BAR-C)
       (draw-filled-rect x y w 1)
@@ -649,7 +684,7 @@
                                    (else (+ (cadr last) (cadddr last) (if note? (+ UNDER-ROW-GAP NOTE-H) 0)))))
              (bot (min bottom (+ content-bottom OVERLAY-PAD))))
         ;; the panel shows the paused table through it (David, 2026-09-21)
-        (draw-panel x top w (- bot top))
+        (draw-panel x top w (- bot top) PAUSE-ALPHA)
         (draw-sub-screen m vw vh)
         ;; the live board's code under the rows, small, COPY by a tap on it (the web)
         (when code
@@ -686,7 +721,7 @@
     (define CRAWL-TOP TEXT-Y)
     (define CRAWL-BOTTOM-INSET 8)
     (define CRAWL-X 9)
-    (define SLIDE-PX 80.0)
+    (define SLIDE-PX 44.0)   ; the letters resolve over 2.2 s of the crawl (David: 1.5-2x faster than 4 s)
     (define *crawl-rt* #f)
     (define *crawl-tex* #f)
     (define *crawl-w* 0)
@@ -713,7 +748,7 @@
                (when (and (< y (* BAKE-SCALE h)) (> (+ y rh) 0))
                  (if (eq? kind 'heading)
                      (let* ((cell (* BAKE-SCALE ITEM-CELL))
-                            (tw (* cell (block-text-width text)))
+                            (tw (* (quotient cell 2) (block-text-width text)))
                             (cx (quotient (- (* BAKE-SCALE w) tw) 2))
                             ;; the reveal begins once the row is wholly inside the box:
                             ;; the letters resolve out of the scramble left to right
@@ -721,9 +756,11 @@
                             (inside (- (* BAKE-SCALE h) (+ y rh)))
                             (t (max 0.0 (min 1.0 (/ inside (* BAKE-SCALE SLIDE-PX)))))
                             (i (label-index text)))
+                       ;; at half the items' cell (the sheet's 8 px cells drawn at 4: a clean
+                       ;; 2:1), so the section titles no longer dwarf the body (David)
                        (if (and *bake* i *items-tex*)
-                           (draw-item-letters-scrambled i cx (+ y (* BAKE-SCALE 4)) text BAKE-SCALE t (+ (caddr row) (exact (floor (/ (menu-ms m) 66.0)))))
-                           (draw-block-text text cx (+ y (* BAKE-SCALE 4)) cell (if (< t 1.0) 'flat 'ramp))))
+                           (draw-item-letters-scrambled i cx (+ y (* BAKE-SCALE 4)) text (/ BAKE-SCALE 2) t (+ (caddr row) (exact (floor (/ (menu-ms m) 66.0)))))
+                           (draw-block-text text cx (+ y (* BAKE-SCALE 4)) (quotient cell 2) (if (< t 1.0) 'flat 'ramp))))
                      (begin
                        (color! C-TEXT)
                        (text! text
@@ -937,7 +974,8 @@
     ;; one translucency for the band, the crawl's box and the overlay's
     ;; panel: David's read of 2026-09-21 wanted the backdrop visible
     ;; through them (at 0.8 over the dark art it read as opaque)
-    (define PANEL-ALPHA 0.7)   ; David on 0.55: a little too translucent
+    (define PANEL-ALPHA 0.7)   ; the crawl's box and the band (David on 0.55: a little too translucent)
+    (define PAUSE-ALPHA 0.85)  ; the pause panel (David, 2026-09-21)
     (define BAND-ALPHA PANEL-ALPHA)
     (define TITLE-LINE "(C) 2026 DAVID WILSON - FLUX HARMONIC")
     (define (draw-bottom-band vw vh hint version)
