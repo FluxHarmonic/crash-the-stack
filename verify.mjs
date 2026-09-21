@@ -163,7 +163,7 @@ function solidPng(w, h, rgb) {
 }
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
-  const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
+  const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : (urlPath.endsWith("/") ? urlPath + "index.html" : urlPath));   // a directory serves its index (tracker/, P3b)
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   const serve = (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
@@ -1682,7 +1682,7 @@ async function downTo(order, id, at = 0) {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards daily-stack daily-cards code scores version back",
+    const want = { free: "stack cards daily-stack daily-cards code scores tracker version back",   // TRACKER: P3b, a link the page follows
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;

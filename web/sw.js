@@ -16,7 +16,8 @@
 //
 // Fetch: same-origin GET requests are served from this version's cache
 // first and the network second (the response is cached for next time);
-// navigations (any query string) are the cached page. Anything else goes
+// navigations (any query string) are the cached page, the tracker's for a
+// path ending in /tracker/ (P3b) and the game's otherwise. Anything else goes
 // to the network untouched.
 
 var VERSION = "__VERSION__";
@@ -36,7 +37,10 @@ var SHELL = [
   "assets/audio/breaker.ogg",
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
-  "assets/icon-512.png"
+  "assets/icon-512.png",
+  // the tracker's page (P3b): its wasm is not precached; the first visit to
+  // /tracker/ fetches it and the runtime branch below caches it
+  "tracker/"
 ];
 
 self.addEventListener("install", function (event) {
@@ -100,7 +104,9 @@ self.addEventListener("fetch", function (event) {
   if (req.mode === "navigate") {
     event.respondWith(
       caches.open(CACHE).then(function (cache) {
-        return cache.match("./").then(function (hit) {
+        // /tracker/ is the tracker's own page and wasm (P3b, David 2026-09-21)
+        var page = /\/tracker\/?$/.test(url.pathname) ? "./tracker/" : "./";
+        return cache.match(page).then(function (hit) {
           return hit || fetch(req);
         });
       }).then(isolated)
