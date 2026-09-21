@@ -8,7 +8,7 @@
 //
 //   imports    tracker/crash-tracker.wasm imports only wasi + gl + sigil_wasm_gles3 +
 //              sigil_browser + sigil_wasm_audio (as the game's wasm; no env)
-//   sizes      the game's wasm is within 0.3 MB of master's 23,647,979 bytes (05f4712)
+//   sizes      the game's wasm is within 0.3 MB of master's 24,465,466 bytes (0b3258d)
 //              (the tracker is not in it) and the tracker's within 20 MB
 //   open       /tracker/?tune=spy: "crash: tracker open spy" then "crash: tune loaded spy"
 //              (the page fetched assets/tunes/spy.cts and handed it over in chunks)
@@ -227,7 +227,7 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
     if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
     else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
   } catch (e) { fail("imports", "compile: " + e.message); }
-  const BASE = 23647979, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;   // BASE: master 05f4712 through scripts/dev (OPTIMIZE on), measured 2026-09-21
+  const BASE = 24465466, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;   // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
@@ -494,8 +494,16 @@ if (PHONE) {
 } else pass("bar", "desktop: no bar (the keys are the controls)");
 
 // ---- console ------------------------------------------------------------------
-const errors = consoleErrors.filter((e) => !/tunes\/nope\.cts/.test(e));   // the missing leg's 404 is the point of that leg
-if (errors.length === 0) pass("console", `no errors (${consoleErrors.length - errors.length} expected 404 of the missing leg)`);
+// The missing leg's 404 is the point of that leg. A game-page texture fetch
+// the arm's own navigation cuts mid-boot (the door, menu and worker legs
+// leave the game page while it fetches) reads as "image fetch failed:
+// TypeError: Failed to fetch" from the gles3 bridge and the game asks again
+// on its next boot (D40); counted and shown, not failed, as verify.mjs does.
+const ABORTED = /image fetch failed: TypeError: Failed to fetch|Failed to load resource: net::ERR_FAILED/;
+const expected404 = consoleErrors.filter((e) => /tunes\/nope\.cts/.test(e)).length;
+const aborted = consoleErrors.filter((e) => ABORTED.test(e)).length;
+const errors = consoleErrors.filter((e) => !/tunes\/nope\.cts/.test(e) && !ABORTED.test(e));
+if (errors.length === 0) pass("console", `no errors (${expected404} expected 404 of the missing leg${aborted ? `, ${aborted} image fetch(es) cut by the arm's navigation` : ""})`);
 else fail("console", errors.join(" | "));
 
 const failed = results.filter((r) => r[1] === "FAIL");
