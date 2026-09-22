@@ -717,8 +717,8 @@ async function toMenu(how) {
     // CREDITS, and UPDATE only while a version waits; the prototype rows
     // (LOOK, HUD, DEPTH) and the bare tables are gone
     const ids = consoleLines[menu.index].split(" ").slice(3).filter((w) => /^[a-z-]+$/.test(w));
-    if (ids.some((id) => !["continue", "jack-in", "free-play", "settings", "credits", "update"].includes(id))) detail = `the menu shows an entry that is not the top screen's: ${ids.join(" ")}`;
-    else if (ids.join(" ") !== "continue jack-in free-play settings credits") detail = `the menu's entries are ${ids.join(" ")}, not continue jack-in free-play settings credits`;
+    if (ids.some((id) => !["continue", "jack-in", "free-play", "tracker", "settings", "credits", "update"].includes(id))) detail = `the menu shows an entry that is not the top screen's: ${ids.join(" ")}`;
+    else if (ids.join(" ") !== "continue jack-in free-play tracker settings credits") detail = `the menu's entries are ${ids.join(" ")}, not continue jack-in free-play tracker settings credits`;   // TRACKER on the top screen where a page acts (David, 2026-09-22)
     else detail = await back("Escape");
   }
   if (!detail && !EXPECT_NO_SELECTION) {
@@ -1788,12 +1788,15 @@ async function dealFrom(free, table, row = "new-board") {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards tracker code scores back",   // D66: the games first; TRACKER: P3b, a link the page follows
+    const want = { free: "stack cards code scores back",   // D66: the games first; TRACKER sits on the top screen now (David, 2026-09-22)
                    "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
                    "free-cards": "new-board daily-board version back",
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
-    if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
+    if (r.top.order.join(" ") !== "continue jack-in free-play tracker settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
+    // the sub-screens' first row sits where the main menu's does (David, 2026-09-22), pulled up only when the rows would cross the band
+    const rowsFrom = (s) => s.rows[s.order[0]].y - 14;   // the row's center less half its height
+    const rowsWant = (s) => Math.max(124, Math.min(168, 380 - s.order.length * 32));
     // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; the games' screens,
     // SCORES and CODE from FREE PLAY (a sub is [row, screen]; a game's screen
     // closes to FREE PLAY, the others to the top)
@@ -1810,6 +1813,7 @@ async function dealFrom(free, table, row = "new-board") {
       const s = await menuOn(screen, m0);
       if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
       if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
+      if (s.order.length && Math.abs(rowsFrom(s) - rowsWant(s)) > 1) { detail = `the ${screen} screen's first row starts at ${rowsFrom(s)}, not ${rowsWant(s)}`; break; }
       if (sub) {
         const [row, sc] = sub;
         m0 = consoleLines.length;
@@ -1818,6 +1822,7 @@ async function dealFrom(free, table, row = "new-board") {
         const s2 = await menuOn(sc, m0);
         if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
         if (s2.order.join(" ") !== want[sc]) { detail = `the ${sc} screen's rows are ${s2.order.join(" ")}, not ${want[sc]}`; break; }
+        if (sc.startsWith("free-") && Math.abs(rowsFrom(s2) - rowsWant(s2)) > 1) { detail = `the ${sc} screen's first row starts at ${rowsFrom(s2)}, not ${rowsWant(s2)}`; break; }
         if (sc.startsWith("free-") && s2.rows.version.value !== "HACKER") { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
         if (sc === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
         if (sc === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
@@ -1874,7 +1879,7 @@ async function dealFrom(free, table, row = "new-board") {
     }
   }
   if (detail) fail("screens", detail);
-  else pass("screens", `top continue jack-in free-play settings credits; ${seen.join(", ")}; Escape continues`);
+  else pass("screens", `top continue jack-in free-play tracker settings credits; the sub-screens' rows from 168 (156 for SETTINGS' seven); ${seen.join(", ")}; Escape continues`);
 }
 
 // settings (D51): the main menu's SETTINGS is the general five; DEFRAG's

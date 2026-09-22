@@ -3,9 +3,10 @@
 ;;; The real menu (P4, rulings D14 and D19): a DOOM-style list of items
 ;;; set in the block alphabet, one highlighted, on a stack of screens.
 ;;; The top screen is JACK IN / FREE PLAY / SETTINGS / CREDITS, with
-;;; CONTINUE first when a board or a run is live and UPDATE last when
-;;; the page says a version is waiting. FREE PLAY lists the games
-;;; (STACK, DEFRAG), the tracker, a share code and the scoreboard; a
+;;; CONTINUE first when a board or a run is live, TRACKER after FREE
+;;; PLAY where a page can open it (the web), and UPDATE last when the
+;;; page says a version is waiting. FREE PLAY lists the games (STACK,
+;;; DEFRAG), a share code and the high scores; a
 ;;; game's own screen (D66) offers NEW BOARD, DAILY BOARD and the
 ;;; VERSION to deal (HACKER, the trace on; CLASSIC, the classic with its
 ;;; timer), remembered per game; SETTINGS holds (crash settings)' rows;
@@ -48,7 +49,7 @@
           menu-scores menu-with-scores menu-run menu-open-run-done
           menu-news menu-news-seen menu-with-news menu-news-unread? menu-news-newest-date menu-post menu-row-label
           menu-new-overlay menu-new-layer-done menu-home menu-table menu-row-note
-          menu-step menu-entry-rect menu-hit menu-cues menu-live?
+          menu-step menu-entry-rect menu-heading-y menu-hit menu-cues menu-live?
           menu-label menu-row-value menu-row-kind menu-heading menu-code-display
           code-line-rect now-playing-rect menu-now-playing keypad-cells keypad-rect keypad-hit
           MENU-ENTRIES MENU-TITLE SCREENS
@@ -75,9 +76,9 @@
             (list 'cards "DEFRAG")
             (list 'new-board "NEW BOARD")     ; a game's screen (D66): the next board of the game
             (list 'daily-board "DAILY BOARD")  ; the game's daily
-            (list 'code "CODE")
-            (list 'scores "SCORES")
-            (list 'tracker "TRACKER")   ; P3b: the tracker, its own page under tracker/ (web only)
+            (list 'code "ENTER CODE")     ; (David, 2026-09-22: the two-word items)
+            (list 'scores "HIGH SCORES")
+            (list 'tracker "TRACKER")   ; P3b: the tracker, its own page under tracker/ (web only); on the top screen (David, 2026-09-22: not a game)
             (list 'version "VERSION")
             (list 'back "BACK")
             ;; the table's overlay (ruling D51)
@@ -96,19 +97,19 @@
     ;; The screens: each with its entries in order and its heading (the
     ;; top screen has the logo instead).
     (define SCREENS
-      (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update 'news 'exit)
+      (list (list 'top #f 'continue 'jack-in 'free-play 'tracker 'settings 'credits 'update 'news 'exit)
             ;; NEWS (P4b, D20): the posts as rows (post-N ids, filled by open-screen
             ;; from the menu's news), each opening the post outside the game
             (list 'news "NEWS" 'back)
             ;; FREE PLAY (D66): the games first, each opening its own screen
-            (list 'free "FREE PLAY" 'stack 'cards 'tracker 'code 'scores 'back)
+            (list 'free "FREE PLAY" 'stack 'cards 'code 'scores 'back)
             ;; a game's screen: its next board, its daily, its version (a
             ;; value row the shell remembers per game), BACK to FREE PLAY
             (list 'free-stack "STACK" 'new-board 'daily-board 'version 'back)
             (list 'free-cards "DEFRAG" 'new-board 'daily-board 'version 'back)
             (list 'settings "SETTINGS" 'back)   ; the general rows (D51), filled from (crash settings)' group by open-screen
             (list 'credits "CREDITS")   ; the crawl: no rows; Escape, Backspace or a tap leaves
-            (list 'scores "SCORES" 'back)
+            (list 'scores "HIGH SCORES" 'back)
             (list 'code "ENTER CODE" 'back)
             (list 'run-done "RUN COMPLETE" 'back)
             ;; JACK IN (D65): the difficulty picked before the run, NORMAL preselected
@@ -146,9 +147,11 @@
     ;; no boxes, plain text, the selected one in the hero ramp with a
     ;; blinking cursor at its left; D41: set in the block alphabet at 4 px
     ;; cells, 24 px tall plus the shadow): six of them at 28 + 4 from y 168
-    ;; end at 356, above the bottom band (376). A sub-screen replaces the
-    ;; logo with its heading at HEADING-Y and starts its rows at
-    ;; SUB-ENTRIES-Y: ten rows end at 372. The rects are the tap targets;
+    ;; end at 356, above the bottom band (BAND-Y, 376). A sub-screen
+    ;; replaces the logo with its heading, HEADING-Y over SUB-ENTRIES-Y as
+    ;; the base, and the pair slides down so the first row lands where the
+    ;; main menu's does (David, 2026-09-22: the sub-screens sat too high),
+    ;; as far as the rows fit above the band: rows-y. The rects are the tap targets;
     ;; 440 wide fits the longest centered label (CONNECTING 0/6 is 14
     ;; glyphs, 444 px, so it overhangs by 2); a value row spans the width
     ;; less the gutters, its name left and its value right.
@@ -157,6 +160,8 @@
     (define ENTRY-GAP 4)
     (define ENTRIES-Y 168)
     (define SUB-ENTRIES-Y 56)
+    (define BAND-Y 376)
+    (define ROWS-MIN-Y 124)   ; the logo's foot (120) plus air: a top screen of eight rows starts here
     (define HEADING-Y 16)
     (define VALUE-ROW-W 600)
     ;; the live board's share code under the top screen's items
@@ -349,18 +354,37 @@
 
     ;; --- geometry ------------------------------------------------------------------
 
+    ;; Where the top screen's and a sub-screen's first row sits: ENTRIES-Y,
+    ;; pulled up only as far as the rows need to end above the band (a
+    ;; top screen of seven or eight rows, NEWS with its posts, SETTINGS'
+    ;; seven), never above the logo's foot.
+    (define (rows-y m)
+      (let ((n (length (menu-entries m))))
+        (max ROWS-MIN-Y
+             (min ENTRIES-Y (- (+ BAND-Y ENTRY-GAP) (* n (+ ENTRY-H ENTRY-GAP)))))))
+
+    ;; The overlay's sub-screens and the text screens keep their rows in
+    ;; their own places; the rest sit at rows-y.
+    (define (own-rows? m)
+      (or (memq (menu-screen m) TEXT-SCREENS) (eq? (menu-home m) 'pause)))
+
+    ;; A sub-screen's heading: HEADING-Y over the rows' base, sliding with
+    ;; them (the overlay and the text screens keep HEADING-Y).
+    (define (menu-heading-y m)
+      (+ HEADING-Y
+         (if (own-rows? m) 0 (- (rows-y m) SUB-ENTRIES-Y))
+         (menu-y-offset m)))
+
     ;; (x y w h) of the index-th row of the menu's screen.
     (define (menu-entry-rect m index vw vh)
-      (let* ((top? (eq? (menu-screen m) 'top))
-             (ids (menu-entries m))
+      (let* ((ids (menu-entries m))
              (id (and (< index (length ids)) (list-ref ids index)))
              (value? (and id (menu-row-value m id) #t))
              (w (if value? VALUE-ROW-W ENTRY-W)))
         (list (quotient (- vw w) 2)
-              (+ (cond (top? ENTRIES-Y)
-                       ((memq (menu-screen m) TEXT-SCREENS) TEXT-ROWS-Y)
+              (+ (cond ((memq (menu-screen m) TEXT-SCREENS) TEXT-ROWS-Y)
                        ((eq? (menu-home m) 'pause) (+ SUB-ENTRIES-Y PAUSE-HEADING-GAP))   ; a row of air under the heading (David)
-                       (else SUB-ENTRIES-Y))
+                       (else (rows-y m)))
                  (* index (+ ENTRY-H ENTRY-GAP))
                  (menu-y-offset m))
               w
@@ -497,10 +521,6 @@
                              ;; NEWS (P4b): a row per post, newest first, then BACK
                              ((eq? screen 'news)
                               (append (post-ids (menu-news m)) (list 'back)))
-                             ;; TRACKER (P3b) is a link the page follows (as COPY is a clipboard the
-                             ;; page writes): shown only where a page is there to act, the same flag
-                             ((and (eq? screen (quote free)) (not (menu-copy m)))
-                              (filter (lambda (id) (not (eq? id (quote tracker)))) (screen-entries screen)))
                              (else (screen-entries screen)))
               highlight: 0
               code: ""

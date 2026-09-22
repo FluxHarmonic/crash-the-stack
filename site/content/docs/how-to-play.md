@@ -8,7 +8,7 @@ summary: The rules of STACK and DEFRAG, the trace, and the controls on a keyboar
 
 ## The menu
 
-JACK IN starts a run: the layers of Gibson's defenses, each guarded by a board you clear to get through. FREE PLAY gives you either game on its own. Pick STACK or DEFRAG and the game's screen offers NEW BOARD, DAILY BOARD (the same layout for everyone that day) and VERSION, which is HACKER (the trace on) or CLASSIC (the plain game) and is remembered for that game. Under the games sit CODE, where a share code goes in, and SCORES. Every board has a share code in its pause menu (Escape, or the MENU button): send it to a friend and they get the exact layout you played.
+JACK IN starts a run: the layers of Gibson's defenses, each guarded by a board you clear to get through. FREE PLAY gives you either game on its own. Pick STACK or DEFRAG and the game's screen offers NEW BOARD, DAILY BOARD (the same layout for everyone that day) and VERSION, which is HACKER (the trace on) or CLASSIC (the plain game) and is remembered for that game. Under the games sit ENTER CODE, where a share code goes in, and HIGH SCORES. On the web, TRACKER on the main menu opens the tune editor in its own page. Every board has a share code in its pause menu (Escape, or the MENU button): send it to a friend and they get the exact layout you played.
 
 ## STACK
 

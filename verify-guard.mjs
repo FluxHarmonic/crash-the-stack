@@ -502,8 +502,13 @@ await trapLeg("trap-dispatch", "now");
       if (!free) detail = "FREE PLAY did not open";
       else {
         const f = parseMenu(free.m[0]);
-        const j = f.order.indexOf("daily-stack");
-        if (j < 0) detail = `no daily-stack row: ${f.order.join(" ")}`;
+        // D66: STACK opens the game's screen; DAILY BOARD is its second row
+        m0 = consoleLines.length;
+        await press("Enter");
+        const game = await waitLine(/^crash: menu free-stack .*$/, m0, 3000);
+        const j = game ? parseMenu(game.m[0]).order.indexOf("daily-board") : -1;
+        if (!game) detail = `STACK did not open its screen from ${f.order.join(" ")}`;
+        else if (j < 0) detail = `no daily-board row: ${parseMenu(game.m[0]).order.join(" ")}`;
         else {
           for (let k = 0; k < j; k++) await press("ArrowDown");
           m0 = consoleLines.length;

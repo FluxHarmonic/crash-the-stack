@@ -46,6 +46,8 @@
     (assert-equal "JACK IN" (menu-label 'jack-in))
     (assert-equal "FREE PLAY" (menu-label 'free-play))
     (assert-equal "DEFRAG" (menu-label 'cards))
+    (assert-equal "ENTER CODE" (menu-label 'code))   ; the two-word items (David, 2026-09-22)
+    (assert-equal "HIGH SCORES" (menu-label 'scores))
     (assert-equal "PULL" (menu-label 'draw))
     (assert-equal "?" (menu-label 'look))
     (for-each (lambda (e)
@@ -129,13 +131,15 @@
       (assert-equal "FREE PLAY" (menu-heading f))
       (assert-equal '(stack cards code scores back) (menu-entries f))
       (assert-equal 0 (menu-highlight f))
-      (assert-equal SUB-ENTRIES-Y (cadr (menu-entry-rect f 0 VW VH)))
+      (assert-equal ENTRIES-Y (cadr (menu-entry-rect f 0 VW VH)))   ; where the main menu's first row is (David, 2026-09-22)
+      (assert-equal (+ HEADING-Y (- ENTRIES-Y SUB-ENTRIES-Y)) (menu-heading-y f))   ; the heading slid with the rows
       (assert-true (<= (+ (cadr (menu-entry-rect f 4 VW VH)) ENTRY-H) 376)))
     (test "STACK and DEFRAG open the game's screen (no choice): NEW BOARD, DAILY BOARD, VERSION, BACK under the game's name"
       (assert-false (cdr (step f '(return))))
       (assert-equal 'free-stack (menu-screen g))
       (assert-equal "STACK" (menu-heading g))
       (assert-equal '(new-board daily-board version back) (menu-entries g))
+      (assert-equal ENTRIES-Y (cadr (menu-entry-rect g 0 VW VH)))
       (assert-equal 0 (menu-highlight g))
       (assert-equal 'free-cards (menu-screen d))
       (assert-equal "DEFRAG" (menu-heading d))
@@ -204,6 +208,9 @@
                   (assert-equal (setting-value-label id (settings-value (settings-defaults) id)) (menu-row-value s id)))
                 (settings-group 'general))
       (assert-equal 'item (menu-row-kind s 'back))
+      ;; seven rows: pulled up from ENTRIES-Y just enough to end above the band, the heading with them
+      (assert-equal (- (+ 376 ENTRY-GAP) (* 7 (+ ENTRY-H ENTRY-GAP))) (cadr (menu-entry-rect s 0 VW VH)))
+      (assert-equal (+ HEADING-Y (- (cadr (menu-entry-rect s 0 VW VH)) SUB-ENTRIES-Y)) (menu-heading-y s))
       (assert-true (<= (+ (cadr (menu-entry-rect s 6 VW VH)) ENTRY-H) 376)))
     (test "PULL and SCORING are not on it (they live in DEFRAG's overlay)"
       (assert-false (memq 'draw (menu-entries s)))
@@ -305,7 +312,7 @@
     (test "SCORES opens from FREE PLAY, BACK returns to the top screen"
       (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down) '(return)))))
         (assert-equal 'scores (menu-screen sc))
-        (assert-equal "SCORES" (menu-heading sc))
+        (assert-equal "HIGH SCORES" (menu-heading sc))
         (assert-equal 'top (menu-screen (car (step sc '(escape)))))))))
 
 (test-group "CODE"
@@ -370,18 +377,31 @@
     (test "Escape closes the CODE screen to the top screen"
       (assert-equal 'top (menu-screen (car (step c '(escape))))))))
 
-(test-group "FREE PLAY > TRACKER (P3b): a link the page follows, shown only where a page acts"
-  (let* ((m (menu-new TOP 'free-play))
-         (plain (car (step m '(return))))
-         (paged (car (step (menu-with-code-line m #f #t) '(return)))))
-    (test "natively (no page to act) the row is not there"
-      (assert-false (memq 'tracker (menu-entries plain))))
-    (test "with a page (the COPY flag) it sits after the games, before CODE (D66), and fits the screen"
-      (assert-equal '(stack cards tracker code scores back) (menu-entries paged))
-      (assert-true (<= (+ (cadr (menu-entry-rect paged 5 VW VH)) ENTRY-H) 376)))
+(test-group "TRACKER (P3b): a link the page follows, on the top screen where the shell shows it (David, 2026-09-22: not a game, so not under FREE PLAY)"
+  (let ((paged (menu-new '(jack-in free-play tracker settings credits))))
+    (test "shown, it sits after FREE PLAY, before SETTINGS; not shown, the list is the same without it"
+      (assert-equal '(jack-in free-play tracker settings credits) (menu-entries paged))
+      (assert-equal '(jack-in free-play settings credits) (menu-entries (menu-new '(jack-in free-play settings credits)))))
+    (test "it is on no sub-screen"
+      (assert-false (memq 'tracker (menu-entries (car (step (menu-new TOP 'free-play) '(return)))))))
     (test "picking it is the choice tracker"
       (assert-equal 'tracker (cdr (step (step* paged 'down 'down) '(return)))))
     (test "its label" (assert-equal "TRACKER" (menu-label 'tracker)))))
+
+(test-group "the rows' place (David, 2026-09-22): the first row where the main menu's is, pulled up only to fit"
+  (test "six rows or fewer start at ENTRIES-Y on the top screen and the sub-screens alike"
+    (assert-equal ENTRIES-Y (cadr (menu-entry-rect (menu-new '(jack-in free-play tracker settings credits news)) 0 VW VH))))
+  (test "eight top rows (CONTINUE, TRACKER, UPDATE, NEWS all at once) start at the logo's foot and end above the band"
+    (let ((m (menu-new '(continue jack-in free-play tracker settings credits update news))))
+      (assert-equal 8 (length (menu-entries m)))
+      (assert-equal 124 (cadr (menu-entry-rect m 0 VW VH)))
+      (assert-true (<= (+ (cadr (menu-entry-rect m 7 VW VH)) ENTRY-H) 380))))
+  (test "the text screens and the overlay keep their own places"
+    (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down) '(return))))
+          (o (menu-new-overlay 'stack #f (settings-defaults) #f #f)))
+      (assert-equal TEXT-ROWS-Y (cadr (menu-entry-rect sc 0 VW VH)))
+      (assert-equal HEADING-Y (menu-heading-y sc))
+      (assert-equal (+ HEADING-Y (menu-y-offset o)) (menu-heading-y o)))))
 
 ;; NEWS (P4b, ruling D20): the devlog's posts beside UPDATE. The row shows
 ;; NEW while the newest post's date is later than the seen one; opening the
