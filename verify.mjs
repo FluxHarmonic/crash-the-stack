@@ -125,7 +125,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "code", "daily", "scores", "music", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "hub", "code", "daily", "scores", "music", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -1512,14 +1512,14 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       const m0 = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
       const chose = await waitLine(/^crash: menu chose jack-in$/, m0, 3000);
-      const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
+      const booted = chose && await waitLine(/^crash: hub open 1 0 /, m0, 5000);   // P5: JACK IN opens the hub
       if (!chose) detail = "after the settle, a tap on JACK IN chose nothing (the menu was not live at once)";
-      else if (!booted) detail = "after the settle, JACK IN chosen but no board booted (the run's first layer)";
+      else if (!booted) detail = "after the settle, JACK IN chosen but the hub did not open";
     }
   }
   delete slowPaths["/assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
-  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
+  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose JACK IN and opened the hub`);
 }
 
 // ---- 9c'. slow-link: a boot on a throttled link loads every texture ----------
@@ -2021,10 +2021,16 @@ async function downTo(order, id, at = 0) {
   else pass("pause", `Escape opened the stack's overlay (resume settings back-to-menu); the clock held at ${on.m[1]} ticks over 2 s and ran on after RESUME (${on2.m[1]} at the button's second open); BACK TO MENU landed on CONTINUE, which booted the same board`);
 }
 
-// run (D51, David 2026-09-21): a JACK IN layer's overlay carries DISCONNECT,
-// which lands on the main menu with CONTINUE resuming the layer; a cleared
-// layer (the demo door) shows the ledger with NEXT LAYER once the cascade
-// is over, and pulls the next layer by itself after the hold.
+// run (P5, phase 2): JACK IN is a hub run. The main menu's JACK IN opens
+// the hub (`crash: hub open 1 0 keys 0 cleared 0`); Escape on the hub
+// opens the pause overlay (resume settings disconnect) whose DISCONNECT
+// lands on the main menu with CONTINUE, which resumes the hub (RUN HELD).
+// Then the plan's gate leg 2 through the arm's doors: ?hub=1&hubat=0 sets
+// the runner on key node 0; Enter launches: `crash: hub launch 0 CODE`
+// and the board deals from that very spec (`crash: spec stack hacker SEED
+// CODE`, the same CODE); the demo door clears it with one match and the
+// hub comes back with the node cleared and its key held (`crash: hub open
+// 1 N keys 1 cleared 1`).
 {
   let detail = "";
   const from = consoleLines.length;
@@ -2032,10 +2038,8 @@ async function downTo(order, id, at = 0) {
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
-  let layer = null;
+  let opened = null;
   if (!detail) {
-    // to the main menu, then the demo door armed for the next spec'd board,
-    // then JACK IN: the run's first layer clears with one match
     let m0 = consoleLines.length;
     await press("Escape");
     const p = await menuOn("pause", m0);
@@ -2049,20 +2053,21 @@ async function downTo(order, id, at = 0) {
         m0 = consoleLines.length;
         await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
         const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-        layer = start && await waitLine(/^crash: spec stack hacker (\d+) /, m0, 5000);
+        opened = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, m0, 5000);
         if (!start) detail = "JACK IN started no run";
-        else if (!layer) detail = "the run dealt no stack layer";
+        else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
       }
     }
   }
   if (!detail) {
-    // DISCONNECT: the main menu with CONTINUE; CONTINUE resumes the layer
     await sleep(500);
     let m0 = consoleLines.length;
     await press("Escape");
-    const p = await menuOn("pause", m0);
-    if (!p) detail = "no overlay on the run's layer";
-    else if (p.order.join(" ") !== "resume settings disconnect") detail = `the run layer's overlay rows are ${p.order.join(" ")}`;
+    const on = await waitLine(/^crash: pause on (\d+)$/, m0, 3000);
+    const p = on && await menuOn("pause", m0);
+    if (!on) detail = "no \"crash: pause on\" from Escape on the hub";
+    else if (!p) detail = "no overlay rows on the hub";
+    else if (p.order.join(" ") !== "resume settings disconnect") detail = `the hub's overlay rows are ${p.order.join(" ")}`;
     else {
       m0 = consoleLines.length;
       await downTo(p.order, "disconnect");
@@ -2074,42 +2079,85 @@ async function downTo(order, id, at = 0) {
       else {
         m0 = consoleLines.length;
         await press("Enter");
-        const back = await waitLine(BOOT_ANY, m0, 5000);
-        if (!back) detail = "CONTINUE did not resume the layer";
-        else if (back.m[0].split(" ")[2] !== layer.m[1]) detail = `CONTINUE booted seed ${back.m[0].split(" ")[2]}, not the layer's ${layer.m[1]}`;
+        const back = await waitLine(/^crash: hub open 1 (\d+) keys 0 cleared 0$/, m0, 5000);
+        if (!back) detail = "CONTINUE did not resume the hub";
+        else if (parseInt(back.m[1], 10) < parseInt(on.m[1], 10)) detail = `CONTINUE resumed at beat ${back.m[1]}, before the pause's ${on.m[1]}`;
       }
     }
   }
-  let done = null, next = null;
+  let launch = null, spec = null, back = null;
   if (!detail) {
-    // a second run with the demo door armed: its first layer clears at once
-    // (the door's own match), the cascade runs, the ledger opens, the pull
-    let m0 = consoleLines.length;
-    const t = await toMenu("Escape");
-    const top = t && parseMenuLine(consoleLines[t.index]);
-    if (!top) detail = toMenuDetail;
+    const m0 = consoleLines.length;
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=0`);
+    const at = await waitLine(/^crash: hub at 0 (\d+)$/, m0, 20000);
+    if (!at) detail = "?hub=1&hubat=0 did not set the runner on key node 0";
+    else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the hub boot";
     else {
       await evalJS("window.__crashUpdates.app.dispatch('demo', 'cleared')");
-      m0 = consoleLines.length;
-      await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
-      const demo = await waitLine(/^crash: demo cleared stack$/, m0, 5000);
-      const removed = demo && await waitLine(/^crash: removed /, m0, 5000);
-      done = removed && await waitLine(/^crash: run layer-done stack$/, m0, 20000);
-      const rows = done && await menuOn("run-layer", done.index, 3000);
-      if (!demo) detail = "the demo door did not arm the new run's layer";
-      else if (!removed) detail = "the demo's match did not fire";
-      else if (!done) detail = "no \"crash: run layer-done\" after the clear's cascade";
-      else if (!rows || rows.order.join(" ") !== "next-layer") detail = `the ledger screen's rows are ${rows ? rows.order.join(" ") : "missing"}`;
+      const m1 = consoleLines.length;
+      await press("Enter");
+      launch = await waitLine(/^crash: hub launch 0 ([0-9A-Z]{10})$/, m1, 5000);
+      spec = launch && await waitLine(/^crash: spec stack hacker (\d+) ([0-9A-Z]{10})$/, m1, 5000);
+      if (!launch) detail = "Enter on the node asked for no launch";
+      else if (!spec) detail = "the launch dealt no stack board";
+      else if (spec.m[2] !== launch.m[1]) detail = `the board's code ${spec.m[2]} is not the node's launch ${launch.m[1]} (gate leg 2)`;
       else {
-        next = await waitLine(/^crash: run layer (\d+)$/, done.index, 8000);
-        if (!next) detail = "the next layer was not pulled by itself within 8 s";
-        else if (next.m[1] !== "2") detail = `the pull went to layer ${next.m[1]}, not 2`;
-        else if (!(await waitLine(/^crash: spec cards hacker /, done.index, 5000))) detail = "layer 2 (DEFRAG) was not dealt";
+        const demo = await waitLine(/^crash: demo cleared stack$/, m1, 5000);
+        const removed = demo && await waitLine(/^crash: removed /, m1, 5000);
+        back = removed && await waitLine(/^crash: hub open 1 (\d+) keys 1 cleared 1$/, m1, 30000);
+        if (!demo) detail = "the demo door did not arm the node's board";
+        else if (!removed) detail = "the demo's match did not fire";
+        else if (!back) detail = "the cleared board did not bring the hub back with the node cleared and its key held";
       }
     }
   }
   if (detail) fail("run", detail);
-  else pass("run", `JACK IN layer ${layer.m[1]}: DISCONNECT landed on CONTINUE, which resumed it; a second run's demo clear ended in the ledger (next-layer) and layer 2 was pulled by itself`);
+  else pass("run", `JACK IN opened the hub; DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key`);
+}
+
+// hub (P5, D60): the world moves on the beat and takes one action per
+// beat. ?hub=1&bpm=120 (500 ms a beat): the beat lines come at the clock's
+// pace, not the frame's; two ArrowRight presses 700 ms apart move the
+// runner one cell each, on the next beat, and a third press within the
+// same beat as the second changes nothing extra; Space waits.
+{
+  let detail = "";
+  const from = consoleLines.length;
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120`);
+  const opened = await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, from, 20000);
+  if (!opened) detail = "?hub=1 did not open the hub";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  const beatLine = /^crash: hub beat (\d+) trace (\d+) (\d+) depth (\d+) cell (\d+)$/;
+  let first = null, cells = [];
+  if (!detail) {
+    const m0 = consoleLines.length;
+    first = await waitLine(beatLine, m0, 5000);
+    if (!first) detail = "no beat line within 5 s";
+    else {
+      const t0 = Date.now();
+      await sleep(2600);
+      const beats = consoleLines.slice(first.index).filter((l) => beatLine.test(l));
+      const expected = Math.round((Date.now() - t0) / 500);
+      if (beats.length < expected - 1 || beats.length > expected + 2) detail = `${beats.length} beats in ${Date.now() - t0} ms at 120 bpm (expected about ${expected})`;
+      else {
+        const cell0 = parseInt(first.m[5], 10);
+        const m1 = consoleLines.length;
+        await press("ArrowRight");
+        await sleep(700);
+        await press("ArrowRight");
+        await sleep(100);
+        await press("ArrowRight");   // the same beat: the last press wins, one move
+        await sleep(900);
+        cells = consoleLines.slice(m1).filter((l) => beatLine.test(l)).map((l) => parseInt(l.match(beatLine)[5], 10));
+        const moved = cells.filter((c, i) => i === 0 ? c !== cell0 : c !== cells[i - 1]).length;
+        if (cells.length === 0) detail = "no beat lines after the presses";
+        else if (cells[cells.length - 1] !== cell0 + 2) detail = `three presses over two beats moved the runner from ${cell0} to ${cells[cells.length - 1]}, not ${cell0 + 2} (one action per beat)`;
+        else if (moved !== 2) detail = `the runner moved on ${moved} beats, not 2`;
+      }
+    }
+  }
+  if (detail) fail("hub", detail);
+  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses over two beats moved the runner two cells (${cells.join(" ")}): one action per beat`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says
