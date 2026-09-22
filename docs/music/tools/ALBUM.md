@@ -275,3 +275,13 @@ Both paths use `(crash soundtrack album metadata)` in lib/album-metadata.sgl.
 Use the existing album-r2.sgl prepare/upload steps with a **new prefix** when
 publishing changed tags. The player's Media Session metadata also supplies the
 artist, title, album and cover for phone browser playback controls.
+
+## Album revisions
+
+`album-batch-render.sgl` accepts `--revision ii` (default `i`) for new mastered
+WAV/FLAC/OGG filenames. Use a fresh external output directory for both stages;
+pass the same revision label to native and master. The current Obsidian revision
+is in `obsidian-ii/`, mastered with `--gain 5`. `album-listening-site.sgl` selects
+its `-album-ii.wav` automatically; `--track obsidian-index` exports only track 12,
+retaining its 12/15 tag. Both master and MP3 tools now use the shared artist and
+album identity. Historical files are preserved.

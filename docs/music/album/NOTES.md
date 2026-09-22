@@ -143,3 +143,11 @@ chooses whether either should adopt the revision.
 
 [Listening feedback and tracker experiments](FEEDBACK.md) records a practical
 process for deeper album review and learning through small edits on copies.
+
+## 2026-09-22: Obsidian album adoption
+
+David approved Tension V's added activity and requested it in the soundtrack.
+[Obsidian album II](OBSIDIAN-II.md) adopts its four focused phrases and dedicated
+instruments, preserving every other album phrase. The new tense entry is at
+1:54.286 in the full album form. Historical game and album auditions stay
+available; no game asset is edited in this worktree.
