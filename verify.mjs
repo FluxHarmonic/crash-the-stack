@@ -2311,7 +2311,7 @@ async function downTo(order, id, at = 0) {
 
 // ---- 9f. music: the soundtrack live from .cts (M1, D59) ---------------------
 // Read from the whole run's console lines: the boot's pick is seeded
-// ("crash: music pick NAME seed N", and the reload leg's second boot of the
+// ("crash: music pick NAME seed N for TABLE", and the reload leg's second boot of the
 // same board picks the same NAME), the track was heard ("crash: music
 // playing NAME P R": the sink pulled past the open position), the ICE
 // crossing in the traced leg asked for the tense section and landed on a
@@ -2325,7 +2325,7 @@ async function downTo(order, id, at = 0) {
 // is not asserted.
 {
   let detail = "";
-  const pickRe = /^crash: music pick ([a-z0-9-]+) seed (\d+)$/;
+  const pickRe = /^crash: music pick ([a-z0-9-]+) seed (\d+) for (stack|cards)$/;
   const picks = consoleLines.map((l) => l.match(pickRe)).filter(Boolean);
   const pick = picks[0];
   let tune = null;
@@ -2343,13 +2343,13 @@ async function downTo(order, id, at = 0) {
     const playing = consoleLines.find((l) => l.startsWith(`crash: music playing ${pick[1]} `));
     const asked = consoleLines.map((l) => l.match(/^crash: music section tense asked at (\d+) (\d+)$/)).filter(Boolean)[0];
     const landed = consoleLines.map((l) => l.match(/^crash: music section tense at (\d+) (\d+)$/)).filter(Boolean)[0];
-    const other = picks.find((p) => p[1] !== pick[1] && p[2] === pick[2]);
-    const again = picks.find((p) => p[2] === pick[2] && p !== pick);
+    const other = picks.find((p) => p[1] !== pick[1] && p[2] === pick[2] && p[3] === pick[3]);   // the same seed on the same table (the P4 legs deal seed 1 on both tables: different pools)
+    const again = picks.find((p) => p[2] === pick[2] && p[3] === pick[3] && p !== pick);
     const np = consoleLines.map((l) => l.match(/^crash: menu-playing (.*)$/)).filter(Boolean)[0];
     const theme = consoleLines.find((l) => /^crash: music open black-glass-title /.test(l));
     const want = tune.fill ?? tune.tense;
     if (!playing) detail = `no "crash: music playing ${pick[1]} ..." line: the track opened but the sink never pulled past the open position`;
-    else if (other) detail = `seed ${pick[2]} picked ${pick[1]} and then ${other[1]}`;
+    else if (other) detail = `seed ${pick[2]} on the ${pick[3]} picked ${pick[1]} and then ${other[1]}`;
     else if (!again) detail = `the board's second boot (the reload leg) printed no pick for seed ${pick[2]}`;
     else if (!asked) detail = "no \"crash: music section tense asked at P R\" line after the ICE crossing";
     else if (!landed) detail = `tense asked at ${asked[1]} ${asked[2]} but no "crash: music section tense at P R" landing line`;

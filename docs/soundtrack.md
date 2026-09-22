@@ -64,8 +64,9 @@ play: the device's rate first (24000 when the page's hints say four cores
 or fewer, or 2 GB or less; or the rate this device's last ladder chose,
 kept in the store as `music-rate`), and after about a second of pulls at
 a rate whose mean cost per 60 fps frame is over 4 ms, the next lower of
-32000, 24000, 22050; never up. A step reopens the player at the audible
-position with the section kept. 32000 keeps 11–16 kHz within 3 dB of the
+32000, 24000, 22050; never up. A step reopens the player at the render
+position with the section kept (the render head, continuing exactly; its
+offset into the row skipped at the new rate). 32000 keeps 11–16 kHz within 3 dB of the
 full rate; 22050 is 8.6 dB down there and gone above 16 kHz.
 
 Doors: `?music-rate=N` (web) and `--music-rate N` (native) pin a rate;
@@ -86,8 +87,9 @@ the MUSIC setting and VOLUME.
 
 Console lines with `?trace` / `--trace`:
 
-    crash: music pick NAME seed N
-    crash: music open NAME top|resume POS ROW
+    crash: music pick NAME seed N for TABLE
+    crash: music open NAME top|resume POS ROW ms N     N: the open's cost
+    crash: music reopen POS ROW skip N head H ms M   a ladder step's reopen
     crash: music playing NAME POS ROW          the sink pulled past the open position
     crash: music section tense asked at POS ROW
     crash: music section tense at POS ROW      the landing, a bar row
