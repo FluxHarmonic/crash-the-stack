@@ -248,8 +248,21 @@
 
     ;; The private grid the generator carves: cells (symbols) and region
     ;; (the room or corridor's region, -1 none, -2 a gate cell).
-    (define (orthogonal i w h)
-      (filter-map (lambda (d) (step-cell i d w h)) (list 'up 'down 'left 'right)))
+
+    ;; The four neighbors without a list: f over each one that exists,
+    ;; folding acc. The searches below visit every cell of a layer several
+    ;; times over GEN-TRIES tries and the solvability proof, and a list of
+    ;; four per visit was the generator's largest allocation (David's
+    ;; phone, 2026-09-22: 94 GC pauses totalling 1006 ms over the twenty
+    ;; seconds after a JACK IN).
+    (define (fold-orthogonal i w h acc f)
+      (let* ((x (idx-x i w))
+             (y (idx-y i w))
+             (acc (if (> y 0) (f acc (- i w)) acc))
+             (acc (if (< y (- h 1)) (f acc (+ i w)) acc))
+             (acc (if (> x 0) (f acc (- i 1)) acc))
+             (acc (if (< x (- w 1)) (f acc (+ i 1)) acc)))
+        acc))
 
     ;; Each cell's room index, or #f: one vector, so the carve asks a
     ;; vector-ref rather than walking the room list per neighbor.
@@ -281,18 +294,19 @@
       (and (eq? (vector-ref cells c) 'void)
            (>= (idx-x c w) 1) (< (idx-x c w) (- w 1))
            (>= (idx-y c w) 1) (< (idx-y c w) (- h 1))
-           (every (lambda (n)
-                    (let ((kind (vector-ref cells n)))
-                      (or (eq? kind 'void)
-                          (and (eq? kind 'floor)
-                               touch
-                               (eqv? (vector-ref room-index n) touch))
-                          (and region (eq? kind 'link) (= (vector-ref regions n) region)))))
-                  (orthogonal c w h))))
+           (fold-orthogonal c w h #t
+                            (lambda (ok n)
+                              (and ok
+                                   (let ((kind (vector-ref cells n)))
+                                     (or (eq? kind 'void)
+                                         (and (eq? kind 'floor)
+                                              touch
+                                              (eqv? (vector-ref room-index n) touch))
+                                         (and region (eq? kind 'link) (= (vector-ref regions n) region)))))))))
 
     (define (beside-room? room-index w h room c)
-      (any (lambda (n) (eqv? (vector-ref room-index n) room))
-           (orthogonal c w h)))
+      (fold-orthogonal c w h #f
+                       (lambda (found n) (or found (eqv? (vector-ref room-index n) room)))))
 
     ;; The corridor from beside room a to beside room b, a list of cells,
     ;; or #f. Multi-source breadth-first from every cell of a's ring that
@@ -321,13 +335,12 @@
                        (walk (vector-ref parent c) (cons c acc)))))
                 (else
                  (loop (cdr front)
-                       (fold-left (lambda (back n)
-                                    (if (and (not (vector-ref parent n))
-                                             (or (inner? n) (goal? n)))
-                                        (begin (vector-set! parent n (car front)) (cons n back))
-                                        back))
-                                  back
-                                  (orthogonal (car front) w h))))))))
+                       (fold-orthogonal (car front) w h back
+                                        (lambda (back n)
+                                          (if (and (not (vector-ref parent n))
+                                                   (or (inner? n) (goal? n)))
+                                              (begin (vector-set! parent n (car front)) (cons n back))
+                                              back)))))))))
 
     ;; --- placement helpers -----------------------------------------------------
 
@@ -665,7 +678,8 @@
                                           (cdr (car front))))
                                     (cdr (car front))))))
                    (loop (cdr front)
-                         (fold-left
+                         (fold-orthogonal
+                          c w h back
                           (lambda (back n)
                             (let ((kind (layer-cell l n)))
                               (if (and (cell-walkable? kind)
@@ -676,10 +690,8 @@
                                        (not (vector-ref seen (+ n (* mask size)))))
                                   (begin (vector-set! seen (+ n (* mask size)) #t)
                                          (cons (cons n mask) back))
-                                  back)))
-                          back
-                          (orthogonal c w h)))))))))
-
+                                  back))))))))))
+)
     (define (layer-solvable? l)
       (layer-reachable? l #t '()))
 

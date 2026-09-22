@@ -524,15 +524,51 @@
 
     ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
+    ;; --- the entry (D65's transition, 2026-09-22) ---------------------------------
+    ;;
+    ;; The frames between JACK IN (or CONTINUE) and the hub's first playable
+    ;; frame: the first draws the screen, the next makes the run (the
+    ;; layer's generation), the rest bake one light step each until
+    ;; lit-ready?, then the hub opens. The web shell's twin.
+    (define *entry* #f)          ; a thunk answering the run, then #t once it has run
+    (define *entry-frames* 0)
+
+    (define (enter-hub a make-run)
+      (set! *entry* make-run)
+      (set! *entry-frames* 0)
+      (audio-fade-out! 300)
+      (display "crash: hub entry") (newline)
+      (stage a screen: 'entry overlay: #f))
+
+    (define (entry-step! a lay model)
+      (set! *entry-frames* (+ 1 *entry-frames*))
+      (when (and (procedure? *entry*) (> *entry-frames* 1))
+        (*entry*)
+        (set! *entry* #t))
+      (if (and (eq? *entry* #t) (lit-ready?))
+          (begin (display "crash: hub entry ready ") (display *entry-frames*) (newline)
+                 (open-hub a))
+          a))
+
+    (define (entry-line)
+      (cond ((procedure? *entry*) 0)
+            ((not (lit-ready?)) 1)
+            (else 2)))
+
     ;; JACK IN: a hub run from the seed at a difficulty (D65: the menu's pick;
     ;; a run code or --hub takes --pace), layer 1, the field seeded by the run.
     (define (jack-in a seed difficulty lay model)
-      (hub-run-start! seed difficulty)
-      (display "crash: run start ") (display seed) (display " ") (display (hub-run-code)) (display " ") (display difficulty) (newline)
-      (open-hub a))
+      (enter-hub a (lambda ()
+                     (hub-run-start! seed difficulty)
+                     (display "crash: run start ") (display seed) (display " ") (display (hub-run-code)) (display " ") (display difficulty) (newline))))
 
     ;; The hub screen up (a new run, a return from a board, CONTINUE).
+    ;; The hub behind the entry screen (a new run, CONTINUE).
+    (define (open-hub-entry a)
+      (if (lit-ready?) (open-hub a) (enter-hub a (lambda () (hub-run-in-force)))))
+
     (define (open-hub a)
+      (set! *entry* #f)
       (set! *layer-cleared* #f)   ; a board left during its cascade does not carry its clear into the next board
       (let ((w (hub-screen-world (hub-run-in-force))))
         (display "crash: hub open ") (display (world-depth w)) (display " ") (display (world-beat w)) (newline)
@@ -618,7 +654,7 @@
              (case choice
                ((continue)
                 (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
-                    (open-hub a)
+                    (open-hub-entry a)
                     (case (active-game)
                     ((cards) (open-cards a seed fresh? #t))
                     (else (open-stack a lay seed fresh? model #t)))))
@@ -772,6 +808,7 @@
                    ;; the music (P4, D50) follows the screen and the table's phase once the menu is live
                    (_ (when (and *reveal-over* (boot-done?))
                         (case (stage-screen a)
+                          ((entry) #f)                                 ; P5: the entry screen is quiet (the theme fades into it)
                           ((menu hub) (music-frame! (quote menu) #f))   ; P5: the theme under the hub until its own pool is wired
                           ((stack) (music-frame! (quote stack) (session-trace (stage-session a)) (session-seed (stage-session a))))
                           (else (music-frame! (quote cards) (deal-trace (stage-deal a)) (deal-seed (stage-deal a)))))))
@@ -796,6 +833,7 @@
                            (if (cdr r)
                                (open (stage a menu: (car r)) (cdr r))
                                (stage a menu: (car r)))))
+                        ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
                         ((stack)
                          (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
@@ -846,6 +884,7 @@
                             (tiles-ensure! *geom*))
                           ;; the menu's and the overlay's bakes, before the passes (they are passes)
                           (cond ((eq? (stage-screen a) 'menu) (menu-prepare! (stage-menu a)))
+                                ((eq? (stage-screen a) 'entry) (hub-prepare!))   ; P5: the entry screen carries the bake (D65)
                                 ((eq? (stage-screen a) 'hub) (hub-prepare!) (when (stage-overlay a) (menu-prepare! (stage-overlay a))))   ; P5: the tile bake is a pass, and the pause panel's
                                 ((stage-overlay a) (menu-prepare! (stage-overlay a)))))
                         (case (stage-screen a)
@@ -856,6 +895,7 @@
                         (lambda ()
                           (case (stage-screen a)
                             ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
+                            ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
                             ((stack)

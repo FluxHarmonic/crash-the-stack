@@ -267,6 +267,8 @@
     (define *ms-tick* 0.0)
     (define *ms-pump* 0.0)
     (define *ms-other* 0.0)
+    (define *ms-resize* 0.0)
+    (define *resize-ms* 0.0)   ; gles3-resize-to-display this frame: the display query and the buffer resize
     (define *ms-boot* 0.0)
     (define *ms-count* 0.0)
     ;; The sim's parts on the stack table (the tap hitch, David on 5f26a45),
@@ -281,7 +283,7 @@
 
     (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
     (define MS-EVERY 120)      ; two seconds at 60 fps: the worst-frame readout refreshes often enough to catch a tap
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN tick MEAN pump MEAN other MEAN boot MEAN count MEAN underruns FRAMES
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN tick MEAN pump MEAN resize MEAN other MEAN boot MEAN count MEAN underruns FRAMES
     ;;                                        (underruns: the audio sink's starved frames in the window: the music stalled)
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
@@ -292,7 +294,7 @@
     ;; The tick's time outside every timed part: the shell's glue, the
     ;; input frame, the trace lines, the texture fetch bookkeeping.
     (define (other-ms)
-      (max 0.0 (- *tick-ms* *sim-ms* *draw-ms* *flush-ms* *pump-ms* *boot-ms* *count-ms*)))
+      (max 0.0 (- *tick-ms* *sim-ms* *draw-ms* *flush-ms* *pump-ms* *boot-ms* *count-ms* *resize-ms*)))
 
     ;; gc-stats is read every GC-SAMPLE frames, not every frame: the read
     ;; costs about 8 ms on the desktop wasm build (measured 2026-09-19 as
@@ -367,6 +369,7 @@
       (set! *ms-tick* 0.0)
       (set! *ms-pump* 0.0)
       (set! *ms-other* 0.0)
+      (set! *ms-resize* 0.0)
       (set! *ms-boot* 0.0)
       (set! *ms-count* 0.0)
       (set! *worst* #f)
@@ -393,6 +396,7 @@
         (set! *ms-tick* (+ *ms-tick* *tick-ms*))
         (set! *ms-pump* (+ *ms-pump* *pump-ms*))
         (set! *ms-other* (+ *ms-other* (other-ms)))
+        (set! *ms-resize* (+ *ms-resize* *resize-ms*))
         (set! *ms-boot* (+ *ms-boot* *boot-ms*))
         (set! *ms-count* (+ *ms-count* *count-ms*))
         (when (or (not *worst*) (> ms (car *worst*)))
@@ -406,7 +410,8 @@
                  "alloc" (- (caddr now) (caddr was))
                  "gcms" (tenth (/ (- (cadddr now) (cadddr was)) 1000000.0))
                  "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY))
-                 "tick" (tenth (/ *ms-tick* MS-EVERY)) "pump" (tenth (/ *ms-pump* MS-EVERY)) "other" (tenth (/ *ms-other* MS-EVERY))
+                 "tick" (tenth (/ *ms-tick* MS-EVERY)) "pump" (tenth (/ *ms-pump* MS-EVERY))
+                 "resize" (tenth (/ *ms-resize* MS-EVERY)) "other" (tenth (/ *ms-other* MS-EVERY))
                  "boot" (tenth (/ *ms-boot* MS-EVERY)) "count" (tenth (/ *ms-count* MS-EVERY))
                  "underruns" (- (audio-underruns) *underruns-last*))
             (set! *underruns-last* (audio-underruns))
@@ -415,6 +420,7 @@
             (set! *ms-tick* 0.0)
             (set! *ms-pump* 0.0)
             (set! *ms-other* 0.0)
+            (set! *ms-resize* 0.0)
             ;;   crash: worst-frame MS sim S draw D flush F step A advance B save C cues D fx E
             (when *worst*
               (apply say "worst-frame" (exact (round (car *worst*)))
@@ -1303,6 +1309,7 @@
           (say "music" "start"))
         (case *screen*
           ((menu) (music-frame! 'menu #f))
+          ((entry) #f)                      ; P5: the entry screen is quiet (the theme fades into it)
           ((hub) (music-frame! 'menu #f))   ; P5: the theme under the hub until its own pool is wired
           ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
           (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
@@ -1343,7 +1350,9 @@
       (set! *sim-ms* 0.0)
       (set! *draw-ms* 0.0)
       (set! *flush-ms* 0.0)
-      (gles3-resize-to-display)
+      (let ((t0 (now-ms)))
+        (gles3-resize-to-display)
+        (set! *resize-ms* (- (now-ms) t0)))
       (tick-screen (input-this-frame) dt)
       (let ((t0 (now-ms)))
         (unless (skip? (quote audio)) (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
@@ -1354,6 +1363,7 @@
       (let ((click (input-frame-click f)))
         (case *screen*
           ((menu) (menu-tick f dt))
+          ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
           ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
@@ -1659,13 +1669,57 @@
     ;; its first layer dealt.
     ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
+    ;; --- the entry (D65's transition, 2026-09-22) ---------------------------------
+    ;;
+    ;; JACK IN and CONTINUE used to generate the layer AND bake the tiles on
+    ;; the frames right after the menu: David's phone read a 1050 ms frame
+    ;; and 94 GC pauses over the twenty seconds after. The work is the same;
+    ;; the entry screen carries it. The first frame only draws the screen
+    ;; (and fades the menu's music); the next makes the run (the layer's
+    ;; generation); the frames after bake one light step each, which
+    ;; hub-prepare! already paces, until lit-ready?; then the hub opens.
+    ;;   crash: hub entry                     the screen is up
+    ;;   crash: hub entry ready MS FRAMES     the hub opens, with the entry's wall time
+    (define *entry* #f)          ; a thunk answering the run, then #t once it has run
+    (define *entry-frames* 0)
+    (define *entry-ms* 0.0)
+
+    (define (enter-hub! make-run)
+      (set! *screen* 'entry)
+      (set! *overlay* #f)
+      (set! *entry* make-run)
+      (set! *entry-frames* 0)
+      (set! *entry-ms* 0.0)
+      (audio-fade-out! ENTRY-FADE-MS)
+      (say "hub" "entry"))
+
+    (define ENTRY-FADE-MS 300)
+
+    (define (entry-tick! f dt)
+      (set! *entry-frames* (+ 1 *entry-frames*))
+      (set! *entry-ms* (+ *entry-ms* (* 1000.0 dt)))
+      ;; the run is made on the second frame: the first drew the screen
+      (when (and (procedure? *entry*) (> *entry-frames* 1))
+        (*entry*)
+        (set! *entry* #t))
+      (present! #f (lambda () (draw-hub-entry VW VH (background) (lit-progress) (entry-step))))
+      ;; the bake ran in the present's prepare; once it is done the hub opens
+      (when (and (eq? *entry* #t) (lit-ready?))
+        (say "hub" "entry" "ready" (exact (round *entry-ms*)) *entry-frames*)
+        (open-hub!)))
+
+    (define (entry-step)
+      (cond ((procedure? *entry*) 0)
+            ((not (lit-ready?)) 1)
+            (else 2)))
+
     ;; JACK IN: a hub run from the seed at a difficulty (D65: the menu's pick;
     ;; a run code or a door takes &pace=), layer 1, the field seeded by the run.
     ;;   crash: run start SEED CODE DIFFICULTY
     (define (jack-in! seed difficulty)
-      (hub-run-set! (hub-run-start! seed difficulty))
-      (say "run" "start" seed (hub-run-code) difficulty)
-      (open-hub!))
+      (enter-hub! (lambda ()
+                    (hub-run-set! (hub-run-start! seed difficulty))
+                    (say "run" "start" seed (hub-run-code) difficulty))))
 
     ;; &hubat=N: the runner set down on key node N (the arms: a walk is seed-specific).
     (define (hub-at! n)
@@ -1676,14 +1730,24 @@
           (hub-run-set! (hub-screen-teleport hs (node-cell node)))
           (say "hub" "at" n (node-cell node)))))
 
+    ;; The hub screen up behind the entry screen (a new run, CONTINUE): the
+    ;; layer's generation and the bake happen there, not on one frame.
+    (define (open-hub-entry!)
+      (if (lit-ready?)
+          (open-hub!)                       ; the tiles are baked: no wait to sell
+          (enter-hub! (lambda () (hub-run-in-force)))))
+
     ;; The hub screen up (a new run, a return from a board, CONTINUE).
     (define (open-hub!)
+      (set! *entry* #f)
       (set! *screen* 'hub)
       (set! *overlay* #f)
       (set! *announced* #f)
       (set! *layer-cleared* #f)   ; a board left during its cascade does not carry its clear into the next board
       (hub-run-set! (hub-screen-with-touch (hub-run-in-force) *touch*))   ; the touch overlay on a coarse pointer (a loaded run too)
       (field-for-deal! (world-run-seed (hub-screen-world (hub-run-in-force))))
+      ;; &hubat=N (the arms): the runner set down on key node N, once there is a hub
+      (when *hub-at* (let ((n *hub-at*)) (set! *hub-at* #f) (hub-at! n)))
       (let ((w (hub-screen-world (hub-run-in-force))))
         (say "hub" "open" (world-depth w) (world-beat w) "keys" (length (world-keys w)) "cleared"
              (length (filter (lambda (n) (eq? (node-state n) 'cleared)) (world-nodes w))))))
@@ -1795,7 +1859,7 @@
              (case choice
                ((continue)
                 (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
-                    (open-hub!)
+                    (open-hub-entry!)
                     (case (active-game)
                     ((cards) (open-cards! #t))
                     (else (open-stack! #t)))))
@@ -1869,6 +1933,7 @@
           (tiles-ensure! *geom*))
         ;; the menu's and the overlay's bakes, before the passes (they are passes)
         (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
+              ((eq? *screen* 'entry) (hub-prepare!))                                           ; P5: the entry screen carries the bake (D65)
               ((eq? *screen* 'hub) (hub-prepare!) (when *overlay* (menu-prepare! *overlay*)))   ; P5: the tile bake is a pass, and the pause panel's
               (*overlay* (menu-prepare! *overlay*)))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
@@ -1963,8 +2028,8 @@
             (*code* (say "code" "refused" *code*) (open-menu!))
             (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
-            ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub!))   ; ?hub=continue: the saved run (P5; the arms)
-            ((number? *hub-seed*) (jack-in! *hub-seed* *pace*) (when *hub-at* (hub-at! *hub-at*)))   ; ?hub=SEED: JACK IN at boot, &hubat=N the runner set down on key node N (P5; the arms)
+            ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub-entry!))   ; ?hub=continue: the saved run (P5; the arms)
+            ((number? *hub-seed*) (jack-in! *hub-seed* *pace*))   ; ?hub=SEED: JACK IN at boot (&hubat=N lands when the entry screen opens the hub; P5, the arms)
             (else (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once

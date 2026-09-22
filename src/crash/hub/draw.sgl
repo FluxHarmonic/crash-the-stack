@@ -27,9 +27,9 @@
           (crash hub screen)
           (crash hub run))
 
-  (export hub-prepare! hub-draw!
+  (export hub-prepare! hub-draw! draw-hub-entry
           HUB-HELD-KEYS
-          draw-hub-screen lit-tiles-ensure! lit-ready? lit-role HUE-NAMES STEPS
+          draw-hub-screen lit-tiles-ensure! lit-ready? lit-progress lit-role HUE-NAMES STEPS
           BAND-H)
 
   (begin
@@ -50,11 +50,29 @@
 
     ;; --- helpers ---------------------------------------------------------------
 
-    (define (rows-of-tone rows digit)
+    ;; One tone of a tile, drawn straight from the tile's own rows: the
+    ;; cells that carry this ramp digit, as runs of filled rect. The bake
+    ;; used to build a fresh list of sixteen strings per tile per tone
+    ;; (280 lists and 4480 strings a bake frame with the roster's sheet,
+    ;; 24 frames per entry), which the GC then swept: David's phone read
+    ;; 94 pauses totalling 1006 ms over the twenty seconds after a JACK IN
+    ;; (2026-09-22). Nothing is allocated here now.
+    (define (draw-tone rows digit x y)
       (let ((c (integer->char (+ digit (char->integer #\0)))))
-        (map (lambda (row)
-               (string-map (lambda (ch) (if (char=? ch c) #\# #\.)) row))
-             rows)))
+        (let rows-loop ((rs rows) (r 0))
+          (when (pair? rs)
+            (let* ((row (car rs))
+                   (w (string-length row))
+                   (ry (+ y r)))
+              (let cells ((col 0) (run-start #f))
+                (cond ((= col w)
+                       (when run-start (draw-filled-rect (+ x run-start) ry (- col run-start) 1)))
+                      ((char=? (string-ref row col) c)
+                       (cells (+ col 1) (or run-start col)))
+                      (else
+                       (when run-start (draw-filled-rect (+ x run-start) ry (- col run-start) 1))
+                       (cells (+ col 1) #f)))))
+            (rows-loop (cdr rs) (+ r 1))))))
 
     ;; --- the world -------------------------------------------------------------
 
@@ -181,13 +199,52 @@
                     (let tones ((d 1))
                       (when (<= d 8)
                         (color! (role-color (lit-role hue d step)))
-                        (draw-rows (rows-of-tone rows d) (* i TILE-SIZE) 0 1 TILE-SIZE)
+                        (draw-tone rows d (* i TILE-SIZE) 0)
                         (tones (+ d 1)))))
                   (tiles (+ i 1)))))
             (set-blend-mode 'normal)
             (set! *lit-rts* (cons (cons (lit-key hue step) (cons rt (render-target->texture rt))) *lit-rts*))))))
 
     (define (lit-ready?) (= (length *lit-rts*) (* STEPS (length HUE-NAMES))))
+
+    ;; The bake's progress, 0..1: what the entry screen shows.
+    (define (lit-progress)
+      (/ (exact->inexact (length *lit-rts*)) (* STEPS (length HUE-NAMES))))
+
+    ;; The entry screen (D65's transition, 2026-09-22): the frames between
+    ;; JACK IN (or CONTINUE) and the hub's first playable frame, while the
+    ;; layer is generated and the tiles bake one light step a frame. In the
+    ;; game's voice, not a spinner: the dialer's log, a line per step done,
+    ;; and the carrier meter filling. progress is 0..1, step the line to
+    ;; show (0 dialing, 1 mapping, 2 ready).
+    (define ENTRY-LINES
+      (list "DIALING THE STACK..."
+            "MAPPING THE LAYER..."
+            "CARRIER LOCKED."))
+    (define (draw-hub-entry vw vh bg progress step)
+      (if bg
+          (draw-board-background vw vh vh 0.0 bg 'off)
+          (begin (color! C-BG) (draw-filled-rect 0 0 vw vh)))
+      (color! C-TEXT)
+      (draw-text "CRASH THE STACK" 24 32 2)
+      (color! C-TEXT-DIM)
+      (draw-text "LINK NEGOTIATION" 24 56 1)
+      (let loop ((ls ENTRY-LINES) (i 0) (y 110))
+        (when (pair? ls)
+          (color! (cond ((< i step) C-TEXT-DIM) ((= i step) C-TEXT) (else C-BAR-C)))
+          (draw-text (car ls) 24 y 2)
+          (when (< i step)
+            (color! C-WIRE-LIT)
+            (draw-text "OK" (- vw 64) y 2))
+          (loop (cdr ls) (+ i 1) (+ y 28))))
+      ;; the carrier meter: the bake's progress, the boards' meter drawn wide
+      (let ((x 24) (y 260) (w (- vw 48)) (h 12))
+        (color! C-BAR-C)
+        (draw-filled-rect x y w h)
+        (color! C-WIRE-LIT)
+        (draw-filled-rect (+ x 1) (+ y 1) (exact (floor (* (- w 2) (max 0.0 (min 1.0 progress))))) (- h 2)))
+      (color! C-TEXT-DIM)
+      (draw-text (string-append (number->string (exact (floor (* 100 (max 0.0 (min 1.0 progress)))))) " PERCENT") 24 284 1))
 
     ;; A sub-rectangle (sx, sy, sw, sh) of tile i at step s under hue h,
     ;; drawn at (x, y): the whole tile when sx sy are 0 and sw sh TILE-SIZE.

@@ -293,7 +293,12 @@
       (let* ((s (door-session (session-new lay (spec-seed sp))))
              (s (session-with-trace-mode s (if (eq? (spec-version sp) 'original) 'clean 'twist)))
              (s (session-with-best s (datum->best (store-read-datum BEST-KEY))))
-             (s (with-launch-thresholds s (lambda (s tr) (session s trace: tr)) session-trace)))
+             (s (with-launch-thresholds s (lambda (s tr) (session s trace: tr)) session-trace))
+             ;; the node's objective (D64): the launch's marked pairs from the deal's own line
+             (s (let ((l (hub-run-launch-pending)))
+                  (if (and l (> (launch-marks l) 0))
+                      (session-with-marks s (mark-slots (session-board s) (launch-marks l)))
+                      s))))
         (session-with-hud s (stored-hud))))
 
     ;; A board dealt for the hub's node takes the depth's thresholds (P5).
@@ -304,17 +309,22 @@
             b)))
 
     (define (deal-from-spec sp)
-      ;; both: M1's ?trace-at door over the deal's own thresholds, then P5's
-      ;; launch thresholds when a hub node dealt this board (the launch wins,
-      ;; since a node names the depth's seconds)
-      (with-launch-thresholds
-       (deal-with-hud (door-deal (deal-new (spec-seed sp)
-                                           (spec-draw sp)
-                                           (spec-scoring sp)
-                                           (if (eq? (spec-version sp) 'original) 'clean 'twist)))
-                      (stored-hud))
-       (lambda (d tr) (deal d trace: tr))
-       deal-trace))
+      ;; M1's ?trace-at door over the deal's own thresholds, then P5's launch
+      ;; thresholds when a hub node dealt this board (a node names the depth's
+      ;; seconds, so the launch wins), then the node's objective (D64): the
+      ;; launch's marked cards, buried in the middle piles
+      (let ((d (with-launch-thresholds
+                (deal-with-hud (door-deal (deal-new (spec-seed sp)
+                                                    (spec-draw sp)
+                                                    (spec-scoring sp)
+                                                    (if (eq? (spec-version sp) 'original) 'clean 'twist)))
+                               (stored-hud))
+                (lambda (d tr) (deal d trace: tr))
+                deal-trace))
+            (l (hub-run-launch-pending)))
+        (if (and l (> (launch-marks l) 0))
+            (deal-with-marks d (mark-cards (deal-game d) (launch-marks l)))
+            d)))
 
     ;; The spec a live board is (for its share code).
     (define (session-spec s)
@@ -360,7 +370,12 @@
     (define (save-after-frame! before after)
       (let* ((b0 (session-board before))
              (b1 (session-board after))
-             (just-cleared? (and (board-cleared? b1) (not (board-cleared? b0))))
+             (just-cleared? (and (board-cleared? b1) (not (board-cleared? b0)) (not (session-extracted? after))))
+             ;; an extraction (D64) is the run's clear, not the scoreboard's or the best's
+             (after (if (and (board-cleared? b1) (not (board-cleared? b0)) (session-extracted? after))
+                        (let ((line (run-clear-line! 'stack (session-trace after) (session-moves after))))
+                          (if line (session after message: line note: line) after))
+                        after))
              (value (trace-value (session-trace after)))
              (best (session-best after))
              (after (if (and just-cleared? (or (not best) (< value best)))
@@ -455,14 +470,18 @@
     ;; changed; a deal just won goes on the scoreboard and, JACKed IN, the
     ;; run (P4), with the clear's line as the deal's message.
     (define (save-deal-after-frame! before after)
-      (let ((after (if (and (deal-won? after) (not (deal-won? before)))
-                       (let ((line (clear-line! 'cards
-                                                (mode->version (trace-mode (deal-trace after)))
-                                                (deal-trace after)
-                                                (game-moves (deal-game after))
-                                                (daily-deal? after))))
-                         (if line (deal after message: line note: line) after))
-                       after)))
+      (let ((after (cond ((not (and (deal-won? after) (not (deal-won? before)))) after)
+                         ;; an extraction (D64) is the run's clear, not the scoreboard's
+                         ((not (game-won? (deal-game after)))
+                          (let ((line (run-clear-line! 'cards (deal-trace after) (game-moves (deal-game after)))))
+                            (if line (deal after message: line note: line) after)))
+                         (else
+                          (let ((line (clear-line! 'cards
+                                                   (mode->version (trace-mode (deal-trace after)))
+                                                   (deal-trace after)
+                                                   (game-moves (deal-game after))
+                                                   (daily-deal? after))))
+                            (if line (deal after message: line note: line) after))))))
         (when (deal-save-due? before after)
           (store-write-datum! CARDS-KEY (deal->datum after)))
         after))

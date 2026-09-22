@@ -37,7 +37,7 @@
           hub-passable? hub-daemon-passable? hub-can-descend? hub-at-market? hub-can-buy?
           hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent? hub-runner-sight hub-path
           hub-nearest-daemon hub-node-here hub-buy hub-market-request hub-remember hub-hold-board
-          launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson
+          launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson launch-marks
           action-valid? ACTIONS)
 
   (begin
@@ -551,6 +551,11 @@
       (let* ((width (layer-width (world-layer w)))
              (decoy (decoy-in-sight w d))
              (d (if decoy (daemon d alert: (cons (car decoy) (cdr decoy)) hunting: 'decoy returning?: #f) d))
+             ;; a daemon passes THROUGH the runner (D23): one standing on his
+             ;; cell at the start of a beat walks on, so it cannot park on him
+             ;; (the arm's run leg, 2026-09-22: a hunting drone reached the
+             ;; runner and sat there, contact spiking, 440/400 in twenty beats)
+             (d (if (= (daemon-cell d) (runner-cell (world-runner w))) (push-through w d) d))
              (alert (daemon-alert d))
              (kind (daemon-kind d)))
         (cond ((eq? kind 'sentinel)
@@ -588,6 +593,22 @@
                (let* ((route (daemon-route d))
                       (step (modulo (+ 1 (daemon-step d)) (vector-length route))))
                  (daemon (moved d (vector-ref route step) width) step: step))))))
+
+    ;; A daemon off the runner's cell: one cell on in its facing, else any
+    ;; other cell it may enter, else where it stands (a dead end of one).
+    (define (push-through w d)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (here (daemon-cell d))
+             (ahead (step-cell here (daemon-facing d) width height))
+             (target (or (and ahead (hub-daemon-passable? w ahead) ahead)
+                         (let loop ((dirs (list 'up 'down 'left 'right)))
+                           (cond ((null? dirs) #f)
+                                 ((let ((n (step-cell here (car dirs) width height)))
+                                    (and n (hub-daemon-passable? w n) n)))
+                                 (else (loop (cdr dirs))))))))
+        (if target (moved d target width) d)))
 
     (define (turn-right d)
       (cond ((eq? d 'up) 'right) ((eq? d 'right) 'down) ((eq? d 'down) 'left) (else 'up)))
@@ -631,10 +652,18 @@
     ;; by a decoy or an alerted node has not seen him and spikes when it
     ;; does) or on contact (his cell), and the ledger counts the beat as
     ;; one sighting.
+    ;; One spike per detection, contact included (2026-09-22): a daemon
+    ;; already hunting the runner does not spike again while it keeps him,
+    ;; whether at range or standing on him. Before, contact spiked every
+    ;; beat, so a daemon that walked onto the runner and stayed filled the
+    ;; layer's budget in twenty beats with nothing to answer it (the arm's
+    ;; run leg found it). Arriving on his cell is still a fresh detection
+    ;; worth CONTACT-FACTOR times the spike, and a daemon that loses him
+    ;; and finds him again spikes again.
     (define (detection-phase w)
       (let* ((c (runner-cell (world-runner w)))
              (seen (filter (lambda (d) (not (hub-runner-hidden? w d))) (world-daemons w)))
-             (spiking (filter (lambda (d) (or (= (daemon-cell d) c) (not (eq? (daemon-hunting d) 'runner)))) seen)))
+             (spiking (filter (lambda (d) (not (eq? (daemon-hunting d) 'runner))) seen)))
         (if (null? seen)
             w
             (let* ((spike (fold-left (lambda (best d)
@@ -704,6 +733,7 @@
       (tools default: '())
       (trace-at default: 180)
       (sever-at default: 220)
+      (marks default: 0)                ; the objective (D64): marked pairs (STACK) or cards (DEFRAG) to extract
       (gibson default: '()))
 
     ;; The launch of the node under the runner, or #f without a launch
@@ -724,6 +754,7 @@
                                            (world-inventory w))
                             trace-at: (descriptor-trace-at d)
                             sever-at: (descriptor-sever-at d)
+                            marks: (descriptor-marks d)
                             gibson: (descriptor-gibson d)))))))
 
     (define (replace-node w n)

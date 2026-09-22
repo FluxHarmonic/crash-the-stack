@@ -84,6 +84,7 @@
           session-tools session-tools-list session-with-tools-touch
           session-hud session-with-hud session-keys-shown
           session-device frame-device session-moves session-note
+          session-marks session-with-marks session-extracted? session-marks-left mark-slots
           session-demo-near-cleared session-demo-finish
           session-request session-clear-request
           session-instruction
@@ -133,7 +134,44 @@
       (seed default: 1)
       (moves default: 0)                  ; pair removals, undos and shuffles so far (the scoreboard's MOVES)
       (note default: #f)                  ; the shell's line for the cleared board (a run's layer, the scoreboard's news), or #f
+      (marks default: '())                ; the node's objective (D64): slots to extract; the board clears when the last is off
+      (extracted? default: #f)            ; the clear came from the marks, not the whole board (no scoreboard, no best)
       (message default: ""))
+
+    ;; --- the objective (D64) -------------------------------------------------
+    ;;
+    ;; A hub node's board asks for an extraction short of a full clear: k
+    ;; pairs of the deal, marked, chosen from the deal's own removal line
+    ;; (the generator's solution) in its middle third, evenly spaced, so a
+    ;; third of the board must come off before the first mark frees and
+    ;; the last sits under cover; deterministic per seed. When the last
+    ;; marked tile leaves, the rest of the board comes off with it (the
+    ;; cascade plays as for a clear, the trace finishes) and the session
+    ;; reads extracted?, which the shell keeps off the scoreboard.
+
+    ;; The slots of k marked pairs, or '() for a board with no line.
+    (define (mark-slots b k)
+      (let* ((line (board-solution b))
+             (n (length line)))
+        (if (or (<= k 0) (< n 3))
+            '()
+            (let* ((lo (quotient n 3))
+                   (span (- (quotient (* 2 n) 3) lo))
+                   (k (min k span)))
+              (let loop ((i 0) (acc '()))
+                (if (= i k)
+                    (reverse acc)
+                    (let ((pair (list-ref line (+ lo (quotient (* i span) k)))))
+                      (loop (+ i 1) (cons (cdr pair) (cons (car pair) acc))))))))))
+
+    (define (session-with-marks s marks)
+      (session s marks: marks))
+
+    ;; The marked tiles still on the board.
+    (define (session-marks-left s)
+      (let ((b (session-board s)))
+        (filter (lambda (id) (tile-present? b id)) (session-marks s))))
+
 
     ;; The device a frame came from, or #f for an idle frame: a click is
     ;; the touch screen or the mouse (the stack's touch flag says which),
@@ -333,6 +371,12 @@
                               (board-unlock-pair b0 id (tile-lock-partner b0 id))
                               b0))
                       (b1 (board-select b0 id))
+                      ;; the objective (D64): the last mark off takes the rest of the board with it
+                      (extracted? (and (pair? (session-marks s))
+                                       (not (board-cleared? b1))
+                                       (< (board-tile-count b1) (board-tile-count b0))
+                                       (not (any (lambda (m) (tile-present? b1 m)) (session-marks s)))))
+                      (b1 (if extracted? (board-extract b1) b1))
                       (tr (if (board-cleared? b1)
                               (trace-finish (session-trace s))
                               (session-trace s))))
@@ -340,6 +384,7 @@
                                moves: (if (< (board-tile-count b1) (board-tile-count b0)) (+ 1 (session-moves s)) (session-moves s))
                                highlight: id
                                trace: tr
+                               extracted?: (or extracted? (session-extracted? s))
                                message: (if broke? MSG-LOCK-BROKEN "")))))))
 
     ;; The cleared sequence on demand (P3c, David's ask: he had not won a
@@ -804,8 +849,11 @@
     (define (session-instruction s)
       (let ((b (session-board s)))
         (cond ((session-hint-armed s) "HINT: PRESS A FACE KEY")
-              ((board-cleared? b) (or (session-note s) "STACK CRASHED. NEXT DEALS ANOTHER."))
+              ((board-cleared? b) (or (session-note s) (if (session-extracted? s) "EXTRACTED. THE NODE IS YOURS." "STACK CRASHED. NEXT DEALS ANOTHER.")))
               ((board-no-moves? b) "NO MOVES LEFT: SHUFFLE.")
+              ((pair? (session-marks s))   ; the objective (D64): the marked tiles left
+               (string-append "EXTRACT " (number->string (length (session-marks-left s))) " OF " (number->string (length (session-marks s)))
+                              (if (board-selected b) ". NOW ITS MATCH." ".")))
               ((board-selected b) "NOW ITS MATCH.")
               ((eq? (session-device s) 'keyboard) "PRESS THE LETTERS OF TWO MATCHING TILES.")
               (else "TAP TWO MATCHING TILES."))))
