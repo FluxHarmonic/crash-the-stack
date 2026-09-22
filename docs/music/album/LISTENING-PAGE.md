@@ -256,3 +256,11 @@ The publisher now refuses an HTML bundle without the album audio element and
 a built worker without the soundtrack bypass, so stale build output fails
 before deployment. Existing controlled clients can accept the normal game
 update; no forced worker activation or game-storage clearing is introduced.
+
+The corrected publication is https://a5f3c5c1.crashthestack.pages.dev, source
+6b43936. A fresh browser context loaded the real soundtrack player and played
+Obsidian Index from soundtrack/obsidian-album-ii/ with David Wilson and the
+correct album metadata; all fifteen tracks were present. The check was muted
+and paused afterward. R2 checksum, MIME, range and CORS verification passed.
+Final deployment records are in publication-obsidian-ii/deployment-restored.txt;
+its publication.json records preserved game hashes and the worker restoration.
