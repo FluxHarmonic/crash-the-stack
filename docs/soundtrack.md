@@ -82,8 +82,10 @@ row is skipped at the new rate). 32000 keeps 11–16 kHz within 3 dB of the
 full rate; 22050 is 8.6 dB down there and gone above 16 kHz.
 
 Doors: `?music-rate=N` (web) and `--music-rate N` (native) pin a rate;
+`?tune=NAME` / `--music-tune NAME` make every deal pick that tune (the slug of
+`assets/tunes/NAME.cts`) instead of the pool's: David's ear on the host;
 `?trace-at=N` / `--trace-at N` land the next deal's trace at N seconds (the
-arm reads the fill's run-up on a 135 s trace after two shuffles);
+arm reads the fill's run-up on a 190 s trace after a hint and two shuffles);
 `?rate=N` runs the whole AudioContext at N (a measurement door, not for
 play: the cues dull and their ring's milliseconds double).
 
