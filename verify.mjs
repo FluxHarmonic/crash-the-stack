@@ -293,6 +293,33 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
+// t-409696 (the phantom vector-ref, [[topics/sigil-wasm-phantom-vector-ref]]):
+// the sigil wasm runtime PRINTS its type errors with console.log rather than
+// throwing, so nothing carries a stack. Wrap console before any page script
+// runs and emit the JS/wasm stack depth beside each one; the sigil row needs
+// the depth to tell a shadow-stack overflow from a rooting fault. Costs
+// nothing when no error fires.
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+  (function () {
+    var re = /type-error|expected non-negative|expected struct|call stack|Scheme error/;
+    ["log", "error", "warn"].forEach(function (k) {
+      var orig = console[k].bind(console);
+      console[k] = function () {
+        try {
+          var text = Array.prototype.map.call(arguments, String).join(" ");
+          if (re.test(text)) {
+            var stack = "";
+            try { throw new Error("depth"); } catch (e) { stack = String(e.stack || ""); }
+            var frames = stack.split("\\n").slice(2);
+            orig("crash: depth " + frames.length + " | " + text.slice(0, 120) + " | " +
+                 frames.slice(0, 8).map(function (f) { return f.trim().slice(0, 90); }).join(" | "));
+          }
+        } catch (e) { /* never break the page */ }
+        return orig.apply(null, arguments);
+      };
+    });
+  })();
+` });
 // The audio tap (P3 gate leg 3, the web half): before any page script,
 // every AudioNode.connect to a context's destination also feeds an
 // AnalyserNode, and the connecting node's kind is remembered, so the arm
