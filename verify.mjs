@@ -2132,19 +2132,24 @@ async function downTo(order, id, at = 0) {
   else pass("run", `JACK IN opened the hub; DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
 }
 
-// hub (P5, D60): the world moves on the beat and takes one action per
-// beat. ?hub=1&bpm=120 (500 ms a beat): the beat lines come at the clock's
-// pace, not the frame's; two ArrowRight presses 700 ms apart move the
-// runner one cell each, on the next beat, and a third press within the
-// same beat as the second changes nothing extra; Space waits.
+// hub (P5, D60, D65): the world moves on the beat and takes one action per
+// beat. ?hub=1&bpm=120&pace=normal (500 ms a beat): the beat lines come at
+// the clock's pace, not the frame's; two ArrowRight presses 700 ms apart
+// move the runner one cell each, on the next beat, and a third press
+// within the same beat as the second changes nothing extra; and at NORMAL
+// the daemons move on every other beat only (D65: PACE beats between
+// their moves), so no daemon changes cell on a beat line whose beat is
+// even (the line's beat counts the step just taken; the daemons step when
+// the count before it is a multiple of the pace).
 {
   let detail = "";
+  const PACE = 2;   // NORMAL's, (crash hub world) daemon-pace
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120`);
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&pace=normal`);
   const opened = await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, from, 20000);
   if (!opened) detail = "?hub=1 did not open the hub";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
-  const beatLine = /^crash: hub beat (\d+) trace (\d+) (\d+) depth (\d+) cell (\d+)$/;
+  const beatLine = /^crash: hub beat (\d+) trace (\d+) (\d+) depth (\d+) cell (\d+) daemons ([\d,]*)$/;
   let first = null, cells = [];
   if (!detail) {
     const m0 = consoleLines.length;
@@ -2175,11 +2180,21 @@ async function downTo(order, id, at = 0) {
         if (cells.length === 0) detail = "no beat lines after the presses";
         else if (steps.some((s) => s > 1)) detail = `a beat moved the runner ${Math.max(...steps)} cells (${cells.join(" ")})`;
         else if (moved < 2 || moved > 3) detail = `three presses moved the runner on ${moved} beats (${cells.join(" ")}), not two or three`;
+        else {
+          // the daemons' pace: their cells hold on every beat the pace skips
+          const lines = consoleLines.slice(first.index).map((l) => l.match(beatLine)).filter(Boolean);
+          const still = lines.filter((m, i) => i > 0 && (parseInt(m[1], 10) - 1) % PACE !== 0);
+          const wrong = still.filter((m, i) => m[6] !== lines[lines.indexOf(m) - 1][6]);
+          const movedOnce = lines.some((m, i) => i > 0 && m[6] !== lines[i - 1][6]);
+          if (lines.length < 4) detail = `only ${lines.length} beat lines to read the daemons' pace from`;
+          else if (wrong.length) detail = `a daemon moved on beat ${wrong[0][1]}, a beat NORMAL's pace skips (${wrong[0][6]} after ${lines[lines.indexOf(wrong[0]) - 1][6]})`;
+          else if (!movedOnce) detail = `no daemon moved over ${lines.length} beats: the pace check read nothing`;
+        }
       }
     }
   }
   if (detail) fail("hub", detail);
-  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses moved the runner one cell a beat (${cells.join(" ")}): one action per beat`);
+  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses moved the runner one cell a beat (${cells.join(" ")}): one action per beat; the daemons held on every beat NORMAL's pace skips`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says

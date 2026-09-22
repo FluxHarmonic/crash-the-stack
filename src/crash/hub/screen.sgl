@@ -25,7 +25,7 @@
 ;;; Keys: arrows / WASD / HJKL move; Space or . wait; Return or E the
 ;;; context verb (enter on a node, descend on the ladder, the market's
 ;;; panel on the market, else wait); 1 2 3 use cloak, decoy, jam; Escape
-;;; asks the shell for the menu. Taps: an adjacent cell moves there; the
+;;; (or the touch overlay's MENU button) asks the shell for the menu. Taps: an adjacent cell moves there; the
 ;;; runner's own cell is the context verb; a far cell steps once along
 ;;; the shortest path toward it (beat-locked: each beat is the player's,
 ;;; no auto-walk). A hold (a panel here, the shell's pause panel or a
@@ -98,15 +98,16 @@
       (walk default: #f)                ; the d-pad's walk: a direction taken every beat until WAIT or a bump
       (buzz default: #f)                ; a touch-overlay button was pressed this frame (the page vibrates)
       (beats default: 0)
-      (last default: 'wait))
+      (last default: 'wait))            ; the last beat's action; 'idle when nobody asked for it (the late window's)
 
     (define (bpm-of hs)
       (or (hub-screen-bpm-pin hs) (hub-tempo (hub-screen-world hs)) DEFAULT-BPM))
 
     (define (beat-ms-of hs) (/ 60000.0 (bpm-of hs)))
 
-    (define (hub-screen-new run-seed)
-      (let* ((w (hub-new run-seed))
+    ;; A new run's screen; the difficulty as hub-new takes it (NORMAL when none).
+    (define (hub-screen-new run-seed . rest)
+      (let* ((w (apply hub-new run-seed rest))
              (hs (hub-screen world: w prev: w)))
         (hub-screen hs beat-ms: (beat-ms-of hs))))
 
@@ -194,7 +195,8 @@
 
     ;; The touch overlay (coarse pointers): a d-pad under the left thumb
     ;; (four arrows, the center WAIT), ACT and WAIT under the right, the
-    ;; three tools above them. (name x y w h) each, on a view vw wide.
+    ;; three tools above them, MENU at the top right. (name x y w h)
+    ;; each, on a view vw wide.
     (define PAD 44)
     (define (hub-touch-buttons vw)
       (let* ((lx 12) (ly (- BOARD-H (* 3 PAD) 12))
@@ -208,7 +210,8 @@
               (list 'wait (+ rx PAD 8) ry PAD PAD)
               (list 'cloak rx (- ry PAD 8) PAD PAD)
               (list 'decoy (+ rx PAD 8) (- ry PAD 8) PAD PAD)
-              (list 'jam (+ rx (* 2 (+ PAD 8))) (- ry PAD 8) PAD PAD))))
+              (list 'jam (+ rx (* 2 (+ PAD 8))) (- ry PAD 8) PAD PAD)
+              (list 'menu (- vw 12 PAD) 12 PAD 28))))   ; the pause menu (a phone has no Escape)
 
     (define (hub-touch-hit vw vx vy)
       (let loop ((bs (hub-touch-buttons vw)))
@@ -275,6 +278,7 @@
                     (cond ((memq button (list 'up 'down 'left 'right)) (list 'walk button))
                           ((eq? button 'wait) 'stop)
                           ((eq? button 'act) (context-verb w))
+                          ((eq? button 'menu) #f)   ; the tick takes it first
                           (else (list 'use button)))))
               (dir (list 'move dir))
               ((or (pressed? f 'space) (pressed? f KEY-DOT)) 'wait)
@@ -345,7 +349,8 @@
     ;; taken at once (the ledger interstitial is the shell's, later).
     (define (route-request hs)
       (let* ((w (hub-screen-world hs))
-             (r (world-request w)))
+             (r (world-request w))
+             (hs (if r (hub-screen hs walk: #f) hs)))   ; a request or a panel ends the walk
         (cond ((not r) hs)
               ((eq? r 'launch) (hub-screen hs request: 'launch))
               ((eq? r 'market) (hub-screen hs world: (world w request: #f) panel: 'market panel-row: 0))
@@ -367,7 +372,9 @@
     (define (panel-tick hs f)
       (let* ((click (input-frame-click f))
              (hit (and click (hub-panel-hit hs VIEW-PX-W (car click) (cdr click))))
+             (hit (if (and hit (menu-tap? hs f)) 'menu hit))
              (f (cond ((not hit) f)
+                      ((eq? hit 'menu) (make-input-frame (list 'escape) '() #f))
                       ((eq? hit 'default) (make-input-frame (list (if (eq? (hub-screen-panel hs) 'market) 'escape 'return)) '() #f))
                       (else (make-input-frame (list 'return) '() #f))))
              (hs (if (and hit (pair? hit)) (hub-screen hs panel-row: (cdr hit)) hs)))
@@ -391,15 +398,21 @@
                (cond ((pressed? f 'return)
                       ;; RECONNECT: the layer regrows (D23)
                       (let ((w2 (hub-severed-layer w)))
-                        (hub-screen hs world: w2 prev: w2 tween: 1.0 panel: #f clock: 0.0
+                        (hub-screen hs world: w2 prev: w2 tween: 1.0 panel: #f clock: 0.0 walk: #f
                                     toasts: (append (toasts-for w2) (hub-screen-toasts hs)))))
-                     ((pressed? f 'escape) (hub-screen hs request: 'menu))   ; JACK OUT: the run holds as it stands
+                     ((pressed? f 'escape) (hub-screen hs request: 'jack-out))   ; JACK OUT: the main menu, the run held for CONTINUE
                      (else hs)))
               ((eq? panel 'done)
                (if (or (pressed? f 'return) (pressed? f 'escape))
-                   (hub-screen hs request: 'menu)
+                   (hub-screen hs request: 'finished)   ; the run ends: the shell forgets it and opens the main menu
                    hs))
               (else hs))))
+
+    ;; The touch overlay's MENU button under the pointer.
+    (define (menu-tap? hs f)
+      (let ((click (input-frame-click f)))
+        (and click (hub-screen-touch? hs)
+             (eq? (hub-touch-hit VIEW-PX-W (car click) (cdr click)) 'menu))))
 
     (define (tick-toasts toasts dt)
       (filter-map (lambda (t)
@@ -413,8 +426,9 @@
              (hs (hub-screen hs tween: (min 1.0 (+ (hub-screen-tween hs) (/ dt (hub-screen-beat-ms hs)))))))
         (cond ((hub-screen-panel hs) (panel-tick hs f))
               ((hub-screen-request hs) hs)                ; waiting on the shell
-              ((pressed? f 'escape) (hub-screen hs request: 'menu))
+              ((or (pressed? f 'escape) (menu-tap? hs f)) (hub-screen hs request: 'menu walk: #f buzz: (menu-tap? hs f)))
               ((hub-screen-held? hs) hs)
+              ((> dt (* MAX-CATCH-UP (hub-screen-beat-ms hs))) hs)   ; a stall longer than the catch-up: the clock holds, nothing steps
               (else
                (let* ((raw (screen-action-for hs f))
                       (click (input-frame-click f))
@@ -428,13 +442,20 @@
                       (action (cond ((and (pair? raw) (eq? (car raw) 'walk)) (list 'move (cadr raw)))
                                     ((eq? raw 'stop) 'wait)
                                     (else raw)))
-                      ;; the late window: a press just after a wait beat is that beat's
+                      ;; the late window: a press just after an idle beat (one nobody asked
+                      ;; for; a deliberate WAIT stands) is that beat's: the beat is re-stepped
+                      ;; from the previous world, its toasts dropped for the new step's
                       (hs (if (and action
-                                   (eq? (hub-screen-last hs) 'wait)
+                                   (eq? (hub-screen-last hs) 'idle)
                                    (> (hub-screen-beats hs) 0)
                                    (< (+ (hub-screen-clock hs) dt) (* LATE-WINDOW (hub-screen-beat-ms hs)))   ; the press lands at clock + dt
                                    (not (world-request (hub-screen-prev hs))))
-                              (let ((late (beat (hub-screen hs world: (hub-screen-prev hs) beats: (- (hub-screen-beats hs) 1)) action)))
+                              (let* ((stale (length (toasts-for (hub-screen-world hs))))
+                                     (toasts (hub-screen-toasts hs))
+                                     (late (step-beat (hub-screen hs world: (hub-screen-prev hs)
+                                                                  beats: (- (hub-screen-beats hs) 1)
+                                                                  toasts: (drop toasts (min stale (length toasts))))
+                                                      action #f)))
                                 (hub-screen late queued: #f tween: (hub-screen-tween hs)))
                               (if action (hub-screen hs queued: action) hs)))
                       (clock (+ (hub-screen-clock hs) dt)))
@@ -444,26 +465,34 @@
                             (hub-screen hs clock: (if (or (hub-screen-request hs) (hub-screen-panel hs)) 0.0 clock)))
                            ((= n MAX-CATCH-UP) (hub-screen hs clock: 0.0))
                            (else
-                            (let* ((action (or (hub-screen-queued hs)
-                                               (let ((d (direction-held f))) (and d (list 'move d)))
-                                               (let ((d (hub-screen-walk hs))) (and d (list 'move d)))
-                                               'wait))
-                                   (hs (beat hs action))
-                                   (hs (if (any (lambda (e) (and (pair? e) (eq? (car e) 'bump))) (world-events (hub-screen-world hs)))
-                                           (hub-screen hs walk: #f)
-                                           hs))
-                                   (hs (hub-screen hs beat-ms: (beat-ms-of hs))))
+                            (let* ((asked (or (hub-screen-queued hs)
+                                              (let ((d (direction-held f))) (and d (list 'move d)))
+                                              (let ((d (hub-screen-walk hs))) (and d (list 'move d)))))
+                                   (hs (step-beat hs (or asked 'wait) (not asked))))
                               (loop hs (- clock beat-ms) (+ n 1))))))))))))
 
-    ;; DISCONNECT on the board: held at its node, the runner back in the world.
-    (define (hub-screen-hold-board hs)
-      (let ((w (hub-hold-board (hub-screen-world hs))))
+    (define (drop l n) (if (= n 0) l (drop (cdr l) (- n 1))))
+
+    ;; One beat as the tick takes it: the step, a bump ends the walk, the
+    ;; tempo may have changed; an idle beat (no one asked) reads 'idle in
+    ;; `last`, for the late window.
+    (define (step-beat hs action idle?)
+      (let* ((hs (beat hs action))
+             (hs (if idle? (hub-screen hs last: 'idle) hs))
+             (hs (if (any (lambda (e) (and (pair? e) (eq? (car e) 'bump))) (world-events (hub-screen-world hs)))
+                     (hub-screen hs walk: #f)
+                     hs)))
+        (hub-screen hs beat-ms: (beat-ms-of hs))))
+
+    ;; DISCONNECT on the board: held at its node (with its heat), the runner back in the world.
+    (define (hub-screen-hold-board hs . rest)   ; rest: the board's heat, as hub-hold-board takes it
+      (let ((w (apply hub-hold-board (hub-screen-world hs) rest)))
         (route-request (hub-screen hs world: w prev: w tween: 1.0 request: #f clock: 0.0
                                    toasts: (append (toasts-for w) (hub-screen-toasts hs))))))
 
     ;; A board's outcome back into the world (the shell, after a launch).
     (define (hub-screen-return hs outcome)
       (let* ((w (hub-return (hub-screen-world hs) outcome))
-             (hs (hub-screen hs world: w prev: w tween: 1.0 request: #f clock: 0.0
+             (hs (hub-screen hs world: w prev: w tween: 1.0 request: #f clock: 0.0 walk: #f
                              toasts: (append (toasts-for w) (hub-screen-toasts hs)))))
         (route-request hs)))))

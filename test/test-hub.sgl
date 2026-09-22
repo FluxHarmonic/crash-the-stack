@@ -19,6 +19,11 @@
 (define (world-of text depth)
   (hub-with-layer (world run-seed: 1) (text->layer text) depth 0))
 
+;; The same at ELITE: the daemons move every beat (D65), which the daemon
+;; mechanics' tests count on.
+(define (elite-world-of text depth)
+  (world (world-of text depth) difficulty: 'elite))
+
 (define (cell w x y) (idx x y (layer-width (world-layer w))))
 
 (define (runner-at w) (runner-cell (world-runner w)))
@@ -296,8 +301,8 @@
                  "############"))
 
 (test-group "hub: patrols, sight and the ICE on the beat"
-  (test "a daemon walks its route one cell a beat, facing where it goes, and wraps"
-    (let* ((w (world-of HALL 1))
+  (test "a daemon walks its route one cell a beat (at ELITE), facing where it goes, and wraps"
+    (let* ((w (elite-world-of HALL 1))
            (a (cell w 5 3))
            (w (patrol w (list a (+ a 1) (+ a 2) (+ a 1))))
            (w1 (hub-step w 'wait))
@@ -311,6 +316,27 @@
       (assert-equal 'left (daemon-facing (daemon-of w3 0)))
       (assert-equal a (daemon-cell (daemon-of w4 0)))
       (assert-equal 0 (daemon-step (daemon-of w4 0)))))
+  (test "the daemons' pace by difficulty (D65): once a bar at EASY, every other beat at NORMAL, every beat at ELITE; the runner acts every beat regardless"
+    (let* ((w0 (world-of HALL 1))
+           (a (cell w0 5 3))
+           (w0 (patrol w0 (list a (+ a 1) (+ a 2) (+ a 3) (+ a 2) (+ a 1))))
+           (w0 (world w0 runner: (runner (world-runner w0) cloak: 100)))   ; unseen: the patrol alone
+           (at (lambda (difficulty n)
+                 (let loop ((w (world w0 difficulty: difficulty)) (k 0) (acc '()))
+                   (if (= k n)
+                       (reverse acc)
+                       (let ((w (hub-step w (list 'move 'right))))
+                         (loop w (+ k 1) (cons (- (daemon-cell (daemon-of w 0)) a) acc))))))))
+      (assert-equal 'normal (world-difficulty w0))
+      (assert-equal 2 (daemon-pace 'normal))
+      (assert-equal BEATS-PER-BAR (daemon-pace 'easy))
+      (assert-equal 1 (daemon-pace 'elite))
+      (assert-equal '(1 2 3 2) (at 'elite 4))
+      (assert-equal '(1 1 2 2 3 3) (at 'normal 6))
+      (assert-equal '(1 1 1 1 2 2 2 2) (at 'easy 8))
+      ;; the runner's own pace never changes
+      (let ((easy (steps (world w0 difficulty: 'easy) (list (list 'move 'right) (list 'move 'right)))))
+        (assert-equal (cell easy 3 1) (runner-at easy)))))
   (test "the fan: SIGHT ahead, no wider than deep, walls block it, the four neighbors always"
     (let* ((w (world-of HALL 1))
            (l (world-layer w))
@@ -357,8 +383,8 @@
       (assert-false (daemon-alert (daemon-of w2 0)))
       (assert-equal 'quiet (hub-alert w2))
       (assert-equal (descriptor-calm-bpm (descriptor-at 1)) (hub-tempo w2))))
-  (test "a hunting daemon steps toward its target and gives up after ALERT-BEATS, walking home"
-    (let* ((w (world-of HALL 1))
+  (test "a hunting daemon steps toward its target and gives up after ALERT-BEATS, walking home (at ELITE)"
+    (let* ((w (elite-world-of HALL 1))
            (a (cell w 5 3))
            (w (patrol w (list a (+ a 1))))
            (w (world w runner: (runner cell: (cell w 8 3) cloak: 100)))   ; unseen from here on
@@ -551,7 +577,7 @@
         (assert-equal 'launch (world-request w3))
         (assert-false (= (spec-seed (launch-spec l1)) (spec-seed (launch-spec l2)))))))
   (test "a node's effects: dark ICE for good, a gate opened, a daemon's route collapsed"
-    (let* ((w (world-of "#########\n#@S~R.!.#\n#########" 1))
+    (let* ((w (elite-world-of "#########\n#@S~R.!.#\n#########" 1))
            (ice (cell w 3 1))
            (gate (cell w 4 1))
            (w (world w daemons: (list (daemon (daemon-of w 0) route: (vector (cell w 6 1) (cell w 7 1))))))

@@ -189,6 +189,7 @@
     (define *bg-rsteps* #f)     ; --react-steps N
     (define *demo* #f)          ; --demo cleared: the cleared sequence on demand (the web shell's ?demo=)
     (define *hub-seed* #f)      ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
+    (define *pace* 'normal)     ; --pace easy|normal|elite: the difficulty of a run --hub or a code starts (D65)
     (define *demo-armed* #f)
     (define *no-save* #f)       ; the demo's board or deal never reaches the store (nor a fake BEST record)
     (define *code* #f)          ; --code: a share code to deal at boot (P4)
@@ -410,8 +411,13 @@
             (stage a screen: 'stack session: s fx: (fx-new)))))
 
     ;; The live board's share code for the pause menu, or #f.
+    ;; The run held for CONTINUE shows its own code (P5); else the table up, else
+    ;; the one the store names.
     (define (live-code a)
-      (case (if (memq (stage-screen a) (list 'stack 'cards)) (stage-screen a) (active-game))
+      (case (cond ((and (not (memq (stage-screen a) (list 'stack 'cards))) (hub-run-in-force)) 'run)
+                  ((memq (stage-screen a) (list 'stack 'cards)) (stage-screen a))
+                  (else (active-game)))
+        ((run) (hub-run-code))
         ((stack) (let ((s (stage-session a))) (and s (not (board-cleared? (session-board s))) (encode (session-spec s)))))
         ((cards) (let ((d (stage-deal a))) (and d (not (deal-won? d)) (encode (deal-spec d)))))
         (else #f)))
@@ -470,7 +476,9 @@
               ((memq choice (list 'disconnect 'back-to-menu))
                ;; DISCONNECT on a hub-launched board: held at its node, the runner back in the world (ruled 2026-09-22)
                (if (and (eq? choice 'disconnect) (memq (stage-screen a) (list 'stack 'cards))
-                        (hub-run-hold! (if (eq? (stage-screen a) 'cards) 'cards 'stack)))
+                        (if (eq? (stage-screen a) 'cards)
+                            (hub-run-hold! 'cards (deal-trace (stage-deal a)))
+                            (hub-run-hold! 'stack (session-trace (stage-session a)))))
                    (open-hub (close-overlay a))
                    (open-menu (close-overlay a))))
               (else a))))
@@ -480,11 +488,12 @@
              overlay: #f
              screen: 'menu
              menu: (let ((m (launch-menu #f
-                                (and (case (active-game)
-                                       ((stack) (stage-session a))
-                                       ((cards) (stage-deal a))
-                                       (else #f))
-                                     #t)
+                                (or (and (hub-run-in-force) #t)   ; P5: a live hub run continues
+                                    (and (case (active-game)
+                                           ((stack) (stage-session a))
+                                           ((cards) (stage-deal a))
+                                           (else #f))
+                                         #t))
                                 #f
                                 (live-code a)
                                 #f          ; no COPY natively (no clipboard)
@@ -515,14 +524,16 @@
 
     ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
-    ;; JACK IN: a hub run from the seed, layer 1, the field seeded by the run.
-    (define (jack-in a seed lay model)
-      (hub-run-start! seed)
-      (display "crash: run start ") (display seed) (display " ") (display (hub-run-code)) (newline)
+    ;; JACK IN: a hub run from the seed at a difficulty (D65: the menu's pick;
+    ;; a run code or --hub takes --pace), layer 1, the field seeded by the run.
+    (define (jack-in a seed difficulty lay model)
+      (hub-run-start! seed difficulty)
+      (display "crash: run start ") (display seed) (display " ") (display (hub-run-code)) (display " ") (display difficulty) (newline)
       (open-hub a))
 
     ;; The hub screen up (a new run, a return from a board, CONTINUE).
     (define (open-hub a)
+      (set! *layer-cleared* #f)   ; a board left during its cascade does not carry its clear into the next board
       (let ((w (hub-screen-world (hub-run-in-force))))
         (display "crash: hub open ") (display (world-depth w)) (display " ") (display (world-beat w)) (newline)
         (stage (field-for-deal a (world-run-seed w)) screen: 'hub overlay: #f)))
@@ -553,18 +564,29 @@
            ;; the pause panel over the world (P5): RESUME, SETTINGS, DISCONNECT = RUN HELD
            (display "crash: pause on") (newline)
            (stage a overlay: (menu-new-overlay 'hub #t (settings-in-force) #f #f)))
+          ((jack-out)   ; the severed panel's JACK OUT: the main menu, the run held for CONTINUE
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           (display "crash: run jack-out") (newline)
+           (open-menu a))
+          ((finished)   ; RUN COMPLETE: the run is over, the store forgets it, the main menu
+           (display "crash: run complete") (newline)
+           (set-run! #f)
+           (open-menu a))
           (else a))))
 
     ;; NEXT or RETRY came out of a table inside a run: the board's outcome is
     ;; in the world already (a clear at the clear, run-clear-line!; a sever
     ;; here) and the hub comes back up. Outside a run the dealt board stands.
+    ;; A board left any other way (NEW STACK, ctrl+n, NEXT before the clear)
+    ;; is severed too: the launch still pending is the sign, and a re-deal
+    ;; of the same node without the sever would be a free retry (the phase-2
+    ;; review, 2026-09-22).
     (define (run-request a request lay model)
       (let ((r (run-in-force)))
         (cond ((not r) a)
               (else
-               (when (eq? request 'retry)
-                 (when (hub-run-severed! (if (eq? (stage-screen a) 'cards) 'cards 'stack))
-                   (display "crash: run reconnect") (newline)))
+               (when (hub-run-severed! (if (eq? (stage-screen a) 'cards) 'cards 'stack))
+                 (display "crash: run reconnect") (newline))
                (display "crash: run back") (newline)
                (open-hub a)))))
 
@@ -589,7 +611,7 @@
                 (let ((sp (cdr choice)))
                   (display "crash: code read ") (display (encode sp)) (display " ") (display (spec-table sp)) (newline)
                   (if (eq? (spec-table sp) 'run)
-                      (jack-in a (spec-seed sp) lay model)
+                      (jack-in a (spec-seed sp) *pace* lay model)
                       (begin (set-run! #f) (open-spec a sp lay model)))))
                (else a)))
             (else
@@ -600,7 +622,7 @@
                     (case (active-game)
                     ((cards) (open-cards a seed fresh? #t))
                     (else (open-stack a lay seed fresh? model #t)))))
-               ((jack-in) (jack-in a (now-second) lay model))
+               ((easy normal elite) (jack-in a (now-second) choice lay model))   ; JACK IN's pick (D65)
                ((stack) (free-play a 'stack lay seed fresh? model))
                ((cards) (free-play a 'cards lay seed fresh? model))
                ((daily-stack) (set-run! #f) (open-spec a (daily-spec 'stack) lay model))
@@ -731,11 +753,11 @@
                           (cond ((and *code* (decode *code*))
                                  (let ((sp (decode *code*)))
                                    (if (eq? (spec-table sp) (quote run))
-                                       (jack-in (open-menu fresh) (spec-seed sp) lay model)
+                                       (jack-in (open-menu fresh) (spec-seed sp) *pace* lay model)
                                        (begin (set-run! #f)   ; a code's board ends a run (the review)
                                               (open-spec (open-menu fresh) sp lay model)))))
                                 (*code* (display "crash: code refused ") (display *code*) (newline) (open-menu fresh))
-                                (*hub-seed* (jack-in (open-menu fresh) *hub-seed* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
+                                (*hub-seed* (jack-in (open-menu fresh) *hub-seed* *pace* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
                                 (cards?
                                  (open-cards (open-menu fresh) seed fresh? #t))
                                 (else (open-menu fresh))))))
@@ -1092,7 +1114,9 @@
         (set! *bg-rsteps* (let ((n (arg-value args "--react-steps" #f))) (and n (string->number n))))
         (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") (quote cleared)))
         (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
-        (set! *hub-seed* (let ((h (arg-value args "--hub" #f))) (and h (string->number h))))   ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
+        (set! *pace* (let ((p (arg-value args "--pace" #f))) (if (and p (difficulty? (string->symbol p))) (string->symbol p) 'normal)))
+        (set! *hub-seed* (let* ((h (arg-value args "--hub" #f)) (n (and h (string->number h))))
+                           (and n (exact? n) (integer? n) (>= n 0) (min SEED-MAX (max 1 n)))))   ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
         (hub-run-bpm! (arg-value args "--bpm" #f))   ; --bpm N: the hub's clock pinned (P5, until M1's player)
         (set! *fresh* fresh?)
         (when fresh? (hub-run-forget-store!))   ; the stored hub run is not offered on a fresh boot (P5)

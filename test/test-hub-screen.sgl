@@ -46,14 +46,18 @@
       (let ((hs (hub-screen-tick hs 250.0 IDLE)))
         (assert-equal 1 (hub-screen-beats hs))
         (assert-equal 1 (world-beat (hub-screen-world hs)))
-        (assert-equal 'wait (hub-screen-last hs))
+        (assert-equal 'idle (hub-screen-last hs))            ; nobody asked for the wait
         (assert-true (< (abs (- 50.0 (hub-screen-clock hs))) 0.001)))))
-  (test "a long frame steps several beats, at most MAX-CATCH-UP"
+  (test "a long frame steps several beats, at most MAX-CATCH-UP; a stall longer than that holds the clock"
     (let ((hs (hub-screen-tick (screen-of ROOM) 1600.0 IDLE)))
       (assert-equal 3 (hub-screen-beats hs)))
-    (let ((hs (hub-screen-tick (screen-of ROOM) 10000.0 IDLE)))
+    (let ((hs (hub-screen-tick (screen-of ROOM) 2000.0 IDLE)))
       (assert-equal MAX-CATCH-UP (hub-screen-beats hs))
-      (assert-equal 0.0 (hub-screen-clock hs))))
+      (assert-equal 0.0 (hub-screen-clock hs)))
+    (let* ((hs (idle (screen-of ROOM) 100.0 1))
+           (stalled (hub-screen-tick hs 10000.0 IDLE)))
+      (assert-equal 0 (hub-screen-beats stalled))
+      (assert-equal 100.0 (hub-screen-clock stalled))))
   (test "the tempo follows the world: unpinned, the tense bpm once a daemon hunts"
     (let* ((w0 (hub-with-layer (world run-seed: 1) (text->layer "#######\n#@..!.#\n#######") 1 0))
            (w (world w0 daemons: (list (daemon (car (world-daemons w0)) facing: 'left))))   ; facing the runner
@@ -92,7 +96,24 @@
       (let* ((hs (idle (screen-of ROOM) 500.0 1))
              (on-time (hub-screen-tick hs 250.0 (frame 'right))))
         (assert-equal (cell hs 1 1) (runner-at on-time))
-        (assert-equal (list 'move 'right) (hub-screen-queued on-time)))))
+        (assert-equal (list 'move 'right) (hub-screen-queued on-time)))
+      ;; a deliberate WAIT stands: the press after it is the next beat's
+      (let* ((hs (hub-screen-tick (screen-of ROOM) 100.0 (frame 'space)))
+             (hs (hub-screen-tick hs 400.0 IDLE))
+             (after (hub-screen-tick hs 100.0 (frame 'right))))
+        (assert-equal 'wait (hub-screen-last hs))
+        (assert-equal 1 (hub-screen-beats after))
+        (assert-equal (cell hs 1 1) (runner-at after))
+        (assert-equal (list 'move 'right) (hub-screen-queued after)))))
+  (test "the late window drops the replaced beat's toasts and keeps the new step's"
+    (let* ((w0 (hub-with-layer (world run-seed: 1) (text->layer "#######\n#@..!.#\n#######") 1 0))
+           (w (world w0 daemons: (list (daemon (car (world-daemons w0)) facing: 'left))))   ; facing the runner: seen on the first beat
+           (hs (hub-screen-with-bpm (hub-screen world: w prev: w) 120))
+           (seen (hub-screen-tick hs 500.0 IDLE))
+           (late (hub-screen-tick seen 100.0 (frame 'left))))   ; re-stepped with a bump into the wall: still seen
+      (assert-equal 1 (length (filter (lambda (t) (string=? (toast-text t) "SEEN. TRACE SPIKED.")) (hub-screen-toasts seen))))
+      (assert-equal 1 (hub-screen-beats late))
+      (assert-equal 1 (length (filter (lambda (t) (string=? (toast-text t) "SEEN. TRACE SPIKED.")) (hub-screen-toasts late))))))
   (test "a held arrow walks one cell a beat while nothing else is queued"
     (let* ((hs (screen-of ROOM))
            (hs (idle-with hs (held-frame 'right) 250.0 4)))
@@ -111,12 +132,18 @@
         ;; held on the request: beats do not pass
         (let ((held (idle hs 500.0 3)))
           (assert-equal (hub-screen-beats hs) (hub-screen-beats held))))))
-  (test "Escape asks the shell for the menu; the request is taken once"
+  (test "Escape asks the shell for the menu; the request is taken once; a walk ends there"
     (let* ((hs (hub-screen-tick (screen-of ROOM) 10.0 (frame 'escape))))
       (assert-equal 'menu (hub-screen-request hs))
       (let ((taken (hub-screen-take-request hs)))
         (assert-equal 'menu (car taken))
-        (assert-false (hub-screen-request (cdr taken)))))))
+        (assert-false (hub-screen-request (cdr taken)))))
+    (let* ((hs (hub-screen-with-touch (screen-of ROOM) #t))
+           (b (assq 'right (hub-touch-buttons VIEW-PX-W)))
+           (hs (hub-screen-tick hs 10.0 (tap-frame (+ (cadr b) 10) (+ (caddr b) 10))))
+           (hs (hub-screen-tick hs 10.0 (frame 'escape))))
+      (assert-equal 'menu (hub-screen-request hs))
+      (assert-false (hub-screen-walk hs)))))
 
 (define (idle-with hs f dt n)
   (if (= n 0) hs (idle-with (hub-screen-tick hs dt f) f dt (- n 1))))
@@ -160,7 +187,7 @@
       (assert-equal 'severed (hub-screen-panel hs))
       (assert-equal 'severed (world-request (hub-screen-world hs)))
       (let ((jack-out (hub-screen-tick hs 10.0 (frame 'escape))))
-        (assert-equal 'menu (hub-screen-request jack-out))
+        (assert-equal 'jack-out (hub-screen-request jack-out))
         (assert-equal 'severed (hub-screen-panel jack-out)))
       (let ((re (hub-screen-tick hs 10.0 (frame 'return))))
         (assert-false (hub-screen-panel re))
@@ -175,8 +202,10 @@
            (hs (hub-screen-tick hs 500.0 (frame 'return))))
       (assert-equal 'launch (hub-screen-request hs))
       (let* ((hs (cdr (hub-screen-take-request hs)))
+             (hs (hub-screen hs walk: 'right))   ; a walk that led onto the node
              (hs (hub-screen-return hs (list 'cleared 60 20 0.1 '()))))
         (assert-false (hub-screen-request hs))
+        (assert-false (hub-screen-walk hs))       ; the return does not walk on
         (assert-equal 'cleared (node-state (world-node (hub-screen-world hs) 0)))
         (assert-equal (list 'red) (world-keys (hub-screen-world hs)))
         (let ((before (hub-screen-beats hs))
@@ -190,7 +219,12 @@
       (assert-equal 3 (world-depth (hub-screen-world hs)))
       (assert-equal 40 (world-credits (hub-screen-world hs)))
       (assert-false (hub-screen-panel hs))
-      (assert-equal 1 (ledger-cleared (world-ledger (hub-screen-world hs)))))))
+      (assert-equal 1 (ledger-cleared (world-ledger (hub-screen-world hs))))))
+  (test "RUN COMPLETE: Return asks the shell to finish the run"
+    (let* ((hs (hub-screen-new 3))
+           (hs (hub-screen hs panel: 'done))
+           (hs (hub-screen-tick hs 10.0 (frame 'return))))
+      (assert-equal 'finished (hub-screen-request hs)))))
 
 (test-group "hub screen: taps on the panels and the touch overlay"
   (test "a tap anywhere on the severed panel reconnects; a tap on a market row picks it, one elsewhere closes the market"
@@ -233,7 +267,7 @@
             (assert-equal (cell hs 4 1) (runner-at hs)))))
       ;; the walk ends at a wall
       (let* ((hs (hub-screen-tick hs 10.0 (tap-frame (car right) (cdr right))))
-             (hs (idle hs 500.0 8)))   ; six moves to the wall, the seventh bumps, the eighth stands
+             (hs (idle hs 500.0 8)))   ; three moves to the wall, the fourth bumps, the rest stand
         (assert-equal (cell hs 7 1) (runner-at hs))
         (assert-false (hub-screen-walk hs))))
     (let* ((hs (hub-screen-with-touch (screen-of "#####\n#@S.#\n#####") #t))
@@ -246,7 +280,21 @@
       (let* ((hs (hub-screen-tick hs 500.0 (frame 'right)))
              (act (center 'act))
              (hs (hub-screen-tick hs 500.0 (tap-frame (car act) (cdr act)))))
-        (assert-equal 'launch (hub-screen-request hs))))))
+        (assert-equal 'launch (hub-screen-request hs)))))
+  (test "the MENU button asks for the menu, under a panel it is Escape (never a stray RECONNECT)"
+    (let* ((hs (hub-screen-with-touch (screen-of ROOM) #t))
+           (b (assq 'menu (hub-touch-buttons VIEW-PX-W)))
+           (menu (hub-screen-tick hs 10.0 (tap-frame (+ (cadr b) 10) (+ (caddr b) 10)))))
+      (assert-equal 'menu (hub-screen-request menu))
+      (assert-true (hub-screen-buzz menu))
+      (let* ((budget (descriptor-budget (descriptor-at 1)))
+             (hs (hub-screen-with-touch (hub-screen-new 3) #t))
+             (hs (hub-screen hs world: (world (hub-screen-world hs) trace: (- budget 1))))
+             (hs (hub-screen-tick hs (hub-screen-beat-ms hs) IDLE))
+             (out (hub-screen-tick hs 10.0 (tap-frame (+ (cadr b) 10) (+ (caddr b) 10)))))
+        (assert-equal 'severed (hub-screen-panel hs))
+        (assert-equal 'jack-out (hub-screen-request out))
+        (assert-equal 0 (world-attempt (hub-screen-world out)))))))
 
 (test-group "hub screen: hold to walk"
   (test "the release ends a walk; a tap's own move still lands on the next beat"

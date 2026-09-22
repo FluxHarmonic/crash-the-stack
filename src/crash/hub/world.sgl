@@ -25,6 +25,7 @@
           BEATS-PER-BAR SIGHT RUNNER-SIGHT SEEN-SPIKE ICE-SPIKE CONTACT-FACTOR
           ALERT-BEATS CLOAK-BEATS DECOY-BEATS JAM-BEATS JAM-RADIUS
           TENSE-AT HUNTED-AT ALERT-AT CARRY HIGH
+          DIFFICULTIES difficulty? daemon-pace HELD-ALERT-AT
           KEY-COLORS TOOLS tool-scope tool-table hub-tool? board-tool? tool-known?
           PRICES hub-tool-price
           ;; --- cells ---
@@ -41,7 +42,7 @@
           LAYERS layer-count descriptor-at
           ;; --- the layer ---
           node node? node-index node-cell node-table node-bounty node-key node-effect node-effect-arg node-loot
-          node-required? node-state node-attempts
+          node-required? node-state node-attempts node-heat
           daemon daemon? daemon-index daemon-cell daemon-facing daemon-route daemon-step daemon-alert daemon-hunting daemon-returning?
           layer layer? layer-depth layer-seed layer-width layer-height layer-cells layer-gates
           layer-nodes layer-caches layer-daemons layer-entry layer-exit layer-rooms layer-market layer-try
@@ -50,7 +51,7 @@
           runner runner? runner-cell runner-facing runner-cloak
           ledger ledger? ledger-cleared ledger-beats ledger-moves ledger-reconnects
           ledger-severed-layers ledger-seen ledger-credits
-          world world? world-run-seed world-depth world-attempt world-layer world-runner
+          world world? world-run-seed world-difficulty world-depth world-attempt world-layer world-runner
           world-nodes world-daemons world-keys world-opened world-taken world-dark world-decoys
           world-inventory world-credits world-layer-credits world-trace world-beat world-ledger world-seen world-seen?
           world-request world-events world-done?
@@ -60,6 +61,16 @@
     ;; --- the tuning block (placeholders; the auto-player row sweeps them) ---
 
     (define BEATS-PER-BAR 4)        ; the ICE pulses on the bar's first beat
+    ;; The difficulty, chosen at JACK IN and kept by the run (D65): the
+    ;; runner always acts once a beat; the daemons move once a bar on EASY,
+    ;; every other beat on NORMAL, every beat on ELITE.
+    (define DIFFICULTIES (list 'easy 'normal 'elite))
+    (define (difficulty? d) (and (memq d DIFFICULTIES) #t))
+    (define (daemon-pace difficulty)   ; beats between daemon moves
+      (cond ((eq? difficulty 'easy) BEATS-PER-BAR)
+            ((eq? difficulty 'elite) 1)
+            (else 2)))
+    (define HELD-ALERT-AT 0.5)      ; a board held this hot (its trace against its trace-at) counts as alerted: a daemon drifts to the node
     (define SIGHT 4)                ; a daemon's fan reaches this many cells ahead
     (define RUNNER-SIGHT 7)         ; the runner sees this far (Euclidean), with line of sight: fog and light are one system (D61)
     (define SEEN-SPIKE 30)          ; the trace when a daemon sees the runner
@@ -242,7 +253,8 @@
       (loot default: #f)
       (required? default: #f)
       (state default: 'sealed)
-      (attempts default: 0))
+      (attempts default: 0)
+      (heat default: 0.0))            ; a held board's trace against its trace-at, 0..1 (D65: the cabinet shows it)
 
     ;; A daemon on patrol. route: a vector of cells walked in a cycle;
     ;; step: the index it stands at. alert: #f, or (target . ttl) while it
@@ -320,6 +332,7 @@
     ;; and the dump.
     (define-struct world
       (run-seed default: 1)
+      (difficulty default: 'normal)   ; the run's, chosen at JACK IN (D65)
       (depth default: 1)
       (attempt default: 0)
       (layer default: #f)

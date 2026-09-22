@@ -183,6 +183,7 @@
     (define *screen* 'menu)  ; menu | stack | cards | hub (P5)
     (define *hub-seed* #f)   ; ?hub=SEED: JACK IN at boot with this run seed (P5; the arms)
     (define *hub-at* #f)     ; &hubat=N: the runner set down on key node N after the jack in (P5; the arms)
+    (define *pace* 'normal)  ; &pace=easy|normal|elite: the difficulty of a run the doors start (D65; the arms)
     (define *overlay* #f)    ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
     (define *menu* #f)       ; the first screen, (crash menu)
     (define *update* #f)     ; waiting | prompt | #f: the page's word on a new version
@@ -865,7 +866,8 @@
     ;; (measured 2026-09-17: under load "dr" arrived as "rd" and picked
     ;; nothing).
     (define (input-this-frame)
-      (let ((f (make-input-frame (append (reverse *pressed*) (if *pointer-up* (list 'pointer-up) '()))   ; the release as a pseudo-key (P5)
+      (let ((f (make-input-frame (append (reverse *pressed*)
+                                         (if (and *pointer-up* (eq? *screen* 'hub)) (list 'pointer-up) '()))   ; the release as the hub's pseudo-key (P5): on a board it would read as a key
                                  (filter (lambda (k) (or (memq k MODIFIERS) (memq k HUB-HELD-KEYS)))   ; the hub walks on a held arrow (P5)
                                          *keys*)
                                  *click*)))
@@ -1469,7 +1471,9 @@
                ;; DISCONNECT on a hub-launched board: the board is held at its node and the
                ;; runner is back in the world there (ruled 2026-09-22); else the main menu
                (if (and (eq? choice 'disconnect) (memq *screen* (list 'stack 'cards))
-                        (hub-run-hold! (if (eq? *screen* 'cards) 'cards 'stack)))
+                        (if (eq? *screen* 'cards)
+                            (hub-run-hold! 'cards (deal-trace *deal*))
+                            (hub-run-hold! 'stack (session-trace *session*))))
                    (open-hub!)
                    (open-menu!)))
               (else #f)))
@@ -1498,8 +1502,12 @@
     ;; here sees every one of them.
     ;; The live board's share code for the pause menu, or #f.
     (define (live-code)
-      ;; the table up, else the one the store names (the pause menu after a table)
-      (case (if (memq *screen* (list 'stack 'cards)) *screen* (active-game))
+      ;; the run held for CONTINUE shows its own code (P5); else the table up, else
+      ;; the one the store names (the pause menu after a table)
+      (case (cond ((and (not (memq *screen* (list 'stack 'cards))) (hub-run-in-force)) 'run)
+                  ((memq *screen* (list 'stack 'cards)) *screen*)
+                  (else (active-game)))
+        ((run) (hub-run-code))
         ((stack) (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
         ((cards) (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
         (else #f)))
@@ -1651,10 +1659,12 @@
     ;; its first layer dealt.
     ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
-    ;; JACK IN: a hub run from the seed, layer 1, the field seeded by the run.
-    (define (jack-in! seed)
-      (hub-run-set! (hub-screen-with-touch (hub-run-start! seed) *touch*))   ; the touch overlay on a coarse pointer
-      (say "run" "start" seed (hub-run-code))
+    ;; JACK IN: a hub run from the seed at a difficulty (D65: the menu's pick;
+    ;; a run code or a door takes &pace=), layer 1, the field seeded by the run.
+    ;;   crash: run start SEED CODE DIFFICULTY
+    (define (jack-in! seed difficulty)
+      (hub-run-set! (hub-run-start! seed difficulty))
+      (say "run" "start" seed (hub-run-code) difficulty)
       (open-hub!))
 
     ;; &hubat=N: the runner set down on key node N (the arms: a walk is seed-specific).
@@ -1671,6 +1681,8 @@
       (set! *screen* 'hub)
       (set! *overlay* #f)
       (set! *announced* #f)
+      (set! *layer-cleared* #f)   ; a board left during its cascade does not carry its clear into the next board
+      (hub-run-set! (hub-screen-with-touch (hub-run-in-force) *touch*))   ; the touch overlay on a coarse pointer (a loaded run too)
       (field-for-deal! (world-run-seed (hub-screen-world (hub-run-in-force))))
       (let ((w (hub-screen-world (hub-run-in-force))))
         (say "hub" "open" (world-depth w) (world-beat w) "keys" (length (world-keys w)) "cleared"
@@ -1679,7 +1691,7 @@
     ;; One frame of the hub: the screen steps on its clock with this frame's
     ;; input; a launch request deals the node's board with the settings' draw
     ;; and scoring; a menu request opens the main menu (CONTINUE resumes).
-    ;;   crash: hub beat N TRACE T/B DEPTH D    once per beat stepped
+    ;;   crash: hub beat N trace T B depth D cell C daemons C,C,...    once per beat stepped
     (define (hub-tick f dt)
       (let* ((hs0 (hub-run-in-force))
              (hs (hub-screen-tick hs0 (* 1000.0 dt) f)))
@@ -1687,7 +1699,9 @@
         (when (hub-screen-buzz hs) (set! *vibrate-asked* #t))   ; the touch overlay's press: the page vibrates
         (when (and *trace* (> (hub-screen-beats hs) (hub-screen-beats hs0)))
           (let ((w (hub-screen-world hs)))
-            (say "hub" "beat" (world-beat w) "trace" (world-trace w) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (runner-cell (world-runner w)))))
+            (say "hub" "beat" (world-beat w) "trace" (world-trace w) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (runner-cell (world-runner w))
+                 "daemons" (fold-left (lambda (acc d) (if (string=? acc "") (number->string (daemon-cell d)) (string-append acc "," (number->string (daemon-cell d)))))
+                                      "" (world-daemons w)))))
         (case (hub-screen-request hs)
           ((launch)
            (let ((l (hub-run-launch! (setting 'draw) (setting 'scoring))))
@@ -1701,6 +1715,14 @@
            ;; the pause panel over the world (P5): RESUME, SETTINGS, DISCONNECT = RUN HELD
            (set! *overlay* (menu-new-overlay 'hub #t (settings-in-force) #f #f))
            (say "pause" "on" (table-ticks)))
+          ((jack-out)   ; the severed panel's JACK OUT: the main menu, the run held for CONTINUE
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           (say "run" "jack-out")
+           (open-menu!))
+          ((finished)   ; RUN COMPLETE: the run is over, the store forgets it, the main menu
+           (say "run" "complete")
+           (set-run! #f)
+           (open-menu!))
           (else #f))
         (when (eq? *screen* 'hub)
           (present! #f (lambda () (hub-draw! VW VH (background)))))))
@@ -1713,12 +1735,15 @@
     ;; NEXT or RETRY came out of a table inside a run: the board's outcome is
     ;; in the world already (a clear at the clear, run-clear-line!; a sever
     ;; here) and the hub comes back up. Outside a run the dealt board stands.
+    ;; A board left any other way (NEW STACK, ctrl+n, NEXT before the clear)
+    ;; is severed too: the launch still pending is the sign, and a re-deal
+    ;; of the same node without the sever would be a free retry (the phase-2
+    ;; review, 2026-09-22).
     (define (run-request! request table)
       (let ((r (run-in-force)))
         (cond ((not r) #f)
               (else
-               (when (eq? request 'retry)
-                 (when (hub-run-severed! table) (say "run" "reconnect" table)))
+               (when (hub-run-severed! table) (say "run" "reconnect" table))
                (say "run" "back" table)
                (open-hub!)))))
 
@@ -1763,7 +1788,7 @@
                 (let ((sp (cdr choice)))
                   (say "code" "read" (encode sp) (spec-table sp))
                   (if (eq? (spec-table sp) 'run)
-                      (jack-in! (spec-seed sp))
+                      (jack-in! (spec-seed sp) *pace*)
                       (begin (set-run! #f) (open-spec! sp)))))
                (else #f)))
             (else
@@ -1774,7 +1799,7 @@
                     (case (active-game)
                     ((cards) (open-cards! #t))
                     (else (open-stack! #t)))))
-               ((jack-in) (jack-in! (now-second)))
+               ((easy normal elite) (jack-in! (now-second) choice))   ; JACK IN's pick (D65)
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
                ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
@@ -1933,13 +1958,13 @@
              (let ((sp (decode *code*)))
                (say "code" "read" (encode sp) (spec-table sp))
                (if (eq? (spec-table sp) (quote run))
-                   (jack-in! (spec-seed sp))
+                   (jack-in! (spec-seed sp) *pace*)
                    (begin (set-run! #f) (open-spec! sp)))))   ; a code's board ends a run (the review)
             (*code* (say "code" "refused" *code*) (open-menu!))
             (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
             ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub!))   ; ?hub=continue: the saved run (P5; the arms)
-            ((number? *hub-seed*) (jack-in! *hub-seed*) (when *hub-at* (hub-at! *hub-at*)))   ; ?hub=SEED: JACK IN at boot, &hubat=N the runner set down on key node N (P5; the arms)
+            ((number? *hub-seed*) (jack-in! *hub-seed* *pace*) (when *hub-at* (hub-at! *hub-at*)))   ; ?hub=SEED: JACK IN at boot, &hubat=N the runner set down on key node N (P5; the arms)
             (else (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
@@ -1992,9 +2017,10 @@
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ;; ?bg=reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off (a name outside the rule table is off); it wins over the BACKGROUND setting
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)) (set! *bg-asked* #t))))
-            ((string=? type "hub") (param! (lambda () (set! *hub-seed* (if (string=? payload "continue") 'continue (let ((n (string->number payload))) (and n (exact? n) (integer? n) (>= n 0) (max 1 n))))))))   ; ?hub=SEED: JACK IN at boot with this run seed; ?hub=continue resumes the saved run (P5; the arms)
+            ((string=? type "hub") (param! (lambda () (set! *hub-seed* (if (string=? payload "continue") 'continue (let ((n (string->number payload))) (and n (exact? n) (integer? n) (>= n 0) (min SEED-MAX (max 1 n)))))))))   ; ?hub=SEED: JACK IN at boot with this run seed; ?hub=continue resumes the saved run (P5; the arms)
             ((string=? type "bpm") (param! (lambda () (hub-run-bpm! payload))))   ; ?bpm=N: the hub's clock pinned (P5, until M1's player)
             ((string=? type "hubat") (param! (lambda () (set! *hub-at* (string->number payload)))))   ; &hubat=N: the runner on key node N at boot (P5; the arms)
+            ((string=? type "pace") (param! (lambda () (let ((d (string->symbol payload))) (when (difficulty? d) (set! *pace* d))))))   ; &pace=easy|normal|elite (D65; the arms)
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
             ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
             ((string=? type "rsteps") (param! (lambda () (set! *bg-rsteps* (let ((n (string->number payload))) (and n (>= n 1) n))))))
@@ -2112,6 +2138,8 @@
             ;;   crash: visibility hidden|visible
             ((string=? type "visibility")
              (set! *last-ms* #f)
+             (set! *keys* '())          ; a keyup missed while hidden would hold the key forever (P5: the hub walks on a held arrow)
+             (set! *pointer-up* #t)
              (say "visibility" payload)
              0)
             ;; ?trap: the page guard's trap door. "now" fires at once, inside this

@@ -8,9 +8,9 @@
 ;;; answering, and the memory (the seen vector run-length encoded). The
 ;;; screen's part is its clock pin and its beat count; its tween and
 ;;; toasts start fresh. The store key is P4a's "run" (RUN-KEY), one
-;;; datum, version 2:
-;;;   (crash-run 2 (seed . S) (depth . D) (attempt . A) (runner C F K)
-;;;              (nodes (I STATE ATTEMPTS) ...) (daemons (I C F STEP ALERT HUNTING RET) ...)
+;;; datum, version 3:
+;;;   (crash-run 3 (seed . S) (difficulty . EASY|NORMAL|ELITE) (depth . D) (attempt . A) (runner C F K)
+;;;              (nodes (I STATE ATTEMPTS HEAT) ...) (daemons (I C F STEP ALERT HUNTING RET) ...)
 ;;;              (keys ...) (opened ...) (taken ...) (dark (C . TTL) ...) (decoys (C . TTL) ...)
 ;;;              (inventory (TOOL . N) ...) (credits . N) (layer-credits . N) (trace . T) (beat . B)
 ;;;              (ledger CLEARED BEATS MOVES RECONNECTS SEVERED SEEN CREDITS)
@@ -33,7 +33,7 @@
 
   (begin
     (define RUN-KEY "run")
-    (define VERSION 2)
+    (define VERSION 3)   ; 3 (D65): the difficulty, the held nodes' heat
 
     ;; --- the memory, run-length encoded -----------------------------------------
     ;; (N0 N1 N2 ...): N0 unseen cells, then N1 seen, then N2 unseen, and so on.
@@ -62,10 +62,11 @@
              (g (world-ledger w)))
         (list 'crash-run VERSION
               (cons 'seed (world-run-seed w))
+              (cons 'difficulty (world-difficulty w))
               (cons 'depth (world-depth w))
               (cons 'attempt (world-attempt w))
               (list 'runner (runner-cell r) (runner-facing r) (runner-cloak r))
-              (cons 'nodes (map (lambda (n) (list (node-index n) (node-state n) (node-attempts n))) (world-nodes w)))
+              (cons 'nodes (map (lambda (n) (list (node-index n) (node-state n) (node-attempts n) (node-heat n))) (world-nodes w)))
               (cons 'daemons (map (lambda (d)
                                     (list (daemon-index d) (daemon-cell d) (daemon-facing d) (daemon-step d)
                                           (daemon-alert d) (daemon-hunting d) (daemon-returning? d)))
@@ -102,6 +103,7 @@
       (and (pair? d) (eq? (car d) 'crash-run) (pair? (cdr d)) (eqv? (cadr d) VERSION) (list? (cddr d))
            (every pair? (cddr d))
            (let ((seed (field d 'seed))
+                 (difficulty (field d 'difficulty))
                  (depth (field d 'depth))
                  (attempt (field d 'attempt))
                  (r (field d 'runner))
@@ -123,10 +125,11 @@
                  (bpm (field d 'bpm))
                  (beats (field d 'beats)))
              (and (nat? seed) (>= seed 1)
+                  (difficulty? difficulty)
                   (nat? depth) (>= depth 1) (<= depth (layer-count))
                   (nat? attempt)
                   (list? r) (= (length r) 3) (nat? (car r)) (direction? (cadr r)) (nat? (caddr r))
-                  (list? nodes) (list? daemons)
+                  (list? nodes) (every list? nodes) (list? daemons) (every list? daemons)   ; assv and length below want proper lists
                   (list? keys) (every (lambda (k) (memq k KEY-COLORS)) keys)
                   (nat-list? opened) (nat-list? taken) (ttl-alist? dark) (ttl-alist? decoys)
                   (list? inventory) (every (lambda (e) (and (pair? e) (tool-known? (car e)) (nat? (cdr e)))) inventory)
@@ -136,13 +139,14 @@
                   (nat-list? seen)
                   (or (not bpm) (and (number? bpm) (> bpm 0)))
                   (nat? beats)
-                  (let* ((w0 (hub-with-layer (world run-seed: seed) (generate-layer seed depth attempt) depth attempt))
+                  (let* ((w0 (hub-with-layer (world run-seed: seed difficulty: difficulty) (generate-layer seed depth attempt) depth attempt))
                          (l (world-layer w0))
                          (size (layer-size l))
                          (live-nodes (map (lambda (n)
                                             (let ((e (assv (node-index n) nodes)))
-                                              (if (and e (= (length e) 3) (memq (cadr e) (list 'sealed 'cleared 'alerted 'held)) (nat? (caddr e)))
-                                                  (node n state: (cadr e) attempts: (caddr e))
+                                              (if (and e (= (length e) 4) (memq (cadr e) (list 'sealed 'cleared 'alerted 'held)) (nat? (caddr e))
+                                                       (number? (cadddr e)) (>= (cadddr e) 0) (<= (cadddr e) 1))
+                                                  (node n state: (cadr e) attempts: (caddr e) heat: (cadddr e))
                                                   n)))
                                           (world-nodes w0)))
                          (live-daemons (map (lambda (dm)
@@ -150,7 +154,7 @@
                                                 (if (and e (= (length e) 7) (nat? (cadr e)) (< (cadr e) size) (direction? (caddr e))
                                                          (nat? (cadddr e)) (< (cadddr e) (vector-length (daemon-route dm))))
                                                     (daemon dm cell: (cadr e) facing: (caddr e) step: (cadddr e)
-                                                            alert: (let ((a (list-ref e 4))) (and (pair? a) (nat? (car a)) (integer? (cdr a)) a))
+                                                            alert: (let ((a (list-ref e 4))) (and (pair? a) (nat? (car a)) (< (car a) size) (integer? (cdr a)) a))
                                                             hunting: (let ((h (list-ref e 5))) (and (memq h (list 'runner 'decoy 'node)) h))
                                                             returning?: (and (list-ref e 6) #t))
                                                     dm)))
@@ -181,7 +185,10 @@
                            (hub-screen-with-bpm (hub-screen world: w prev: w beats: beats
                                                             panel: (cond ((eq? request 'severed) 'severed)
                                                                          ((eq? request 'done) 'done)
-                                                                         (else #f)))
+                                                                         (else #f))
+                                                            ;; a board up: the screen holds on its request as it did (else a
+                                                            ;; beat would pass and re-raise it: the shells read the screen's)
+                                                            request: (and (eq? request 'launch) 'launch))
                                                 bpm))))))))
 
     ;; --- the store -------------------------------------------------------------------

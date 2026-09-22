@@ -87,8 +87,10 @@
     (define (hub-remember w) (remember w))
 
     ;; A run from its seed, on layer 1.
-    (define (hub-new run-seed)
-      (hub-enter-layer (world run-seed: (max 1 run-seed)) 1 0))
+    ;; A run from its seed at a difficulty (NORMAL when none is given).
+    (define (hub-new run-seed . rest)
+      (let ((difficulty (if (and (pair? rest) (difficulty? (car rest))) (car rest) 'normal)))
+        (hub-enter-layer (world run-seed: (max 1 run-seed) difficulty: difficulty) 1 0)))
 
     ;; --- queries ---------------------------------------------------------------
 
@@ -539,8 +541,12 @@
                       (step (modulo (+ 1 (daemon-step d)) (vector-length route))))
                  (daemon (moved d (vector-ref route step) width) step: step))))))
 
+    ;; The daemons move on the difficulty's beats (D65): once a bar on EASY,
+    ;; every other beat on NORMAL, every beat on ELITE.
     (define (daemon-phase w)
-      (world w daemons: (map (lambda (d) (step-daemon w d)) (world-daemons w))))
+      (if (= 0 (modulo (world-beat w) (daemon-pace (world-difficulty w))))
+          (world w daemons: (map (lambda (d) (step-daemon w d)) (world-daemons w)))
+          w))
 
     ;; --- detection ---------------------------------------------------------------
 
@@ -748,13 +754,18 @@
 
     ;; DISCONNECT on a node's board (ruled 2026-09-22): the board is held at its
     ;; node, the runner is back in the world there, the node reads HELD;
-    ;; entering it again resumes the held board (the shell keeps the board).
-    (define (hub-hold-board w)
-      (let ((n (live-node-here w)))
+    ;; entering it again resumes the held board (the shell keeps the board,
+    ;; its trace paused). heat is the board's trace against its trace-at,
+    ;; 0..1: the cabinet shows it, and a board held at HELD-ALERT-AT or
+    ;; hotter counts as alerted, a daemon drifting to the node (D65).
+    (define (hub-hold-board w . rest)
+      (let ((n (live-node-here w))
+            (heat (if (and (pair? rest) (number? (car rest))) (max 0.0 (min 1.0 (car rest))) 0.0)))
         (if (not (and (eq? (world-request w) 'launch) n))
             w
-            (add-event (replace-node (world w request: #f events: '()) (node n state: 'held))
-                       (list 'held (node-index n))))))
+            (let* ((w (replace-node (world w request: #f events: '()) (node n state: 'held heat: heat)))
+                   (w (if (>= heat HELD-ALERT-AT) (alert-nearest w (node-cell n)) w)))
+              (add-event w (list 'held (node-index n)))))))
 
     ;; The ladder down: the layer's credits bank, the ledger counts the
     ;; layer, and the next layer begins; past the last the run is done.
