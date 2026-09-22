@@ -1,0 +1,64 @@
+#!/bin/sh
+# Stage the deploy tree of crashthestack.com (P4b, ruling D20): the Press
+# site at the root, the game under /jack-in/, the tracker under /tracker/,
+# and the root files the move needs. publish-web deploys what this stages;
+# host-site serves it on wg0 for a look.
+#
+#   scripts/stage-web DIR      DIR is emptied and filled; the file list is printed
+#
+# The parts, and where each comes from:
+#   /                 site/public (cd site && sigil run -- build)
+#   /jack-in/         build/web: the page, the stylesheet, the worker, the wasm,
+#                     the bridge loader and its manifest, assets/ (never bin/,
+#                     native/ or assets/refs)
+#   /tracker/         build/web/tracker: exactly the files its page loads
+#   /_headers         web/_headers (COOP/COEP for /jack-in/* and /tracker/*)
+#   /_redirects       web/_redirects (the old manifest path)
+#   /sw.js            web/sw-tombstone.js: the worker that retires the old
+#                     root-scoped one on the next visit (its comment says how)
+# A missing part is a refusal, not a partial tree.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+DIR="${1:-}"
+[ -n "$DIR" ] || { echo "stage-web: give the directory to stage into"; exit 1; }
+[ -f site/public/index.html ] || { echo "stage-web: site/public/index.html missing; cd site && sigil run -- build first"; exit 1; }
+[ -f build/web/index.html ] || { echo "stage-web: build/web/index.html missing; build --config web first"; exit 1; }
+[ -f build/web/crash-the-stack.wasm ] || { echo "stage-web: build/web/crash-the-stack.wasm missing"; exit 1; }
+for f in web/_headers web/_redirects web/sw-tombstone.js; do [ -f "$f" ] || { echo "stage-web: $f missing"; exit 1; }; done
+for d in jack-in tracker; do [ -e "site/public/$d" ] && { echo "stage-web: site/public/$d exists; the site must not claim the game's or the tracker's path"; exit 1; }; done
+[ -e site/public/sw.js ] && { echo "stage-web: site/public/sw.js exists; the root worker is web/sw-tombstone.js"; exit 1; }
+
+rm -rf "$DIR"
+mkdir -p "$DIR"
+cp -r site/public/. "$DIR/"
+# the game
+mkdir -p "$DIR/jack-in"
+for f in index.html styles.css sw.js crash-the-stack.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json; do
+  [ -f "build/web/$f" ] || { echo "stage-web: build/web/$f missing"; exit 1; }
+  cp "build/web/$f" "$DIR/jack-in/"
+done
+cp -r build/web/assets "$DIR/jack-in/assets"
+# the build task already drops assets/refs (generator provenance, never
+# shipped); refuse rather than stage it if a build ever leaves it in
+if [ -n "$(find "$DIR/jack-in/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "stage-web: build/web/assets/refs has files; the build task should have dropped it"; exit 1; fi
+rm -rf "$DIR/jack-in/assets/refs"
+# M1 retired the OGG tracks: a build directory that still carries them (a build never
+# cleans assets/) would publish 3 MB nothing fetches; refuse rather than stage it
+if [ -d "$DIR/jack-in/assets/audio" ]; then echo "stage-web: build/web/assets/audio exists; M1 retired the OGGs, remove the directory (rm -rf build/web/assets/audio) and rerun"; exit 1; fi
+# the tracker, behind /tracker/: exactly the files its page loads
+mkdir -p "$DIR/tracker/assets"
+for f in index.html crash-tracker.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json styles.css \
+         assets/sigil-web-app.js assets/sigil-wasm-gles3.js assets/sigil-wasm-audio.js assets/sigil-browser.js; do
+  [ -f "build/web/tracker/$f" ] || { echo "stage-web: build/web/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
+  cp "build/web/tracker/$f" "$DIR/tracker/$f"
+done
+grep -q "crash-tracker" "$DIR/tracker/index.html" || { echo "stage-web: build/web/tracker/index.html is not the tracker page"; exit 1; }
+# the root files
+cp web/_headers "$DIR/_headers"
+cp web/_redirects "$DIR/_redirects"
+cp web/sw-tombstone.js "$DIR/sw.js"
+# the manifest served under /jack-in/ must scope the app there
+grep -q '"scope": "\.\./"' "$DIR/jack-in/assets/manifest.webmanifest" || { echo "stage-web: the manifest's scope is not ../ (= /jack-in/)"; exit 1; }
+echo "stage-web: staged $(find "$DIR" -type f | wc -l) files ($(du -sh "$DIR" | cut -f1)) in $DIR:"
+(cd "$DIR" && find . -type f | sort | sed 's|^\./|  |')
+echo "stage-web: wasm sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16), game page $(sha256sum build/web/index.html | cut -c1-16), tracker wasm $(sha256sum build/web/tracker/crash-tracker.wasm | cut -c1-16), landing $(sha256sum site/public/index.html | cut -c1-16)"

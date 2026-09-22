@@ -104,12 +104,20 @@ import zlib from "node:zlib";
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--shot", "--port", "--cdp"];
+const VALUED = ["--shot", "--port", "--cdp", "--base"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
+// The served root, and where the game sits under it: build/web at "/" by
+// default; the staged deploy tree (scripts/stage-web) with --base /jack-in/
+// (P4b: the site at the root, the game under /jack-in/). Every page URL
+// and every path the server special-cases carries BASE.
 const ROOT = path.resolve(positional[0] || "build/web");
+const BASE = opt("--base", "/");
+if (!BASE.startsWith("/") || !BASE.endsWith("/")) { console.log(`SETUP-FAILED: --base must start and end with /, got ${BASE}`); process.exit(2); }
+const GAME = path.join(ROOT, BASE);
 const EXPECT_NO_SELECTION = flag("--expect-no-selection");
 const SHOT = opt("--shot", "/tmp/crash-the-stack-verify.png");
 const PORT = parseInt(opt("--port", "8095"), 10);
+const PAGE = `http://127.0.0.1:${PORT}${BASE}index.html`;
 const CDP = parseInt(opt("--cdp", "9235"), 10);
 const PHONE = flag("--phone");
 
@@ -133,7 +141,7 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 
 // ---- 1. imports, from the file on disk (no browser needed) -----------------
 {
-  const wasmPath = path.join(ROOT, "crash-the-stack.wasm");
+  const wasmPath = path.join(GAME, "crash-the-stack.wasm");
   if (!fs.existsSync(wasmPath)) { console.log(`SETUP-FAILED imports: ${wasmPath} missing`); process.exit(2); }
   const mod = new WebAssembly.Module(fs.readFileSync(wasmPath));
   const byModule = {};
@@ -171,7 +179,7 @@ const server = http.createServer((req, res) => {
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   const serve = (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
-    if (urlPath === "/sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
+    if (urlPath === BASE + "sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
     const delay = slowPaths[urlPath] || 0;
     setTimeout(() => {
     res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
@@ -440,7 +448,7 @@ function timedOut(name) {
 // is ~15 s: quiet-array's 10.4 s fill, a 2.6 s bar, the queue); a real
 // deal's 180 s is the same machine (the traced and music legs).
 const ARM_TRACE_AT = 190;
-await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&trace-at=${ARM_TRACE_AT}`);
+await navigate(`${PAGE}?trace&stack&trace-at=${ARM_TRACE_AT}`);
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -764,7 +772,7 @@ let barRects = null;
 // ---- 6c. assets: everything the page fetched answered (P3 leg 2, web) -----
 {
   try {
-    const entries = await evalJS(`JSON.stringify(performance.getEntriesByType("resource").map((e) => [e.name.replace(location.origin + "/", ""), e.responseStatus]))`);
+    const entries = await evalJS(`JSON.stringify(performance.getEntriesByType("resource").map((e) => [e.name.replace(location.origin + ${JSON.stringify(BASE)}, ""), e.responseStatus]))`);
     const list = JSON.parse(entries);
     // every entry is same-origin (the page loads nothing else), so a status
     // other than 200 is a failure, 0 included (blocked, or never answered)
@@ -953,7 +961,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   else {
     const inPlay = consoleLines.slice().reverse().map((l) => l.match(/^crash: (?:seed \d+|removed(?: \d+)+|undo|restored) tiles (\d+)/)).find(Boolean);
     mark = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+    await navigate(`${PAGE}?trace&stack`);
     const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
     if (!inPlay) fail("reload", "no \"tiles N\" line before the reload to hold the restore to");
     else if (inPlay[1] !== "142") fail("reload", `the legs before this one left ${inPlay[1]} tiles in play, not 142 (the sequence, not the restore, is off: ${inPlay[0]})`);
@@ -1053,8 +1061,8 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
 
 // ---- 9. update: a new service-worker version waits, never interrupts -------
 {
-  const builtVersion = (fs.readFileSync(path.join(ROOT, "index.html"), "utf8").match(/version: "([^"]+)"/) || [])[1];
-  const swExists = fs.existsSync(path.join(ROOT, "sw.js"));
+  const builtVersion = (fs.readFileSync(path.join(GAME, "index.html"), "utf8").match(/version: "([^"]+)"/) || [])[1];
+  const swExists = fs.existsSync(path.join(GAME, "sw.js"));
   if (EXPECT_NO_SELECTION) skip("update", "not part of the positive-control run");
   else if (!swExists || !builtVersion) fail("update", `build has no sw.js or no stamped version (sw.js ${swExists}, version ${builtVersion})`);
   else {
@@ -1096,7 +1104,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
     if (!detail) {
       // the next launch: the prompt, then a tap on the game's APPLY box
       mark = consoleLines.length;
-      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+      await navigate(`${PAGE}?trace&stack`);
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
       const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 20000) : null;   // the worker registers once the board's boot is done (the ambient in ~18 frames)
       const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;
@@ -1259,7 +1267,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   };
   const bootTitle = async (seed, listen) => {
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}`);
+    await navigate(`${PAGE}?trace&seed=${seed}&baud=${TITLE_BAUD}`);
     const opened = await openGate(from, listen, listen ? "read" : "skip");   // the first boot reads the card, the others tap it away
     if (opened.error) return opened;
     const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
@@ -1275,7 +1283,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   // a flat C-BG backdrop stands in for the real one on this leg: the boot needs
   // the texture to land (D45: the card waits for it; a boot fetch is never given
   // up), and the dots with no bg must show a ground that is never a logo color
-  substitutePaths["/assets/title/backdrop.png"] = solidPng(640, 400, hexes["C-BG"] || [0, 0, 0]);
+  substitutePaths[BASE + "assets/title/backdrop.png"] = solidPng(640, 400, hexes["C-BG"] || [0, 0, 0]);
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   let a = null;
   if (!detail) {
@@ -1435,7 +1443,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
     const seedsSeen = [];
     for (let i = 0; i < 2 && !detail; i++) {
       const from = consoleLines.length;
-      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}`);
+      await navigate(`${PAGE}?trace&baud=${TITLE_BAUD}`);
       const gated = await openGate(from, false); if (gated.error) { detail = gated.error; break; }
       const head = await waitLine(/^crash: title seed (\d+) baud /, from, 20000);
       if (!head) detail = "no title line on a boot without ?seed";
@@ -1448,7 +1456,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   // a tap during the reveal skips it and picks nothing
   if (!detail) {
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600`);
+    await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=600`);
     const gated2 = await openGate(from, false);
     const head = gated2.error ? null : await waitLine(/^crash: title seed /, from, 20000);
     if (!head) detail = "no title line on the slow boot";
@@ -1466,7 +1474,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       else if (chose) detail = `the skipping tap also chose: ${chose.m[0]}`;
     }
   }
-  delete substitutePaths["/assets/title/backdrop.png"];
+  delete substitutePaths[BASE + "assets/title/backdrop.png"];
   await evalJS(`localStorage.removeItem("scanlines")`);
   if (detail) fail("title", detail);
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the music started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
@@ -1486,10 +1494,10 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
-  slowPaths["/assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
+  slowPaths[BASE + "assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
+  await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
   const menuLine = await waitLine(/^crash: menu top .*\bjack-in (-?[\d.]+) (-?[\d.]+)/, from, 20000);
   const gateP = await waitLine(/^crash: title gate /, from, 20000);
   let connect = null;
@@ -1546,7 +1554,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       else if (!booted) detail = "after the settle, NORMAL chosen but the hub did not open";
     }
   }
-  delete slowPaths["/assets/tunes/black-glass-title.cts"];
+  delete slowPaths[BASE + "assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
   else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap on JACK IN then NORMAL opened the hub`);
 }
@@ -1571,7 +1579,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   let detail = "";
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
+  await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
   // the NEW page's first line ("crash: page dpr", the trace header), not any
   // "crash: page ..." line: the page being left prints "crash: page hidden"
   // as it unloads (the web-soak guard), and throttling on that line starved
@@ -1629,7 +1637,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   const MENU_FRAME_FACTOR = 2.5;
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&ms&seed=1&fresh`);
+  await navigate(`${PAGE}?trace&stack&ms&seed=1&fresh`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   let boardMs = null, menuMs = null;
@@ -1737,7 +1745,7 @@ async function pauseMenu(extra = "") {
   // the store before the boot (a leg that dies at its first frame is read against it)
   try { pushLine("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) return { error: "no boot line" };
   if (!(await waitLine(/^crash: boot done /, from, 20000))) return { error: "no \"crash: boot done\" within 20 s" };
@@ -1989,7 +1997,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -2063,7 +2071,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -2380,7 +2388,7 @@ async function downTo(order, id, at = 0) {
   if (!detail) {
     // ?code= deals the same
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${code}`);
+    await navigate(`${PAGE}?trace&code=${code}`);
     const read = await waitLine(/^crash: code read ([0-9A-Z]{10}) (\w+)$/, from, 20000);
     const spec = read && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, from, 10000);
     const dealt = spec && await waitLine(/^crash: cards seed (\d+) /, from, 10000);
@@ -2397,7 +2405,7 @@ async function downTo(order, id, at = 0) {
     const other = alphabet[(alphabet.indexOf(code[i]) + 1) % 32];
     flipped = code.slice(0, i) + other + code.slice(i + 1);
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${flipped}`);
+    await navigate(`${PAGE}?trace&code=${flipped}`);
     const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, from, 20000);
     await sleep(1500);
     const after = consoleLines.slice(from);

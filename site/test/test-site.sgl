@@ -1,0 +1,67 @@
+;;; test-site.sgl - The site's own checks: the disclosure paragraph on the
+;;; About page is the approved text byte for byte (D58: it moved here from
+;;; CREDITS), every devlog post carries a title and a date, no page uses an
+;;; em dash (content/anti-patterns), and the theme renders a page with the
+;;; nav, the feed links and the licences line.
+
+(import (sigil core)
+        (sigil string)
+        (sigil fs)
+        (sigil io)
+        (sigil list)
+        (sigil test)
+        (press core)
+        (press scan)
+        (press model)
+        (sigil sxml)
+        (crash-site theme))
+
+(define (read-trimmed path)
+  (let ((text (read-file-string path)))
+    (string-trim text)))
+
+(define (post-files)
+  (filter (lambda (p) (string-ends-with? p ".md"))
+          (map (lambda (name) (string-append "content/devlog/" name))
+               (directory-list "content/devlog"))))
+
+(test-group "site"
+  (test "the About page carries the approved disclosure verbatim"
+    (let ((disclosure (read-trimmed "../test/fixtures/disclosure.txt"))
+          (about (read-file-string "content/about.md")))
+      (assert-true (> (string-length disclosure) 100))
+      (assert-true (string-contains? about disclosure))))
+  (test "every devlog post has front matter with a title and an ISO date"
+    (let ((posts (post-files)))
+      (assert-true (pair? posts))
+      (for-each (lambda (path)
+                  (let ((text (read-file-string path)))
+                    (assert-true (string-starts-with? text "---\ntitle: "))
+                    (assert-true (string-contains? text "\ndate: 20"))))
+                posts)))
+  (test "no page or post uses an em dash"
+    (for-each (lambda (path)
+                (assert-false (string-contains? (read-file-string path) "—")))
+              (cons "content/about.md" (post-files))))
+  (test "the theme renders the nav, the feed links and the licences line around a body"
+    (let* ((item #{source-path: "content/about.md" output-path: "/about/index.html" title: "About"
+                   metadata: #{summary: "What it is"} format: 'markdown
+                   body-loader: (lambda () (document metadata: #{} children: '((h1 "About") (p "body"))))})
+           (page (crash-theme #{title: "Crash The Stack"} (initial-state) item '((h1 "About") (p "body"))))
+           (html (sxml->html page)))
+      (assert-true (string-contains? html "<title>About / Crash The Stack</title>"))
+      (assert-true (string-contains? html "href=\"/jack-in/\""))
+      (assert-true (string-contains? html "href=\"/devlog/feed.xml\""))
+      (assert-true (string-contains? html "href=\"/devlog/feed.json\""))
+      (assert-true (string-contains? html "GPL-3.0-or-later"))
+      (assert-true (string-contains? html "<meta name=\"description\" content=\"What it is\""))
+      ;; the body's own h1 is the title already: not repeated
+      (assert-equal 2 (length (string-split html "<h1>")))))
+  (test "the landing is a complete document with the redirect script and the newest post"
+    (let* ((newest #{source-path: "content/devlog/x.md" output-path: "/devlog/x/index.html" title: "Newest"
+                     metadata: #{date: "2026-09-22"} format: 'markdown})
+           (html (sxml->html (landing-page newest))))
+      (assert-true (string-starts-with? html "<html"))
+      (assert-true (string-contains? html "location.replace('/jack-in/' + q + h)"))
+      (assert-true (string-contains? html "display-mode: fullscreen"))
+      (assert-true (string-contains? html "href=\"/devlog/x/\">Newest</a>")))))
