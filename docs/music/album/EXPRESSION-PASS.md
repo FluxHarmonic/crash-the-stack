@@ -245,5 +245,6 @@ original eighth-note grid. The complete arrangement is still 3:16.
 Both game and album candidates come from one frozen shared phrase library;
 the fifth tense phrase's deliberate album variant receives the same melodic
 edit as the game loop. Three contextual before/after pairs and both complete
-versions are being rendered. This is a listening candidate: no maintained song
+versions were delivered through Telegram (1152–1154). Sample timing, game-loop
+transport, source reproducibility, encoded peaks and ending decay checks pass. This is a listening candidate: no maintained song
 or public audio is replaced until the musical changes are approved.

@@ -79,3 +79,42 @@ sigil docs/music/tools/album-audit.sgl \
 Use a fresh artifact directory for rendering. Audio, renderer hash, commands,
 level measurements and timing audit stay outside the repository. The native
 renderer is the published Motif 0.6.6 dependency pinned by Crash.
+
+## Source and timing validation
+
+All fifteen maintained song regeneration checks pass. Both reference scores
+match the accepted game/album exactly. The candidate album has 1,799 compiled
+attacks, zero sample timing error, no off-grid melodic attacks and all final
+gates released. This is seven more attacks over 3:16 than the accepted album;
+the development primarily changes contour and response rather than density.
+
+The game candidate has 1,690 compiled attacks, zero sample timing error and
+its original final jump to order 6. Its one-pass duration remains 168 seconds.
+A fresh `/tmp/closed-loop-phrases-replay` generation reproduced all 21 generated
+files byte-for-byte, including the frozen pools, layout, complete scores,
+comparison excerpts, maps and manifests. This verifies that later adoption
+will not erase the audition's baseline or change the comparison silently.
+
+## Audio validation and delivery
+
+All eight native renders pass duration, 44.1 kHz stereo and nonclipping checks.
+Both full native versions measure -20.1 LUFS-I and -4.7 dBTP. Calm and tense
+pairs have identical integrated loudness (-20.2 and -19.4 LUFS-I respectively).
+The ending changes from -22.4 to -22.7 LUFS-I, with the same -8.5 dBTP peak.
+
+Delivery applies one common -0.5 dB gain. The 2:48 montage measures -20.4 LUFS-I;
+both 3:16 full OGGs measure -20.5 LUFS-I. All three encoded true peaks are
+-5.2 dBTP. The final second of each full track peaks at -90.3 dBFS. No added
+limiter or per-half normalization is involved. These are comparison levels,
+not an album-release master.
+
+Audio lives in `~/Ops/artifacts/crash-the-stack-album/closed-loop-phrases-i/`,
+with delivered files in `ogg/`. That directory retains native WAVs, exact
+score snapshots, renderer hash, command lists, raw measurements, audit reports,
+reproduction log and `README-renders.txt`. Native renderer SHA-256:
+`f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842`.
+
+Telegram acknowledged the montage as message **1152**, full reference as
+**1153**, and full candidate as **1154**. Source/tool commit: `1fbdf4f`.
+Listening approval is pending. No maintained song, generated game asset,
+accepted album score or public recording has been replaced.

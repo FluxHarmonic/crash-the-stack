@@ -148,3 +148,14 @@ approved Breach Vector Phrases I score on both sides. It generates percussion,
 calm and transition comparisons and both complete scores for the shared
 `expression-render.sgl` workflow. Only instrument 2 may change; the composer
 also verifies that every snare/fill hit uses that instrument.
+
+### Shared Closed Loop phrase comparisons
+
+`closed-loop-phrases.sgl --motif PATH --output SCORE_DIR` freezes the accepted
+shared pool and layout, then generates proposed game/album arrangements and
+three contextual before/after pairs. Only the declared melodic phrases change;
+protected channel events, instruments, bus, order and clock are checked. The
+frozen reference in `alternates/closed-loop-phrases-i/` drives later reruns,
+including after adoption. Use `expression-render.sgl` for native audio and OGG
+delivery, and `album-audit.sgl --track closed-loop --source CANDIDATE.cts` for
+sample-clock and release checks. This composer never adopts the candidate.
