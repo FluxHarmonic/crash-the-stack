@@ -95,3 +95,11 @@ external album artifact root. The MP3 exporter now selects this release by
 default, retaining David Wilson, track 3/15 and the compact embedded artwork.
 Versioned R2 object: `soundtrack/relay-album-ii/relay-ghost.mp3`.
 The previous public release and comparison renders remain available locally.
+
+The release is live at https://crashthestack.com/soundtrack/ (deployment
+340709c4). The decoded public MP3 measures -16.7 LUFS-I and -1.6 dBTP.
+A fresh browser context selected Relay Ghost and advanced playback from its
+new URL with all fifteen tracks, correct artist and download hint intact.
+That functional check was muted and paused afterward. The complete current
+local MP3 set is `tagged-preview-iv/soundtrack/audio/`. Future game publication
+must carry `publication-relay-ii/site/soundtrack/` or the current live manifest.

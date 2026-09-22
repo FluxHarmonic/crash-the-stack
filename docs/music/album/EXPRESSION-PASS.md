@@ -184,3 +184,20 @@ are retained; the original pluck also stays. [Album II](RELAY-II.md) adopts this
 combination and provides the requested complete track. The separate acid line
 is unchanged. Preserve the metallic bell for another context. Breach Vector
 is the suggested next phrase-development pass.
+
+## Breach Vector: Phrases I
+
+After approving and publishing Relay Ghost album II, David requested Breach
+Vector with the same before/after listening process. This pass develops phrase
+replies using the accepted instruments. The calm bridge grows an E–D–C answer,
+then D–B–G over the G bass. The lower pipe passage and later high pipe return
+recall that D–B–G cadence. The focused signal makes room for the spaced plucks,
+answering in their gaps; the late return thins its final half before the calm
+reprise. Drum, bass, pluck and opening performances remain intact.
+
+Only pattern/channel pairs 11/7, 30/7, 31/5, 40/7 and 41/5 change. Instruments,
+bus, tempo, order, duration and all other channel events remain identical.
+The public album and game retain their accepted Breach Vector versions pending
+review. Sources, maps, exact changes and listening guidance live in
+`../alternates/breach-phrases-i/`. Three fresh-state contextual A/B pairs and
+both full versions use one common monitoring gain, with no added limiter.

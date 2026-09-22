@@ -1,0 +1,131 @@
+#!/usr/bin/env sigil
+;;; Develop replies without changing the accepted groove or instrument bank.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define CHANGES '((11 7) (30 7) (31 5) (40 7) (41 5)))
+
+(define (replace-part p channel start notes)
+  (add-notes
+    (transform p
+      (lambda (row cell)
+        (and (not (and (= (car cell) channel) (>= row start))) cell)))
+    notes))
+
+(define (pipe-cadence p octave)
+  (transform p
+    (lambda (row cell)
+      (let ((pitch (assoc row '((58 . "D-") (60 . "B-") (62 . "G-")))))
+        (if (and (= (car cell) 7) (attack? cell) pitch)
+            (append (list 7 (str (cdr pitch) (if (= row 58) (+ octave 1) octave))) (skip cell 2))
+            cell)))))
+
+(define (develop p)
+  (case (field p id:)
+    ((11)
+     (replace-part p 7 0
+       '((20 7 "E-4" 7 14 4)
+         (26 7 "D-4" 7 14 3)
+         (30 7 "C-4" 7 13 5)
+         (50 7 "D-4" 7 14 4)
+         (56 7 "B-3" 7 13 3)
+         (60 7 "G-3" 7 12 3))))
+    ((30) (pipe-cadence p 3))
+    ((31)
+     (replace-part p 5 0
+       '((18 5 "E-4" 11 27 3)
+         (24 5 "D-4" 11 28 3)
+         (28 5 "C-4" 11 26 3)
+         (50 5 "D-4" 11 27 3)
+         (56 5 "B-3" 11 26 3)
+         (60 5 "G-3" 11 25 3))))
+    ((40) (pipe-cadence p 4))
+    ((41)
+     (replace-part p 5 32
+       '((34 5 "C-4" 11 28 3)
+         (40 5 "A-3" 11 27 3)
+         (44 5 "F-3" 11 26 3)
+         (50 5 "D-4" 11 27 3)
+         (56 5 "B-3" 11 26 3)
+         (60 5 "G-3" 11 25 3))))
+    (else p)))
+
+(define (channel-events p channel)
+  (filter (lambda (row) (pair? (cddr row)))
+    (map (lambda (row)
+           (append (take row 2)
+             (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+         (skip p 5))))
+
+(cli "breach-phrases" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference "docs/music/album/breach-vector.cts")
+           (frozen (path output "breach-vector-before.cts"))
+           (source (read-score
+                     (if (file? frozen) frozen (path (root) reference))))
+           (after
+             (replace-child source 'patterns
+               (cons 'patterns (map develop (cdr (child source 'patterns))))))
+           (clips '()))
+      (ensure-directory output)
+      (write-canonical motif frozen source)
+      (write-canonical motif (path output "breach-vector-after.cts") after)
+      (each section '(instruments order bus)
+        (check (equal? (child source section) (child after section))
+               "Phrase pass changed a protected section" section))
+      (each original (cdr (child source 'patterns))
+        (let* ((id (field original id:))
+               (revised (pattern after id))
+               (allowed (assoc id CHANGES)))
+          (check (equal? (take original 5) (take revised 5))
+                 "Pattern clock changed" id)
+          (each channel CHANNELS
+            (unless (and allowed (= channel (cadr allowed)))
+              (check (equal? (channel-events original channel)
+                             (channel-events revised channel))
+                     "Unexpected performance change" id channel)))))
+      (each spec '(("calm" "Calm bridge" (9 10 11 12))
+                   ("development" "Lower pipe and spaced replies" (29 30 31 32))
+                   ("return" "Late return and release of pressure" (39 40 41 42)))
+        (each variant '("before" "after")
+          (let* ((stem (str (car spec) "-" variant))
+                 (score (if (equal? variant "before") source after))
+                 (sections
+                   (append
+                     (map (lambda (id)
+                            (list (str (cadr spec) " / original pattern " id)
+                                  (pattern score id)))
+                          (caddr spec))
+                     (list (list "Release / comparison gap" (phrase-rows 32 '()))))))
+            (write-album motif output stem
+              (str "Breach Vector - " (cadr spec) " / " variant)
+              score sections (list reference)
+              "Phrases I: arrangement comparison, not an accepted album revision."
+              "Same instruments, mix, tempo and section lengths. Only declared pipe/signal replies change. Each comparison half starts from fresh engine state."
+              "2026-09-22")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ (* 288 10.0) 140)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "breach-vector"
+              title: "Breach Vector"
+              audition: "phrases-i"
+              comment: "Three pairs, BEFORE then AFTER: calm bridge, lower pipe development, late return. Same monitoring gain and instrument bank."
+              full_duration_seconds: (/ (* 2944 10.0) 140)
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict accepted_source_sha256: (out sha256sum ,frozen)
+              changed_patterns: (list->array (map car CHANGES))
+              changed_channels: (list->array CHANGES)
+              protected_channels_identical: #t
+              original_instruments_bus_order_and_clock: #t))
+      (display "Breach Vector phrase comparisons and complete candidate ready.\n"))))

@@ -118,3 +118,22 @@ The acid-only example receives an explicit +8 dB monitoring boost; the
 combined example uses the original relative levels before the approved cut.
 It checks duration, sample format and decoded true peak. Historical audition
 tools read the frozen album-I snapshot so accepted updates do not alter A/Bs.
+
+### Breach Vector phrase comparisons
+
+`breach-phrases.sgl --motif PATH --output SCORE_DIR` preserves the current album
+reference and generates a candidate plus three contextual before/after pairs.
+Once present, the frozen reference drives reproduction. Its source checks
+restrict changes to the five declared pattern/channel pairs.
+
+`expression-render.sgl --input SCORE_DIR --output EXTERNAL_DIR --motif PATH
+--stage native` then `--stage delivery` renders and validates the comparison
+and both complete arrangements. Optional `slug`, `title`, `audition` and
+`comment` fields in comparison.json name other tracks; absent fields preserve
+the original Relay Ghost behavior. This shares the existing gain, fresh-state,
+peak, tail, duration and source-provenance checks.
+
+`album-audit.sgl --track breach-vector --source CANDIDATE.cts --motif PATH
+--output REPORT_DIR` applies the established full-track policy to an alternate
+without installing it as the accepted album. `--source` requires one title.
+Omitting it retains normal album auditing.

@@ -32,8 +32,14 @@
            (output (option-ref options 'output))
            (manifest (json-decode (read-text (path input "comparison.json"))))
            (clips (array->list (dict-ref manifest clips:)))
+           (slug (dict-ref manifest slug: "relay-ghost"))
+           (audition (dict-ref manifest audition: "expression-i"))
+           (ab-stem (str slug "-" audition "-ab"))
+           (full-stems
+             (map (lambda (variant) (str slug "-" variant "-" audition "-full"))
+                  '("before" "after")))
            (fulls (map (lambda (variant)
-                        (dict stem: (str "relay-ghost-" variant)
+                        (dict stem: (str slug "-" variant)
                               duration_seconds: (dict-ref manifest full_duration_seconds:)))
                       '("before" "after")))
            (commands '()))
@@ -123,28 +129,26 @@
                                              start_seconds: offset
                                              monitoring_boost_db: (dict-ref clip audition_gain_db: 0)))))
               (set! offset (+ offset (dict-ref clip duration_seconds:))))
-            (let ((comparison (path ogg-dir "relay-ghost-expression-i-ab.ogg")))
+            (let ((comparison (path ogg-dir (str ab-stem ".ogg"))))
               (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
                          "-f" "concat" "-safe" "1" "-i" sequence
                          "-af" gain-filter "-c:a" "libvorbis" "-q:a" "7"
-                         "-metadata" "title=Relay Ghost - Expression I A/B"
+                         "-metadata" (str "title=" (dict-ref manifest title: "Relay Ghost") " - " audition " A/B")
                          "-metadata" "artist=David Wilson"
-                         "-metadata" "comment=Each pair plays BEFORE then AFTER; two release bars between clips. Final choir pair compares a warm pad prototype, not an original Relay Ghost part."
+                         "-metadata" (str "comment=" (dict-ref manifest comment: "Each pair plays BEFORE then AFTER; two release bars between clips. Final choir pair compares a warm pad prototype, not an original Relay Ghost part."))
                          comparison)))
             (each clip fulls
               (let* ((stem (dict-ref clip stem:))
                      (wav (path output (str stem ".wav")))
-                     (ogg (path ogg-dir (str stem "-expression-i-full.ogg"))))
+                     (ogg (path ogg-dir (str stem "-" audition "-full.ogg"))))
                 (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
                            "-af" gain-filter "-c:a" "libvorbis" "-q:a" "7"
-                           "-metadata" (str "title=" stem " - Expression I full")
+                           "-metadata" (str "title=" stem " - " audition " full")
                            "-metadata" "artist=David Wilson"
                            "-metadata" "album=Crash The Stack - Auditions"
                            ogg))))
             (let ((checks '()))
-              (each stem '("relay-ghost-expression-i-ab"
-                           "relay-ghost-before-expression-i-full"
-                           "relay-ghost-after-expression-i-full")
+              (each stem (cons ab-stem full-stems)
                 (let* ((file (path ogg-dir (str stem ".ogg")))
                        (levels (measure file (path output (str stem "-ogg-levels.txt")))))
                   (check (<= (dict-ref levels true_peak_dbtp:) -1)
@@ -152,7 +156,7 @@
                   (let* ((probe (json ffprobe -v error -show_format -of json ,file))
                          (duration (string->number
                                      (dict-ref (dict-ref probe format:) duration:)))
-                         (expected (if (equal? stem "relay-ghost-expression-i-ab")
+                         (expected (if (equal? stem ab-stem)
                                        offset
                                        (dict-ref manifest full_duration_seconds:))))
                     (check (< (abs (- duration expected)) 0.001)
