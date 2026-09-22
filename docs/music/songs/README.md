@@ -30,8 +30,9 @@ phrase library; put them in the corresponding arrangement overlays.
 
 ## Generate and check
 
-Use Sigil and a Motif executable containing instrument gain support (currently
-Motif feature commit `b0d135e`). Set `MOTIF_BIN` or pass `--motif /path/to/motif`.
+Use Sigil and Motif 0.6.6 or later for instrument gain support. Crash pins the
+published 0.6.6 release. Set `MOTIF_BIN` or pass `--motif /path/to/motif`; after
+building Crash, `build/dev/bin/motif` is available from the pinned dependency.
 An older Motif can silently drop `gain:`; this builder detects that loss and
 refuses to produce either score. No credentials or machine-specific renderer
 location is embedded in these tools.
@@ -63,8 +64,8 @@ recovery from Git. Avoid concurrent editing while generating.
 
 Commit source, generated game/album files, maps and receipts together. Run the
 all-song check as a review/build gate. No CI workflow exists in this worktree;
-this command is ready to add to the coordinator's checks once its renderer has
-the required Motif support.
+this command is ready to add to the coordinator's checks using Motif 0.6.6 or
+later.
 
 ## Editing in the tracker
 

@@ -31,29 +31,25 @@ shared sources and regenerate from the same layout.
 
 ## Integration boundary
 
-This work updates source and generated score assets in `task-codex-album`.
+The migration updates source and generated score assets in `task-codex-album`.
 The user's explicit synchronization request supersedes the original album-only
-restriction on editing `assets/tunes/`; no runtime source or package dependency
-is changed. Asset provenance rows identify the new authoring sources.
+restriction on editing `assets/tunes/`. Asset provenance rows identify the new
+authoring sources.
 
-Relay Ghost's exact trim requires Motif commit `b0d135e` from
-`feat/codex-expression` before the game uses these scores. The builder rejects
-older readers that drop instrument gain. That feature is not yet on the local
-Motif main branch, and its web build has not been validated here. Merge/release
-and wire the runtime dependency during game integration; score synchronization
-is not a claim that the currently deployed game has been upgraded.
+The subsequent integration publishes Motif 0.6.6 (commit `6a788c6`) to both
+Motif remotes and pins that release in Crash. It preserves Relay Ghost's exact
+2 dB instrument output trim through native and web playback, note/patch edits,
+and score serialization. The builder rejects older readers that drop gain.
+See [integration evidence](MOTIF-066-INTEGRATION.md) for validation and deployment.
 
-Release handoff: validate the instrument-gain feature in Motif's web build,
-merge and publish a Motif update, then bump Crash's dependency and verify Relay
-Ghost's gritty bass trim in browser playback alongside the existing tunes.
-This small engine update need not wait for the remaining musical improvements;
-composition and patch changes can continue through the shared-source workflow.
+The current game mainline uses Motif scores in its tracker. Board-mode music
+still plays the existing spy/groove/breaker OGG assets; changing that playback
+system is separate work. Shipping synchronized tracker scores does not replace
+those board-mode recordings.
 
-No game/site deployment or new public audio release is part of this migration.
-The public Breach Vector MP3 still precedes the recently approved phrase/snare
-pass; regenerate its master and publish that revision separately. The MP3
-exporter's source-snapshot check prevents silently using its stale master.
-No lossless or encoded audio is committed.
+Breach Vector's approved phrase/snare revision is now mastered and published as
+[album II](album/BREACH-II.md). The MP3 exporter selects its verified source
+snapshot and master. No lossless or encoded audio is committed.
 
 ## Validation and workflow
 
@@ -75,6 +71,6 @@ their respective loop destinations (Relay 6, Breach 17, Obsidian 5).
 
 Read [the authoring workflow](songs/README.md) before editing. Commit the source
 pool, arrangement map, generated scores, album maps and hash receipt together.
-Run `sigil docs/music/tools/songs.sgl --stage check` with the feature renderer
+Run `sigil docs/music/tools/songs.sgl --stage check` with Motif 0.6.6 or later
 as the regeneration gate. The previous authoring scripts are retained for
 historical reconstruction and auditions, not as a second current source.
