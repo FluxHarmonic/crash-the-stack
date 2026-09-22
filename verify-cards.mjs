@@ -350,7 +350,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       const shown = Object.keys(top2.entries);
       let free2 = null;
       if (shown.some((id) => id === "look" || id === "hud" || id === "depth")) lookDetail = `the menu still shows ${shown.join(" ")}`;
-      else if (shown.join(" ") !== "jack-in free-play tracker settings credits") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not jack-in free-play tracker settings credits`;   // TRACKER on the top screen (David, 2026-09-22)
+      else if (shown.join(" ") !== "jack-in free-play settings credits") lookDetail = `the fresh menu's entries are ${shown.join(" ")}, not jack-in free-play settings credits`;
       else {
         // a tap on FREE PLAY opens it: its rows are said once
         await tap(top2.entries["free-play"][0], top2.entries["free-play"][1]);

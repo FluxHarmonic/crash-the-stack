@@ -36,8 +36,8 @@ a blank one, `Ctrl-E` prints the tune's text to stdout, `Escape` with
 nothing playing leaves.
 
 Web: `/tracker/` is the door, its own page and wasm beside the game's
-(the game's page carries no tracker code; the FREE PLAY menu's TRACKER
-row is a link there).
+(the game's page carries no tracker code, and the game's menu no link:
+the site's nav is where the tracker is found).
 
     /tracker/                 a blank tune
     /tracker/?tune=spy        a bundled tune (any of assets/tunes/: spy, blind-spot, demo-columns, ...)

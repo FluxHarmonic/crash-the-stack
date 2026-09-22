@@ -717,8 +717,8 @@ async function toMenu(how) {
     // CREDITS, and UPDATE only while a version waits; the prototype rows
     // (LOOK, HUD, DEPTH) and the bare tables are gone
     const ids = consoleLines[menu.index].split(" ").slice(3).filter((w) => /^[a-z-]+$/.test(w));
-    if (ids.some((id) => !["continue", "jack-in", "free-play", "tracker", "settings", "credits", "update"].includes(id))) detail = `the menu shows an entry that is not the top screen's: ${ids.join(" ")}`;
-    else if (ids.join(" ") !== "continue jack-in free-play tracker settings credits") detail = `the menu's entries are ${ids.join(" ")}, not continue jack-in free-play tracker settings credits`;   // TRACKER on the top screen where a page acts (David, 2026-09-22)
+    if (ids.some((id) => !["continue", "jack-in", "free-play", "settings", "credits", "update"].includes(id))) detail = `the menu shows an entry that is not the top screen's: ${ids.join(" ")}`;
+    else if (ids.join(" ") !== "continue jack-in free-play settings credits") detail = `the menu's entries are ${ids.join(" ")}, not continue jack-in free-play settings credits`;
     else detail = await back("Escape");
   }
   if (!detail && !EXPECT_NO_SELECTION) {
@@ -1793,7 +1793,7 @@ async function dealFrom(free, table, row = "new-board") {
                    "free-cards": "new-board daily-board version back",
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
-    if (r.top.order.join(" ") !== "continue jack-in free-play tracker settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
+    if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
     // the sub-screens' first row sits where the main menu's does (David, 2026-09-22), pulled up only when the rows would cross the band
     const rowsFrom = (s) => s.rows[s.order[0]].y - 14;   // the row's center less half its height
     const rowsWant = (s) => Math.max(124, Math.min(168, 380 - s.order.length * 32));
@@ -1879,7 +1879,7 @@ async function dealFrom(free, table, row = "new-board") {
     }
   }
   if (detail) fail("screens", detail);
-  else pass("screens", `top continue jack-in free-play tracker settings credits; the sub-screens' rows from 168 (156 for SETTINGS' seven); ${seen.join(", ")}; Escape continues`);
+  else pass("screens", `top continue jack-in free-play settings credits; the sub-screens' rows from 168 (156 for SETTINGS' seven); ${seen.join(", ")}; Escape continues`);
 }
 
 // settings (D51): the main menu's SETTINGS is the general five; DEFRAG's
