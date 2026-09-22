@@ -2067,7 +2067,7 @@ async function downTo(order, id, at = 0) {
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
-  let opened = null;
+  let opened = null, hubTune = null;
   if (!detail) {
     let m0 = consoleLines.length;
     await press("Escape");
@@ -2090,8 +2090,22 @@ async function downTo(order, id, at = 0) {
           await tap(pick.rows["normal"].x, pick.rows["normal"].y);
           const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10}) normal$/, m0, 5000);
           opened = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, m0, 5000);
+          // The hub's music, proven rather than eyeballed (P5 on M1's live
+          // model): the entry screen's table has NO pool, so the driver fades
+          // the menu theme out; then the hub picks from its own pool with the
+          // RUN's seed, which is what makes one JACK IN one tune all the way
+          // down. The pool is David's three (shadow-protocol, dead-sector,
+          // blind-spot); the seed must be the run's, not the board's.
+          const HUB_POOL = ["shadow-protocol", "dead-sector", "blind-spot"];
+          const faded = opened && await waitLine(/^crash: music fade out (\S+)$/, m0, 8000);
+          const picked = opened && await waitLine(/^crash: music pick (\S+) seed (\d+) for hub$/, m0, 12000);
           if (!start) detail = "NORMAL on the pick started no run at normal";
           else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+          else if (!faded) detail = "the entry screen did not fade the menu theme out (no \"crash: music fade out\")";
+          else if (!picked) detail = "the hub picked no tune (no \"crash: music pick ... for hub\")";
+          else if (!HUB_POOL.includes(picked.m[1])) detail = `the hub picked ${picked.m[1]}, which is not one of ${HUB_POOL.join(", ")}`;
+          else if (picked.m[2] !== start.m[1]) detail = `the hub's tune was picked from seed ${picked.m[2]}, not the run's ${start.m[1]} (one tune a run depends on it)`;
+          else hubTune = picked.m[1];
         }
       }
     }
@@ -2166,7 +2180,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("run", detail);
-  else pass("run", `JACK IN opened the hub; DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
+  else pass("run", `JACK IN opened the hub on ${hubTune} (picked from the run's seed, the menu theme faded first); DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
 }
 
 // hub (P5, D60, D65): the world moves on the beat and takes one action per
