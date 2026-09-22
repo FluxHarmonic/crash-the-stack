@@ -1,0 +1,40 @@
+;;; The approved mix survives the game's tracker edit/save path.
+(import (sigil test)
+        (sigil list)
+        (motif tune)
+        (crash tracker model))
+
+(define RELAY-GAIN 0.79432823472428149)
+
+(define (gritty-bass score)
+  (list-find (lambda (instrument)
+               (= (tune-instrument-id instrument) 19))
+             (tune-instruments score)))
+
+(test-group "soundtrack: instrument output gain in the tracker"
+  (let* ((score (read-tune-file "assets/tunes/relay-ghost.cts"))
+         (state (tstate (tracker-new score "relay-ghost")
+                        inst: 19
+                        edit: #t))
+         (note-edit (tracker-apply state '(note 48)))
+         (panel (tracker-apply note-edit 'panel))
+         (patch-edit (tracker-apply panel 'panel-inc))
+         (saved (read-tune-string (tune->string (tstate-tune patch-edit)))))
+    (test "Relay Ghost loads the approved two-decibel bass trim"
+      (assert-equal RELAY-GAIN (tune-instrument-gain (gritty-bass score))))
+    (test "editing a note preserves output gain"
+      (assert-equal RELAY-GAIN
+                    (tune-instrument-gain
+                      (gritty-bass (tstate-tune note-edit)))))
+    (test "changing the patch kind actually edits the instrument"
+      (assert-false
+        (eq? (tune-instrument-kind (gritty-bass score))
+             (tune-instrument-kind (gritty-bass saved)))))
+    (test "saving and reloading a patch edit preserves output gain"
+      (assert-equal RELAY-GAIN (tune-instrument-gain (gritty-bass saved))))
+    (test "undo restores the prior instrument without losing the trim"
+      (let* ((undone (tracker-apply (tracker-apply patch-edit 'panel-close) 'undo))
+             (instrument (gritty-bass (tstate-tune undone))))
+        (assert-equal RELAY-GAIN (tune-instrument-gain instrument))
+        (assert-equal (tune-instrument-kind (gritty-bass score))
+                      (tune-instrument-kind instrument))))))
