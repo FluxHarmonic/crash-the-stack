@@ -12,11 +12,15 @@
 #                     the bridge loader and its manifest, assets/ (never bin/,
 #                     native/ or assets/refs)
 #   /tracker/         build/web/tracker: exactly the files its page loads
-#   /soundtrack/      the album's listening page (its own bundle: index.html,
-#                     style.css, player.js, album.json; the MP3s stay on
-#                     assets.crashthestack.com), from CRASH_SOUNDTRACK_DIR
-#                     (default build/web/soundtrack, where the album row's
-#                     generator leaves it)
+#   /soundtrack/      the album's listening page, built from the tree: the
+#                     page from docs/music/album/listen (index.html,
+#                     style.css, player.js) and album.json from
+#                     scripts/album-manifest; the MP3s stay on
+#                     assets.crashthestack.com. CRASH_SOUNDTRACK_DIR
+#                     overrides the whole bundle with a directory holding
+#                     those four files, for a render being tried out; it
+#                     is never a fallback (a bundle the tree cannot build
+#                     is a refusal, not a copy of whatever is live)
 #   /_headers         web/_headers (COOP/COEP for /jack-in/* and /tracker/*)
 #   /_redirects       web/_redirects (the old manifest path)
 #   /sw.js            web/sw-tombstone.js: the worker that retires the old
@@ -30,10 +34,17 @@ DIR="${1:-}"
 [ -f build/web/index.html ] || { echo "stage-web: build/web/index.html missing; build --config web first"; exit 1; }
 [ -f build/web/crash-the-stack.wasm ] || { echo "stage-web: build/web/crash-the-stack.wasm missing"; exit 1; }
 for f in web/_headers web/_redirects web/sw-tombstone.js; do [ -f "$f" ] || { echo "stage-web: $f missing"; exit 1; }; done
-SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-build/web/soundtrack}"
-for f in index.html style.css player.js album.json; do
-  [ -f "$SOUNDTRACK/$f" ] || { echo "stage-web: $SOUNDTRACK/$f missing; the album's listening page is a required part (set CRASH_SOUNDTRACK_DIR to the generated soundtrack/ directory)"; exit 1; }
-done
+SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-}"
+if [ -n "$SOUNDTRACK" ]; then
+  for f in index.html style.css player.js album.json; do
+    [ -f "$SOUNDTRACK/$f" ] || { echo "stage-web: $SOUNDTRACK/$f missing; CRASH_SOUNDTRACK_DIR must hold the whole bundle"; exit 1; }
+  done
+else
+  for f in index.html style.css player.js; do
+    [ -f "docs/music/album/listen/$f" ] || { echo "stage-web: docs/music/album/listen/$f missing; the album's listening page is a required part"; exit 1; }
+  done
+  [ -x scripts/album-manifest ] || { echo "stage-web: scripts/album-manifest missing; it writes the album's manifest from the tree"; exit 1; }
+fi
 for d in jack-in tracker soundtrack; do [ -e "site/public/$d" ] && { echo "stage-web: site/public/$d exists; the site must not claim the game's, the tracker's or the album's path"; exit 1; }; done
 [ -e site/public/sw.js ] && { echo "stage-web: site/public/sw.js exists; the root worker is web/sw-tombstone.js"; exit 1; }
 
@@ -62,8 +73,19 @@ for f in index.html crash-tracker.wasm sigil-wasm-bridges.js sigil-wasm-bridges.
   cp "build/web/tracker/$f" "$DIR/tracker/$f"
 done
 grep -q "crash-tracker" "$DIR/tracker/index.html" || { echo "stage-web: build/web/tracker/index.html is not the tracker page"; exit 1; }
-# the album's listening page
-cp -r "$SOUNDTRACK" "$DIR/soundtrack"
+# the album's listening page: from the tree, or wholly from the override
+mkdir -p "$DIR/soundtrack"
+if [ -n "$SOUNDTRACK" ]; then
+  cp "$SOUNDTRACK"/index.html "$SOUNDTRACK"/style.css "$SOUNDTRACK"/player.js "$SOUNDTRACK"/album.json "$DIR/soundtrack/"
+else
+  cp docs/music/album/listen/index.html docs/music/album/listen/style.css docs/music/album/listen/player.js "$DIR/soundtrack/"
+  scripts/album-manifest > "$DIR/soundtrack/album.json" || { echo "stage-web: scripts/album-manifest failed; the album's manifest is a required part"; exit 1; }
+fi
+# the page is the site's, not an older style: the palette's ground and the site's face
+grep -q -- "--bg: #0d0a1a" "$DIR/soundtrack/style.css" || { echo "stage-web: the staged /soundtrack/ stylesheet is not the site's (no --bg: #0d0a1a); it is an older bundle"; exit 1; }
+grep -q "JetBrainsMono-Regular.woff2" "$DIR/soundtrack/style.css" || { echo "stage-web: the staged /soundtrack/ stylesheet does not use the site's face"; exit 1; }
+grep -q 'class="nav"' "$DIR/soundtrack/index.html" || { echo "stage-web: the staged /soundtrack/ page does not carry the site's nav"; exit 1; }
+grep -q '"tracks"' "$DIR/soundtrack/album.json" || { echo "stage-web: the staged /soundtrack/album.json has no tracks"; exit 1; }
 # the root files
 cp web/_headers "$DIR/_headers"
 cp web/_redirects "$DIR/_redirects"

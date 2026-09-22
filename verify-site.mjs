@@ -365,6 +365,34 @@ else {
   if (detail.length) fail(name, detail.join("; "));
 }
 
+// ---- soundtrack -------------------------------------------------------------
+// The album's listening page is staged from the tree (stage-web builds it
+// from docs/music/album/listen plus scripts/album-manifest), so a publish
+// can never quietly put an older bundle back: the page must carry the
+// site's clothes and a manifest with every track.
+{
+  const detail = [];
+  const page = text("soundtrack/index.html");
+  const css = text("soundtrack/style.css");
+  if (!/--bg: #0d0a1a/.test(css)) detail.push("the stylesheet is not the site's palette (no --bg: #0d0a1a)");
+  if (!/JetBrainsMono-Regular\.woff2/.test(css)) detail.push("the stylesheet does not use the site's face");
+  if (!/class="nav"/.test(page)) detail.push("the page does not carry the site's nav");
+  if (!/href="\/jack-in\/"/.test(page)) detail.push("the nav has no PLAY link to /jack-in/");
+  let album = null;
+  try { album = JSON.parse(text("soundtrack/album.json")); } catch (e) { detail.push(`album.json does not parse: ${e.message}`); }
+  if (album) {
+    if (!Array.isArray(album.tracks) || album.tracks.length !== 15) detail.push(`album.json lists ${album.tracks ? album.tracks.length : "no"} tracks, not 15`);
+    else {
+      const bad = album.tracks.filter((t) => !t.title || !(t.duration_seconds > 0) || !/^https:\/\/assets\.crashthestack\.com\/soundtrack\//.test(t.mp3 || ""));
+      if (bad.length) detail.push(`${bad.length} track(s) with no title, length or MP3 URL (first: ${JSON.stringify(bad[0])})`);
+    }
+  }
+  const nav = await fetch(`${origin}/soundtrack/`).then((r) => r.status).catch(() => 0);
+  if (nav !== 200) detail.push(`/soundtrack/ answers ${nav}`);
+  if (detail.length) fail("soundtrack", detail.join("; "));
+  else pass("soundtrack", `/soundtrack/ is the site's page (palette, JetBrains Mono, the nav) with ${album.tracks.length} tracks, ${Math.round(album.duration_seconds)} s, the MP3s on assets.crashthestack.com`);
+}
+
 // ---- console ----------------------------------------------------------------
 {
   const sokol = consoleLines.filter((l) => /^sokol\[level=[01]\]/.test(l));
