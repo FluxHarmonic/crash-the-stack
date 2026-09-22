@@ -43,9 +43,10 @@
   (export hub-screen hub-screen? hub-screen-new
           hub-screen-world hub-screen-prev hub-screen-tween hub-screen-clock hub-screen-beat-ms
           hub-screen-queued hub-screen-held? hub-screen-request hub-screen-toasts hub-screen-panel
-          hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats hub-screen-last
+          hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats hub-screen-last hub-screen-touch? hub-screen-walk
+          hub-screen-with-touch hub-panel-rect hub-panel-hit hub-touch-buttons hub-touch-hit PANEL-W PANEL-H PANEL-ROW-Y PANEL-ROW-H BOARD-H PAD VIEW-PX-W
           hub-screen-tick hub-screen-hold hub-screen-take-request hub-screen-return hub-screen-launch
-          hub-screen-with-bpm hub-screen-shop hub-screen-camera hub-screen-daemon-at ease
+          hub-screen-with-bpm hub-screen-shop hub-screen-camera hub-screen-daemon-at beat-ease
           SCALE CELL-PX VIEW-W VIEW-H
           screen-action-for LATE-WINDOW TOAST-MS MAX-CATCH-UP
           toast toast? toast-text toast-ms toast-kind)
@@ -93,6 +94,8 @@
       (panel default: #f)
       (panel-row default: 0)
       (bpm-pin default: #f)
+      (touch? default: #f)              ; a coarse pointer: the touch overlay is up
+      (walk default: #f)                ; the d-pad's walk: a direction taken every beat until WAIT or a bump
       (beats default: 0)
       (last default: 'wait))
 
@@ -111,6 +114,9 @@
       (let ((hs (hub-screen hs bpm-pin: (and bpm (> bpm 0) bpm))))
         (hub-screen hs beat-ms: (beat-ms-of hs))))
 
+    (define (hub-screen-with-touch hs on?)
+      (hub-screen hs touch?: on?))
+
     (define (hub-screen-hold hs on?)
       (hub-screen hs held?: on?))
 
@@ -125,13 +131,13 @@
     ;; The market's rows: (tool price affordable?) for the descriptor's shop.
     (define (hub-screen-shop hs)
       (let ((w (hub-screen-world hs)))
-        (map (lambda (tool) (list tool (tool-price tool) (hub-can-buy? w tool)))
+        (map (lambda (tool) (list tool (hub-tool-price tool) (hub-can-buy? w tool)))
              (descriptor-shop (hub-descriptor w)))))
 
     ;; --- the camera --------------------------------------------------------------------
 
     ;; Ease-out: fast off the mark, settling on the beat.
-    (define (ease t) (- 1.0 (* (- 1.0 t) (- 1.0 t))))
+    (define (beat-ease t) (- 1.0 (* (- 1.0 t) (- 1.0 t))))
 
     ;; A point between two cells, in cells: (x . y) floats.
     (define (lerp-cell a b t width)
@@ -144,14 +150,68 @@
       (let* ((w (hub-screen-world hs))
              (p (hub-screen-prev hs))
              (width (layer-width (world-layer w))))
-        (lerp-cell (runner-cell (world-runner p)) (runner-cell (world-runner w)) (ease (hub-screen-tween hs)) width)))
+        (lerp-cell (runner-cell (world-runner p)) (runner-cell (world-runner w)) (beat-ease (hub-screen-tween hs)) width)))
 
     ;; A daemon between beats, by index: its cell in prev and now.
     (define (hub-screen-daemon-at hs d)
       (let* ((w (hub-screen-world hs))
              (width (layer-width (world-layer w)))
              (before (find (lambda (e) (= (daemon-index e) (daemon-index d))) (world-daemons (hub-screen-prev hs)))))
-        (lerp-cell (if before (daemon-cell before) (daemon-cell d)) (daemon-cell d) (ease (hub-screen-tween hs)) width)))
+        (lerp-cell (if before (daemon-cell before) (daemon-cell d)) (daemon-cell d) (beat-ease (hub-screen-tween hs)) width)))
+
+    ;; --- the panels' and the touch overlay's geometry (shared with the draw) ---
+
+    (define PANEL-W 360)
+    (define PANEL-H 200)
+    (define PANEL-ROW-Y 52)           ; the market's first row, from the panel's top
+    (define PANEL-ROW-H 20)
+    (define BOARD-H 352)              ; the board area above the band
+    (define VIEW-PX-W 640)            ; the view's width in virtual pixels
+
+    ;; The panel's rectangle (x y w h) on a view vw wide.
+    (define (hub-panel-rect vw)
+      (list (quotient (- vw PANEL-W) 2) (quotient (- BOARD-H PANEL-H) 2) PANEL-W PANEL-H))
+
+    ;; What a tap at (vx, vy) means on the panel up: (row . i) on a market
+    ;; row, or default (anywhere else: the panel's one action).
+    (define (hub-panel-hit hs vw vx vy)
+      (let* ((r (hub-panel-rect vw))
+             (px (car r)) (py (cadr r))
+             (rows (if (eq? (hub-screen-panel hs) 'market) (length (hub-screen-shop hs)) 0)))
+        (if (and (> rows 0)
+                 (>= vx px) (< vx (+ px PANEL-W))
+                 (>= vy (+ py PANEL-ROW-Y)) (< vy (+ py PANEL-ROW-Y (* rows PANEL-ROW-H))))
+            (cons 'row (quotient (- vy (+ py PANEL-ROW-Y)) PANEL-ROW-H))
+            'default)))
+
+    ;; The touch overlay (coarse pointers): a d-pad under the left thumb
+    ;; (four arrows, the center WAIT), ACT and WAIT under the right, the
+    ;; three tools above them. (name x y w h) each, on a view vw wide.
+    (define PAD 44)
+    (define (hub-touch-buttons vw)
+      (let* ((lx 12) (ly (- BOARD-H (* 3 PAD) 12))
+             (rx (- vw 12 (* 2 PAD) 8)) (ry (- BOARD-H PAD 12)))
+        (list (list 'up (+ lx PAD) ly PAD PAD)
+              (list 'left lx (+ ly PAD) PAD PAD)
+              (list 'wait (+ lx PAD) (+ ly PAD) PAD PAD)
+              (list 'right (+ lx (* 2 PAD)) (+ ly PAD) PAD PAD)
+              (list 'down (+ lx PAD) (+ ly (* 2 PAD)) PAD PAD)
+              (list 'act rx ry PAD PAD)
+              (list 'wait (+ rx PAD 8) ry PAD PAD)
+              (list 'cloak rx (- ry PAD 8) PAD PAD)
+              (list 'decoy (+ rx PAD 8) (- ry PAD 8) PAD PAD)
+              (list 'jam (+ rx (* 2 (+ PAD 8))) (- ry PAD 8) PAD PAD))))
+
+    (define (hub-touch-hit vw vx vy)
+      (let loop ((bs (hub-touch-buttons vw)))
+        (cond ((null? bs) #f)
+              ((let ((b (car bs)))
+                 (and (>= vx (cadr b)) (< vx (+ (cadr b) (cadddr b)))
+                      (>= vy (caddr b)) (< vy (+ (caddr b) (car (cddddr b))))))
+               (car (car bs)))
+              (else (loop (cdr bs))))))
+
+    (define (cddddr x) (cdr (cdddr x)))
 
     ;; --- input -> action -------------------------------------------------------------
 
@@ -202,7 +262,13 @@
              (cam (hub-screen-camera hs))
              (dir (direction-pressed f))
              (click (input-frame-click f)))
-        (cond (dir (list 'move dir))
+        (cond ((and click (hub-screen-touch? hs) (hub-touch-hit VIEW-PX-W (car click) (cdr click)))
+               => (lambda (button)
+                    (cond ((memq button (list 'up 'down 'left 'right)) (list 'walk button))
+                          ((eq? button 'wait) 'stop)
+                          ((eq? button 'act) (context-verb w))
+                          (else (list 'use button)))))
+              (dir (list 'move dir))
               ((or (pressed? f 'space) (pressed? f KEY-DOT)) 'wait)
               ((or (pressed? f 'return) (pressed? f 'e)) (context-verb w))
               ((pressed? f KEY-1) (list 'use 'cloak))
@@ -285,8 +351,20 @@
               ((eq? r 'done) (hub-screen hs panel: 'done panel-row: 0))
               (else hs))))
 
-    ;; A panel's input: up/down move the row, Return picks, Escape leaves.
+    ;; A panel's input: up/down move the row, Return picks, Escape leaves; a
+    ;; tap on a market row picks it, a tap anywhere else is the panel's one
+    ;; action (the market closes, the severed link reconnects, the end goes
+    ;; to the menu).
     (define (panel-tick hs f)
+      (let* ((click (input-frame-click f))
+             (hit (and click (hub-panel-hit hs VIEW-PX-W (car click) (cdr click))))
+             (f (cond ((not hit) f)
+                      ((eq? hit 'default) (make-input-frame (list (if (eq? (hub-screen-panel hs) 'market) 'escape 'return)) '() #f))
+                      (else (make-input-frame (list 'return) '() #f))))
+             (hs (if (and hit (pair? hit)) (hub-screen hs panel-row: (cdr hit)) hs)))
+        (panel-keys hs f)))
+
+    (define (panel-keys hs f)
       (let ((panel (hub-screen-panel hs))
             (row (hub-screen-panel-row hs))
             (w (hub-screen-world hs)))
@@ -329,7 +407,14 @@
               ((pressed? f 'escape) (hub-screen hs request: 'menu))
               ((hub-screen-held? hs) hs)
               (else
-               (let* ((action (screen-action-for hs f))
+               (let* ((raw (screen-action-for hs f))
+                      ;; the d-pad: an arrow starts a walk (and moves now), WAIT stops it
+                      (hs (cond ((and (pair? raw) (eq? (car raw) 'walk)) (hub-screen hs walk: (cadr raw)))
+                                ((eq? raw 'stop) (hub-screen hs walk: #f))
+                                (else hs)))
+                      (action (cond ((and (pair? raw) (eq? (car raw) 'walk)) (list 'move (cadr raw)))
+                                    ((eq? raw 'stop) 'wait)
+                                    (else raw)))
                       ;; the late window: a press just after a wait beat is that beat's
                       (hs (if (and action
                                    (eq? (hub-screen-last hs) 'wait)
@@ -348,8 +433,12 @@
                            (else
                             (let* ((action (or (hub-screen-queued hs)
                                                (let ((d (direction-held f))) (and d (list 'move d)))
+                                               (let ((d (hub-screen-walk hs))) (and d (list 'move d)))
                                                'wait))
                                    (hs (beat hs action))
+                                   (hs (if (any (lambda (e) (and (pair? e) (eq? (car e) 'bump))) (world-events (hub-screen-world hs)))
+                                           (hub-screen hs walk: #f)
+                                           hs))
                                    (hs (hub-screen hs beat-ms: (beat-ms-of hs))))
                               (loop hs (- clock beat-ms) (+ n 1))))))))))))
 

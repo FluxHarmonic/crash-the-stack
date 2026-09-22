@@ -426,6 +426,7 @@
               (color! (cond ((eq? (toast-kind t) 'ice) C-ICE) ((eq? (toast-kind t) 'gibson) C-GIBSON) (else C-TEXT)))
               (draw-text (toast-text t) (- (/ vw 2) (/ (* 12 (string-length (toast-text t))) 2)) y 2)
               (toasts (cdr ts) (+ y 18) (+ n 1)))))
+        (when (hub-screen-touch? hs) (draw-touch-overlay hs vw))
         (draw-hub-panel hs vw top)
         ;; the band: the trace, the credits, the beat
         (color! C-BG)
@@ -456,12 +457,37 @@
         (color! (if (>= f TENSE-AT) C-TRACE-HOT C-TRACE))
         (draw-filled-rect (+ x 1) (+ y 1) (exact (floor (* (- wd 2) f))) (- ht 2))))
 
+    ;; The touch overlay (coarse pointers): the d-pad, ACT and WAIT, the
+    ;; tools, as outlined buttons in the game's look; the walk's arrow lit.
+    (define (draw-touch-overlay hs vw)
+      (let ((w (hub-screen-world hs))
+            (walk (hub-screen-walk hs)))
+        (for-each
+         (lambda (b)
+           (let* ((name (car b)) (x (cadr b)) (y (caddr b)) (bw (cadddr b)) (bh (car (cddddr b)))
+                  (tool? (memq name (list 'cloak 'decoy 'jam)))
+                  (count (and tool? (world-inventory-count w name)))
+                  (lit? (or (eq? name walk) (and tool? (> count 0)))))
+             (color! (if lit? C-SELECTED C-BAR-C))
+             (draw-filled-rect x y bw 1) (draw-filled-rect x (+ y bh -1) bw 1)
+             (draw-filled-rect x y 1 bh) (draw-filled-rect (+ x bw -1) y 1 bh)
+             (color! (cond (lit? C-SELECTED) ((and tool? (= count 0)) C-TEXT-DIM) (else C-TEXT)))
+             (let ((label (cond ((eq? name 'up) "^") ((eq? name 'down) "v") ((eq? name 'left) "<") ((eq? name 'right) ">")
+                                ((eq? name 'wait) "WAIT") ((eq? name 'act) "ACT")
+                                ((eq? name 'cloak) (string-append "CLK " (number->string count)))
+                                ((eq? name 'decoy) (string-append "DCY " (number->string count)))
+                                (else (string-append "JAM " (number->string count))))))
+               (draw-text label (+ x (quotient (- bw (* 6 (string-length label))) 2)) (+ y (quotient (- bh 7) 2)) 1))))
+         (hub-touch-buttons vw))))
+
+    (define (cddddr x) (cdr (cdddr x)))
+
     ;; The screen's own panels: the market's rows, the severed link, RUN COMPLETE.
     (define (draw-hub-panel hs vw top)
       (let ((panel (hub-screen-panel hs))
             (w (hub-screen-world hs)))
         (when panel
-          (let* ((pw 360) (ph 200) (px (quotient (- vw pw) 2)) (py (quotient (- top ph) 2)))
+          (let* ((rect (hub-panel-rect vw)) (px (car rect)) (py (cadr rect)) (pw (caddr rect)) (ph (cadddr rect)))
             (color! C-BG)
             (draw-filled-rect px py pw ph)
             (color! C-BAR-C)
@@ -472,7 +498,7 @@
                    (draw-text "MARKET" (+ px 16) (+ py 12) 2)
                    (color! C-TEXT-DIM)
                    (draw-text (string-append "CREDITS " (number->string (+ (world-credits w) (world-layer-credits w))) "   ESC LEAVES") (+ px 16) (+ py 34) 1)
-                   (let rows ((rs (hub-screen-shop hs)) (i 0) (y (+ py 52)))
+                   (let rows ((rs (hub-screen-shop hs)) (i 0) (y (+ py PANEL-ROW-Y)))
                      (when (pair? rs)
                        (let* ((row (car rs))
                               (lit? (= i (hub-screen-panel-row hs))))
@@ -481,7 +507,7 @@
                                                    "  " (number->string (cadr row)) " CR"
                                                    "  X" (number->string (world-inventory-count w (car row))))
                                     (+ px 16) y 2)
-                         (rows (cdr rs) (+ i 1) (+ y 20))))))
+                         (rows (cdr rs) (+ i 1) (+ y PANEL-ROW-H))))))
                   ((eq? panel 'severed)
                    (color! C-TRACE-HOT)
                    (draw-text "LINK SEVERED." (+ px 16) (+ py 12) 2)
