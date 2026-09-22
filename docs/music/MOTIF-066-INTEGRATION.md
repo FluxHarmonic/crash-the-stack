@@ -56,3 +56,38 @@ integration work, not implied by this dependency update.
 Breach Vector album II is already published separately; see
 [the mastering and publication record](album/BREACH-II.md). Future game deploys
 must preserve its current soundtrack manifest using `CRASH_SOUNDTRACK_DIR`.
+
+## Browser build and deployment
+
+The full web build completed successfully. After Asyncify and `wasm-opt`, the
+game is 25,137,475 bytes (23.97 MiB) and the tracker is 15,718,691 bytes
+(14.99 MiB), each below Pages' 25 MiB file limit. All twenty staged tune files
+match their repository counterparts byte for byte.
+
+A fresh Chromium session passes seven integration checks: Relay Ghost tense
+playback, gain-preserving browser serialization, Breach Vector tense playback,
+Obsidian Index tense playback, legacy spy playback, game boot, and absence of
+runtime errors. Playback requires nonzero measured browser audio and an
+advancing score position, not merely a successful page load.
+
+Deployment `c3e7651a` is live at https://crashthestack.com/ and
+https://c3e7651a.crashthestack.pages.dev. The stamped build and deployment source
+are `23b16a76357a`; changes after the runtime commit are tests and documentation.
+The previous production was `cfb7d2bb`, checked immediately before publishing.
+
+```sh
+CRASH_SOUNDTRACK_DIR="$HOME/Ops/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
+  scripts/publish-web --dry-run
+CRASH_SOUNDTRACK_DIR="$HOME/Ops/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
+  scripts/publish-web "Integrate Motif 0.6.6 and synchronized soundtrack scores"
+```
+
+The public game's page, service worker, both WASM files, three revised scores,
+and every soundtrack page file match the validated local files by SHA-256.
+The soundtrack retains all fifteen entries, Relay Ghost album II, Obsidian
+Index album II, and the newly published Breach Vector album II. The public
+listening page remains https://crashthestack.com/soundtrack/.
+
+The same seven browser checks also pass against the canonical public domain
+in a new browser profile after deployment, including measured audio output
+and Relay Ghost's gain-preserving share/save path.
