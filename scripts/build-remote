@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Build the web config of HEAD on an azoth runner, optionally run arms there
+# against that build, and fetch the served tree back.
+#
+#   scripts/build-remote                             build HEAD, fetch the tree
+#   scripts/build-remote --arm "verify.mjs --phone" --arm verify-tracker.mjs
+#                                                    ... and run those arms on the
+#                                                    runner against the build
+#   scripts/build-remote --no-fetch --arm verify.mjs  arms only, keep nothing
+#
+# The whole verify cycle then runs remotely: deliver the source at a SHA, build,
+# arm, fetch. One lease for all of it.
+#
+# WHAT IS BUILT IS EXACTLY HEAD, AND THE RESULT SAYS SO OR IS REFUSED.
+#   - a tree with tracked changes is refused before anything is leased: the
+#     build would not be HEAD's, and "the thing measured was not the thing
+#     shipped" (topics/thing-measured-was-not-thing-shipped);
+#   - the source travels as a git bundle of HEAD, so the runner's checkout is a
+#     real repository at that commit and package.sgl's web-version stamps the
+#     page from it exactly as it does here;
+#   - after the build the page's stamp must equal HEAD's 12-character sha, on
+#     the runner AND again here on the fetched tree; either mismatch refuses
+#     (exit 125) and the fetched tree is deleted;
+#   - the fetched tree lands in build/remote-web-<sha>/ (refused if it already
+#     exists), never in build/web, so a remote result can never be mistaken
+#     for a local build or overwrite one; BUILD-SHA inside it names the sha.
+#
+# The runner uses the same sigil CLI version as this box's `sigil --version`
+# (`sigil cli use`), and the same scripts/dev (guix shell -m manifest.scm).
+#
+# Exit: 0 build and every arm green; 1 an arm failed (the build succeeded);
+# 2 the build failed; 125 refused or SETUP-FAILED; 126/127 from azoth-remote
+# (results incomplete / runner not released).
+#
+# Environment: AZOTH_REMOTE (path to azoth.works bin/azoth-remote), BUILD_TIMEOUT
+# (seconds, default 10800), OPTIMIZE (default 1, as the gate builds).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+say() { printf 'build-remote: %s\n' "$*" >&2; }
+
+ARMS=()
+FETCH=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --arm)      [ $# -ge 2 ] || { say "--arm needs an argument"; exit 125; }; ARMS+=("$2"); shift 2 ;;
+    --no-fetch) FETCH=0; shift ;;
+    *) say "unknown argument '$1'"; exit 125 ;;
+  esac
+done
+for a in "${ARMS[@]+"${ARMS[@]}"}"; do
+  f=${a%% *}
+  case "$f" in *.mjs) ;; *) say "--arm '$a' does not start with an arm file"; exit 125 ;; esac
+  [ -f "$f" ] || { say "--arm '$a': no $f at HEAD's checkout"; exit 125; }
+  git ls-files --error-unmatch "$f" >/dev/null 2>&1 || { say "--arm '$a': $f is not tracked, so it is not in the bundle"; exit 125; }
+done
+
+REMOTE=${AZOTH_REMOTE:-}
+if [ -z "$REMOTE" ]; then
+  for c in "$HOME/Projects/Sites/azoth.works/bin/azoth-remote" \
+           "$HOME/Projects/Sites/azoth-task-azoth-remote-builds/bin/azoth-remote"; do
+    [ -x "$c" ] && { REMOTE=$c; break; }
+  done
+fi
+[ -n "$REMOTE" ] && [ -x "$REMOTE" ] || { say "azoth-remote not found (set AZOTH_REMOTE)"; exit 125; }
+
+dirty=$(git status --porcelain --untracked-files=no)
+if [ -n "$dirty" ]; then
+  say "REFUSED: the tree has tracked changes; the build would not be HEAD's. Commit first."
+  printf '%s\n' "$dirty" | head -5 >&2
+  exit 125
+fi
+SHA=$(git rev-parse --short=12 HEAD)
+FULL=$(git rev-parse HEAD)
+DEST="build/remote-web-$SHA"
+if [ "$FETCH" = 1 ] && [ -e "$DEST" ]; then
+  say "REFUSED: $DEST already exists; remove it to rebuild this sha"
+  exit 125
+fi
+SIGIL_V=$(sigil --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '{print $2}')
+case "$SIGIL_V" in [0-9]*.[0-9]*.[0-9]*) ;; *) say "cannot read this box's sigil version ('$SIGIL_V')"; exit 125 ;; esac
+say "HEAD $SHA ($FULL), sigil $SIGIL_V, OPTIMIZE=${OPTIMIZE:-1}, arms: ${ARMS[*]:-none}"
+
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/build-remote.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT
+git bundle create "$STAGE/src.bundle" HEAD 2>/dev/null
+: > "$STAGE/arms"
+for a in "${ARMS[@]+"${ARMS[@]}"}"; do printf '%s\n' "$a" >> "$STAGE/arms"; done
+
+cat > "$STAGE/remote.sh" <<'EOF'
+#!/usr/bin/env bash
+# Runs ON THE RUNNER, in ~/work. Args: <full sha> <short sha> <sigil version> <optimize>
+set -uo pipefail
+cd "$HOME/work"
+FULL=$1; SHA=$2; SIGIL_V=$3; OPT=$4
+mkdir -p out
+t() { date +%s; }
+T0=$(t)
+echo "remote: runner $(ip -4 -br addr show eth0 | awk '{print $3}') nproc=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg)"
+git clone --quiet src.bundle checkout || { echo "SETUP-FAILED: clone"; exit 125; }
+git -C checkout checkout --quiet "$FULL" || { echo "SETUP-FAILED: checkout $FULL"; exit 125; }
+[ "$(git -C checkout rev-parse HEAD)" = "$FULL" ] || { echo "SETUP-FAILED: checkout is not $FULL"; exit 125; }
+"$HOME/.sigil/bin/sigil" cli use "$SIGIL_V" >/dev/null 2>&1 || { echo "SETUP-FAILED: sigil cli use $SIGIL_V"; exit 125; }
+export PATH="$HOME/.sigil/bin:$PATH"
+echo "remote: sigil $(sigil --version 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
+cd checkout
+T1=$(t); sigil deps install > ../out/deps.log 2>&1 || { echo "BUILD-FAILED: deps install (out/deps.log)"; tail -20 ../out/deps.log; exit 2; }
+T2=$(t); echo "remote: deps install $((T2-T1))s"
+# The guix environment scripts/dev enters is realised on first use; time it
+# apart from the build so the build figure is the build.
+guix shell -m manifest.scm -- true > ../out/guix.log 2>&1 || { echo "SETUP-FAILED: guix shell -m manifest.scm (out/guix.log)"; tail -20 ../out/guix.log; exit 125; }
+T3=$(t); echo "remote: guix environment $((T3-T2))s"
+OPTIMIZE=$OPT scripts/dev sigil build --config web > ../out/build.log 2>&1; brc=$?
+T4=$(t); echo "remote: build rc=$brc $((T4-T3))s"
+[ $brc -eq 0 ] || { echo "BUILD-FAILED rc=$brc (out/build.log)"; tail -30 ../out/build.log; exit 2; }
+STAMP=$(grep -o 'version: "[^"]*"' build/web/index.html | head -1 | cut -d'"' -f2)
+[ "$STAMP" = "$SHA" ] || { echo "REFUSED: the page is stamped '$STAMP', not $SHA"; exit 125; }
+echo "remote: stamp $STAMP ok; wasm $(stat -c %s build/web/crash-the-stack.wasm) bytes sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16)"
+# arms, against the build just made, from the checkout root as locally
+ARC=0
+if [ -s ../arms ]; then
+  mkdir -p ../shim
+  CHROME=$(command -v chromium) || { echo "SETUP-FAILED: no chromium"; exit 125; }
+  printf '#!/bin/sh\nexec %s "$@"\n' "$CHROME" > ../shim/google-chrome; chmod +x ../shim/google-chrome
+  export PATH="$HOME/work/shim:$PATH"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    read -r -a A <<<"$line"
+    arm=${A[0]}; rest=("${A[@]:1}")
+    Ta=$(t)
+    echo "=== ARM $line"
+    node "$arm" build/web "${rest[@]+"${rest[@]}"}" < /dev/null; r=$?
+    echo "=== ARM-RESULT rc=$r $((($(t))-Ta))s $line"
+    [ $r -eq 0 ] || ARC=1
+  done < ../arms
+fi
+# served tree only, for the fetch
+tar -C build/web --exclude=./native --exclude=./bin --exclude=./.sigil-package-cache -cf - . | (mkdir -p ../out/web && tar -C ../out/web -xf -)
+echo "remote: total $(( $(t) - T0 ))s"
+exit $ARC
+EOF
+
+GETS=()
+[ "$FETCH" = 1 ] && GETS=(--get "out:$STAGE/fetched")
+[ "$FETCH" = 1 ] || GETS=(--get "out/build.log:$STAGE/build.log")
+T0=$(date +%s)
+set +e
+"$REMOTE" --label "build $SHA" --timeout "${BUILD_TIMEOUT:-10800}" --detach \
+  --put "$STAGE/src.bundle:src.bundle" --put "$STAGE/remote.sh:remote.sh" --put "$STAGE/arms:arms" \
+  "${GETS[@]}" -- bash remote.sh "$FULL" "$SHA" "$SIGIL_V" "${OPTIMIZE:-1}"
+rc=$?
+set -e
+say "remote cycle rc=$rc in $(( $(date +%s) - T0 ))s"
+
+if [ "$FETCH" = 1 ] && [ -f "$STAGE/fetched/web/index.html" ]; then
+  STAMP=$(grep -o 'version: "[^"]*"' "$STAGE/fetched/web/index.html" | head -1 | cut -d'"' -f2)
+  if [ "$STAMP" != "$SHA" ]; then
+    say "REFUSED: the fetched page is stamped '$STAMP', not $SHA; deleting it"
+    exit 125
+  fi
+  mkdir -p build
+  mv "$STAGE/fetched/web" "$DEST"
+  printf '%s\n' "$FULL" > "$DEST/BUILD-SHA"
+  say "fetched the build of $SHA to $DEST (stamp verified here)"
+fi
+# The runner's logs, kept whatever happened (a failed build's are the ones you
+# need), beside the tree rather than inside it so they are never served.
+if [ -d "$STAGE/fetched" ]; then
+  LOGS="build/remote-web-$SHA.logs"
+  rm -rf "$LOGS"; mkdir -p "$LOGS"
+  for l in build.log deps.log guix.log; do
+    [ -f "$STAGE/fetched/$l" ] && cp "$STAGE/fetched/$l" "$LOGS/$l"
+  done
+  say "runner logs in $LOGS"
+fi
+exit $rc
