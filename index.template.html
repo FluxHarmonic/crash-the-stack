@@ -291,9 +291,12 @@
       return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length +
         "\npage tunes fetched " + tuneWork.fetched + " failed " + tuneWork.failed + " loading " + tuneWork.loading +
         "\n" + line("page tune-upload", tuneWork.upload) +
+        "\npage starved-at " + (starved.log.length ? starved.log.map(function (e) { return e[0] + "s cues+" + e[1] + " music+" + e[2]; }).join(", ") : "(none)") +
+        "\npage events " + (starved.events.length ? starved.events.map(function (e) { return e[0] + "s " + e[1]; }).join(", ") : "(none)") +
         "\npage audio node " + mode + " state " + (ctx ? ctx.state : "unknown") +
         " rate " + (ctx ? ctx.sampleRate : 0) + " block " + audioOutput.block +
         " secure " + (window.isSecureContext ? "yes" : "no") + " isolated " + (window.crossOriginIsolated ? "yes" : "no") + where +
+        " sw " + (window.crashUpdate ? window.crashUpdate.state + (window.crashUpdate.reason ? " (" + window.crashUpdate.reason + ": no precache, every boot fetches fresh)" : "") : "none") +
         "\n" + line("page audio-callback-gap", audioOutput.gaps);
     }
 
@@ -310,12 +313,30 @@
     // an update waiting to apply waits on that (the worker's activation
     // under a fetch in flight hung twice in four runs, 2026-09-19).
     var tuneWork = { fetched: 0, failed: 0, loading: "none", upload: [] };
+    // When the sinks starved (the leader's question, 2026-09-22: the phone's
+    // 55040 starved cue frames on the https host, one stall or spread over
+    // the taps?): every 100 ms the bridge's cumulative starved-frame counts
+    // are read, and a growth is kept as [seconds since load, cues delta,
+    // music delta]; the page's own events (a tune landing) are kept beside
+    // them with their seconds, so the two lines of the stats say which.
+    var starved = { cues: 0, music: 0, log: [], events: [] };
+    function pageEvent(what) { starved.events.push([(performance.now() / 1000).toFixed(1), what]); if (starved.events.length > 40) starved.events.shift(); }
+    setInterval(function () {
+      var b = window.SigilWasmAudio; if (!b || !b.sinkUnderruns) return;
+      var c = b.sinkUnderruns(1) || 0, m = b.sinkUnderruns(2) || 0;
+      if (c > starved.cues || m > starved.music) {
+        starved.log.push([(performance.now() / 1000).toFixed(1), c - starved.cues, m - starved.music]);
+        if (starved.log.length > 60) starved.log.shift();
+      }
+      starved.cues = c; starved.music = m;
+    }, 100);
     var themeSettled = null, themeAsked = false;
     window.crashThemeSettled = new Promise(function (resolve) { themeSettled = resolve; });
     function fetchTune(name, attempt, first) {
       if (!attempt) { attempt = 1; first = !themeAsked; themeAsked = true; }
       function settled(failed) {
         tuneWork.fetched++; if (failed) tuneWork.failed++;
+        pageEvent((failed ? "tune-failed " : "tune-landed ") + name);
         tuneWork.loading = "none";
         if (first) themeSettled();
       }
@@ -920,7 +941,13 @@
       console.log("crash: sw registered");   // the arms read it (the registration waits for the menu to be live)
       track(reg);
     }).catch(function (err) {
-      status.state = "failed";
+      // A self-signed https host (scripts/serve-web-tls.mjs): the tapped-through
+      // certificate exception does not cover the worker's script fetch, so no
+      // worker, no precache, no UPDATE, and every boot fetches fresh (part of
+      // the boot stall a phone measures there; not the published site's case)
+      var selfSigned = /certificate|SSL/i.test(err.message);
+      status.state = "failed"; status.reason = selfSigned ? "self-signed host" : err.message;
+      console.log(selfSigned ? "crash: sw not registered, self-signed host (no precache, no UPDATE, every boot fetches fresh)" : "crash: sw refused " + err.message);
       document.getElementById("status").textContent = "Service worker refused: " + err.message;
     });
   })();
