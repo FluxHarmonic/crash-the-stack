@@ -36,11 +36,18 @@ soundtrack, and what the tracker edits is what the game plays.
   and speed) and half a bar. The jump lands on the next bar row, so the
   fill ends within half a bar of the trace landing either way; it runs on
   into the tense region (the region set to fill-through-tense at the
-  landing, then to tense alone once the walk is there), which loops.
+  landing, then to tense alone once the walk is there), which loops. The
+  window is a **trigger, not a predicate**: once the fill is running it runs
+  to the strike. It has to be, because one of the window's terms (the sink's
+  queue) moves on its own — a ladder step or an underrun shrinks it, and a
+  predicate would answer CALM in the middle of the run-up and jump the music
+  out of the fill seconds before the ICE.
 - **Tense begins at the strike.** The phase turning `counter` asks for
   the `tense` mark at the next bar row unless the fill already ran into
   it. A strike with no run-up (a shuffle jumping the trace past its
-  threshold; a tune with no fill) goes to tense with no fill. A strike
+  threshold; a tune with no fill) goes to tense with no fill: a trace already
+  past its threshold (the frame between a hint's or a shuffle's seconds
+  landing and the phase flipping) starts no fill. A strike
   during the fill cuts it at the next bar.
 - A return to calm (no path in today's trace model; kept for one) asks
   for the `calm` mark at the next bar row with a 300 ms dip.

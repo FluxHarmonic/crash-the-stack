@@ -88,24 +88,41 @@
     (assert-equal (music-pick 'cards 0 #f) (music-pick 'cards #f #f))))
 
 (test-group "music: the section the trace asks for (the trace -> music coupling)"
-  (test "the counter-hack phase is TENSE, whatever the trace's remaining time or the window"
-    (assert-equal 'tense (music-section 'counter #f #f))
-    (assert-equal 'tense (music-section 'counter 5000.0 8000.0))
-    (assert-equal 'tense (music-section 'counter 50000.0 8000.0)))
+  (test "the counter-hack phase is TENSE, whatever the trace's remaining time, window or current section"
+    (assert-equal 'tense (music-section 'counter #f #f 'calm))
+    (assert-equal 'tense (music-section 'counter 5000.0 8000.0 'fill))
+    (assert-equal 'tense (music-section 'counter 50000.0 8000.0 'tense)))
   (test "the fill runs up to the trace: FILL once the remaining ms are within the window, CALM before"
-    (assert-equal 'calm (music-section 'trace 50000.0 8000.0))
-    (assert-equal 'calm (music-section 'trace 8000.1 8000.0))
-    (assert-equal 'fill (music-section 'trace 8000.0 8000.0))
-    (assert-equal 'fill (music-section 'trace 100.0 8000.0))
-    (assert-equal 'fill (music-section 'trace 0.0 8000.0)))
+    (assert-equal 'calm (music-section 'trace 50000.0 8000.0 'calm))
+    (assert-equal 'calm (music-section 'trace 8000.1 8000.0 'calm))
+    (assert-equal 'fill (music-section 'trace 8000.0 8000.0 'calm))
+    (assert-equal 'fill (music-section 'trace 100.0 8000.0 'calm)))
+  ;; the window's queue term moves on its own (a ladder step or an underrun
+  ;; drains the sink): a predicate would answer CALM mid-run-up and jump the
+  ;; music out of the fill with a dip. The fill latches (the reviewer's M1).
+  (test "the fill is latched: a window that shrinks under the remaining time does not leave it"
+    (assert-equal 'fill (music-section 'trace 7000.0 8000.0 'fill))
+    (assert-equal 'fill (music-section 'trace 7000.0 3000.0 'fill))    ; the window lost 4 s of queue
+    (assert-equal 'fill (music-section 'trace 7000.0 #f 'fill))        ; and the whole window with it
+    (assert-equal 'fill (music-section 'trace 50000.0 8000.0 'fill)))  ; even far from the trace
+  (test "the latch is the fill's alone: tense and calm re-decide every frame"
+    (assert-equal 'calm (music-section 'trace 50000.0 8000.0 'tense))
+    (assert-equal 'fill (music-section 'trace 1000.0 8000.0 'tense))
+    (assert-equal 'calm (music-section 'trace 50000.0 8000.0 'calm)))
+  ;; a hint or a shuffle adds its seconds to the trace's value a frame before
+  ;; trace-advance flips the phase: no run-up is left, so no fill starts
+  (test "a trace already past its threshold (remaining <= 0) starts no fill: the next frame is the strike"
+    (assert-equal 'calm (music-section 'trace 0.0 8000.0 'calm))
+    (assert-equal 'calm (music-section 'trace -12000.0 8000.0 'calm))
+    (assert-equal 'tense (music-section 'counter -12000.0 8000.0 'calm)))
   (test "no window (a tune without a fill) or no landing ahead (clean mode) is CALM until the strike"
-    (assert-equal 'calm (music-section 'trace 100.0 #f))
-    (assert-equal 'calm (music-section 'trace #f 8000.0))
-    (assert-equal 'calm (music-section 'trace #f #f)))
+    (assert-equal 'calm (music-section 'trace 100.0 #f 'calm))
+    (assert-equal 'calm (music-section 'trace #f 8000.0 'calm))
+    (assert-equal 'calm (music-section 'trace #f #f 'calm)))
   (test "the cascade and the severed screen ask CALM (the live model fades out instead)"
-    (assert-equal 'calm (music-section #f #f #f))
-    (assert-equal 'calm (music-section 'cleared 100.0 8000.0))
-    (assert-equal 'calm (music-section 'severed 100.0 8000.0))))
+    (assert-equal 'calm (music-section #f #f #f 'calm))
+    (assert-equal 'calm (music-section 'cleared 100.0 8000.0 'fill))
+    (assert-equal 'calm (music-section 'severed 100.0 8000.0 'fill))))
 
 ;; The page hands a tune's text over as base64 (the only payload the
 ;; bridge carries); the decode is (crash native)'s C. RFC 4648's vectors,

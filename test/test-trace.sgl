@@ -45,7 +45,7 @@
 (define SEED 5)
 (define lay (turtle-layout))
 (define geom (make-geometry lay 640 400))
-(define TPS 60)
+(define TPS 60)   ; (crash tween)'s TICKS-PER-SECOND, the one clock
 
 (define (frame pressed . rest)
   (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
@@ -538,3 +538,42 @@
       (let ((next (session-step last (frame '(n) '(ctrl)) geom)))
         (assert-equal 'clean (trace-mode (tr-of next)))
         (assert-true (close? 0 (value-of next)))))))
+
+;; The ms until the trace lands: what the music's run-up counts down (M1,
+;; D59; the reviewer's MEDIUM 3, 2026-09-22 — the shell computed this
+;; inline and no test anywhere read it). The fill is asked when these ms
+;; fall inside the tune's window, so a hint's or a shuffle's seconds must
+;; move it at once, a layout's own threshold must be the one counted to,
+;; and clean mode must have no landing at all.
+(test-group "trace: the ms until the trace lands (the music's run-up)"
+  (test "a fresh twist trace counts the whole threshold"
+    (let ((tr (trace-new 'twist)))
+      (assert-true (close? 180000.0 (trace-remaining-ms tr)))))
+  (test "the seconds played count down, at 1 ms per ms"
+    (let ((tr (trace-add-ticks (trace-new 'twist) (* 30 TPS))))
+      (assert-true (close? 150000.0 (trace-remaining-ms tr)))))
+  (test "a hint takes its 30 s and a shuffle its 60 s off the moment they are charged"
+    (let* ((tr (trace-add-ticks (trace-new 'twist) (* 30 TPS)))
+           (hinted (trace-hint tr))
+           (shuffled (trace-shuffle hinted)))
+      (assert-true (close? 120000.0 (trace-remaining-ms hinted)))
+      (assert-true (close? 60000.0 (trace-remaining-ms shuffled)))))
+  (test "a layout's own threshold is the one counted to"
+    (let ((tr (trace-with-thresholds (trace-new 'twist) 45 220)))
+      (assert-true (close? 45000.0 (trace-remaining-ms tr)))))
+  (test "a charge past the threshold reads NEGATIVE until the advance flips the phase"
+    (let* ((tr (trace-add-ticks (trace-new 'twist) (* 150 TPS)))
+           (shuffled (trace-shuffle tr)))          ; 150 + 60 = 210 against 180
+      (assert-equal 'trace (trace-phase shuffled))
+      (assert-true (< (trace-remaining-ms shuffled) 0))
+      (assert-true (close? -30000.0 (trace-remaining-ms shuffled)))))
+  (test "the counter phase, a severed link and a cleared board have no landing ahead"
+    (let* ((states (run (session-new lay SEED) (list (list (quote ticks) (* 181 TPS)))))
+           (after (tr-of (last-of states))))
+
+      (assert-equal 'counter (trace-phase after))
+      (assert-false (trace-remaining-ms after))))
+  (test "clean mode never lands: no ICE, no run-up"
+    (let ((tr (trace-with-mode (trace-new 'twist) 'clean)))
+      (assert-false (trace-remaining-ms tr))
+      (assert-false (trace-remaining-ms (trace-add-ticks tr (* 300 TPS)))))))

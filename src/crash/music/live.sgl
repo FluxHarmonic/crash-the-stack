@@ -48,7 +48,7 @@
           live-music-unavailable! live-music-prefetch! live-music-has-text?
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
-          live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door!
+          live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms
           live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
@@ -143,18 +143,29 @@
     ;; ms the ear is behind the walker: the source's queue at the device rate
     (define (queue-ms) (/ (* 1000.0 (audio-source-depth)) (max 1 (audio-rate))))
 
+    ;; The window's arithmetic, apart from the player so a test can hold
+    ;; every term (the reviewer's MEDIUM 3: the tests run with no sink, so
+    ;; the queue term was identically zero and could not have caught a
+    ;; mistake in it). row: the walker's row, the one being rendered now.
+    ;;   queue-ms   the ear is this far behind the walker (the sink's frames)
+    ;;   wait       the walker's rows until its next bar row: a jump lands there
+    ;;   fill-rows  the fill's own length in rows
+    ;;   half a bar the slack is constant within a bar and steps up by a bar
+    ;;              at each bar row, so asking at the half-bar point misses
+    ;;              the trace by at most half a bar either way
+    (define (fill-window-ms queue-ms row-ms bar-rows row fill-rows)
+      (let ((wait-rows (- bar-rows (modulo row bar-rows))))
+        (+ queue-ms
+           (* wait-rows row-ms)
+           (* fill-rows row-ms)
+           (* 0.5 bar-rows row-ms))))
+
     ;; How far ahead of the trace the fill must be asked for, in ms; #f when
     ;; the tune has no fill (tense is asked at the strike alone).
     (define (fill-window)
       (and *timing* *player* (timing-fill-rows) (timing-tense-pos)
-           (let* ((wp (or (walker-position) (cons 0 0)))
-                  (bar (timing-bar-rows))
-                  (wait-rows (- bar (modulo (cdr wp) bar)))
-                  (row-ms (timing-row-ms)))
-             (+ (queue-ms)
-                (* wait-rows row-ms)
-                (* (timing-fill-rows) row-ms)
-                (* 0.5 bar row-ms)))))
+           (let ((wp (or (walker-position) (cons 0 0))))
+             (fill-window-ms (queue-ms) (timing-row-ms) (timing-bar-rows) (cdr wp) (timing-fill-rows)))))
 
     ;; The region the walk loops in for the section asked: calm's; the fill
     ;; runs on into tense (fill's start to tense's end) until the walk is in
@@ -235,7 +246,10 @@
               ((eq? rate 'stored) #f)   ; the shell says a stored rate as (live-music-set-rate! N 'stored)
               ((and (number? rate) (> rate 0)) (set! *rate* rate) (set! *rate-pinned* pin?)
                (set! *rate-reason* (cond (pin? 'pin) ((and (pair? rest) (eq? (car rest) 'stored)) 'stored) (else 'device))))
-              (else (set! *rate* #f)))))
+              ;; (live-music-set-rate! #f #t): the device's rate AND the pin
+              ;; lifted, so the ladder runs again (the pin is otherwise
+              ;; permanent for the process: the door is a boot argument)
+              (else (set! *rate* #f) (set! *rate-pinned* #f) (set! *rate-reason* 'device)))))
     (define (rate-below r)
       (let loop ((rs RATES))
         (cond ((null? rs) #f)
@@ -258,7 +272,8 @@
     ;; rule) never decides.
     (define (ladder!)
       (when (and *player* (>= *ladder-pulls* LADDER-PULLS))
-        (let* ((per-1024 (median-of *ladder-samples* LADDER-PULLS))
+        (let* ((unread (if (resampling?) (resampler-unread *rs*) 0))   ; read before the rate moves (LOW 5)
+               (per-1024 (median-of *ladder-samples* LADDER-PULLS))
                (per-frame (* per-1024 (/ (audio-rate) 61440.0)))
                (next (rate-below (live-music-rate))))
           (set! *ladder-pulls* 0)
@@ -267,7 +282,7 @@
             (set! *rate-reason* (cons 'ladder (/ (round (/ (- (current-milliseconds) *boot-ms*) 100)) 10.0)))
             (*say* "music" "rate" next "per-frame-ms" (/ (round (* 10 per-frame)) 10.0))
             (when *remember* (*remember* next))
-            (reopen!)))))
+            (reopen! unread)))))
     (define (median-of v n)
       (let ((s (list-sort < (vector->list (vector-copy v 0 n)))))
         (if (even? n)
@@ -304,10 +319,15 @@
     ;; the timeline gives the row that head is in and its start sample, and
     ;; the new player skips the head's offset into that row at its own
     ;; rate. The section and its region are kept; the source's sink stays open.
-    (define (reopen!)
+    ;; unread: what the resampler held when the OLD player rendered its last
+    ;; frames, captured by the caller before the rate moved (ladder! assigns
+    ;; the new rate first, so (resampling?) here would describe the player
+    ;; being opened, not the one whose counters are being read: the
+    ;; reviewer's LOW 5, 2026-09-22).
+    (define (reopen! unread)
       (let* ((old *player*)
              (old-rate (player-rate-of old))
-             (head (- (player-rendered old) (if (resampling?) (resampler-unread *rs*) 0)))
+             (head (- (player-rendered old) unread))
              (entry (let loop ((es (player-timeline old)))   ; newest first: #(pos row start)
                       (cond ((null? es) #f)
                             ((<= (vector-ref (car es) 2) head) (car es))
@@ -439,7 +459,13 @@
       (let ((text (text-for name)))
         (if (not text)
             'pending
-            (let* ((stall (audio-stall-begin!))   ; the parse and the open stall the frame: a known stall, the cues pre-rolled and its starvation counted apart
+            ;; The parse and the open stall the frame: a known stall, the cues
+            ;; pre-rolled and its starvation counted apart. A tune that fails
+            ;; to read or validate must still close the bracket, or every
+            ;; starved frame after it is folded into the known count (the
+            ;; reviewer's LOW 4, 2026-09-22).
+            (guard (e (#t (audio-stall-end!) (raise e)))
+            (let* ((stall (audio-stall-begin!))
                    (t (read-tune-string text))
                    (calm (or (tune-mark t 'calm) 0))
                    (left (assq name *positions*))
@@ -464,7 +490,7 @@
               (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
               (fade! 0.0 1.0 FADE-IN-MS #f)
               (audio-stall-end!)
-              'open))))
+              'open)))))
 
     ;; --- the frame ---------------------------------------------------------------------
     ;; screen: menu | stack | cards; phase: trace | counter | severed | cleared | #f;
@@ -502,12 +528,13 @@
         ;; the section follows the trace: the fill in its run-up, tense at
         ;; the strike, each landing on the walker's next bar row
         (when (and *player* (not (eq? screen 'menu)) (eq? want *name*))
-          (let ((section (music-section phase remaining (fill-window))))
+          (let ((section (music-section phase remaining (fill-window) *section*)))
             (unless (eq? section *section*)
               (set! *section* section)
               (let ((p (walker-position)))
                 (*say* "music" "section" (symbol->string section) "asked" "at" (if p (car p) "-") (if p (cdr p) "-")))
               (cond ((eq? section 'fill)
+                     (set! *in-tense* #f)   ; a resume that left the flag set must not swallow the strike's tense ask
                      (ask-jump! 'fill))
                     ((eq? section 'tense)
                      ;; the fill that ran into tense already is there: nothing to jump

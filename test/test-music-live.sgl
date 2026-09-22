@@ -93,6 +93,7 @@
 
 (define (ms->frames ms) (* ms (/ RATE 1000.0)))
 (define (within-frames? a b tolerance) (<= (abs (- a b)) tolerance))
+(define (close? a b) (< (abs (- a b)) 1e-6))
 
 (test-group "music live: the fill runs up to the trace and runs on into tense"
   (fresh-deal!)
@@ -109,15 +110,18 @@
       (assert-equal 1 (length landed))
       (assert-equal (fill-pos tm) (line-pos (car landed)))
       (assert-equal 0 (modulo (line-row (car landed)) (bar-rows tm))))
-    (test "the fill ends within a bar of the trace landing (the strike)"
+    ;; the model's claim is HALF a bar either way (the ask fires at a bar row
+    ;; with the slack in [0, bar)); a full-bar tolerance is a test that agrees
+    ;; with whatever happens (the reviewer's MEDIUM 3, 2026-09-22)
+    (test "the fill ends within half a bar of the trace landing (the strike)"
       (let ((end (+ (* FRAME (line-frame (car landed))) (ms->frames (fill-ms tm))))
             (at (* FRAME strike)))
-        (assert-true (within-frames? end at (+ (ms->frames (bar-ms tm)) (* 2 FRAME))))))
-    (test "tense began: once, at the tense mark on a bar row, within a bar of the strike"
+        (assert-true (within-frames? end at (+ (ms->frames (* 0.5 (bar-ms tm))) (* 2 FRAME))))))
+    (test "tense began: once, at the tense mark on a bar row, within half a bar of the strike"
       (assert-equal 1 (length tense))
       (assert-equal (tense-pos tm) (line-pos (car tense)))
       (assert-equal 0 (modulo (line-row (car tense)) (bar-rows tm)))
-      (assert-true (within-frames? (* FRAME (line-frame (car tense))) (* FRAME strike) (+ (ms->frames (bar-ms tm)) (* 2 FRAME)))))
+      (assert-true (within-frames? (* FRAME (line-frame (car tense))) (* FRAME strike) (+ (ms->frames (* 0.5 (bar-ms tm))) (* 2 FRAME)))))
     (test "the strike asked for tense (the walk either there already or jumping at the next bar)"
       (assert-equal 1 (length tense-asked)))
     (test (string-append "the walk stays in tense: the fill never plays again (at " (if final (string-append (number->string (car final)) ":" (number->string (cdr final))) "-") ")")
@@ -181,4 +185,118 @@
     (test "200 pulls with no frame between them all rendered, and the next frame ran"
       (assert-true pulled)
       (assert-true playing)))))
+
+;; The window's arithmetic, every term held by hand (the reviewer's MEDIUM 3,
+;; 2026-09-22: the tests drive the model with no sink, so the queue term is
+;; identically zero here and a mistake in it could not have been caught).
+(test-group "music live: the fill's window, term by term"
+  (let ((row-ms 100.0) (bar 16) (fill-rows 64))
+    (test "on a bar row the wait is a whole bar: queue + bar + fill + half a bar"
+      (assert-true (close? (fill-window-ms 0.0 row-ms bar 0 fill-rows)
+                           (+ (* bar row-ms) (* fill-rows row-ms) (* 0.5 bar row-ms)))))
+    (test "one row past a bar row the wait is one row short of a bar"
+      (assert-true (close? (fill-window-ms 0.0 row-ms bar 1 fill-rows)
+                           (+ (* (- bar 1) row-ms) (* fill-rows row-ms) (* 0.5 bar row-ms)))))
+    (test "the queue's ms are added as they are: the ear is that far behind the walker"
+      (assert-true (close? (- (fill-window-ms 341.0 row-ms bar 5 fill-rows)
+                              (fill-window-ms 0.0 row-ms bar 5 fill-rows))
+                           341.0)))
+    (test "the window falls by a row for each row the walker takes toward its bar row"
+      (let loop ((row 1))
+        (when (< row bar)
+          (assert-true (close? (- (fill-window-ms 0.0 row-ms bar (- row 1) fill-rows)
+                                  (fill-window-ms 0.0 row-ms bar row fill-rows))
+                               row-ms))
+          (loop (+ row 1)))))
+    (test "a longer fill widens the window by its own length"
+      (assert-true (close? (- (fill-window-ms 0.0 row-ms bar 3 128) (fill-window-ms 0.0 row-ms bar 3 64))
+                           (* 64 row-ms))))
+    (test "the window is never shorter than the fill plus half a bar (the jump's own wait aside)"
+      (let loop ((row 0))
+        (when (< row bar)
+          (assert-true (>= (fill-window-ms 0.0 row-ms bar row fill-rows)
+                           (+ (* fill-rows row-ms) (* 0.5 bar row-ms))))
+          (loop (+ row 1)))))))
+
+;; The menu theme has `calm` and nothing else (black-glass-title). A tune
+;; with no fill or tense mark must never be asked for one, on a table
+;; screen as much as on the menu.
+(test-group "music live: a tune with no fill or tense mark is never asked for one"
+  (live-music-stop!)
+  (live-music-set-tune-door! MENU-THEME)
+  (fresh-deal!)
+  (let* ((name (live-music-name))
+         (strike (run-trace! 20000.0 4000.0))
+         (fills (lines-matching '("section" "fill")))
+         (tense (lines-matching '("section" "tense" "at")))
+         (playing (live-music-playing?)))
+    (live-music-set-tune-door! #f)
+    (test "the markless tune played the whole run-up and the strike"
+      (assert-equal MENU-THEME name)
+      (assert-true playing))
+    (test "no fill was asked or landed"
+      (assert-equal 0 (length fills)))
+    (test "and no tense landing either: the tune has no tense mark to jump to"
+      (assert-equal 0 (length tense)))))
+
+;; A real deal goes through the fade-out -> restart -> open path, not
+;; live-music-stop!; the section state must come out of it clean (the
+;; reviewer's MEDIUM 3).
+(test-group "music live: a fresh deal through the fade, mid-tense"
+  (live-music-stop!)
+  (set! *lines* '())
+  (live-music-fresh!)
+  (let loop ((i 0)) (when (< i 8) (frame! 'trace 600000.0) (loop (+ i 1))))
+  (let* ((first-name (live-music-name))
+         (tm (timing-of first-name)))
+    ;; into tense on this deal
+    (run-trace! (+ (fill-ms tm) 4000.0) (* 2 (bar-ms tm)))
+    (let ((in-tense (live-music-section)))
+      ;; a new deal of the other table: the fade runs, then the next track opens
+      (live-music-fresh!)
+      (let loop ((i 0))
+        (when (< i 400)                      ; the 500 ms fade at 1024 frames a frame
+          (set! *frame* (+ *frame* 1))
+          (live-music-frame! 'cards 'trace 600000.0 'cards 11)
+          (live-music-pull! out 0 FRAME)
+          (loop (+ i 1))))
+      (let ((name (live-music-name))
+            (playing (live-music-playing?))   ; read at setup: a body runs after every group's setup
+            (section (live-music-section))
+            (opens (lines-matching '("open"))))
+        (test "the leaving track faded and the new deal's track opened"
+          (assert-equal 'tense in-tense)
+          (assert-true (>= (length opens) 2))
+          (assert-true playing))
+        (test "the new track starts in CALM: the section state did not survive the switch"
+          (assert-equal 'calm section)
+          (assert-true (symbol? name)))))))
+
+;; A ladder step reopens the player mid-run-up: the pending jump and the
+;; section must survive it (the reviewer's MEDIUM 3: the rate was pinned in
+;; every other case here, so no reopen ran).
+(test-group "music live: a ladder step during the fill's run-up"
+  (live-music-stop!)
+  (live-music-set-rate! #f #t)          ; the device's rate and the pin lifted: the ladder may step
+  (live-music-set-budget! 0.0001)       ; every measured window is over budget
+  (fresh-deal!)
+  (let* ((tm (timing-of (live-music-name)))
+         (strike (run-trace! (+ (fill-ms tm) 8000.0) (+ (* 2 (bar-ms tm)) 2000.0)))
+         (reopens (lines-matching '("reopen")))
+         (fill-landings (lines-matching '("section" "fill" "at")))
+         (tense-landings (lines-matching '("section" "tense" "at")))
+         (calm-asks (lines-matching '("section" "calm" "asked")))
+         (final (live-music-position)))
+    (live-music-set-budget! MUSIC-BUDGET-MS)
+    (live-music-set-rate! 22050 #t)
+    (test "the ladder stepped at least once during the run"
+      (assert-true (>= (length reopens) 1)))
+    ;; M1: the window's queue term shrinks when a reopen drains the sink; a
+    ;; predicate would answer CALM here and dip out of the fill
+    (test "the fill still landed once and was never left for CALM"
+      (assert-equal 1 (length fill-landings))
+      (assert-equal 0 (length calm-asks)))
+    (test "tense still began once, and the walk is in it"
+      (assert-equal 1 (length tense-landings))
+      (assert-true (and final (>= (car final) (tense-pos tm)))))))
 (live-music-off!)
