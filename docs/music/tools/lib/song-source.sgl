@@ -1,0 +1,227 @@
+;;; One musical library, explicit arrangements, and guarded generated outputs.
+(define-library (crash soundtrack songs)
+  (import (sigil shell prelude)
+          (sigil args)
+          (sigil json)
+          (sigil list)
+          (sigil fs)
+          (crash soundtrack tools)
+          (crash soundtrack album arrangement))
+  (export song-main song-plan apply-song-plans song-hash build-song-score)
+  (begin
+    (define (song-hash file)
+      (car (split (out sha256sum ,file) " ")))
+
+    (define (hash-text text)
+      (with-temp-dir temporary
+        (let ((file (path temporary "text")))
+          (write-text file text)
+          (song-hash file))))
+
+    (define (lookup key table message)
+      (or (assoc key table) (error message key)))
+
+    (define (remap-cell cell bank)
+      (if (= (caddr cell) 0)
+          cell
+          (append (take cell 2)
+            (list (car (or (list-find (lambda (entry) (= (cadr entry) (caddr cell))) bank)
+                          (error "Phrase uses an instrument outside this arrangement" cell))))
+            (skip cell 3))))
+
+    (define (arrange-pattern parts names bank reference)
+      (let* ((ident (car reference))
+             (name (cadr reference))
+             (source-id (cadr (lookup name names "Unknown phrase")))
+             (original (pattern parts source-id))
+             (entry-offs (cdr (child reference 'entry-offs)))
+             (effects (cdr (child reference 'effects)))
+             (p
+               (append (list 'pattern id: ident rows: (field original rows:))
+                 (filter (lambda (row) (pair? (cddr row)))
+                   (map (lambda (row)
+                          (append (take row 2)
+                            (map (lambda (cell) (remap-cell cell bank))
+                              (filter
+                                (lambda (cell)
+                                  (not (and (= (cadr row) 0) (equal? (cadr cell) "==="))))
+                                (cddr row)))))
+                        (skip original 5))))))
+        (each entry entry-offs
+          (let* ((ch (car entry))
+                 (row (assoc 0 (map cdr (skip p 5))))
+                 (existing (and row (assoc ch (cdr row)))))
+            (check (not existing)
+                   "Entry gate conflicts with an edited phrase; reconcile arrangement" name ch)
+            (set! p (put-cell p 0 entry))))
+        (each effect effects
+          (let* ((row (list-find (lambda (r) (= (cadr r) (car effect))) (skip p 5)))
+                 (cell (and row (assoc (cadr effect) (cddr row)))))
+            (check (and cell (equal? (list-ref cell 4) "000"))
+                   "Transport overlay conflicts with edited phrase" name effect)
+            (set! p
+              (put-cell p (car effect)
+                (append (take cell 4) (list (caddr effect)))))))
+        p))
+
+    (define (build-song-score parts layout arrangement)
+      (let* ((template (cadr (child arrangement 'template)))
+             (bank (cdr (child arrangement 'bank)))
+             (names (cdr (child layout 'phrases)))
+             (references (cdr (child arrangement 'patterns)))
+             (score template))
+        ;; Timing and mix come from the shared library, never a stale template.
+        (each key '(version: tempo: speed: channels:)
+          (set! score (set-field score key (field parts key))))
+        (check (equal? (if (member meter: parts) (field parts meter:) #f)
+                       (if (member meter: score) (field score meter:) #f))
+               "Meter changed; reconcile arrangement templates")
+        (set! score (replace-child score 'bus (child parts 'bus)))
+        (set! score
+          (replace-child score 'instruments
+            (cons 'instruments
+              (map (lambda (entry)
+                     (let ((instrument
+                             (list-find (lambda (i) (= (field i id:) (cadr entry)))
+                                        (cdr (child parts 'instruments)))))
+                       (check instrument "Missing shared instrument" entry)
+                       (set-field instrument id: (car entry))))
+                   bank))))
+        (replace-child score 'patterns
+          (cons 'patterns
+            (map (lambda (ref) (arrange-pattern parts names bank ref)) references)))))
+
+    (define (canonical-text motif score)
+      (with-temp-dir temporary
+        (let ((file (path temporary "score.cts")))
+          (write-text file (score-text score))
+          (let ((text (canonical motif file)))
+            ;; Old Motif readers silently discard gain. Reject such round trips.
+            (write-text file text)
+            (check (equal? (child score 'instruments)
+                           (child (read-score file) 'instruments))
+                   "Renderer changed instrument data; Motif gain support is required")
+            ($ ,motif tune check ,file)
+            text))))
+
+    (define (album-map score arrangement sources)
+      (let ((offset 0)
+            (sections '())
+            (bar-rows (if (member meter: score) (apply * (field score meter:)) 16)))
+        (each id (cdr (child score 'order))
+          (let* ((p (pattern score id))
+                 (label (cadr (lookup id (cdr (child arrangement 'labels)) "Missing album label")))
+                 (rows (field p rows:)))
+            (set! sections
+              (append sections
+                (list (dict pattern: id label: label
+                            start_bar: (+ 1 (/ offset bar-rows))
+                            bars: (/ rows bar-rows)
+                            start_seconds: (/ (* offset 2.5 (field score speed:))
+                                              (field score tempo:))))))
+            (set! offset (+ offset rows))))
+        (dict title: (field score name:)
+              duration_seconds: (/ (* offset 2.5 (field score speed:)) (field score tempo:))
+              sources: (list->array sources)
+              sections: (list->array sections))))
+
+    (define (safe-destination? file slug)
+      (member file
+        (list (str "assets/tunes/" slug ".cts")
+              (str "assets/tunes/" slug "-title.cts")
+              (str "docs/music/album/" slug ".cts"))))
+
+    (define (song-plan slug motif)
+      (let* ((directory (str "docs/music/songs/" slug))
+             (source-files
+               (list (str directory "/parts.cts")
+                     (str directory "/arrangements.sgl")
+                     (str "docs/music/songs/" slug ".sgl")))
+             (parts (read-score (path (root) (car source-files))))
+             (layout (read-score (path (root) (cadr source-files))))
+             (receipt (str directory "/generated.json"))
+             (baseline (json-decode (read-text (path (root) receipt))))
+             (outputs '())
+             (mapping '())
+             (hashes
+               (map (lambda (file) (dict path: file sha256: (song-hash (path (root) file))))
+                    source-files)))
+        (each arrangement (cdr (child layout 'arrangements))
+          (let* ((destination (field arrangement destination:))
+                 (score (build-song-score parts layout arrangement))
+                 (text (canonical-text motif score)))
+            (check (safe-destination? destination slug) "Invalid generated destination" destination)
+            (set! outputs (append outputs (list (dict path: destination text: text sha256: (hash-text text)))))
+            (set! mapping
+              (append mapping
+                (list (dict arrangement: (symbol->string (car arrangement))
+                            destination: destination
+                            bank: (score-text (child arrangement 'bank))
+                            patterns: (score-text (child arrangement 'patterns))))))
+            (when (eq? (car arrangement) 'album)
+              (let* ((map-file (str "docs/music/album/" slug "-map.json"))
+                     (map-text (str (json-encode (album-map score arrangement source-files)) "\n")))
+                (set! outputs
+                  (append outputs (list (dict path: map-file text: map-text sha256: (hash-text map-text)))))))))
+        (dict slug: slug receipt: receipt baseline: baseline
+              source_hashes: (list->array hashes)
+              mapping: (list->array mapping)
+              outputs: (list->array outputs))))
+
+    (define (output-record item)
+      (dict path: (dict-ref item path:) sha256: (dict-ref item sha256:)))
+
+    (define (apply-song-plans plans stage output)
+      ;; Preflight every song before touching any generated output.
+      (each plan plans
+        (each item (array->list (dict-ref plan outputs:))
+          (let* ((file (path (root) (dict-ref item path:)))
+                 (old (list-find
+                        (lambda (entry) (equal? (dict-ref entry path:) (dict-ref item path:)))
+                        (array->list (dict-ref (dict-ref plan baseline:) outputs:)))))
+            (check (and (file? file) old) "Missing generated baseline/output" file)
+            (check (equal? (song-hash file) (dict-ref old sha256:))
+                   "Tracker edit detected: reconcile it into shared parts before generating" file)
+            (when (equal? stage "check")
+              (check (equal? (song-hash file) (dict-ref item sha256:))
+                     "Shared source drift: regenerate both arrangements" file))))
+        (each source (array->list (dict-ref plan source_hashes:))
+          (check (equal? (song-hash (path (root) (dict-ref source path:)))
+                         (dict-ref source sha256:))
+                 "Shared source changed during generation" (dict-ref source path:))))
+      (unless (equal? stage "check")
+        (each plan plans
+          (each item (array->list (dict-ref plan outputs:))
+            (let ((target (path (if (equal? stage "export") output (root)) (dict-ref item path:))))
+              (ensure-directory (dirname target))
+              (unless (and (file? target) (equal? (song-hash target) (dict-ref item sha256:)))
+                (when (equal? stage "export")
+                  (check (not (file-exists? target)) "Export refuses a differing existing file" target))
+                (let ((temporary (str target ".song-tmp")))
+                  (check (not (file-exists? temporary)) "Stale temporary output" temporary)
+                  (write-text temporary (dict-ref item text:))
+                  (rename-file temporary target)))))
+          (when (equal? stage "write")
+            (write-json-file (path (root) (dict-ref plan receipt:))
+              (dict schema: 1
+                    source_hashes: (dict-ref plan source_hashes:)
+                    mapping: (dict-ref plan mapping:)
+                    outputs: (list->array (map output-record (array->list (dict-ref plan outputs:)))))))))
+      (println "~a: ~a song(s) passed; tracker edits protected." stage (length plans)))
+
+    (define (song-main root-directory slugs args)
+      (initialize root-directory)
+      (cli "songs" args
+        (list (option name: 'stage long: "stage" value: "STAGE"
+                      choices: '("check" "write" "export") default: "check"))
+        (lambda (options)
+          (let ((chosen (or (option-ref options 'tracks) slugs))
+                (stage (option-ref options 'stage))
+                (output (option-ref options 'output)))
+            (each slug chosen (check (member slug slugs) "Unknown song" slug))
+            (when (equal? stage "export")
+              (check (and (starts-with? output "/") (not (file-exists? output)))
+                     "Export needs a fresh absolute directory"))
+            (apply-song-plans
+              (map (lambda (slug) (song-plan slug (require-tool (option-ref options 'motif)))) chosen)
+              stage output)))))))

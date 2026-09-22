@@ -1,0 +1,244 @@
+#!/usr/bin/env sigil
+;;; One-time import of approved scores. Never overwrites established sources.
+(import (sigil json) (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define SLUGS
+  '("black-glass" "cold-boot" "relay-ghost" "closed-loop" "shadow-protocol"
+    "blind-spot" "quiet-array" "sector-drift" "dirty-cache" "basement-circuit"
+    "dead-sector" "obsidian-index" "breach-vector" "clock-edge" "glass-current"))
+
+(define (flat value) (trim (score-text value)))
+
+(define (format-layout phrases arrangements)
+  (str "(song version: 1\n  (phrases\n"
+       (string-join (map (lambda (p) (str "    " (flat p))) phrases) "\n")
+       ")\n  (arrangements\n"
+       (string-join
+         (map (lambda (a)
+                (str "    (" (symbol->string (car a)) " destination: " (flat (field a destination:)) "\n"
+                     (string-join
+                       (map (lambda (section)
+                              (str "      (" (symbol->string (car section)) "\n"
+                                   (string-join
+                                     (map (lambda (item) (str "        " (flat item))) (cdr section)) "\n")
+                                   ")"))
+                            (skip a 3))
+                       "\n")
+                     ")"))
+              arrangements)
+         "\n")
+       "))\n"))
+
+(define (restore-transport old revised)
+  (each row (skip old 5)
+    (each cell (cddr row)
+      (when (starts-with? (list-ref cell 4) "B")
+        (let* ((new-row (list-find (lambda (r) (= (cadr r) (cadr row))) (skip revised 5)))
+               (new-cell (or (and new-row (assoc (car cell) (cddr new-row)))
+                             (append (take cell 4) '("000")))))
+          (set! revised
+            (put-cell revised (cadr row)
+              (append (take new-cell 4) (list (list-ref cell 4)))))))))
+  revised)
+
+(define (approved-scores slug game album)
+  (cond
+    ((equal? slug "relay-ghost")
+     (list (replace-child game 'instruments (child album 'instruments)) album))
+    ((equal? slug "breach-vector")
+     (let* ((approved
+              (read-score (path (root) "docs/music/alternates/breach-percussion-i/breach-vector-after.cts")))
+            (updated
+              (replace-child game 'instruments (child approved 'instruments))))
+       (set! updated
+         (replace-child updated 'patterns
+           (cons 'patterns
+             (map (lambda (p)
+                    (let ((pair (assoc (field p id:) '((34 40) (35 41)))))
+                      (if pair
+                          (restore-transport p
+                            (set-field (pattern approved (cadr pair)) id: (car pair)))
+                          p)))
+                  (cdr (child game 'patterns))))))
+       (list updated approved)))
+    ((equal? slug "obsidian-index")
+     (let* ((approved
+              (read-score (path (root) "docs/music/alternates/obsidian-index/obsidian-index-v5.cts")))
+            (updated (replace-child game 'instruments (child approved 'instruments))))
+       (set! updated
+         (replace-child updated 'patterns
+           (cons 'patterns
+             (map (lambda (p)
+                    (if (>= (field p id:) 5)
+                        (restore-transport p (pattern approved (field p id:)))
+                        p))
+                  (cdr (child game 'patterns))))))
+       (list updated album)))
+    (else (list game album))))
+
+(define (migrate slug motif output)
+  (let* ((directory (path output slug))
+         (game-file (str "assets/tunes/" slug ".cts"))
+         (album-file (str "docs/music/album/" slug ".cts"))
+         (map-file (str "docs/music/album/" slug "-map.json"))
+         (original-game (read-score (path (root) game-file)))
+         (original-album (read-score (path (root) album-file)))
+         (approved (approved-scores slug original-game original-album))
+         (game (car approved))
+         (album (cadr approved))
+         (timeline (json-decode (read-text (path (root) map-file))))
+         (variants
+           (append (list (list 'game game-file game) (list 'album album-file album))
+             (if (equal? slug "black-glass")
+                 (list (list 'title "assets/tunes/black-glass-title.cts"
+                         (read-score (path (root) "assets/tunes/black-glass-title.cts"))))
+                 '())))
+         (instruments '())
+         (patterns '())
+         (names '())
+         (arrangements '())
+         (outputs '())
+         (next-instrument 1)
+         (next-pattern 0)
+         (sections (dict-ref (dict-ref (accepted) (string->keyword slug)) sections:)))
+    (check (not (file-exists? directory)) "Shared song source already exists" directory)
+    (ensure-directory directory)
+    (each variant variants
+      (let* ((role (car variant))
+             (destination (cadr variant))
+             (score (caddr variant))
+             (bank '())
+             (references '()))
+        (check (equal? (child score 'bus) (child game 'bus)) "Bus needs explicit migration" slug role)
+        (each key '(tempo: speed: channels:)
+          (check (= (field score key) (field game key)) "Clock mismatch" slug role key))
+        (each instrument (cdr (child score 'instruments))
+          (let* ((existing
+                   (list-find
+                     (lambda (candidate)
+                       (equal? (set-field candidate id: 0) (set-field instrument id: 0)))
+                     instruments))
+                 (ident (if existing (field existing id:) next-instrument)))
+            (unless existing
+              (set! instruments (append instruments (list (set-field instrument id: ident))))
+              (set! next-instrument (+ next-instrument 1)))
+            (set! bank (append bank (list (list (field instrument id:) ident))))))
+        (each p (cdr (child score 'patterns))
+          (let ((entry-offs '()) (effects '()) (rows '()))
+            (each row (skip p 5)
+              (let ((cells '()))
+                (each cell (cddr row)
+                  (let ((clean cell))
+                    (when (starts-with? (list-ref cell 4) "B")
+                      (set! effects (append effects (list (list (cadr row) (car cell) (list-ref cell 4)))))
+                      (set! clean (append (take clean 4) '("000"))))
+                    (if (and (= (cadr row) 0) (equal? (cadr clean) "==="))
+                        (set! entry-offs (append entry-offs (list clean)))
+                        (begin
+                          (unless (= (caddr clean) 0)
+                            (set! clean
+                              (append (take clean 2)
+                                (list (cadr (assoc (caddr clean) bank)))
+                                (skip clean 3))))
+                          (set! cells (append cells (list clean)))))))
+                (when (pair? cells)
+                  (set! rows (append rows (list (append (take row 2) cells)))))))
+            (let* ((normalized (append '(pattern id: 0) (list rows: (field p rows:)) rows))
+                   (existing
+                     (list-find (lambda (candidate)
+                                  (equal? normalized (set-field candidate id: 0)))
+                                patterns))
+                   (ident (if existing (field existing id:) next-pattern))
+                   (name
+                     (if existing
+                         (car (list-find (lambda (entry) (= (cadr entry) ident)) names))
+                         (cond
+                           ((eq? role 'game)
+                            (let ((id (field p id:)) (fill (array-ref sections 0)) (tense (array-ref sections 1)))
+                              (cond ((< id fill) (str "calm-" (+ id 1)))
+                                    ((< id tense) "transition")
+                                    (else (str "tense-" (+ 1 (- id tense)))))))
+                           ((eq? role 'album)
+                            (str "album: "
+                              (dict-ref
+                                (list-find (lambda (s) (= (dict-ref s pattern:) (field p id:)))
+                                           (array->list (dict-ref timeline sections:)))
+                                label:)))
+                           (else (str "title-" (field p id:)))))))
+              (unless existing
+                (set! patterns (append patterns (list (set-field normalized id: ident))))
+                (set! names (append names (list (list name ident))))
+                (set! next-pattern (+ next-pattern 1)))
+              (set! references
+                (append references
+                  (list (list (field p id:) name
+                              (cons 'entry-offs entry-offs)
+                              (cons 'effects effects))))))))
+        (let* ((template
+                 (replace-child
+                   (replace-child
+                     (replace-child score 'instruments '(instruments))
+                     'patterns '(patterns))
+                   'bus '(bus)))
+               (arrangement
+                 (append (list role destination: destination
+                               (list 'template template)
+                               (cons 'bank bank)
+                               (cons 'patterns references))
+                   (if (eq? role 'album)
+                       (list (cons 'labels
+                               (map (lambda (s) (list (dict-ref s pattern:) (dict-ref s label:)))
+                                    (array->list (dict-ref timeline sections:)))))
+                       '()))))
+          (set! arrangements (append arrangements (list arrangement))))
+        (set! outputs
+          (append outputs
+            (list (dict path: destination sha256: (song-hash (path (root) destination))))))))
+    (set! outputs (append outputs (list (dict path: map-file sha256: (song-hash (path (root) map-file))))))
+    (let* ((parts
+             (replace-child
+               (replace-child
+                 (replace-child
+                   (filter (lambda (item)
+                             (not (and (pair? item) (member (car item) '(chart marks))))) game)
+                   'instruments (cons 'instruments instruments))
+                 'patterns (cons 'patterns patterns))
+               'order (cons 'order (map (lambda (p) (field p id:)) patterns))))
+           (layout (list 'song version: 1 (cons 'phrases names) (cons 'arrangements arrangements))))
+      ;; Keep a normal, tracker-readable tune as the shared phrase library.
+      ;; The source pool is for editing phrases, not a final listening arrangement.
+      (set! parts (replace-child parts 'history
+                     '(history ("codex" "2026-09-22" "Shared musical parts; see arrangements.sgl for game, title and album forms."))))
+      (write-canonical motif (path directory "parts.cts") parts)
+      (write-text (path directory "arrangements.sgl") (format-layout names arrangements))
+      (each variant variants
+        (let* ((a (list-find (lambda (a) (eq? (car a) (car variant))) arrangements))
+               (rebuilt (build-song-score parts layout a)))
+          (check (equal? rebuilt (caddr variant)) "Migration failed exact score round trip" slug (car variant))))
+      (write-json-file (path directory "generated.json")
+        (dict schema: 1 source_hashes: (array) outputs: (list->array outputs)))
+      (write-text (path output (str slug ".sgl"))
+        (str "#!/usr/bin/env sigil\n"
+             ";;; Edit " slug "/parts.cts and arrangements.sgl; generated scores are checked in.\n"
+             "(load (path (script-dir) \"../tools/lib/core.sgl\"))\n"
+             "(load (path (script-dir) \"../tools/lib/album-arrangement.sgl\"))\n"
+             "(load (path (script-dir) \"../tools/lib/song-source.sgl\"))\n"
+             "(import (crash soundtrack songs))\n"
+             "(song-main (path (script-dir) \"../../..\")\n"
+             "           '(\"" slug "\")\n"
+             "           (script-args))\n"))
+      (println "~a: ~a shared phrases; ~a arrangements; exact reconstruction passed."
+               slug (length patterns) (length variants)))))
+
+(cli "songs-migrate" (script-args) '()
+  (lambda (options)
+    (each slug (or (option-ref options 'tracks) SLUGS)
+      (check (member slug SLUGS) "Unknown song" slug)
+      (migrate slug (require-tool (option-ref options 'motif)) (option-ref options 'output)))))
