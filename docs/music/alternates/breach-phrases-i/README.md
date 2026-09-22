@@ -90,3 +90,7 @@ Telegram acknowledged the A/B montage as message 1143, complete before as
 album/game scores and public recording remain unchanged pending feedback.
 Delivery receipts and hashes are beside the external audio. Source commit:
 5880119. No claim of subjective listening approval is implied by the checks.
+
+David subsequently approved these phrasing improvements, calling them more
+musical and complete. The after score is now the arrangement baseline for
+Percussion I; public adoption waits for the follow-on snare review.

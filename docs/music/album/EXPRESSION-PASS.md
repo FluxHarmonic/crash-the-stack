@@ -201,3 +201,13 @@ The public album and game retain their accepted Breach Vector versions pending
 review. Sources, maps, exact changes and listening guidance live in
 `../alternates/breach-phrases-i/`. Three fresh-state contextual A/B pairs and
 both full versions use one common monitoring gain, with no added limiter.
+
+## Breach Vector phrasing approved; percussion audition
+
+David likes Phrases I's more musical and complete replies. That candidate is
+the approved arrangement baseline for the next listening comparison. He then
+authorized a snare experiment: retain its low punch, shorten the noisy tail,
+and add a quiet metallic click, including through the fill. Percussion I
+changes instrument 2 only; all notes and the newly approved phrasing are fixed.
+The game and website stay on their prior version until this pass is resolved.
+See `../alternates/breach-percussion-i/README.md` for comparisons and provenance.

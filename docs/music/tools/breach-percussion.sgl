@@ -1,0 +1,124 @@
+#!/usr/bin/env sigil
+;;; Keep approved phrasing fixed while testing a shorter snare with a metal edge.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BREACH-SNARE
+  '(instrument id: 2 name: "breach-contact-snare"
+     patch: (chip-snare
+              body: 0.38
+              crush-bits: 14
+              noise: 0.5
+              noise-decay: 0.045)
+     volume: 42
+     send: 0.12
+     layers: ((fm4-bell
+                alg: 4
+                index: 1.8
+                op1: (6.73 0.7 0.001 0.018 0 0.008)
+                op2: (11.2 0.55 0.001 0.012 0 0.006)
+                op3: (9.17 0.3 0.001 0.014 0 0.008)
+                op4: (16.7 0.4 0.001 0.009 0 0.006)
+                amp-attack: 0.001
+                amp-decay: 0.03
+                amp-sustain: 0
+                amp-release: 0.01
+                octave: 0
+                volume: 0.18))
+     pan: 0))
+
+(define (candidate source)
+  (replace-child source 'instruments
+    (cons 'instruments
+      (map (lambda (instrument)
+             (if (= (field instrument id:) 2) BREACH-SNARE instrument))
+           (cdr (child source 'instruments))))))
+
+(cli "breach-percussion" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference "docs/music/alternates/breach-phrases-i/breach-vector-after.cts")
+           (source (read-score (path (root) reference)))
+           (after (candidate source))
+           (clips '())
+           (snare-hits 0)
+           (fill-hits 0))
+      (ensure-directory output)
+      (each variant '("before" "after")
+        (write-canonical motif
+          (path output (str "breach-vector-" variant ".cts"))
+          (if (equal? variant "before") source after)))
+      (each section '(patterns order bus)
+        (check (equal? (child source section) (child after section))
+               "Percussion audition changed performance or bus" section))
+      (check
+        (equal?
+          (filter (lambda (i) (not (= (field i id:) 2)))
+                  (cdr (child source 'instruments)))
+          (filter (lambda (i) (not (= (field i id:) 2)))
+                  (cdr (child after 'instruments))))
+        "Percussion audition changed another instrument")
+      (each p (cdr (child source 'patterns))
+        (each row (skip p 5)
+          (each cell (cddr row)
+            (when (and (= (car cell) 2) (attack? cell))
+              (check (= (caddr cell) 2)
+                     "A snare hit uses a different instrument" (field p id:) row)
+              (set! snare-hits (+ snare-hits 1))
+              (when (= (field p id:) 20)
+                (set! fill-hits (+ fill-hits 1)))))))
+      (check (> fill-hits 0) "Missing transition snare hits")
+      (each spec
+        '(("drums" "Exposed kick, snare and hats" (2 3) (1 2 3 8))
+          ("calm" "Calm full mix" (2 3 4 5) (1 2 3 4 5 6 7 8))
+          ("fill" "Fill into focused groove" (19 20 21 22) (1 2 3 4 5 6 7 8)))
+        (each variant '("before" "after")
+          (let* ((stem (str (car spec) "-" variant))
+                 (score (if (equal? variant "before") source after))
+                 (sections
+                   (append
+                     (map (lambda (id)
+                            (list (str (cadr spec) " / original pattern " id)
+                              (transform (pattern score id)
+                                (lambda (row cell)
+                                  (and (member (car cell) (list-ref spec 3)) cell)))))
+                          (caddr spec))
+                     (list (list "Release / comparison gap" (phrase-rows 32 '())))))
+                 (rows (+ (* 64 (length (caddr spec))) 32)))
+            (write-album motif
+              output
+              stem
+              (str "Breach Vector - " (cadr spec) " / " variant)
+              score
+              sections
+              (list reference)
+              "Percussion I: shorter snare noise and quiet inharmonic FM click; approved Phrases I in both halves."
+              "Only instrument 2 changes. Identical notes, velocities, gates, timing and bus; the same patch covers the fill."
+              "2026-09-22")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ (* rows 10.0) 140)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "breach-vector"
+              title: "Breach Vector"
+              audition: "percussion-i"
+              comment: "BEFORE then AFTER in each pair: exposed drums, calm full mix, fill into focused groove. Both include approved Phrases I. Same monitoring gain."
+              full_duration_seconds: (/ (* 2944 10.0) 140)
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict baseline: reference
+              baseline_sha256: (out sha256sum ,(path (root) reference))
+              changed_instrument: 2
+              identical_patterns_order_bus: #t
+              other_instruments_identical: #t
+              total_snare_hits: snare-hits
+              transition_snare_hits: fill-hits
+              all_snare_hits_use_same_patch: #t))
+      (display "Breach percussion comparisons and full candidate ready.\n"))))

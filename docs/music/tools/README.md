@@ -137,3 +137,10 @@ peak, tail, duration and source-provenance checks.
 --output REPORT_DIR` applies the established full-track policy to an alternate
 without installing it as the accepted album. `--source` requires one title.
 Omitting it retains normal album auditing.
+
+`breach-percussion.sgl --motif PATH --output SCORE_DIR` compares a shorter
+chip-snare with a faint FM metal layer against the original snare, using the
+approved Breach Vector Phrases I score on both sides. It generates percussion,
+calm and transition comparisons and both complete scores for the shared
+`expression-render.sgl` workflow. Only instrument 2 may change; the composer
+also verifies that every snare/fill hit uses that instrument.
