@@ -1,5 +1,4 @@
-;;; (crash hub draw) - One static screen of a layer (P5 phase 1), and the
-;;; tile bake and light phase 2 will draw the world with.
+;;; (crash hub draw) - The hub screen's frame (P5), and the tile bake it draws from.
 ;;;
 ;;; The hub's look, ruled D61 (David, 2026-09-22: "stylish, like the
 ;;; player's in a real place, not in an overhead map"): 16x16 tiles drawn
@@ -10,10 +9,9 @@
 ;;; once per (hue, step) into a 'nearest render target (a bake is a
 ;;; pass, so it runs from the shells' prepare step, never inside the
 ;;; frame's pass), and a cell of the world is then one draw-texture-region
-;;; (or sixteen 4 px blocks where the light sits between two steps). No
-;;; input, no beats: the debug doors (?hub=SEED on the web, --hub SEED
-;;; natively) show layer 1 of run seed SEED twelve beats down the path
-;;; to its first key node.
+;;; (or sixteen 4 px blocks where the light sits between two steps). The
+;;; shells call hub-prepare! before their passes and hub-draw! inside the
+;;; frame while the hub screen is up; (crash hub run) holds the live run.
 
 (define-library (crash hub draw)
   (import (sigil math)
@@ -26,10 +24,11 @@
           (crash hub world)
           (crash hub gen)
           (crash hub rules)
-          (crash hub screen))
+          (crash hub screen)
+          (crash hub run))
 
-  (export hub-door! hub-bpm! hub-door-seed hub-door-world hub-door-prepare! hub-door-tick! hub-door-draw!
-          hub-live? hub-current hub-set! HUB-HELD-KEYS
+  (export hub-prepare! hub-draw!
+          HUB-HELD-KEYS
           draw-hub-screen lit-tiles-ensure! lit-ready? lit-role HUE-NAMES STEPS
           BAND-H)
 
@@ -38,62 +37,16 @@
     ;; The keys the shells report as held (beside the modifiers) so the
     ;; screen walks on a held arrow: what (crash hub screen)'s direction-held reads.
     (define HUB-HELD-KEYS (list 'up 'down 'left 'right 'w 'a 's 'd 'h 'j 'k 'l))
-    ;; --- the door --------------------------------------------------------------
-    ;;
-    ;; ?hub=SEED / --hub SEED: the hub live on layer 1 of run seed SEED, in
-    ;; place of the menu, stepping on the beat and taking input; ?bpm=N
-    ;; pins the clock. The shells own nothing of it but four hooks: tick,
-    ;; prepare, draw, and the request they answer (a launch or the menu).
-    ;; The JACK IN wiring (phase 2, step 4) replaces the door with the run.
+    ;; --- the shells' hooks -------------------------------------------------------
 
-    (define *door-seed* #f)
-    (define *door-bpm* #f)
-    (define *hub* #f)                 ; the live hub-screen, or #f
+    ;; Before the frame's passes: the bake, one (hue, step) per call.
+    (define (hub-prepare!)
+      (lit-tiles-ensure!))
 
-    (define (hub-door! text)
-      (let ((n (and (string? text) (string->number text))))
-        (set! *hub* #f)
-        (set! *door-seed* (and n (exact? n) (integer? n) (>= n 0) (max 1 n)))))
-
-    (define (hub-bpm! text)
-      (let ((n (and (string? text) (string->number text))))
-        (set! *door-bpm* (and n (> n 0) n))
-        (when *hub* (set! *hub* (hub-screen-with-bpm *hub* *door-bpm*)))))
-
-    (define (hub-door-seed) *door-seed*)
-    (define (hub-live?) (and *hub* #t))
-    (define (hub-current) *hub*)
-    (define (hub-set! hs) (set! *hub* hs))
-
-    ;; The door's screen, built on first use.
-    (define (hub-door-world)
-      (when (and *door-seed* (not *hub*))
-        (set! *hub* (hub-screen-with-bpm (hub-screen-new *door-seed*) *door-bpm*)))
-      *hub*)
-
-    ;; Before the frame's passes: the bake (one (hue, step) per call) and the
-    ;; screen on the first call.
-    (define (hub-door-prepare!)
-      (when *door-seed*
-        (lit-tiles-ensure!)
-        (hub-door-world)))
-
-    ;; The frame's tick while the door is live: the screen steps on its clock
-    ;; with this frame's input; answers #t when it took the frame (the shell
-    ;; skips its menu step), #f when the door is shut.
-    (define (hub-door-tick! dt-ms f)
-      (and *door-seed*
-           (let ((hs (hub-door-world)))
-             (set! *hub* (hub-screen-tick hs dt-ms f))
-             #t)))
-
-    ;; Inside the frame: the screen, or #f when the door is shut so the
-    ;; shell draws its own.
-    (define (hub-door-draw! vw vh bg)
-      (and *door-seed*
-           (let ((hs (hub-door-world)))
-             (draw-hub-screen hs vw vh bg)
-             #t)))
+    ;; The frame of the live run's screen (or nothing when no run is live).
+    (define (hub-draw! vw vh bg)
+      (let ((hs (hub-run-in-force)))
+        (when hs (draw-hub-screen hs vw vh bg))))
 
     ;; --- helpers ---------------------------------------------------------------
 

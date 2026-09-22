@@ -30,7 +30,10 @@
           (crash menu)
           (crash settings)
           (crash scores)
-          (crash run)
+          (crash hub world)      ; P5: the hub run replaces the fixed sequence
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub run)
           (crash code)
           (crash daily)
           (crash music)
@@ -248,15 +251,12 @@
             ((memq 'moves news) "NEW FEWEST MOVES.")
             (else #f)))
 
-    ;; The run in force (JACK IN), loaded on first use: #f when none.
-    (define *run* 'unread)
-    (define (run-in-force)
-      (when (eq? *run* 'unread) (set! *run* (run-load)))
-      *run*)
+    ;; The run in force (JACK IN): the live hub screen, or #f (P5; the run
+    ;; persists in step 5).
+    (define (run-in-force) (hub-run-in-force))
 
     (define (set-run! r)
-      (set! *run* r)
-      (if r (run-save! r) (run-clear!)))
+      (if r (hub-run-set! r) (hub-run-end!)))
 
     ;; --- the clock -----------------------------------------------------------------
 
@@ -284,23 +284,37 @@
         (free-spec table 'hacker (if (eq? table 'cards) (daily-cards-seed day) (daily-stack-seed day)))))
 
     ;; The run's current layer as a spec (hacker), or #f when the run is done.
+    ;; The spec of the board the hub launched (a launch is pending), or #f.
     (define (run-spec r)
-      (and (not (run-done? r))
-           (free-spec (run-layer-table r) 'hacker (run-layer-seed r))))
+      (hub-run-spec))
 
     ;; A session or deal from a spec, the settings' HUD on it.
     (define (session-from-spec sp lay)
       (let* ((s (door-session (session-new lay (spec-seed sp))))
              (s (session-with-trace-mode s (if (eq? (spec-version sp) 'original) 'clean 'twist)))
-             (s (session-with-best s (datum->best (store-read-datum BEST-KEY)))))
+             (s (session-with-best s (datum->best (store-read-datum BEST-KEY))))
+             (s (with-launch-thresholds s (lambda (s tr) (session s trace: tr)) session-trace)))
         (session-with-hud s (stored-hud))))
 
+    ;; A board dealt for the hub's node takes the depth's thresholds (P5).
+    (define (with-launch-thresholds b set get)
+      (let ((l (hub-run-launch-pending)))
+        (if l
+            (set b (trace-with-thresholds (get b) (launch-trace-at l) (launch-sever-at l)))
+            b)))
+
     (define (deal-from-spec sp)
-      (deal-with-hud (door-deal (deal-new (spec-seed sp)
-                               (spec-draw sp)
-                               (spec-scoring sp)
-                               (if (eq? (spec-version sp) 'original) 'clean 'twist)))
-                     (stored-hud)))
+      ;; both: M1's ?trace-at door over the deal's own thresholds, then P5's
+      ;; launch thresholds when a hub node dealt this board (the launch wins,
+      ;; since a node names the depth's seconds)
+      (with-launch-thresholds
+       (deal-with-hud (door-deal (deal-new (spec-seed sp)
+                                           (spec-draw sp)
+                                           (spec-scoring sp)
+                                           (if (eq? (spec-version sp) 'original) 'clean 'twist)))
+                      (stored-hud))
+       (lambda (d tr) (deal d trace: tr))
+       deal-trace))
 
     ;; The spec a live board is (for its share code).
     (define (session-spec s)
@@ -324,7 +338,7 @@
     ;; (a run replays from its seed; the player's own settings apply on
     ;; the receiving side, so the sender's are not carried).
     (define (run-code r)
-      (encode (spec-new 'run 'hacker 1 'vegas 'turtle (run-seed r))))
+      (hub-run-code))
 
 
     ;; (cons session restored?): the saved session if there is one and
@@ -357,7 +371,7 @@
              (after (if just-cleared?
                         (let ((line (clear-line! 'stack
                                                  (mode->version (trace-mode (session-trace after)))
-                                                 (trace-ticks (session-trace after))
+                                                 (session-trace after)
                                                  (session-moves after)
                                                  (daily-session? after))))
                           (if line (session after message: line note: line) after))
@@ -367,25 +381,20 @@
         after))
 
     ;; A clear: the scoreboard, the run, and the line to show for it (or #f).
-    (define (clear-line! table version ticks moves daily?)
-      (let ((news (record-clear! table version ticks moves (and daily? (today)))))
-        (or (run-clear-line! table ticks moves)
+    (define (clear-line! table version tr moves daily?)
+      (let ((news (record-clear! table version (trace-ticks tr) moves (and daily? (today)))))
+        (or (run-clear-line! table tr moves)
             (news-line news))))
 
-    ;; The run's part of a clear: the layer done, the next one named (or the
-    ;; ledger), or #f when no run is on this table. Also what a demo clear
-    ;; (the arm's door, which keeps the scoreboard clean) advances.
-    (define (run-clear-line! table ticks moves)
-      (let ((r (run-in-force)))
-        (and r (not (run-done? r)) (eq? (run-layer-table r) table)
-             (let ((r (run-cleared r ticks moves)))
-               (set-run! r)
-               (set! *layer-cleared* table)
-               (if (run-done? r)
-                   "STACK CRASHED. RUN COMPLETE."
-                   (string-append "LAYER " (number->string (run-layer r))   ; the layer just cleared, 1-based, is the next's index
-                                  "/" (number->string (run-layer-count))
-                                  " CRASHED."))))))
+    ;; The run's part of a clear (P5): the node opens in the world, its
+    ;; outcome carried in (beats from the ticks, the moves, how hot the board
+    ;; finished); the line names the return. #f when no launch of this
+    ;; table is pending. Also what a demo clear (the arm's door, which keeps
+    ;; the scoreboard clean) advances.
+    (define (run-clear-line! table tr moves)
+      (let ((line (hub-run-cleared! table tr moves)))
+        (when line (set! *layer-cleared* table))
+        line))
 
     ;; The table whose layer was just cleared (David, 2026-09-21: after the
     ;; cascade the shells show the run's ledger with NEXT LAYER, and pull
@@ -402,13 +411,13 @@
       (let ((b0 (session-board before))
             (b1 (session-board after)))
         (if (and (board-cleared? b1) (not (board-cleared? b0)))
-            (let ((line (run-clear-line! 'stack (trace-ticks (session-trace after)) (session-moves after))))
+            (let ((line (run-clear-line! 'stack (session-trace after) (session-moves after))))
               (if line (session after message: line note: line) after))
             after)))
 
     (define (deal-run-after-frame! before after)
       (if (and (deal-won? after) (not (deal-won? before)))
-          (let ((line (run-clear-line! 'cards (trace-ticks (deal-trace after)) (game-moves (deal-game after)))))
+          (let ((line (run-clear-line! 'cards (deal-trace after) (game-moves (deal-game after)))))
             (if line (deal after message: line note: line) after))
           after))
     ;; (cons deal restored?): the saved deal if there is one and fresh? is
@@ -449,7 +458,7 @@
       (let ((after (if (and (deal-won? after) (not (deal-won? before)))
                        (let ((line (clear-line! 'cards
                                                 (mode->version (trace-mode (deal-trace after)))
-                                                (trace-ticks (deal-trace after))
+                                                (deal-trace after)
                                                 (game-moves (deal-game after))
                                                 (daily-deal? after))))
                          (if line (deal after message: line note: line) after))

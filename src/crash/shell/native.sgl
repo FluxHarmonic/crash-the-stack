@@ -81,7 +81,11 @@
           (crash menu)
           (crash title)
           (crash title draw)
-          (crash hub draw)   ; the --hub door (P5 phase 1)
+          (crash hub world)   ; P5: the hub (JACK IN is a hub run)
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub run)
+          (crash hub draw)
           (crash hud)
           (crash bg)
           (crash gpu bg)
@@ -185,6 +189,7 @@
     (define *bg-stride* #f)     ; --bg-stride N
     (define *bg-rsteps* #f)     ; --react-steps N
     (define *demo* #f)          ; --demo cleared: the cleared sequence on demand (the web shell's ?demo=)
+    (define *hub-seed* #f)      ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
     (define *demo-armed* #f)
     (define *no-save* #f)       ; the demo's board or deal never reaches the store (nor a fake BEST record)
     (define *code* #f)          ; --code: a share code to deal at boot (P4)
@@ -445,13 +450,8 @@
     (define *run-done-at* 0)
     (define (layer-done a table lay model)
       (set! *layer-cleared* #f)
-      (let ((r (run-in-force)))
-        (cond ((not r) a)
-              ((run-done? r) (run-request a 'next lay model))
-              (else
-               (display "crash: run layer-done ") (display table) (newline)
-               (set! *overlay-at* (current-milliseconds))
-               (stage a overlay: (menu-new-layer-done table r (run-code r)))))))
+      ;; P5: the hub's node crashed; back to the layer once the cascade is over (its toast says so)
+      (run-request a 'next lay model))
 
     (define (overlay-step a f dt card-geom lay model)
       (let* ((layer? (eq? (menu-screen (stage-overlay a)) 'run-layer))
@@ -509,37 +509,57 @@
                 (next (cond (held (deal-seed (deal-next held))) (seed seed) (else (first-seed)))))
            (open-spec a (free-spec 'cards (menu-version (stage-menu a)) next) lay model)))))
 
-    ;; JACK IN: a new run from a seed, its first layer dealt.
-    (define (jack-in a seed lay model)
-      (let ((r (run-new seed)))
-        (set-run! r)
-        (display "crash: run start ") (display (run-seed r)) (display " ") (display (run-code r)) (newline)
-        (open-spec a (run-spec r) lay model)))
+    ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
-    ;; NEXT or RETRY came out of a table (its own next or retry board is
-    ;; dealt already): inside a run, the run's next layer, a new attempt
-    ;; (RECONNECT), or the ledger when the run is done; outside, the
-    ;; dealt board stands.
+    ;; JACK IN: a hub run from the seed, layer 1, the field seeded by the run.
+    (define (jack-in a seed lay model)
+      (hub-run-start! seed)
+      (display "crash: run start ") (display seed) (display " ") (display (hub-run-code)) (newline)
+      (open-hub a))
+
+    ;; The hub screen up (a new run, a return from a board, CONTINUE).
+    (define (open-hub a)
+      (let ((w (hub-screen-world (hub-run-in-force))))
+        (display "crash: hub open ") (display (world-depth w)) (display " ") (display (world-beat w)) (newline)
+        (stage (field-for-deal a (world-run-seed w)) screen: 'hub overlay: #f)))
+
+    ;; One frame of the hub: the screen steps on its clock with this frame's
+    ;; input; a launch request deals the node's board with the settings' draw
+    ;; and scoring; a menu request opens the main menu (CONTINUE resumes).
+    (define (hub-step! a f dt lay model)
+      (let* ((hs0 (hub-run-in-force))
+             (hs (hub-screen-tick hs0 (* 1000.0 dt) f)))
+        (hub-run-set! hs)
+        (when (> (hub-screen-beats hs) (hub-screen-beats hs0))
+          (let ((w (hub-screen-world hs)))
+            (display "crash: hub beat ") (display (world-beat w)) (display " trace ") (display (world-trace w))
+            (display " depth ") (display (world-depth w)) (display " cell ") (display (runner-cell (world-runner w))) (newline)))
+        (case (hub-screen-request hs)
+          ((launch)
+           (let ((l (hub-run-launch! (setting 'draw) (setting 'scoring))))
+             (if l
+                 (begin
+                   (display "crash: hub launch ") (display (node-index (launch-node l))) (display " ") (display (encode (launch-spec l))) (newline)
+                   (open-spec a (launch-spec l) lay model))
+                 a)))
+          ((menu)
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           (open-menu a))
+          (else a))))
+
+    ;; NEXT or RETRY came out of a table inside a run: the board's outcome is
+    ;; in the world already (a clear at the clear, run-clear-line!; a sever
+    ;; here) and the hub comes back up. Outside a run the dealt board stands.
     (define (run-request a request lay model)
       (let ((r (run-in-force)))
         (cond ((not r) a)
-              ((run-done? r)
-               (display "crash: run done ") (display (run-seed r)) (newline)
-               (let ((a (open-menu a)))
-                 (set-run! #f)
-                 (set! *run-done-at* (current-milliseconds))
-                 (stage a menu: (menu-open-run-done (stage-menu a) (cons r (run-code r))))))
-              ((eq? request 'retry)
-               (let ((r (run-severed r)))
-                 (set-run! r)
-                 (display "crash: run reconnect ") (display (run-layer-number r)) (display " ") (display (run-attempt r)) (newline)
-                 (open-spec a (run-spec r) lay model)))
               (else
-               (display "crash: run layer ") (display (run-layer-number r)) (newline)
-               (open-spec a (run-spec r) lay model)))))
+               (when (eq? request 'retry)
+                 (when (hub-run-severed! (if (eq? (stage-screen a) 'cards) 'cards 'stack))
+                   (display "crash: run reconnect") (newline)))
+               (display "crash: run back") (newline)
+               (open-hub a)))))
 
-    ;; A setting stepped: stored and applied (the mixer at once, the HUD
-    ;; on the live boards, the field rebuilt, the cosmetics).
     (define (apply-setting a id v)
       (set-setting! id v)
       (display "crash: setting ") (display id) (display " ") (display v) (newline)
@@ -567,9 +587,11 @@
             (else
              (case choice
                ((continue)
-                (case (active-game)
-                  ((cards) (open-cards a seed fresh? #t))
-                  (else (open-stack a lay seed fresh? model #t))))
+                (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
+                    (open-hub a)
+                    (case (active-game)
+                    ((cards) (open-cards a seed fresh? #t))
+                    (else (open-stack a lay seed fresh? model #t)))))
                ((jack-in) (jack-in a (now-second) lay model))
                ((stack) (free-play a 'stack lay seed fresh? model))
                ((cards) (free-play a 'cards lay seed fresh? model))
@@ -705,6 +727,7 @@
                                        (begin (set-run! #f)   ; a code's board ends a run (the review)
                                               (open-spec (open-menu fresh) sp lay model)))))
                                 (*code* (display "crash: code refused ") (display *code*) (newline) (open-menu fresh))
+                                (*hub-seed* (jack-in (open-menu fresh) *hub-seed* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
                                 (cards?
                                  (open-cards (open-menu fresh) seed fresh? #t))
                                 (else (open-menu fresh))))))
@@ -719,7 +742,7 @@
                    ;; the music (P4, D50) follows the screen and the table's phase once the menu is live
                    (_ (when (and *reveal-over* (boot-done?))
                         (case (stage-screen a)
-                          ((menu) (music-frame! (quote menu) #f))
+                          ((menu hub) (music-frame! (quote menu) #f))   ; P5: the theme under the hub until its own pool is wired
                           ((stack) (music-frame! (quote stack) (session-trace (stage-session a)) (session-seed (stage-session a))))
                           (else (music-frame! (quote cards) (deal-trace (stage-deal a)) (deal-seed (stage-deal a)))))))
                    (click (input-frame-click f))
@@ -738,11 +761,12 @@
                          (let ((r (if (and (eq? (menu-screen (stage-menu a)) 'run-done)
                                            (> (- (current-milliseconds) *run-done-at*) LAYER-HOLD-MS))
                                       (menu-step (stage-menu a) (make-input-frame (list 'escape) '() #f) VW VH (* 1000.0 dt))
-                                      (if (hub-door-tick! (* 1000.0 dt) f) (cons (stage-menu a) #f) (menu-step (stage-menu a) f VW VH (* 1000.0 dt))))))   ; the hub door takes the frame when live (P5)
+                                      (menu-step (stage-menu a) f VW VH (* 1000.0 dt)))))
                            (play-cues! (menu-cues (stage-menu a) (car r) (cdr r)))   ; the title reveal's cues (P3d) and the menu's own
                            (if (cdr r)
                                (open (stage a menu: (car r)) (cdr r))
                                (stage a menu: (car r)))))
+                        ((hub) (hub-step! a f dt lay model))   ; P5
                         ((stack)
                          (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((menu-frame? f) (open-menu a))
@@ -791,7 +815,8 @@
                           (when (eq? (stage-screen a) 'stack)
                             (tiles-ensure! *geom*))
                           ;; the menu's and the overlay's bakes, before the passes (they are passes)
-                          (cond ((eq? (stage-screen a) 'menu) (menu-prepare! (stage-menu a)) (hub-door-prepare!))   ; the --hub door bakes its tiles here too (P5)
+                          (cond ((eq? (stage-screen a) 'menu) (menu-prepare! (stage-menu a)))
+                                ((eq? (stage-screen a) 'hub) (hub-prepare!))   ; P5: the tile bake is a pass
                                 ((stage-overlay a) (menu-prepare! (stage-overlay a)))))
                         (case (stage-screen a)
                           ((stack) (and (fx-cleared (stage-fx a)) #t))
@@ -800,7 +825,8 @@
                         log-keys?   ; the menu's frames too (the credits crawl's cost, 2026-09-21)
                         (lambda ()
                           (case (stage-screen a)
-                            ((menu) (or (hub-door-draw! VW VH #f) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH))))   ; the title's backdrop and card strip (P3d); the --hub door in its place (P5)
+                            ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
+                            ((hub) (hub-draw! VW VH (stage-background a)))   ; P5
                             ((stack)
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (stage-background a) *copper*)
@@ -1057,8 +1083,8 @@
         (set! *bg-rsteps* (let ((n (arg-value args "--react-steps" #f))) (and n (string->number n))))
         (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") (quote cleared)))
         (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
-        (hub-door! (arg-value args "--hub" #f))   ; --hub SEED: the hub live on layer 1 of run seed SEED (P5)
-        (hub-bpm! (arg-value args "--bpm" #f))   ; --bpm N: the hub's clock pinned (P5, until M1's player)
+        (set! *hub-seed* (let ((h (arg-value args "--hub" #f))) (and h (string->number h))))   ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
+        (hub-run-bpm! (arg-value args "--bpm" #f))   ; --bpm N: the hub's clock pinned (P5, until M1's player)
         (set! *fresh* fresh?)
         (atlas-set! (not (equal? (arg-value args "--atlas" "on") "off")))
         (let ((d (arg-value args "--audio-depth" #f))) (when (and d (string->number d)) (audio-set-depth! (string->number d))))

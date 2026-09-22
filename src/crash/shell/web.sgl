@@ -123,7 +123,11 @@
           (crash menu)
           (crash title)
           (crash title draw)
-          (crash hub draw)   ; the ?hub= door (P5 phase 1)
+          (crash hub world)   ; P5: the hub (JACK IN is a hub run)
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub run)
+          (crash hub draw)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -175,7 +179,8 @@
     (define *version* #f)    ; the page's build stamp, for the menu's corner
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
-    (define *screen* 'menu)  ; menu | stack | cards
+    (define *screen* 'menu)  ; menu | stack | cards | hub (P5)
+    (define *hub-seed* #f)   ; ?hub=SEED: JACK IN at boot with this run seed (P5; the arms)
     (define *overlay* #f)    ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
     (define *menu* #f)       ; the first screen, (crash menu)
     (define *update* #f)     ; waiting | prompt | #f: the page's word on a new version
@@ -1240,7 +1245,7 @@
              ;; RUN COMPLETE closes to the top screen by itself after the hold
              (r (if (and (eq? (menu-screen *menu*) 'run-done) (> (- (now-ms) *run-done-at*) LAYER-HOLD-MS))
                     (menu-step *menu* (make-input-frame (list 'escape) '() #f) VW VH (* 1000.0 dt))
-                    (if (hub-door-tick! (* 1000.0 dt) f) (cons *menu* #f) (menu-step *menu* f VW VH (* 1000.0 dt))))))   ; the hub door takes the frame when live (P5)
+                    (menu-step *menu* f VW VH (* 1000.0 dt)))))
         (play-cues! (menu-cues *menu* (car r) (cdr r)))   ; the title reveal's cues (P3d) and the menu's own
         (when *trace* (say-title *menu* (car r)))
         (set! *menu* (car r))
@@ -1256,10 +1261,10 @@
               ;; the menu's bakes and the crawl's target before the frame's passes (a
               ;; pass cannot nest; the web's menu frame went without them and the
               ;; crawl's box came up empty on the host, 2026-09-21)
-              (menu-prepare! *menu*) (hub-door-prepare!)   ; the ?hub= door bakes its tiles here too (P5)
+              (menu-prepare! *menu*)
               ;; SCANLINES on every screen (David, 2026-09-21: the display, not a table effect)
               (post-tick!)
-              (let ((draw (lambda () (or (hub-door-draw! VW VH #f) (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH) (texture-for-path CARD-PATH))))))   ; the title's backdrop and card strip (P3d); the ?hub= door in its place (P5)
+              (let ((draw (lambda () (draw-menu *menu* VW VH *version* (texture-for-path BACKDROP-PATH) (texture-for-path CARD-PATH)))))   ; the title's backdrop and card strip (P3d)
                 (if (post-scanlines?)
                     (post-frame! VW VH (dpr-pitch) draw)
                     (draw)))
@@ -1293,6 +1298,7 @@
           (say "music" "start"))
         (case *screen*
           ((menu) (music-frame! 'menu #f))
+          ((hub) (music-frame! 'menu #f))   ; P5: the theme under the hub until its own pool is wired
           ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
           (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
@@ -1343,6 +1349,7 @@
       (let ((click (input-frame-click f)))
         (case *screen*
           ((menu) (menu-tick f dt))
+          ((hub) (hub-tick f dt))   ; P5
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
                  ((or (menu-frame? f)
@@ -1395,14 +1402,8 @@
     (define *run-done-at* 0)
     (define (layer-done! table)
       (set! *layer-cleared* #f)
-      (let ((r (run-in-force)))
-        (cond ((not r) #f)
-              ((run-done? r) (run-request! 'next table))
-              (else
-               (say "run" "layer-done" table)
-               (set! *overlay* (menu-new-layer-done table r (run-code r)))
-               (set! *overlay-at* (now-ms))
-               (set! *menu-said* #f)))))
+      ;; P5: the hub's node crashed; back to the layer once the cascade is over (its toast says so)
+      (run-request! 'next table))
 
     ;; --- the table's overlay (ruling D51) ------------------------------------------
     ;;
@@ -1500,11 +1501,12 @@
       (set! *announced* #f)
       ;; a menu rebuilt mid-reveal (the update word landing) keeps the reveal (P3d)
       (set! *menu* (let ((m (launch-menu (and *update* #t)
-                                (and (case (active-game)
-                                       ((stack) *session*)
-                                       ((cards) *deal*)
-                                       (else #f))
-                                     #t)
+                                (or (and (hub-run-in-force) #t)   ; P5: a live hub run continues
+                                    (and (case (active-game)
+                                         ((stack) *session*)
+                                         ((cards) *deal*)
+                                         (else #f))
+                                       #t))
                                 (or *seed* *clock*)   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
                                 (live-code)
                                 #t      ; COPY: the page writes the clipboard
@@ -1636,35 +1638,62 @@
 
     ;; JACK IN: a new run from a seed (the clock's, or a run code's),
     ;; its first layer dealt.
+    ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
+
+    ;; JACK IN: a hub run from the seed, layer 1, the field seeded by the run.
     (define (jack-in! seed)
-      (let ((r (run-new seed)))
-        (set-run! r)
-        (say "run" "start" (run-seed r) (run-code r))
-        (open-spec! (run-spec r))))
+      (hub-run-start! seed)
+      (say "run" "start" seed (hub-run-code))
+      (open-hub!))
+
+    ;; The hub screen up (a new run, a return from a board, CONTINUE).
+    (define (open-hub!)
+      (set! *screen* 'hub)
+      (set! *overlay* #f)
+      (set! *announced* #f)
+      (field-for-deal! (world-run-seed (hub-screen-world (hub-run-in-force))))
+      (say "hub" "open" (world-depth (hub-screen-world (hub-run-in-force))) (world-beat (hub-screen-world (hub-run-in-force)))))
+
+    ;; One frame of the hub: the screen steps on its clock with this frame's
+    ;; input; a launch request deals the node's board with the settings' draw
+    ;; and scoring; a menu request opens the main menu (CONTINUE resumes).
+    ;;   crash: hub beat N TRACE T/B DEPTH D    once per beat stepped
+    (define (hub-tick f dt)
+      (let* ((hs0 (hub-run-in-force))
+             (hs (hub-screen-tick hs0 (* 1000.0 dt) f)))
+        (hub-run-set! hs)
+        (when (and *trace* (> (hub-screen-beats hs) (hub-screen-beats hs0)))
+          (let ((w (hub-screen-world hs)))
+            (say "hub" "beat" (world-beat w) "trace" (world-trace w) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (runner-cell (world-runner w)))))
+        (case (hub-screen-request hs)
+          ((launch)
+           (let ((l (hub-run-launch! (setting 'draw) (setting 'scoring))))
+             (when l
+               (say "hub" "launch" (node-index (launch-node l)) (encode (launch-spec l)))
+               (open-spec! (launch-spec l)))))
+          ((menu)
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           (open-menu!))
+          (else #f))
+        (when (eq? *screen* 'hub)
+          (present! #f (lambda () (hub-draw! VW VH (background)))))))
 
     ;; NEXT or RETRY came out of a table (its own next or retry board is
     ;; dealt already): inside a run, replace it with the run's next layer
     ;; (after a clear), a new attempt of the layer (RECONNECT after a
     ;; sever), or the ledger when the run is done; outside, the dealt
     ;; board stands.
+    ;; NEXT or RETRY came out of a table inside a run: the board's outcome is
+    ;; in the world already (a clear at the clear, run-clear-line!; a sever
+    ;; here) and the hub comes back up. Outside a run the dealt board stands.
     (define (run-request! request table)
       (let ((r (run-in-force)))
         (cond ((not r) #f)
-              ((run-done? r)
-               (say "run" "done" (run-seed r))
-               (open-menu!)
-               (set! *menu* (menu-open-run-done *menu* (cons r (run-code r))))
-               (set! *run-done-at* (now-ms))
-               (set-run! #f))
-              ((eq? request 'retry)
-               ;; a sever counted by the table's step: the layer's next attempt
-               (let ((r (run-severed r)))
-                 (set-run! r)
-                 (say "run" "reconnect" (run-layer-number r) (run-attempt r))
-                 (open-spec! (run-spec r))))
               (else
-               (say "run" "layer" (run-layer-number r))
-               (open-spec! (run-spec r))))))
+               (when (eq? request 'retry)
+                 (when (hub-run-severed! table) (say "run" "reconnect" table)))
+               (say "run" "back" table)
+               (open-hub!)))))
 
     ;; The update's state reaches the stack's session (the game draws it
     ;; and takes the choice, (crash input) step-update) and the menu (its
@@ -1713,9 +1742,11 @@
             (else
              (case choice
                ((continue)
-                (case (active-game)
-                  ((cards) (open-cards! #t))
-                  (else (open-stack! #t))))
+                (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
+                    (open-hub!)
+                    (case (active-game)
+                    ((cards) (open-cards! #t))
+                    (else (open-stack! #t)))))
                ((jack-in) (jack-in! (now-second)))
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
@@ -1775,7 +1806,7 @@
     ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
-      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? (quote draw)) (lambda () #f) draw))))
+      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? 'draw) (lambda () #f) draw))))
 
     (define (present-frame! cascading? draw)
       (set! *sim-ms* (- (now-ms) *tick-t0*))
@@ -1786,6 +1817,7 @@
           (tiles-ensure! *geom*))
         ;; the menu's and the overlay's bakes, before the passes (they are passes)
         (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
+              ((eq? *screen* 'hub) (hub-prepare!))   ; P5: the tile bake is a pass
               (*overlay* (menu-prepare! *overlay*)))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
         ;; the phosphor's compose pass first, then the frame (or the composed
@@ -1879,6 +1911,7 @@
             (*code* (say "code" "refused" *code*) (open-menu!))
             (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
+            (*hub-seed* (jack-in! *hub-seed*))   ; ?hub=SEED: JACK IN at boot (P5; the arms)
             (else (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
@@ -1930,8 +1963,8 @@
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ;; ?bg=reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off (a name outside the rule table is off); it wins over the BACKGROUND setting
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)) (set! *bg-asked* #t))))
-            ((string=? type "hub") (param! (lambda () (hub-door! payload))))   ; ?hub=SEED: the hub live on layer 1 of run seed SEED (P5)
-            ((string=? type "bpm") (param! (lambda () (hub-bpm! payload))))   ; ?bpm=N: the hub's clock pinned (P5, until M1's player)
+            ((string=? type "hub") (param! (lambda () (set! *hub-seed* (let ((n (string->number payload))) (and n (exact? n) (integer? n) (>= n 0) (max 1 n)))))))   ; ?hub=SEED: JACK IN at boot with this run seed (P5; the arms)
+            ((string=? type "bpm") (param! (lambda () (hub-run-bpm! payload))))   ; ?bpm=N: the hub's clock pinned (P5, until M1's player)
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
             ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
             ((string=? type "rsteps") (param! (lambda () (set! *bg-rsteps* (let ((n (string->number payload))) (and n (>= n 1) n))))))
