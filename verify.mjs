@@ -2111,8 +2111,25 @@ async function downTo(order, id, at = 0) {
       }
     }
   }
+  // and the seeds are the nodes' own: key node 1 launches a different code
+  // (a constant launch seed, sabotage S1, would give every node the same)
+  let launch1 = null;
+  if (!detail) {
+    const m0 = consoleLines.length;
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=1`);
+    const at = await waitLine(/^crash: hub at 1 (\d+)$/, m0, 20000);
+    if (!at) detail = "?hub=1&hubat=1 did not set the runner on key node 1";
+    else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the second hub boot";
+    else {
+      const m1 = consoleLines.length;
+      await press("Enter");
+      launch1 = await waitLine(/^crash: hub launch 1 ([0-9A-Z]{10})$/, m1, 5000);
+      if (!launch1) detail = "Enter on key node 1 asked for no launch";
+      else if (launch1.m[1] === launch.m[1]) detail = `key node 1 launched node 0's code ${launch.m[1]}: the launch seed is not the node's`;
+    }
+  }
   if (detail) fail("run", detail);
-  else pass("run", `JACK IN opened the hub; DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key`);
+  else pass("run", `JACK IN opened the hub; DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
 }
 
 // hub (P5, D60): the world moves on the beat and takes one action per
