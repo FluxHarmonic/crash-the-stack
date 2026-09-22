@@ -78,3 +78,15 @@ comparison proves every note, gate, effect, pattern and order remains identical.
 The composer reproduces the candidate byte for byte. Native full levels are
 -17.0 LUFS-I before and -17.4 after, with peaks of -2.0/-2.3 dBTP. The shorter
 noise tail's energy difference is preserved rather than normalized away.
+
+## Delivery checks and receipts
+
+Delivery uses a shared -0.5 dB monitoring gain. The complete before/after OGGs
+measure -17.6/-17.9 LUFS-I and -2.5/-2.8 dBTP; the montage is -18.0 LUFS-I and
+-4.2 dBTP. All format, duration, source-identity and full ending-decay checks
+pass. The difference in energy remains part of this timbre audition.
+
+Telegram acknowledged the montage as message 1146, complete reference as 1147
+and complete candidate as 1148. Source commit: 6e62208. All three deliveries
+use the approved phrasing. This percussion choice awaits listener feedback;
+no public upload or game change was made.
