@@ -56,7 +56,7 @@
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code take-layer-cleared! credits-text!
           set-clock-source! now-second today
-          music-frame! music-fresh! music-off! music-readout music-title
+          music-frame! music-fresh! music-off! music-readout music-title set-trace-at-door!
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
           daily-session? daily-deal?
           boot-session save-after-frame! run-after-frame! deal-run-after-frame!
@@ -290,16 +290,16 @@
 
     ;; A session or deal from a spec, the settings' HUD on it.
     (define (session-from-spec sp lay)
-      (let* ((s (session-new lay (spec-seed sp)))
+      (let* ((s (door-session (session-new lay (spec-seed sp))))
              (s (session-with-trace-mode s (if (eq? (spec-version sp) 'original) 'clean 'twist)))
              (s (session-with-best s (datum->best (store-read-datum BEST-KEY)))))
         (session-with-hud s (stored-hud))))
 
     (define (deal-from-spec sp)
-      (deal-with-hud (deal-new (spec-seed sp)
+      (deal-with-hud (door-deal (deal-new (spec-seed sp)
                                (spec-draw sp)
                                (spec-scoring sp)
-                               (if (eq? (spec-version sp) 'original) 'clean 'twist))
+                               (if (eq? (spec-version sp) 'original) 'clean 'twist)))
                      (stored-hud)))
 
     ;; The spec a live board is (for its share code).
@@ -335,7 +335,7 @@
       (let* ((saved (and (not fresh?)
                          (datum->session (store-read-datum BOARD-KEY))))
              (best (datum->best (store-read-datum BEST-KEY)))
-             (s (session-with-best (or saved (session-new lay (or seed 1))) best)))
+             (s (session-with-best (or saved (door-session (session-new lay (or seed 1)))) best)))
         (cons (session-with-hud s (stored-hud))
               (and saved #t))))
 
@@ -496,11 +496,31 @@
        " SET " (if (eq? (setting 'music) 'on) "ON" "OFF") "/" (number->string (setting 'volume))))
     ;; The playing track's title (the tune's name:), for NOW PLAYING; #f when nothing plays
     (define (music-title) (live-music-title))
-    (define (music-frame! screen phase . rest)
+    ;; tr: the table's trace (#f on the menu). The music gets its phase and
+    ;; the ms until it lands (the fill's run-up; #f when it never will: clean
+    ;; mode, or landed already).
+    (define (music-frame! screen tr . rest)
       (unless *music-off*
         (let ((seed (and (pair? rest) (car rest)))
-              (table (if (eq? screen 'cards) 'cards 'stack)))
-          (live-music-frame! screen phase table seed))))
+              (table (if (eq? screen 'cards) 'cards 'stack))
+              (phase (and tr (trace-phase tr)))
+              (remaining (and tr
+                              (eq? (trace-mode tr) 'twist)
+                              (eq? (trace-phase tr) 'trace)
+                              (* 1000.0 (- (trace-trace-at tr) (trace-value tr))))))
+          (live-music-frame! screen phase remaining table seed))))
+
+    ;; ?trace-at=N / --trace-at N: the trace lands at N seconds on the next
+    ;; deal of either table (the arm's door to the fill's run-up: a real
+    ;; deal takes TRACE-AT minus the shuffles' 60 s each to get there).
+    (define *trace-at-door* #f)
+    (define (set-trace-at-door! n) (set! *trace-at-door* n))
+    (define (door-thresholds tr)
+      (if *trace-at-door*
+          (trace-with-thresholds tr *trace-at-door* (trace-sever-at tr))
+          tr))
+    (define (door-session s) (session s trace: (door-thresholds (session-trace s))))
+    (define (door-deal d) (deal-with-trace d (door-thresholds (deal-trace d))))
 
     ;; --- the sound (P3) ---------------------------------------------------------
 

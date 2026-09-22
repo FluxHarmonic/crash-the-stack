@@ -4,7 +4,8 @@
 ;;; hook the tracker uses. (crash music) is the data (the pools, the pick,
 ;;; the section a phase asks for, the menu theme); this module runs it:
 ;;;
-;;;   (live-music-frame! screen phase table seed)   every frame the menu or a table is up
+;;;   (live-music-frame! screen phase remaining table seed)   every frame the menu or a table is up
+;;;                                                 (remaining: ms until the trace lands, or #f)
 ;;;   (live-music-fresh!)                           a new deal: its pick from the calm mark, from the top
 ;;;   (live-music-off!) / (live-music-stop!)               silence (the cascade, the severed screen)
 ;;;   (live-music-provide! name text)                     a tune's text landed (the web page's fetch)
@@ -17,17 +18,19 @@
 ;;; the menu theme resumes where IT left off; a switch fades the leaving
 ;;; track ~0.5 s and the coming one in ~1 s (two source gains, one player
 ;;; each way: the leaving player finishes its fade before the next opens,
-;;; so at most one player runs). The phase turning counter (the trace
-;;; crossed the ICE threshold) asks the player for the fill at the next
-;;; bar row and the tense region after it; the phase falling back asks
-;;; for calm at the next bar row with a 300 ms dip (no track has a
-;;; composed return fill yet). MUSIC / VOLUME apply on the source gain.
+;;; so at most one player runs). The fill runs up to the trace landing:
+;;; it is asked for one fill-length ahead (plus the wait for a bar row and
+;;; the sink's queue) so it ends as the ICE strikes, and runs on into the
+;;; tense region; the phase turning counter (the strike) asks for tense
+;;; at the next bar row unless the fill is already there; the phase falling
+;;; back asks for calm at the next bar row with a 300 ms dip (no track has
+;;; a composed return fill yet). MUSIC / VOLUME apply on the source gain.
 ;;;
 ;;; Lines (say with ?trace / --trace):
 ;;;   crash: music pick NAME seed N for TABLE  the deal's track (stack | cards)
 ;;;   crash: music open NAME top|resume POS ROW ms N   (N: the open's cost, the compile and the voice graphs)
-;;;   crash: music section tense|calm asked at POS ROW   (the phase change)
-;;;   crash: music section tense|calm at POS ROW         (the landing, a bar row)
+;;;   crash: music section fill|tense|calm asked at POS ROW   (the trace's ask; POS ROW the walker's)
+;;;   crash: music section fill|tense|calm at POS ROW        (the landing, a bar row; tense's also when the fill runs into it)
 ;;;   crash: music fade out|in NAME
 ;;;   crash: music playing NAME POS ROW        the sink pulled past the open position (heard, if the context runs)
 
@@ -45,7 +48,7 @@
           live-music-unavailable! live-music-prefetch! live-music-has-text?
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
-          live-music-section live-music-pending? live-music-name
+          live-music-section live-music-pending? live-music-name live-music-pull!
           live-music-rate live-music-rate-set? live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
@@ -75,6 +78,9 @@
     (define *say* (lambda parts #f))
     (define *landed-seen* #f)     ; the last landing reported (the arm reads the line once)
     (define *opened-at* #f)       ; (pos . row) the track opened at; #f once "playing" was said (the sink pulled past it)
+    (define *pending* #f)         ; the mark asked for and not yet landed (re-asked by a reopen), or #f
+    (define *in-tense* #f)        ; the walk has entered the tense region (by the fill running into it, or a jump)
+    (define *timing* #f)          ; the playing tune's (row-ms bar-rows fill-rows fill-pos tense-pos end-pos), fill-rows #f without a fill
 
     (define (live-music-playing?) (and *player* #t))
     (define (live-music-title) (and *tune* (tune-name *tune*)))
@@ -91,6 +97,76 @@
                                 ;; the sink's frames in the player's rate, plus what the upsampler holds unread
                                 (exact (round (+ (* (audio-source-depth) (rs-ratio)) (resampler-unread *rs*))))
                                 (audio-source-depth)))))
+
+    ;; --- the fill's run-up (David's ruling, 2026-09-22) ------------------------------
+    ;; The fill starts one fill-length before the trace lands, so it ends as
+    ;; the ICE strikes, and tense begins at the strike. A mark jump lands on
+    ;; the walker's next bar row, and the walker runs ahead of the ear by
+    ;; the sink's queue, so the fill is asked for when the trace's remaining
+    ;; ms are within: the queue's latency + the walker's wait for its next
+    ;; bar row + the fill's length + half a bar (the wait and the remaining
+    ;; ms shrink together between bar rows, so the fill's end misses the
+    ;; trace by at most half a bar either way). The lengths come from the
+    ;; tune's header tempo and speed (a tempo effect inside the fill moves
+    ;; the end by its amount: within the tolerance for the tunes shipped).
+    (define (tune-timing t)
+      (let* ((row-ms (/ (* 2500.0 (tune-speed t)) (tune-tempo t)))
+             (m (tune-meter t))
+             (bar-rows (* (car m) (cdr m)))
+             (rs (tune-mark-regions t))
+             (fill (assq 'fill rs))
+             (tense (assq 'tense rs))
+             (rows-of (lambda (from to)
+                        (let loop ((i from) (n 0))
+                          (if (>= i to) n
+                              (let ((pat (list-find (lambda (p) (= (tune-pattern-id p) (list-ref (tune-order t) i))) (tune-patterns t))))
+                                (loop (+ i 1) (+ n (if pat (tune-pattern-rows pat) 0)))))))))
+        (list row-ms bar-rows
+              (and fill tense (rows-of (cadr fill) (cddr fill)))
+              (and fill (cadr fill))
+              (and tense (cadr tense))
+              (if tense (cddr tense) (length (tune-order t))))))
+    (define (timing-row-ms) (list-ref *timing* 0))
+    (define (timing-bar-rows) (list-ref *timing* 1))
+    (define (timing-fill-rows) (list-ref *timing* 2))
+    (define (timing-fill-pos) (list-ref *timing* 3))
+    (define (timing-tense-pos) (list-ref *timing* 4))
+    (define (timing-end-pos) (list-ref *timing* 5))
+
+    ;; The walker's own position (the row being rendered now, ahead of the ear)
+    (define (walker-position) (and *player* (player-position *player* 0)))
+
+    ;; ms the ear is behind the walker: the source's queue at the device rate
+    (define (queue-ms) (/ (* 1000.0 (audio-source-depth)) (max 1 (audio-rate))))
+
+    ;; How far ahead of the trace the fill must be asked for, in ms; #f when
+    ;; the tune has no fill (tense is asked at the strike alone).
+    (define (fill-window)
+      (and *timing* *player* (timing-fill-rows) (timing-tense-pos)
+           (let* ((wp (or (walker-position) (cons 0 0)))
+                  (bar (timing-bar-rows))
+                  (wait-rows (- bar (modulo (cdr wp) bar)))
+                  (row-ms (timing-row-ms)))
+             (+ (queue-ms)
+                (* wait-rows row-ms)
+                (* (timing-fill-rows) row-ms)
+                (* 0.5 bar row-ms)))))
+
+    ;; The region the walk loops in for the section asked: calm's; the fill
+    ;; runs on into tense (fill's start to tense's end) until the walk is in
+    ;; tense, then tense's own. Or #f when the tune has no such marks.
+    (define (section-region)
+      (let ((rs (tune-mark-regions *tune*)))
+        (cond ((and (eq? *section* 'fill) (not *in-tense*))
+               (let ((f (assq 'fill rs)) (tn (assq 'tense rs)))
+                 (and f (cons (cadr f) (if tn (cddr tn) (cddr f))))))
+              ((or *in-tense* (eq? *section* 'tense))
+               (let ((r (assq 'tense rs))) (and r (cdr r))))
+              (else
+               (let ((r (assq 'calm rs))) (and r (cdr r)))))))
+    (define (apply-region! p)
+      (let ((r (section-region)))
+        (when r (player-set-region! p (car r) (cdr r)))))
 
     ;; MUSIC / VOLUME: a factor applied at once
     (define (live-music-set-gain! g)
@@ -195,12 +271,12 @@
              (pos (if entry (cons (vector-ref entry 0) (vector-ref entry 1)) (or (live-music-position) (cons 0 0))))
              (skip (if entry (max 0 (exact (round (* (- head (vector-ref entry 2)) (/ (live-music-rate) (* 1.0 old-rate)))))) 0))
              (t0 (current-milliseconds))
-             (p (open-player *tune* pos))
-             (r (assq *section* (tune-mark-regions *tune*))))
+             (p (open-player *tune* pos)))
         (player-close! old)
         (set! *player* p)
         (set! *player-rate* (live-music-rate))
-        (when r (player-set-region! p (cadr r) (cddr r)))
+        (apply-region! p)
+        (when *pending* (player-jump-to-mark! p *pending*))   ; a jump asked and not landed survives the reopen
         (discard! p skip)
         (set! *landed-seen* #f)
         (set! *opened-at* #f)
@@ -240,6 +316,9 @@
                     (set! *ladder-pulls* (+ *ladder-pulls* 1))
                     (set! *ladder-ms* (+ *ladder-ms* per-1024)))))))
         (if on #t (begin (close-player!) #f))))
+
+    ;; The source's render by hand (the tests drive the walker without a sink)
+    (define (live-music-pull! out byte-offset n) (pull! out byte-offset n))
 
     (define (pull-resampled! out byte-offset n)
       (let ((p *player*))
@@ -331,10 +410,16 @@
               (set! *name* name)
               (set! *tune* t)
               (set! *section* 'calm)
+              (set! *in-tense* #f)
+              (set! *pending* #f)
+              (set! *timing* (tune-timing t))
+              ;; a resume inside tense (a return from the menu under the ICE) stays there
+              (when (and (timing-tense-pos) (>= (car start) (timing-tense-pos)))
+                (set! *section* 'tense)
+                (set! *in-tense* #t))
               (set! *landed-seen* #f)
               (set! *opened-at* start)
-              (let ((r (assq 'calm (tune-mark-regions t))))
-                (when r (player-set-region! p (cadr r) (cddr r))))
+              (apply-region! p)
               (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
               (fade! 0.0 1.0 FADE-IN-MS #f)
               'open))))
@@ -343,7 +428,7 @@
     ;; screen: menu | stack | cards; phase: trace | counter | severed | cleared | #f;
     ;; table: the table the pick is for (stack | cards); seed: the board's;
     ;; fresh?: a new deal (its pick from the top).
-    (define (live-music-frame! screen phase table seed)
+    (define (live-music-frame! screen phase remaining table seed)
       (fade-frame!)
       (ladder!)
       (let* ((fresh? (and *fresh* (not (eq? screen 'menu)) (not (memq phase '(cleared severed)))))
@@ -372,24 +457,46 @@
             (when (and p (not (equal? p *opened-at*)))
               (set! *opened-at* #f)
               (*say* "music" "playing" (symbol->string *name*) (car p) (cdr p)))))
-        ;; the section follows the phase, at the next bar row
+        ;; the section follows the trace: the fill in its run-up, tense at
+        ;; the strike, each landing on the walker's next bar row
         (when (and *player* (not (eq? screen 'menu)) (eq? want *name*))
-          (let ((section (music-section phase)))
+          (let ((section (music-section phase remaining (fill-window))))
             (unless (eq? section *section*)
               (set! *section* section)
-              (let ((p (live-music-position)))
+              (let ((p (walker-position)))
                 (*say* "music" "section" (symbol->string section) "asked" "at" (if p (car p) "-") (if p (cdr p) "-")))
-              (cond ((eq? section 'tense)
-                     (unless (player-jump-to-mark! *player* 'fill)
-                       (player-jump-to-mark! *player* 'tense)))
+              (cond ((eq? section 'fill)
+                     (ask-jump! 'fill))
+                    ((eq? section 'tense)
+                     ;; the fill that ran into tense already is there: nothing to jump
+                     (unless *in-tense* (ask-jump! 'tense)))
                     (else
-                     (player-jump-to-mark! *player* 'calm)
+                     (set! *in-tense* #f)
+                     (ask-jump! 'calm)
                      (player-dip! *player* RETURN-DIP-MS)))))
-          ;; the landing, once
+          ;; a mark's landing, once: the fill's runs on into tense; tense's is tense
           (let ((l (player-landed *player*)))
             (when (and l (not (equal? l *landed-seen*)))
               (set! *landed-seen* l)
-              (*say* "music" "section" (symbol->string *section*) "at" (car l) (cadr l)))))))
+              (set! *pending* #f)
+              (when (and (timing-tense-pos) (>= (car l) (timing-tense-pos)))
+                (set! *in-tense* #t))
+              (apply-region! *player*)
+              (*say* "music" "section" (if *in-tense* "tense" (symbol->string *section*)) "at" (car l) (cadr l))))
+          ;; the fill ran into tense on its own: the walk loops tense from here
+          (when (and (eq? *section* 'fill) (not *in-tense*) (not *pending*) (timing-tense-pos))
+            (let ((wp (walker-position)))
+              (when (and wp (>= (car wp) (timing-tense-pos)))
+                (set! *in-tense* #t)
+                (apply-region! *player*)
+                (*say* "music" "section" "tense" "at" (car wp) (cdr wp))))))))
+
+    ;; A mark jump asked (lands on the walker's next bar row); a tune
+    ;; without the mark gets tense for a missing fill, nothing for the rest.
+    (define (ask-jump! name)
+      (let ((name (if (and (eq? name 'fill) (not (tune-mark *tune* 'fill))) 'tense name)))
+        (when (player-jump-to-mark! *player* name)
+          (set! *pending* name))))
 
     (define (fading-out?) (and *fade* (eq? (list-ref *fade* 4) 'close)))
 

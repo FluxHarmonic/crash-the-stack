@@ -274,6 +274,8 @@ if (!pageWs) { console.log("SETUP-FAILED: no chrome page target after 20 s; did 
 const ws = new WebSocket(pageWs);
 let msgId = 0; const pending = new Map();
 const consoleLines = [];   // every console.log/warn text, in order
+const consoleTimes = [];   // when each arrived (Date.now()), for the music leg's timing
+function pushLine(text) { consoleLines.push(text); consoleTimes.push(Date.now()); }
 const consoleErrors = [];  // error-level entries and exceptions
 function send(method, params = {}) {
   return new Promise((res, rej) => { const id = ++msgId; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
@@ -283,7 +285,7 @@ ws.addEventListener("message", (ev) => {
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
   if (msg.method === "Runtime.consoleAPICalled") {
     const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
-    consoleLines.push(text);
+    pushLine(text);
     if (msg.params.type === "error") consoleErrors.push("console.error: " + text);
   }
   if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") consoleErrors.push("log: " + msg.params.entry.text);
@@ -337,7 +339,7 @@ if (PHONE) {
 // a second apart, and the abort noted.
 async function navigate(url) {
   let r = null;
-  consoleLines.push(`arm: navigate ${url.replace(/^.*index\.html/, "index.html")}`);   // the log says which boot is whose
+  pushLine(`arm: navigate ${url.replace(/^.*index\.html/, "index.html")}`);   // the log says which boot is whose
   for (let i = 0; i < 3; i++) {
     r = await send("Page.navigate", { url });
     if (!r.errorText) return r;
@@ -405,7 +407,13 @@ function timedOut(name) {
 
 // ---- 2. boot ----------------------------------------------------------------
 // ?trace switches on the game's console lines; a player's page prints nothing.
-await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+// The first deal's trace lands at ARM_TRACE_AT s (the ?trace-at door): the
+// tools leg's hint (30 s) and two shuffles (60 s each) then leave a run-up
+// of 25-35 s of clock for the fill to start in (the longest fill's window
+// is ~15 s: quiet-array's 10.4 s fill, a 2.6 s bar, the queue); a real
+// deal's 180 s is the same machine (the traced and music legs).
+const ARM_TRACE_AT = 190;
+await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&trace-at=${ARM_TRACE_AT}`);
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -764,15 +772,17 @@ let barRects = null;
 }
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
-// Each shuffle costs SHUFFLE_COST on the trace, so SHUFFLES taps take the
-// value past TRACE_AT and the next tick completes the trace ("crash: trace
-// V H SHUFFLES counter 0"); the first
-// counter-hack fires ICE-FIRST (10 s) later: "crash: trace ... counter 1"
-// with either "crash: lock A B" or one more "crash: shuffle". With
-// forwarding off the control cannot be tapped, so the positive-control run
-// skips this.
-const TRACE_AT = 180, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
+// Each shuffle costs SHUFFLE_COST on the trace; SHUFFLES taps take the
+// value (with the tools leg's hint) to within a run-up of the deal's threshold (ARM_TRACE_AT through
+// the ?trace-at door), the clock does the rest, and the tick that reaches
+// it completes the trace ("crash: trace V H SHUFFLES counter 0"); the music
+// leg reads the fill's run-up over that wait. The first counter-hack fires
+// ICE-FIRST (10 s) later: "crash: trace ... counter 1" with either
+// "crash: lock A B" or one more "crash: shuffle". With forwarding off the
+// control cannot be tapped, so the positive-control run skips this.
+const SHUFFLE_COST = 60, SHUFFLES = 2;
 let iceLock = null;
+let strikeAt = null;   // when the trace completed (consoleTimes), for the music leg
 {
   if (EXPECT_NO_SELECTION) skip("traced", "controls are not tappable with forwarding off");
   else {
@@ -788,9 +798,13 @@ let iceLock = null;
       await sleep(150);
     }
     if (!detail) {
-      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, 3000);
-      if (!traced) detail = `${SHUFFLES} shuffles did not complete the trace (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
+      // the run-up: the threshold less the shuffles and the seconds played so far, plus slack
+      const last = consoleLines.map((l) => l.match(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} trace 0$`))).filter(Boolean).pop();
+      const runUp = ARM_TRACE_AT - (last ? Number(last[1]) : SHUFFLES * SHUFFLE_COST);
+      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, (runUp + 5) * 1000);
+      if (!traced) detail = `${SHUFFLES} shuffles and ${runUp} s of clock did not complete the trace at ${ARM_TRACE_AT} s (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
       else {
+        strikeAt = consoleTimes[traced.index];
         mark = traced.index + 1;
         const ice = await waitLine(/^crash: trace (\d+) (\d+) (\d+) counter 1$/, mark, 16000);
         if (!ice) detail = "no counter-hack within 16 s of the trace completing";
@@ -1682,7 +1696,7 @@ let topAt = 0;
 // a fresh board, then Escape: the pause menu's top screen
 async function pauseMenu(extra = "") {
   // the store before the boot (a leg that dies at its first frame is read against it)
-  try { consoleLines.push("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
+  try { pushLine("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
   const from = consoleLines.length;
   await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
@@ -2315,16 +2329,21 @@ async function downTo(order, id, at = 0) {
 // Read from the whole run's console lines: the boot's pick is seeded
 // ("crash: music pick NAME seed N for TABLE", and the reload leg's second boot of the
 // same board picks the same NAME), the track was heard ("crash: music
-// playing NAME P R": the sink pulled past the open position), the ICE
-// crossing in the traced leg asked for the tense section and landed on a
-// bar row at or past the fill mark ("section tense asked at P R" then
-// "section tense at P2 R2" with R2 a multiple of rows-per-beat x
-// beats-per-bar and P2 >= fill, both read from the served
-// assets/tunes/NAME.cts), the pause panel said NOW PLAYING with the tune's
-// name: ("crash: menu-playing TITLE"), and the main menu opened its theme
-// ("crash: music open black-glass-title ..."). The return to calm has no
-// path in today's trace model (the counter phase never falls back), so it
-// is not asserted.
+// playing NAME P R": the sink pulled past the open position), the fill ran
+// up to the trace (David's ruling, 2026-09-22): "section fill asked at P R"
+// during the traced leg's run-up, "section fill at P2 R2" landing on a bar
+// row at the fill mark, and the fill's END (its landing plus its length,
+// from the tune's tempo, speed and the fill's patterns) within a bar of the
+// trace completing (the traced leg's "counter 0" line); tense began at the
+// strike: "section tense at P3 R3" at the tense mark on a bar row, within a
+// bar of the strike either way (the fill running into tense a little early,
+// or the jump landing at the next bar), and said once (the fill never
+// looped: David's phone, 2026-09-22); the pause panel said NOW PLAYING with
+// the tune's name: ("crash: menu-playing TITLE"); the main menu opened its
+// theme ("crash: music open black-glass-title ..."). The return to calm has
+// no path in today's trace model (the counter phase never falls back), so
+// it is not asserted. Rows per bar and the marks are read from the served
+// assets/tunes/NAME.cts.
 {
   let detail = "";
   const pickRe = /^crash: music pick ([a-z0-9-]+) seed (\d+) for (stack|cards)$/;
@@ -2338,29 +2357,52 @@ async function downTo(order, id, at = 0) {
       const meter = text.match(/meter: \((\d+) (\d+)/);
       const marks = text.match(/\(marks ([^)]*)\)/);
       const mark = (k) => { const m = marks && marks[1].match(new RegExp(`${k}: (\\d+)`)); return m ? Number(m[1]) : null; };
-      tune = { name: (text.match(/name: "([^"]*)"/) || [])[1], barRows: meter ? Number(meter[1]) * Number(meter[2]) : 16, fill: mark("fill"), tense: mark("tense"), calm: mark("calm") };
+      const tempo = Number((text.match(/tempo: (\d+)/) || [])[1] || 125), speed = Number((text.match(/speed: (\d+)/) || [])[1] || 6);
+      const order = ((text.match(/\(order ([\d ]*)\)/) || [])[1] || "").trim().split(/\s+/).map(Number);
+      const rows = {}; for (const m of text.matchAll(/\(pattern id: (\d+) rows: (\d+)/g)) rows[m[1]] = Number(m[2]);
+      const fill = mark("fill"), tense = mark("tense");
+      const rowMs = 2500 * speed / tempo;
+      const fillRows = fill !== null && tense !== null ? order.slice(fill, tense).reduce((n, id) => n + (rows[id] || 0), 0) : null;
+      tune = { name: (text.match(/name: "([^"]*)"/) || [])[1], barRows: meter ? Number(meter[1]) * Number(meter[2]) : 16, fill, tense, calm: mark("calm"),
+               rowMs, barMs: (meter ? Number(meter[1]) * Number(meter[2]) : 16) * rowMs, fillMs: fillRows === null ? null : fillRows * rowMs };
     } catch (e) { detail = `cannot read assets/tunes/${pick[1]}.cts: ${e.message}`; }
   }
   if (!detail) {
     const playing = consoleLines.find((l) => l.startsWith(`crash: music playing ${pick[1]} `));
-    const asked = consoleLines.map((l) => l.match(/^crash: music section tense asked at (\d+) (\d+)$/)).filter(Boolean)[0];
-    const landed = consoleLines.map((l) => l.match(/^crash: music section tense at (\d+) (\d+)$/)).filter(Boolean)[0];
+    const find = (re) => { const i = consoleLines.findIndex((l) => re.test(l)); return i < 0 ? null : { m: consoleLines[i].match(re), index: i, at: consoleTimes[i] }; };
+    const count = (re) => consoleLines.filter((l) => re.test(l)).length;
+    const fillAsked = find(/^crash: music section fill asked at (\d+) (\d+)$/);
+    const fillAt = find(/^crash: music section fill at (\d+) (\d+)$/);
+    const tenseAt = find(/^crash: music section tense at (\d+) (\d+)$/);
+    const tenseAsked = find(/^crash: music section tense asked at (\d+) (\d+)$/);
     const other = picks.find((p) => p[1] !== pick[1] && p[2] === pick[2] && p[3] === pick[3]);   // the same seed on the same table (the P4 legs deal seed 1 on both tables: different pools)
     const again = picks.find((p) => p[2] === pick[2] && p[3] === pick[3] && p !== pick);
     const np = consoleLines.map((l) => l.match(/^crash: menu-playing (.*)$/)).filter(Boolean)[0];
     const theme = consoleLines.find((l) => /^crash: music open black-glass-title /.test(l));
-    const want = tune.fill ?? tune.tense;
+    const slack = tune.barMs + 500;   // a bar either way, plus the lines' own latency (a frame, the sink's queue read)
+    const fillEnd = fillAt && tune.fillMs !== null ? fillAt.at + tune.fillMs : null;
     if (!playing) detail = `no "crash: music playing ${pick[1]} ..." line: the track opened but the sink never pulled past the open position`;
     else if (other) detail = `seed ${pick[2]} on the ${pick[3]} picked ${pick[1]} and then ${other[1]}`;
     else if (!again) detail = `the board's second boot (the reload leg) printed no pick for seed ${pick[2]}`;
-    else if (!asked) detail = "no \"crash: music section tense asked at P R\" line after the ICE crossing";
-    else if (!landed) detail = `tense asked at ${asked[1]} ${asked[2]} but no "crash: music section tense at P R" landing line`;
-    else if (Number(landed[2]) % tune.barRows !== 0) detail = `the tense section landed at row ${landed[2]}, not a bar row (${tune.barRows} rows a bar)`;
-    else if (want !== null && Number(landed[1]) < want) detail = `the tense section landed at order position ${landed[1]}, before the ${tune.fill !== null ? "fill" : "tense"} mark ${want}`;
+    else if (strikeAt === null) detail = "the traced leg recorded no strike (the trace never completed): the fill's run-up cannot be read";
+    else if (tune.fill === null || tune.tense === null) detail = `${pick[1]} has no fill and tense marks (fill ${tune.fill}, tense ${tune.tense})`;
+    else if (!fillAsked) detail = "no \"crash: music section fill asked at P R\" line in the trace's run-up";
+    else if (fillAsked.at > strikeAt) detail = `the fill was asked ${((fillAsked.at - strikeAt) / 1000).toFixed(1)} s AFTER the trace completed, not in its run-up`;
+    else if (!fillAt) detail = `fill asked at ${fillAsked.m[1]} ${fillAsked.m[2]} but no "crash: music section fill at P R" landing line`;
+    else if (count(/^crash: music section fill at /) !== 1) detail = `the fill landed ${count(/^crash: music section fill at /)} times: it looped`;
+    else if (Number(fillAt.m[2]) % tune.barRows !== 0) detail = `the fill landed at row ${fillAt.m[2]}, not a bar row (${tune.barRows} rows a bar)`;
+    else if (Number(fillAt.m[1]) !== tune.fill) detail = `the fill landed at order position ${fillAt.m[1]}, not the fill mark ${tune.fill}`;
+    else if (Math.abs(fillEnd - strikeAt) > slack) detail = `the fill (${(tune.fillMs / 1000).toFixed(1)} s) landed ${((strikeAt - fillAt.at) / 1000).toFixed(1)} s before the trace completed: it ends ${((fillEnd - strikeAt) / 1000).toFixed(1)} s ${fillEnd > strikeAt ? "after" : "before"} the strike, over a bar (${(tune.barMs / 1000).toFixed(1)} s)`;
+    else if (!tenseAsked || tenseAsked.at < strikeAt - 500) detail = tenseAsked ? "tense was asked before the trace completed" : "no \"crash: music section tense asked at P R\" line at the strike";
+    else if (!tenseAt) detail = "no \"crash: music section tense at P R\" line: tense never began (the fill looped?)";
+    else if (count(/^crash: music section tense at /) !== 1) detail = `tense began ${count(/^crash: music section tense at /)} times`;
+    else if (Number(tenseAt.m[2]) % tune.barRows !== 0) detail = `tense began at row ${tenseAt.m[2]}, not a bar row (${tune.barRows} rows a bar)`;
+    else if (Number(tenseAt.m[1]) !== tune.tense) detail = `tense began at order position ${tenseAt.m[1]}, not the tense mark ${tune.tense}`;
+    else if (Math.abs(tenseAt.at - strikeAt) > slack) detail = `tense began ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s ${tenseAt.at > strikeAt ? "after" : "before"} the strike, over a bar (${(tune.barMs / 1000).toFixed(1)} s)`;
     else if (!np) detail = "no \"crash: menu-playing TITLE\" line: the pause panel showed no NOW PLAYING";
     else if (tune.name && np[1] !== tune.name) detail = `NOW PLAYING said "${np[1]}", the tune's name: is "${tune.name}"`;
     else if (!theme) detail = "the main menu never opened its theme (no \"crash: music open black-glass-title\" line)";
-    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; ICE asked at ${asked[1]}:${asked[2]}, landed at ${landed[1]}:${landed[2]} (bar ${tune.barRows}, fill ${tune.fill}); NOW PLAYING "${np[1]}"; menu theme opened`);
+    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; NOW PLAYING "${np[1]}"; menu theme opened`);
   }
   if (detail) fail("music", detail);
 }

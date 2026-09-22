@@ -1,0 +1,169 @@
+;;; The live soundtrack's sequencing (M1, D59; David's ruling 2026-09-22):
+;;; (crash music live) driven without a sink, the walker pulled by hand a
+;;; frame at a time, the trace's remaining time counted down alongside.
+;;; The fill starts in the run-up to the trace (asked a fill-length ahead,
+;;; landing on a bar row) and ENDS within a bar of the trace landing; it
+;;; runs on into tense, which then loops (David's phone, 2026-09-22: the
+;;; fill looped and tense never came: motif's mark jump set the region to
+;;; the fill's own range); tense begins at the strike whether the fill ran
+;;; into it or is cut short; a strike with no run-up (a shuffle jumping the
+;;; trace past its threshold) goes to tense at the next bar with no fill.
+
+(import (sigil test)
+        (sigil math)
+        (sigil io)
+        (sigil fs)
+        (sigil list)
+        (crash music)
+        (crash music live)
+        (crash audio)
+        (motif tune))
+
+(define RATE (audio-rate))           ; (crash audio)'s rate with no sink open is the device's default; the music renders at it here
+(define FRAME 1024)                  ; frames pulled per simulated frame
+(define FRAME-MS (/ (* 1000.0 FRAME) RATE))
+(define SEED 3)
+
+(define (tune-text name) (read-file-string (music-tune-path name)))
+(live-music-set-loader! tune-text)
+(live-music-set-rate! 22050 #t)      ; pinned at the ladder's floor: the render is the test's cost, and no ladder step reopens mid-run
+
+;; the lines the model says, as ("section" "fill" "asked" "at" P R) lists, with the frame they came at
+(define *lines* '())
+(define *frame* 0)
+(live-music-set-say! (lambda parts (set! *lines* (cons (cons *frame* parts) *lines*))))
+(define (lines-matching prefix)   ; prefix: the first words after "music"
+  (filter (lambda (l) (let ((words (cddr l))) (and (>= (length words) (length prefix)) (equal? (list-head words (length prefix)) prefix))))
+          (reverse *lines*)))
+(define (list-head l n) (if (= n 0) '() (cons (car l) (list-head (cdr l) (- n 1)))))
+(define (line-frame l) (car l))
+(define (line-pos l) (list-ref l (- (length l) 2)))
+(define (line-row l) (list-ref l (- (length l) 1)))
+
+;; The tune's timing, as the arm computes it from the file
+(define (timing-of name)
+  (let* ((t (read-tune-string (tune-text name)))
+         (row-ms (/ (* 2500.0 (tune-speed t)) (tune-tempo t)))
+         (m (tune-meter t))
+         (bar-rows (* (car m) (cdr m)))
+         (rs (tune-mark-regions t))
+         (fill (assq 'fill rs))
+         (tense (assq 'tense rs))
+         (rows-of (lambda (from to)
+                    (let loop ((i from) (n 0))
+                      (if (>= i to) n
+                          (let ((pat (list-find (lambda (p) (= (tune-pattern-id p) (list-ref (tune-order t) i))) (tune-patterns t))))
+                            (loop (+ i 1) (+ n (tune-pattern-rows pat)))))))))
+    (list (* bar-rows row-ms)                              ; bar ms
+          (* (rows-of (cadr fill) (cddr fill)) row-ms)     ; fill ms
+          (cadr fill) (cadr tense) bar-rows)))
+(define (bar-ms tm) (list-ref tm 0))
+(define (fill-ms tm) (list-ref tm 1))
+(define (fill-pos tm) (list-ref tm 2))
+(define (tense-pos tm) (list-ref tm 3))
+(define (bar-rows tm) (list-ref tm 4))
+
+;; One simulated frame: the model told the trace's state, then FRAME frames pulled
+(define out (make-bytevector (* 8 FRAME) 0))
+(define (frame! phase remaining)
+  (set! *frame* (+ *frame* 1))
+  (live-music-frame! 'stack phase remaining 'stack SEED)
+  (live-music-pull! out 0 FRAME))
+
+;; Run a trace: `ms` of trace phase counting down from `from` ms remaining
+;; (a strike at 0), then `after` ms of the counter phase. Answers the frame
+;; the strike came at.
+(define (run-trace! from after)
+  (let loop ((remaining from))
+    (if (> remaining 0)
+        (begin (frame! 'trace remaining) (loop (- remaining FRAME-MS)))
+        (let ((strike *frame*))
+          (let loop2 ((left after))
+            (when (> left 0)
+              (frame! 'counter #f)
+              (loop2 (- left FRAME-MS))))
+          strike))))
+
+(define (fresh-deal!)
+  (set! *lines* '())
+  (live-music-stop!)   ; the playing track closed at once (a real deal fades it over 500 ms of wall clock)
+  (live-music-fresh!)
+  ;; the pick opens on the first frame; a few frames of calm settle it
+  (let loop ((i 0)) (when (< i 8) (frame! 'trace 600000.0) (loop (+ i 1)))))
+
+(define (ms->frames ms) (* ms (/ RATE 1000.0)))
+(define (within-frames? a b tolerance) (<= (abs (- a b)) tolerance))
+
+(test-group "music live: the fill runs up to the trace and runs on into tense"
+  (fresh-deal!)
+  (let* ((name (live-music-name))
+         (tm (timing-of name))
+         (strike (run-trace! (+ (fill-ms tm) 6000.0) (+ (* 2 (bar-ms tm)) 2000.0)))
+         (asked (lines-matching '("section" "fill" "asked")))
+         (landed (lines-matching '("section" "fill" "at")))
+         (tense (lines-matching '("section" "tense" "at")))
+         (tense-asked (lines-matching '("section" "tense" "asked")))
+         (final (live-music-position)))   ; read now: a test body runs after every group's setup
+    (test "the fill was asked once and landed once, on a bar row at the fill mark"
+      (assert-equal 1 (length asked))
+      (assert-equal 1 (length landed))
+      (assert-equal (fill-pos tm) (line-pos (car landed)))
+      (assert-equal 0 (modulo (line-row (car landed)) (bar-rows tm))))
+    (test "the fill ends within a bar of the trace landing (the strike)"
+      (let ((end (+ (* FRAME (line-frame (car landed))) (ms->frames (fill-ms tm))))
+            (at (* FRAME strike)))
+        (assert-true (within-frames? end at (+ (ms->frames (bar-ms tm)) (* 2 FRAME))))))
+    (test "tense began: once, at the tense mark on a bar row, within a bar of the strike"
+      (assert-equal 1 (length tense))
+      (assert-equal (tense-pos tm) (line-pos (car tense)))
+      (assert-equal 0 (modulo (line-row (car tense)) (bar-rows tm)))
+      (assert-true (within-frames? (* FRAME (line-frame (car tense))) (* FRAME strike) (+ (ms->frames (bar-ms tm)) (* 2 FRAME)))))
+    (test "the strike asked for tense (the walk either there already or jumping at the next bar)"
+      (assert-equal 1 (length tense-asked)))
+    (test (string-append "the walk stays in tense: the fill never plays again (at " (if final (string-append (number->string (car final)) ":" (number->string (cdr final))) "-") ")")
+      (let ((p final))
+        (assert-true (and p (>= (car p) (tense-pos tm))))))))
+
+(test-group "music live: a strike with no run-up goes to tense at the next bar, no fill"
+  (fresh-deal!)
+  (let* ((name (live-music-name))
+         (tm (timing-of name))
+         (strike (run-trace! 0.0 (+ (* 2 (bar-ms tm)) 1000.0)))
+         (asked (lines-matching '("section" "fill")))
+         (tense (lines-matching '("section" "tense" "at"))))
+    (test "no fill was asked"
+      (assert-equal 0 (length asked)))
+    (test "tense landed at its mark on a bar row within a bar of the strike"
+      (assert-equal 1 (length tense))
+      (assert-equal (tense-pos tm) (line-pos (car tense)))
+      (assert-equal 0 (modulo (line-row (car tense)) (bar-rows tm)))
+      (assert-true (within-frames? (* FRAME (line-frame (car tense))) (* FRAME strike) (+ (ms->frames (bar-ms tm)) (* 2 FRAME)))))))
+
+(test-group "music live: a strike during the fill cuts it: tense at the next bar"
+  (fresh-deal!)
+  (let* ((name (live-music-name))
+         (tm (timing-of name))
+         ;; the fill asked at the window, then the trace jumps to its landing 2 bars later
+         (strike (let loop ((remaining (+ (fill-ms tm) 6000.0)) (fill-seen #f))
+                   (cond ((and fill-seen (>= (- *frame* fill-seen) (/ (ms->frames (* 2 (bar-ms tm))) FRAME)))
+                          (let ((s *frame*))
+                            (let loop2 ((left (+ (* 2 (bar-ms tm)) 1000.0)))
+                              (when (> left 0) (frame! 'counter #f) (loop2 (- left FRAME-MS))))
+                            s))
+                         (else
+                          (frame! 'trace remaining)
+                          (loop (- remaining FRAME-MS)
+                                (or fill-seen (let ((l (lines-matching '("section" "fill" "at")))) (and (pair? l) (line-frame (car l))))))))))
+         (tense (lines-matching '("section" "tense" "at")))
+         (final (live-music-position)))
+    (test "tense landed at its mark on a bar row within a bar after the strike"
+      (assert-equal 1 (length tense))
+      (assert-equal (tense-pos tm) (line-pos (car tense)))
+      (assert-equal 0 (modulo (line-row (car tense)) (bar-rows tm)))
+      (assert-true (>= (line-frame (car tense)) strike))
+      (assert-true (<= (* FRAME (- (line-frame (car tense)) strike)) (+ (ms->frames (bar-ms tm)) (* 2 FRAME)))))
+    (test (string-append "the walk is in tense (at " (if final (string-append (number->string (car final)) ":" (number->string (cdr final))) "-") ")")
+      (let ((p final))
+        (assert-true (and p (>= (car p) (tense-pos tm))))))))
+
+(live-music-off!)
