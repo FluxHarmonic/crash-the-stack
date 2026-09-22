@@ -78,3 +78,20 @@ Sent on 2026-09-22: full `relay-ghost-album-ii.ogg` (message 1140), then
 `relay-ghost-bass-identification-i.ogg` (message 1141). API acknowledgements
 and delivered-file SHA-256 hashes are retained beside each external render.
 Awaiting the listener's full-track review; no public deployment performed.
+
+## Approved album master
+
+David approved the full revised mix and requested mastering and publication.
+The release retains the approved native render and uses +0.5 dB input gain
+through the existing oversampled ceiling recipe, 1.6 dB above the deliberately
+quiet comparison export. No balance, timbre or arrangement changes are added.
+The WAV measures -16.7 LUFS-I, 10.8 LU LRA and -1.7 dBTP; the OGG is -16.6
+LUFS-I and -1.7 dBTP. This sits close to the original -16.4 LUFS-I album release
+without pushing the more spacious mix to an exact loudness target. All duration,
+lossless PCM and final-decay checks pass.
+
+Release masters: `relay-ii-release/`; tagged MP3: `relay-ii-mp3/` under the
+external album artifact root. The MP3 exporter now selects this release by
+default, retaining David Wilson, track 3/15 and the compact embedded artwork.
+Versioned R2 object: `soundtrack/relay-album-ii/relay-ghost.mp3`.
+The previous public release and comparison renders remain available locally.

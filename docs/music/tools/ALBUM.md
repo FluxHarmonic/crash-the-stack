@@ -285,3 +285,10 @@ is in `obsidian-ii/`, mastered with `--gain 5`. `album-listening-site.sgl` selec
 its `-album-ii.wav` automatically; `--track obsidian-index` exports only track 12,
 retaining its 12/15 tag. Both master and MP3 tools now use the shared artist and
 album identity. Historical files are preserved.
+
+Relay Ghost album II is now selected from `relay-ii-release/relay-ghost-album-ii.wav`.
+It uses the approved native mix with `album-batch-render.sgl --stage master
+--track relay-ghost --revision ii --gain 0.5`. The earlier `relay-ii/` export
+is the quiet comparison level; preserve it. Export the release with
+`album-listening-site.sgl --track relay-ghost` and the normal artifact/output
+arguments. The new public object gets a fresh immutable R2 prefix.
