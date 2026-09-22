@@ -1,0 +1,180 @@
+#!/bin/sh
+# Run a browser arm on an azoth runner instead of this box.
+#
+#   scripts/arm-remote verify.mjs [build/web] [--phone] [--shot PATH] ...
+#   scripts/arm-remote verify-cards.mjs build/web --seed 3
+#   scripts/arm-remote verify-site.mjs build/hosted-site --old /path/to/old
+#
+# Same arguments, from the same directory, as `node <arm> ...`; the arm's own
+# output and exit status (0 pass, 1 FAIL, 2 TIMED-OUT/SETUP-FAILED) come back
+# unchanged. Adopting it is changing `node` to `scripts/arm-remote`.
+#
+# What happens: a runner is leased (azoth.works bin/azoth-remote); the arm's
+# CHECKOUT (its tracked files, as they are on disk, ~44 MB) and the SERVED part
+# of the build tree (not native/, bin/ or the package cache: ~45 MB of ~420)
+# are delivered; the arm runs there from the checkout root, as it would here,
+# against the runner's Chromium; --shot comes back to the path you named; the
+# runner is released on every exit path. Up to four arms can run at once, one
+# per runner, with no contention between them or with this box.
+#
+# Why the whole checkout: the arms read repo files beside them (verify.mjs's
+# title leg reads src/crash/title/logo.sgl and assets/palette.sgl; verify-site
+# reads test/fixtures/). Delivering directories one FAIL at a time found two
+# of those and would have kept finding more.
+#
+# Exit statuses the arm itself never uses:
+#   125  SETUP-FAILED: no runner, delivery failed, or the wasm on the runner
+#        did not hash the same as the local one. THE ARM DID NOT RUN; this is
+#        not a verdict on the build
+#   126  the arm ran but its --shot could not be fetched (see the RESULT line)
+#   127  the runner could not be released; the log names it
+#
+# Every run prints the tree's version stamp, the checkout's HEAD and whether it
+# is dirty, and the wasm's sha256 computed ON THE RUNNER next to the local one,
+# so a transcript says which build and which arm were measured.
+#
+# Environment:
+#   AZOTH_REMOTE   path to azoth-remote (default: the first of
+#                  ~/Projects/Sites/azoth.works/bin/azoth-remote and
+#                  ~/Projects/Sites/azoth-task-azoth-remote-builds/bin/azoth-remote
+#                  that exists)
+#   ARM_TIMEOUT    remote wall-clock limit in seconds (default 1800)
+set -eu
+say() { printf 'arm-remote: %s\n' "$*" >&2; }
+
+[ $# -ge 1 ] || { say "usage: scripts/arm-remote <arm.mjs> [build-dir] [arm args...]"; exit 125; }
+ARM=$1; shift
+case "$ARM" in
+  *.mjs) ;;
+  *) say "'$ARM' is not an arm (.mjs)"; exit 125 ;;
+esac
+[ -f "$ARM" ] || { say "no arm '$ARM' (paths are relative to $(pwd), as for node)"; exit 125; }
+ARM_BASE=$(basename "$ARM")
+ARM_ABS=$(cd "$(dirname "$ARM")" && pwd)/$ARM_BASE
+
+# The arm's checkout: the git toplevel above it, else its own directory.
+ROOT=$(git -C "$(dirname "$ARM_ABS")" rev-parse --show-toplevel 2>/dev/null || dirname "$ARM_ABS")
+ARM_REL=${ARM_ABS#"$ROOT"/}
+
+REMOTE=${AZOTH_REMOTE:-}
+if [ -z "$REMOTE" ]; then
+  for c in "$HOME/Projects/Sites/azoth.works/bin/azoth-remote" \
+           "$HOME/Projects/Sites/azoth-task-azoth-remote-builds/bin/azoth-remote"; do
+    [ -x "$c" ] && { REMOTE=$c; break; }
+  done
+fi
+[ -n "$REMOTE" ] && [ -x "$REMOTE" ] || { say "azoth-remote not found (set AZOTH_REMOTE)"; exit 125; }
+
+# ---- rewrite the arm's arguments for the runner -----------------------------
+# On the runner the arm runs in ~/work/repo, the tree is ~/work/web, --old is
+# ~/work/old and --shot writes ~/work/out/shot.png. Options that take a value
+# are skipped when looking for the tree argument.
+case "$ARM_BASE" in
+  verify-site.mjs) TREE=build/hosted-site ;;
+  *)               TREE=build/web ;;
+esac
+TREE_SET=""
+SHOT=""
+OLD=""
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/arm-remote.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT
+ARGS_FILE="$STAGE/arm-args"
+: > "$ARGS_FILE"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --shot) [ $# -ge 2 ] || { say "--shot needs a path"; exit 125; }
+            SHOT=$2; printf '%s\n' --shot ../out/shot.png >> "$ARGS_FILE"; shift 2 ;;
+    --old)  [ $# -ge 2 ] || { say "--old needs a directory"; exit 125; }
+            OLD=$2; printf '%s\n' --old ../old >> "$ARGS_FILE"; shift 2 ;;
+    --port|--cdp|--seed|--base)
+            [ $# -ge 2 ] || { say "$1 needs a value"; exit 125; }
+            printf '%s\n%s\n' "$1" "$2" >> "$ARGS_FILE"; shift 2 ;;
+    --*)    printf '%s\n' "$1" >> "$ARGS_FILE"; shift ;;
+    *)      if [ -z "$TREE_SET" ]; then TREE=$1; TREE_SET=1; else printf '%s\n' "$1" >> "$ARGS_FILE"; fi
+            shift ;;
+  esac
+done
+[ -f "$TREE/index.html" ] || { say "SETUP-FAILED: $TREE/index.html missing; build --config web first"; exit 125; }
+[ -z "$OLD" ] || [ -f "$OLD/index.html" ] || { say "SETUP-FAILED: --old $OLD/index.html missing"; exit 125; }
+
+# ---- what is being measured -------------------------------------------------
+STAMP=$(grep -o 'version: "[^"]*"' "$TREE/index.html" | head -1 | cut -d'"' -f2)
+HEAD=$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo none)
+DIRTY=$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null | head -1)
+WASM=""
+for w in crash-the-stack.wasm jack-in/crash-the-stack.wasm; do
+  [ -f "$TREE/$w" ] && { WASM=$w; break; }
+done
+LOCAL_SHA=""
+[ -n "$WASM" ] && LOCAL_SHA=$(sha256sum "$TREE/$WASM" | cut -c1-64)
+say "arm $ARM_REL in $ROOT (HEAD=$HEAD dirty=$([ -n "$DIRTY" ] && echo yes || echo no))"
+say "tree $TREE stamp=${STAMP:-none} wasm=${WASM:-none} sha256=${LOCAL_SHA:-none}"
+[ "$STAMP" = "$HEAD" ] || say "note: the tree's stamp ($STAMP) is not the arm checkout's HEAD ($HEAD)"
+
+# ---- stage: hard links, so this costs no copy ---------------------------------
+# The served tree, without the native build's objects and executables or
+# sigil's package cache (none of them is served; ~375 MB together).
+cp -al "$TREE" "$STAGE/web" 2>/dev/null || cp -a "$TREE" "$STAGE/web"
+rm -rf "$STAGE/web/native" "$STAGE/web/bin" "$STAGE/web/.sigil-package-cache" "$STAGE/web/obj"
+# The checkout: tracked files as they are on disk (what a local run reads),
+# plus the arm itself in case it is not tracked yet.
+mkdir -p "$STAGE/repo"
+if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+  (cd "$ROOT" && git ls-files -z | xargs -0 -r cp --parents -al -t "$STAGE/repo" 2>/dev/null) \
+    || (cd "$ROOT" && git ls-files -z | xargs -0 -r cp --parents -a -t "$STAGE/repo")
+else
+  (cd "$ROOT" && tar --exclude=./build --exclude=./.sigil -cf - .) | tar -C "$STAGE/repo" -xf -
+fi
+mkdir -p "$STAGE/repo/$(dirname "$ARM_REL")"
+cp -f "$ARM_ABS" "$STAGE/repo/$ARM_REL"
+cat > "$STAGE/run.sh" <<'EOF'
+#!/usr/bin/env bash
+# Runs ON THE RUNNER, in ~/work.
+set -u
+cd "$HOME/work"
+mkdir -p shim out
+# The arms spawn `google-chrome'; the runner image carries ungoogled-chromium
+# as `chromium'. A shim on PATH, not an edit to the arm, so the arm that runs
+# here is byte-identical to the one delivered.
+CHROME=""
+for c in chromium chromium-browser google-chrome google-chrome-stable; do
+  command -v "$c" >/dev/null 2>&1 && { CHROME=$(command -v "$c"); break; }
+done
+[ -n "$CHROME" ] || { echo "SETUP-FAILED: no chromium on the runner"; exit 125; }
+printf '#!/bin/sh\nexec %s "$@"\n' "$CHROME" > shim/google-chrome
+chmod +x shim/google-chrome
+export PATH="$HOME/work/shim:$PATH"
+command -v node >/dev/null 2>&1 || { echo "SETUP-FAILED: no node on the runner"; exit 125; }
+if [ -n "$WASM" ]; then
+  got=$(sha256sum "web/$WASM" | cut -c1-64)
+  [ "$got" = "$LOCAL_SHA" ] || { echo "SETUP-FAILED: delivered wasm sha256 $got != local $LOCAL_SHA"; exit 125; }
+fi
+echo "arm-remote(runner): $(ip -4 -br addr show eth0 | awk '{print $3}') nproc=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg) node=$(node --version) chrome=$("$CHROME" --version 2>/dev/null | head -1)"
+echo "arm-remote(runner): wasm sha256=${got:-none} (matches local)"
+mapfile -t ARGS < arm-args
+cd repo
+exec node "$ARM_REL" ../web "${ARGS[@]}"
+EOF
+
+PUTS="--put $STAGE/web:web --put $STAGE/repo:repo --put $ARGS_FILE:arm-args --put $STAGE/run.sh:run.sh"
+if [ -n "$OLD" ]; then
+  cp -al "$OLD" "$STAGE/old" 2>/dev/null || cp -a "$OLD" "$STAGE/old"
+  PUTS="$PUTS --put $STAGE/old:old"
+fi
+GETS=""
+if [ -n "$SHOT" ]; then
+  # The whole out/ directory, which run.sh always creates: fetching a shot the
+  # arm never wrote (it FAILed first) would turn the arm's rc into 126.
+  GETS="--get out:$STAGE/fetched"
+fi
+
+set +e
+# shellcheck disable=SC2086
+"$REMOTE" --label "$ARM_BASE" --timeout "${ARM_TIMEOUT:-1800}" $PUTS $GETS -- \
+  env WASM="$WASM" LOCAL_SHA="$LOCAL_SHA" ARM_REL="$ARM_REL" bash run.sh
+rc=$?
+set -e
+if [ -n "$SHOT" ] && [ -f "$STAGE/fetched/shot.png" ]; then
+  mkdir -p "$(dirname "$SHOT")" && mv -f "$STAGE/fetched/shot.png" "$SHOT" && say "shot -> $SHOT"
+fi
+exit $rc
