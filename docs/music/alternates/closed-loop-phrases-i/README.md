@@ -118,3 +118,11 @@ Telegram acknowledged the montage as message **1152**, full reference as
 **1153**, and full candidate as **1154**. Source/tool commit: `1fbdf4f`.
 Listening approval is pending. No maintained song, generated game asset,
 accepted album score or public recording has been replaced.
+
+## Listener decision and adoption
+
+David approved the revision as more musical and requested adoption, mastering
+and publication on 2026-09-23. The musical pass is complete; no further patch
+or mix changes are proposed. The maintained shared pool now carries these
+phrases, and both generated arrangements match the approved candidates exactly.
+The original pool, arrangement layout, scores, audio and A/B remain preserved.
