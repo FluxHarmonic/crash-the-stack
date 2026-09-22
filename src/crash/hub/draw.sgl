@@ -113,6 +113,7 @@
     (define HUE-NAMES (list 'cool 'hot 'red 'green 'blue 'yellow))
     (define RUNNER-LIGHT (+ RUNNER-SIGHT 1))  ; the runner's light reaches one past his sight, so its edge is step 1, never 0
     (define NODE-LIGHT 3.5)
+    (define CLEARED-NODE-LIGHT 5.25)   ; a crashed node lights its sector for good (D64)
     (define ICE-LIGHT 2.5)
     (define GATE-LIGHT 2.5)
     (define LINK-GLINT 1.5)           ; a link's own light, at least
@@ -298,9 +299,12 @@
              (size (layer-size l)))
         (append
          (list (list (runner-cell (world-runner w)) RUNNER-LIGHT 'cool))
+         ;; a live node burns in its key's hue; a crashed one keeps lighting
+         ;; its sector, brighter and cool: the layer reads as taken (D64)
          (filter-map (lambda (n)
-                       (and (not (eq? (node-state n) 'cleared))
-                            (list (node-cell n) NODE-LIGHT (key-hue (node-key n)))))
+                       (if (eq? (node-state n) 'cleared)
+                           (list (node-cell n) CLEARED-NODE-LIGHT 'cool)
+                           (list (node-cell n) NODE-LIGHT (key-hue (node-key n)))))
                      (world-nodes w))
          (filter-map (lambda (g)
                        (and (not (memv (car g) (world-opened w)))
@@ -382,6 +386,31 @@
                                         (world-seen? w (idx (+ x dx) (+ y dy) width)))
                                    (down (+ dy 1)))))
                         (around (+ dx 1))))))))
+
+    ;; A gate on the beat it opens (D64): its two halves slide apart by
+    ;; half a tile over the beat, and the floor shows between them.
+    (define (draw-gate-opening hue name light x y tween)
+      (let* ((i (tile-index name))
+             (slide (exact (floor (* tween (/ TILE-SIZE 2))))))
+        (when i
+          (draw-lit-part hue i (light-step light) (- x (* SCALE slide)) y 0 0 (quotient TILE-SIZE 2) TILE-SIZE)
+          (draw-lit-part hue i (light-step light) (+ x (* SCALE slide)) y (quotient TILE-SIZE 2) 0 (quotient TILE-SIZE 2) TILE-SIZE))))
+
+    ;; A node on the beat it crashes (D64): the crashed cabinet wipes in
+    ;; from the left over the live one.
+    (define (draw-node-opening hue light x y tween)
+      (let ((live (tile-index "node"))
+            (open (tile-index "node-cleared"))
+            (step (light-step light))
+            (cut (max 1 (min TILE-SIZE (exact (floor (* tween TILE-SIZE)))))))
+        (when (and live open)
+          (draw-lit-part hue live step x y 0 0 TILE-SIZE TILE-SIZE)
+          (draw-lit-part hue open step x y 0 0 cut TILE-SIZE))))
+
+    ;; The step a continuous light draws at (the dither is for the plane;
+    ;; these one-beat pieces take the nearest step).
+    (define (light-step light)
+      (max 1 (min STEPS (exact (floor (max 1.0 (min (* 1.0 STEPS) light)))))))
 
     ;; A daemon's tile: its kind and facing; a dormant hunter is folded.
     (define (daemon-tile d)
@@ -468,6 +497,14 @@
              (cam-x (car cam))
              (cam-y (cdr cam))
              (r (world-runner w))
+             (tween (beat-ease (hub-screen-tween hs)))
+             ;; what opened on this beat (D64's visible rewards): the gate's
+             ;; halves slide apart and the node's cabinet wipes open over the
+             ;; beat the event landed on, which is the beat the world holds
+             (opening-gates (filter-map (lambda (e) (and (pair? e) (eq? (car e) 'gate-opened) (cadr e))) (world-events w)))
+             (opening-nodes (filter-map (lambda (e) (and (pair? e) (eq? (car e) 'cleared)
+                                                         (let ((n (world-node w (cadr e)))) (and n (node-cell n)))))
+                                        (world-events w)))
              ;; pixel of a cell's top-left from its cell coordinates
              (px-of (lambda (cx) (exact (round (+ (/ vw 2.0) (* CELL-PX (- cx cam-x 0.5)))))))
              (py-of (lambda (cy) (exact (round (+ (/ top 2.0) (* CELL-PX (- cy cam-y 0.5)))))))
@@ -502,8 +539,12 @@
                              (draw-lit hue (if (walkable-at? l lx (+ ly 1)) "barrier-front" "barrier-top") light px py))
                             (else
                              (draw-lit hue "floor" light px py)
-                             (let ((item (item-tile w i)))
-                               (when item (draw-lit hue item light px py)))
+                             ;; the openings first: a gate that opened this beat is
+                             ;; already in world-opened, so item-tile has no tile for it
+                             (cond ((memv i opening-gates) (draw-gate-opening hue "gate" light px py tween))
+                                   ((memv i opening-nodes) (draw-node-opening hue light px py tween))
+                                   (else (let ((item (item-tile w i)))
+                                           (when item (draw-lit hue item light px py)))))
                              (when (and (in-bounds? lx (- ly 1) width height)
                                         (eq? (layer-cell l (idx lx (- ly 1) width)) 'barrier))
                                (draw-lit hue "wall-shadow" light px py))
