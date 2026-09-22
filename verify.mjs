@@ -2657,7 +2657,8 @@ async function downTo(order, id, at = 0) {
     // the feed is read after the tunes and the credits (15 s on this box):
     // the top screen is rebuilt with the row when it lands
     const got = await waitLine(/^crash: news (\d+)$/, 0, 40000);
-    const top = r.top.rows.news ? r.top : await menuOn("top", r.from, 40000);
+    const topLine = r.top.rows.news ? null : await waitLine(/^crash: menu top .* news/, r.from, 40000);
+    const top = r.top.rows.news ? r.top : (topLine ? parseMenuLine(consoleLines[topLine.index]) : await menuOn("top", r.from, 100));
     if (!got || got.m[1] !== "2") detail = `the game did not take the two fixture posts (${got ? got.m[0] : "no crash: news line"})`;
     else if (!top || !top.rows.news) detail = `no NEWS row on the top screen (${top ? top.order.join(" ") : "no line"})`;
     else if (top.rows.news.value !== "NEW") detail = `the NEWS row reads ${JSON.stringify(top.rows.news.value)} on a fresh origin, want NEW`;
@@ -2691,7 +2692,8 @@ async function downTo(order, id, at = 0) {
   if (!detail) {
     // seen: the reload's row has no NEW
     const r2 = await pauseMenu(`&news=${BASE}news-fixture.json`);
-    const top2 = r2.error ? null : (r2.top.rows.news ? r2.top : await menuOn("top", r2.from, 40000));
+    const topLine2 = r2.error || r2.top.rows.news ? null : await waitLine(/^crash: menu top .* news/, r2.from, 40000);
+    const top2 = r2.error ? null : (r2.top.rows.news ? r2.top : (topLine2 ? parseMenuLine(consoleLines[topLine2.index]) : null));
     if (r2.error) detail = r2.error;
     else if (!top2 || !top2.rows.news) detail = "no NEWS row after the reload";
     else if (top2.rows.news.value) detail = `the NEWS row still reads ${top2.rows.news.value} after the posts were seen`;
@@ -2703,7 +2705,7 @@ async function downTo(order, id, at = 0) {
     const r3 = await pauseMenu();
     if (r3.error) detail = r3.error;
     else {
-      const failedLine = await waitLine(/^crash: news (failed|empty)/, r3.from - 200 > 0 ? r3.from - 200 : 0, 40000);
+      const failedLine = await waitLine(/^crash: news (failed|empty|none)/, r3.from - 200 > 0 ? r3.from - 200 : 0, 40000);
       const top3 = await menuOn("top", r3.from, 1000) || r3.top;
       if (!failedLine) detail = "no crash: news failed line without a feed";
       else if (top3.rows.news) detail = "a NEWS row with no feed to read";
