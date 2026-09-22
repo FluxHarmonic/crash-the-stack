@@ -211,3 +211,15 @@ and add a quiet metallic click, including through the fill. Percussion I
 changes instrument 2 only; all notes and the newly approved phrasing are fixed.
 The game and website stay on their prior version until this pass is resolved.
 See `../alternates/breach-percussion-i/README.md` for comparisons and provenance.
+
+## Cold Boot: Motion I
+
+After Breach Vector album II and the Motif 0.6.6 integration, David requested
+Cold Boot next. [Motion I](../alternates/cold-boot-motion-i/README.md) compares
+short metallic hats and greater note-triggered pressure-filter contrast,
+independently and combined. Kick/sub, approved knock/fill, all performance
+events and the bus remain fixed. Both game and album candidates are built
+from one proposed shared patch bank; the accepted shared source remains intact
+pending listening feedback. No transport LFO or automation feature is added.
+The Motif gain release and public integration are now complete; see
+[the integration record](../MOTIF-066-INTEGRATION.md).

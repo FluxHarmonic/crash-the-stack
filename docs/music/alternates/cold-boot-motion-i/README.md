@@ -82,3 +82,22 @@ same four intentional 32nd-note fill hits, and all final gates released. Its
 complete duration is 214.5454545 seconds. Both generated before snapshots match
 the current accepted versions. All fifteen maintained shared songs pass their
 regeneration check; this audition leaves those sources and outputs unchanged.
+
+## Render checks and delivery
+
+Ten native renders pass duration, stereo format and peak checks. Full native
+before/after loudness is -17.4 LUFS-I for both, with -2.6/-2.4 dBTP peaks. The
+closed/open hat and pressure-filter changes retain comparable overall energy;
+no per-half normalization was needed or applied.
+
+Delivery uses a common -0.5 dB gain. Both full OGGs measure -17.8 LUFS-I, with
+true peaks -3.1 dBTP before and -2.9 dBTP after. The montage is -17.7 LUFS-I and
+-3.2 dBTP. Durations and encoded peak checks pass, and both full final seconds
+peak at -91.0 dBFS. Source snapshots and renderer SHA-256 are retained alongside
+exact command lists and raw measurement logs.
+
+Telegram acknowledged the A/B montage as message 1149, the complete reference
+as 1150, and the complete candidate as 1151. The source/tool commit is
+`1bf4743`. Listening approval is pending; the public album and accepted shared
+song remain unchanged. The updated game arrangement is staged with the audition
+for adoption together with the album if these patches are selected.
