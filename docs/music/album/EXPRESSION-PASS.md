@@ -254,3 +254,8 @@ mastering and publication. The shared pool and both generated arrangements now
 match the audition. Retain the accepted instrument design and mix; the musical
 pass is finished. Dirty Cache is the next suggested review, keeping the rhythm
 and distant plucks while examining phrase development and calm/tense contrast.
+
+Closed Loop II is now mastered and published. The release retains its existing
++3 dB gain, measures -17.1 LUFS-I/-1.7 dBTP as MP3, and passes browser playback
+verification. [The release record](CLOSED-LOOP-II.md) keeps source adoption,
+mastering, publication and future deployment handoff details together.

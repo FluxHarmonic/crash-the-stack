@@ -319,3 +319,17 @@ negative cache. For future uploads, check object existence through the storage
 API rather than requesting an unpublished CDN URL. Always verify the exact URL
 that goes into the manifest after upload, including byte identity, range/CORS
 behavior and actual browser playback. See [Cold Boot II](COLD-BOOT-II.md).
+
+## Closed Loop album II publication
+
+Closed Loop's approved phrase development is synchronized in the shared game
+and album sources, mastered and live in deployment `2b9c8cc3` (source `1906d44`).
+Only its MP3 URL changes from production `014fbd1d`. The master selector uses
+`closed-loop-ii-release` / `-album-ii`; the exact public bytes, range/CORS/MIME,
+manifest and fresh browser playback checks pass. See [Closed Loop II](CLOSED-LOOP-II.md).
+
+Use `~/Ops/artifacts/crash-the-stack-album/publication-closed-loop-ii/site/soundtrack/`
+as `CRASH_SOUNDTRACK_DIR` for later game publication. The current complete local
+MP3 collection is `tagged-preview-vii/soundtrack/audio/` under the same artifact
+root. Older bundles remain available; preserve all later accepted track URLs
+when assembling a new game deployment.
