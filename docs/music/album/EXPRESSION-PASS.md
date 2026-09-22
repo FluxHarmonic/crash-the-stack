@@ -108,3 +108,34 @@ the base voice and layers after note dynamics, default to unity, and leave the
 tracker's existing `volume:` default semantics intact. Explicit note volume
 winning over the default is intentional, not a playback bug. This gain control
 is proposed; it is not present in the current audition renderer.
+
+## Delivered review measurements
+
+Delivered on 2026-09-22 from source commit `4449b96`. All fourteen scores parse
+and print canonically. Seven before/after pairs have identical notes, gates,
+clock and bus; all 2,572 compiled attacks and every other full-track tick match.
+The reference score matches the accepted album source byte for byte. The audio
+reference is freshly synthesized using the same renderer as the alternate;
+it is not the previously distributed master. All protected game and accepted
+album arrangement files remain untouched.
+
+The wire pair measures -41.3/-41.4 LUFS-I before its shared monitoring boost;
+metal -27.7/-27.7 and warm pad/choir -27.6/-27.6. The percussion pair measures
+-18.2/-19.7: its shorter transients and sparser noise remain a real mix change.
+The full candidate is 0.9 LU quieter in the encoded delivery; no per-file gain
+was applied to disguise this difference.
+
+| Encoded file | LUFS-I | True peak |
+|---|---:|---:|
+| Sequential A/B | -18.5 | -2.5 dBTP |
+| Complete reference | -17.0 | -2.2 dBTP |
+| Complete candidate | -17.9 | -3.2 dBTP |
+
+The common delivery gain is -1.1 dB. Both complete last seconds peak at
+-90.3 dBFS. Native and encoded durations pass, and no new limiter is applied.
+Raw logs, source snapshots, exact argv, renderer hash, reuse provenance and
+machine-readable checks live in the external delivery directory.
+
+Telegram acknowledged the A/B file as message 1135, complete before as 1136,
+and complete after as 1137. Listening approval is pending. These are auditions,
+not an adopted album revision or public-site update.
