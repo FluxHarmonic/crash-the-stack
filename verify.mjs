@@ -2149,15 +2149,20 @@ async function downTo(order, id, at = 0) {
         await press("ArrowRight");   // the same beat: the last press wins, one move
         await sleep(900);
         cells = consoleLines.slice(m1).filter((l) => beatLine.test(l)).map((l) => parseInt(l.match(beatLine)[5], 10));
-        const moved = cells.filter((c, i) => i === 0 ? c !== cell0 : c !== cells[i - 1]).length;
+        // one action per beat: no beat line moves the runner more than one cell, and
+        // three presses land as two or three moves (the third's beat depends on the
+        // clock's phase against the presses: in the same beat as the second it is
+        // dropped, the last press winning; in the next it is its own move)
+        const steps = cells.map((c, i) => Math.abs(c - (i === 0 ? cell0 : cells[i - 1])));
+        const moved = steps.filter((s) => s > 0).length;
         if (cells.length === 0) detail = "no beat lines after the presses";
-        else if (cells[cells.length - 1] !== cell0 + 2) detail = `three presses over two beats moved the runner from ${cell0} to ${cells[cells.length - 1]}, not ${cell0 + 2} (one action per beat)`;
-        else if (moved !== 2) detail = `the runner moved on ${moved} beats, not 2`;
+        else if (steps.some((s) => s > 1)) detail = `a beat moved the runner ${Math.max(...steps)} cells (${cells.join(" ")})`;
+        else if (moved < 2 || moved > 3) detail = `three presses moved the runner on ${moved} beats (${cells.join(" ")}), not two or three`;
       }
     }
   }
   if (detail) fail("hub", detail);
-  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses over two beats moved the runner two cells (${cells.join(" ")}): one action per beat`);
+  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses moved the runner one cell a beat (${cells.join(" ")}): one action per beat`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says
