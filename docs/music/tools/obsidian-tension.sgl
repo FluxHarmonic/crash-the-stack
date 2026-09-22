@@ -1,0 +1,113 @@
+#!/usr/bin/env sigil
+;;; A separate game audition; the accepted game and album sources stay intact.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(load (path (script-dir) "lib/audit.sgl"))
+(import (crash soundtrack audit))
+(initialize (path (script-dir) "../../.."))
+
+(define (instrument source ident)
+  (list-find (lambda (item) (= (field item id:) ident))
+             (cdr (child source 'instruments))))
+
+(define (revise-cell row cell)
+  (let ((ch (car cell))
+        (note (cadr cell))
+        (inst (caddr cell))
+        (volume (cadddr cell))
+        (effect (list-ref cell 4)))
+    (cond
+      ((member note '("..." "===")) cell)
+      ((= ch 4)
+       (list ch note 14 (+ volume 3) effect))
+      ((= ch 7)
+       ;; An octave answer every two bars gives tension a recognizable signal.
+       ;; All attack rows and gate endings remain on the accepted clock.
+       (list ch
+             (if (= (modulo row 64) 8)
+                 (str (substring note 0 2)
+                      (+ 1 (string->number (substring note 2 3))))
+                 note)
+             19
+             (+ volume 6)
+             effect))
+      ((= ch 2)
+       (list ch note 12 (if (>= volume 20) (+ volume 2) volume) effect))
+      (else cell))))
+
+(define (revise source)
+  (let* ((bass (set-field (instrument source 4) id: 14))
+         (bass (set-field bass name: "obsidian-pressure"))
+         (bass (set-field bass patch:
+                 (set-field (field bass patch:) drive: 0.28)))
+         (bass (set-field bass layers:
+                 (list (set-field (car (field bass layers:)) volume: 1.0))))
+         (answer (set-field (instrument source 9) id: 19))
+         (answer (set-field answer name: "edge-answer"))
+         (answer (set-field answer patch:
+                   '(fm4-stab cutoff: 2100 decay: 0.24 index: 1.15 release: 0.11)))
+         (answer (set-field answer volume: 25))
+         (answer (set-field answer send: 0.12))
+         (tap (set-field (instrument source 2) id: 12))
+         (tap (set-field tap name: "pressed-frame"))
+         (tap (set-field tap patch:
+                (set-field
+                  (set-field (field tap patch:) index: 0.28)
+                  drive: 0.3)))
+         (result
+           (replace-child source 'instruments
+             (append (child source 'instruments) (list bass answer tap)))))
+    (set! result
+      (replace-child result 'patterns
+        (cons 'patterns
+          (map
+            (lambda (pattern)
+              (if (< (field pattern id:) 5)
+                  pattern
+                  (append (take pattern 5)
+                    (map
+                      (lambda (row)
+                        (append (take row 2)
+                          (map (lambda (cell) (revise-cell (cadr row) cell))
+                               (cddr row))))
+                      (skip pattern 5)))))
+            (cdr (child source 'patterns))))))
+    ;; The preserved source predates M1. Carry exactly M1's section positions.
+    (set! result
+      (append (filter (lambda (item)
+                        (not (and (pair? item) (eq? (car item) 'marks))))
+                      result)
+              '((marks calm: 0 fill: 4 tense: 5))))
+    (replace-child result 'history
+      (append (child source 'history)
+        '(("codex" "2026-09-22" "Tension V audition: calm and fill unchanged. Dedicated tense bass and frame voices; brighter metallic lower answer with an octave signal every two bars. All attack/gate rows, main glass melody, pads, bus and B05 loop retained. Game and album adoption await listening."))))))
+
+(cli "obsidian-tension" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source (read-score (path (root) "assets/tunes/obsidian-index.cts")))
+           (score (revise source))
+           (file (path output "obsidian-index-v5.cts")))
+      (write-canonical motif file score)
+      ;; Check the result actually written, including canonical serialization.
+      (let ((written (read-score file)))
+        (check (equal? (take (cdr (child source 'patterns)) 5)
+                       (take (cdr (child written 'patterns)) 5))
+               "Calm or transition changed")
+        (check (equal? (child written 'marks) '(marks calm: 0 fill: 4 tense: 5))
+               "Incorrect adaptive sections")
+        (check (equal? (child source 'bus) (child written 'bus))
+               "Master bus changed")
+        (each pattern (cdr (child written 'patterns))
+          (each row (skip pattern 5)
+            (each cell (cddr row)
+              (unless (member (cadr cell) '("..." "==="))
+                (check (even? (cadr row)) "Off-sixteenth onset")
+                (when (member (car cell) '(6 7))
+                  (check (= (modulo (cadr row) 4) 0) "Off-eighth melody")))))))
+      ($ ,motif tune check ,file)
+      (write-json-file (path output "obsidian-index-v5-audit.json")
+        (clock-audit file motif 5))
+      (display (str "Prepared and audited " file "\n")))))

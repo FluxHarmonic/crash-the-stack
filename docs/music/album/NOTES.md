@@ -132,3 +132,14 @@ for the most recently delivered pieces or final release approval.
 David requested a public listening page at crashthestack.com/soundtrack/ for
 the current album. Package the provisional album-level OGGs with MP3 fallbacks,
 without moving audio artifacts into Git. Preserve the existing game deployment.
+
+## 2026-09-22: Obsidian game tension audition
+
+David requested a more recognizable tense section after hearing the M1 game
+version. A separate [Tension V audition](../OBSIDIAN-V.md) is preserved under
+alternates, with the engine's correct calm/fill/tense marks. The accepted game
+asset and this album's score/render stay unchanged until David hears it and
+chooses whether either should adopt the revision.
+
+[Listening feedback and tracker experiments](FEEDBACK.md) records a practical
+process for deeper album review and learning through small edits on copies.
