@@ -18,7 +18,8 @@
         (sigil struct)
         (motif tune)
         (motif tune player)
-        (only (crash native) %cpu-ms))
+        (only (crash native) %cpu-ms)
+        (only (motif render native) %render-voice-computes %render-set-idle-skip!))
 
 (define TUNES '("black-glass-title" "breach-vector"))
 (define RATES '(32000))
@@ -102,7 +103,35 @@
    TUNES)
   (test "printed" (assert-true #t)))
 
-;; The work counted, not timed — voice graphs computed per 1024 frames
-;; (%render-voice-computes, motif 0.6.5's counter) — comes back here with
-;; that release: on the title theme the idle-voice skip read 11721 -> 5245
-;; per 1024 frames (2026-09-22), on Breach Vector 5736 -> 5644.
+
+;; The work counted, not timed: voice graphs computed per 1024 frames over
+;; SECONDS of each tune as written, with motif 0.6.5's idle-voice skip on
+;; and off (a count is the same on a loaded box), and the CPU cost of each.
+(define (computes t rate skip?)
+  (%render-set-idle-skip! skip?)
+  (let* ((p (open-tune-player t rate start: (cons (or (tune-mark t 'calm) 0) 0) loop: #t))
+         (chunk 1024)
+         (bv (make-bytevector (* 8 chunk) 0)))
+    (let warm ((n 0)) (when (< n rate) (player-pull! p bv 0 chunk) (warm (+ n chunk))))
+    (%render-voice-computes)
+    (let loop ((n 0)) (when (< n (* SECONDS rate)) (player-pull! p bv 0 chunk) (loop (+ n chunk))))
+    (let ((c (%render-voice-computes)))
+      (player-close! p)
+      (%render-set-idle-skip! #t)
+      (/ (* 1024.0 c) (* SECONDS rate)))))
+
+(define (costs-with t rate skip?)
+  (%render-set-idle-skip! skip?)
+  (let ((s (costs t rate)))
+    (%render-set-idle-skip! #t)
+    s))
+
+(test-group "bench: the idle-voice skip"
+  (for-each
+   (lambda (name)
+     (let ((t (tune-of name)))
+       (line "== " name " at 32000: voice computes per 1024 frames, skip off " (tenth (computes t 32000 #f)) ", on " (tenth (computes t 32000 #t)))
+       (line "   CPU ms per 1024 frames, skip off: " (costs-with t 32000 #f))
+       (line "   CPU ms per 1024 frames, skip on:  " (costs-with t 32000 #t))))
+   TUNES)
+  (test "counted" (assert-true #t)))

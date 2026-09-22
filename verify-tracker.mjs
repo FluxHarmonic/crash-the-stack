@@ -8,7 +8,7 @@
 //
 //   imports    tracker/crash-tracker.wasm imports only wasi + gl + sigil_wasm_gles3 +
 //              sigil_browser + sigil_wasm_audio (as the game's wasm; no env)
-//   sizes      the game's wasm is within 0.3 MB of master's 24,465,466 bytes (0b3258d)
+//   sizes      the game's wasm is within M1's +10 MB budget over master 0b3258d's 24,465,466 bytes
 //              (the tracker is not in it) and the tracker's within 20 MB
 //   open       /tracker/?tune=spy: "crash: tracker open spy" then "crash: tune loaded spy"
 //              (the page fetched assets/tunes/spy.cts and handed it over in chunks)
@@ -227,7 +227,11 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
     if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
     else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
   } catch (e) { fail("imports", "compile: " + e.message); }
-  const BASE = 24465466, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;   // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21
+  // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21. SLACK: since M1
+  // the game plays its soundtrack on motif's player, so the game wasm carries motif again:
+  // David's budget for that is +10 MB over the P4c publish (D59; 32.9 MB measured 2026-09-22,
+  // the OGGs still aboard), and this leg holds the game to it.
+  const BASE = 24465466, SLACK = 10 * 1024 * 1024, TRACKER_MAX = 20 * 1024 * 1024;
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
