@@ -65,8 +65,8 @@ or fewer, or 2 GB or less; or the rate this device's last ladder chose,
 kept in the store as `music-rate`), and after about a second of pulls at
 a rate whose mean cost per 60 fps frame is over 4 ms, the next lower of
 32000, 24000, 22050; never up. A step reopens the player at the render
-position with the section kept (the render head, continuing exactly; its
-offset into the row skipped at the new rate). 32000 keeps 11–16 kHz within 3 dB of the
+head with the section kept (continuing exactly: the head's offset into its
+row is skipped at the new rate). 32000 keeps 11–16 kHz within 3 dB of the
 full rate; 22050 is 8.6 dB down there and gone above 16 kHz.
 
 Doors: `?music-rate=N` (web) and `--music-rate N` (native) pin a rate;
