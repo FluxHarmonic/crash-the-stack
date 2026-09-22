@@ -153,3 +153,9 @@ changed. Existing bell first; metallic bell at 0:32.727. He also raised the
 level of the squeaky upper bass line as a possible issue; identification of
 the higher acid line versus the main gritty bass is pending before a separate
 level audition.
+
+After hearing the calm comparison (Telegram 1138), David chose the original
+bell for Relay Ghost. The metallic patch is liked but is a better candidate
+for a different context. Preserve both the patch and comparison. Further Relay
+Ghost auditions should retain the original bell and preferred quieter kit;
+the wire pluck, choir and bass-level questions remain separate.

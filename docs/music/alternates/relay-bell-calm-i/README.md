@@ -43,3 +43,12 @@ A roughly 2 dB reduction is worth comparing with the preferred drums. Clarify
 whether he means the higher acid pattern on channel 8 (instruments 23–25) or
 the lower grit bass on channel 4 (instrument 19) before changing that part.
 The calm bell comparison contains no bass-level change.
+
+## Listening decision
+
+Telegram acknowledged this comparison as message 1138. David chose the original
+bell as more appropriate for Relay Ghost. Retain it in further revisions.
+He likes the metallic patch itself; preserve it in the expression collection
+for a different musical context rather than discarding it. The quieter drums
+remain preferred. No wire-pluck or bass-level decision is implied by the bell
+choice, and the public arrangement has not been replaced.
