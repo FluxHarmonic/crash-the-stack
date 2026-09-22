@@ -104,3 +104,17 @@ bars. It requires Motif's new instrument `gain:` support and explicitly checks
 that the renderer preserves that field. Only the specified output gains may
 differ; all compiled tick tables must match. The preferred kit, original bell
 and original pluck remain constant.
+
+### Relay Ghost album II
+
+`album-compose-opening.sgl --relay-revision ii` (the default) adopts the
+approved drum bank and gritty-bass output gain from the preserved audition.
+`--relay-revision i` reproduces album I. Use a Motif renderer containing
+commit `b0d135e` for gain support; the composer verifies gain survives.
+
+`relay-bass-identity.sgl --motif PATH --output EXTERNAL_DIR` renders three
+identification examples: gritty FM bass, separate acid line, then both.
+The acid-only example receives an explicit +8 dB monitoring boost; the
+combined example uses the original relative levels before the approved cut.
+It checks duration, sample format and decoded true peak. Historical audition
+tools read the frozen album-I snapshot so accepted updates do not alter A/Bs.

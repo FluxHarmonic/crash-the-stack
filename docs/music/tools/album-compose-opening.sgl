@@ -1,5 +1,6 @@
 #!/usr/bin/env sigil
 ;;; Cold Boot and Relay Ghost: standalone album arrangements, not game loops.
+(import (sigil args) (sigil list))
 (load (path (script-dir) "lib/core.sgl"))
 (import (crash soundtrack tools))
 (load (path (script-dir) "lib/album-arrangement.sgl"))
@@ -186,7 +187,9 @@
         (list "Final call and answer / E-minor resolution" ending)
         (list "Released room tail" (empty-pattern 2))))))
 
-(cli "album-compose-opening" (script-args) '()
+(cli "album-compose-opening" (script-args)
+  (list (option name: 'relay-revision long: "relay-revision" value: "REVISION"
+                choices: '("i" "ii") default: "ii"))
   (lambda (options)
     (let ((motif (require-tool (option-ref options 'motif)))
           (output (option-ref options 'output)))
@@ -195,11 +198,28 @@
                        (list "relay-ghost" "Relay Ghost" relay-ghost))
         (let* ((slug (car spec))
                (reference (str "assets/tunes/" slug ".cts"))
-               (source (read-score (path (root) reference))))
-          (write-album motif
-                       output
-                       slug
-                       (cadr spec)
-                       source
-                       ((caddr spec) source)
-                       (list reference)))))))
+               (source (read-score (path (root) reference)))
+               (revised? (and (equal? slug "relay-ghost")
+                              (equal? (option-ref options 'relay-revision) "ii")))
+               (mix-reference "docs/music/alternates/relay-bass-balance-i/gritty-bass-down.cts")
+               (base
+                 (if revised?
+                     (replace-child source 'instruments
+                       (child (read-score (path (root) mix-reference)) 'instruments))
+                     source)))
+          (apply write-album
+            (append
+              (list motif output slug (cadr spec) base ((caddr spec) source)
+                    (if revised? (list reference mix-reference) (list reference)))
+              (if revised?
+                  '("Relay Ghost album II: approved contact/dust drums, original bell and pluck, gritty bass output 2 dB lower."
+                    "Album-I arrangement and note dynamics retained. Selected mix is pinned to the gritty-bass-down audition; requires Motif instrument gain support."
+                    "2026-09-22")
+                  '())))
+          (when revised?
+            (let* ((written (read-score (path output "relay-ghost.cts")))
+                   (bass (list-find (lambda (i) (= (field i id:) 19))
+                                    (cdr (child written 'instruments)))))
+              (check (and (member gain: bass)
+                          (< (abs (- (field bass gain:) 0.7943282347242815)) 0.00000001))
+                     "Album II requires a Motif renderer with instrument gain support"))))))))

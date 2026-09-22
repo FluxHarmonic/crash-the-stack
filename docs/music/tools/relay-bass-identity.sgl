@@ -1,0 +1,85 @@
+#!/usr/bin/env sigil
+;;; Identify the two overlapping bass parts; this is not a balance comparison.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(cli "relay-bass-identity" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference "docs/music/alternates/relay-bass-balance-i/current-balance.cts")
+           (source (read-score (path (root) reference)))
+           (scores (path (root) "docs/music/alternates/relay-bass-identity-i"))
+           (specs '(("gritty-bass" (4) 0)
+                    ("acid-line" (8) 8)
+                    ("both-parts" (4 8) 0)))
+           (commands '()))
+      (check (starts-with? output "/") "Supply an absolute external artifact directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep audio outside the repository")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (each spec specs
+        (let* ((stem (car spec))
+               (channels (cadr spec))
+               (boost (caddr spec))
+               (wav (path output (str stem ".wav")))
+               (input (path scores (str stem ".cts")))
+               (music (transform (pattern source 0)
+                        (lambda (row cell)
+                          (and (member (car cell) channels) cell)))))
+          (check (not (file-exists? wav)) "Use a fresh output directory" output)
+          (write-album motif scores stem
+            (str "Relay Ghost - Bass identification / " stem)
+            source
+            (list (list stem music) (list "Room release" (empty-pattern 2)))
+            (list reference)
+            "Bass identification: original levels, before the approved 2 dB gritty-bass cut."
+            "Separate channels 4 and 8, then both. Acid-only monitoring is boosted 8 dB; the combined version retains their original relative levels."
+            "2026-09-22")
+          (copy-file input (path output (str stem ".cts")))
+          (run (list motif "tune" "render" input "-r" "44100" "-o" wav))
+          (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                     "-af" (str "volume=" (number->string (- boost 1.1)) "dB")
+                     "-c:a" "pcm_f32le" (path output (str stem "-monitor.wav"))))))
+      (ensure-directory (path output "ogg"))
+      (write-text (path output "sequence.txt")
+                  "file 'gritty-bass-monitor.wav'\nfile 'acid-line-monitor.wav'\nfile 'both-parts-monitor.wav'\n")
+      (let ((ogg (path output "ogg/relay-ghost-bass-identification-i.ogg")))
+        (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                   "-f" "concat" "-safe" "1" "-i" (path output "sequence.txt")
+                   "-c:a" "libvorbis" "-q:a" "7"
+                   "-metadata" "title=Relay Ghost - Bass identification I"
+                   "-metadata" "artist=David Wilson"
+                   "-metadata" "comment=0:00 gritty FM bass; 0:18.182 separate acid line (boosted 8 dB for identification); 0:36.364 both at original relative levels."
+                   ogg))
+        ($ ffmpeg -hide_banner -nostats -i ,ogg
+           -af "ebur128=peak=true" -f null - err: ,(path output "loudness.txt"))
+        (let* ((probe (json ffprobe -v error -show_format -show_streams -of json ,ogg))
+               (stream (array-ref (dict-ref probe streams:) 0))
+               (duration (string->number (dict-ref (dict-ref probe format:) duration:)))
+               (peak-lines
+                 (filter (lambda (line) (contains? line "    Peak:"))
+                         (split (read-text (path output "loudness.txt")) "\n")))
+               (peak (string->number
+                       (car (filter (lambda (word) (not (equal? word "")))
+                                    (split (trim (cadr (split (car (reverse peak-lines)) "Peak:"))) " "))))))
+          (check (and (= (dict-ref stream channels:) 2)
+                      (equal? (dict-ref stream sample_rate:) "44100")
+                      (< (abs (- duration (/ 600.0 11))) 0.001)
+                      (<= peak -1))
+                 "Identification audio failed duration, format or peak checks")
+          (write-json-file (path output "probe.json") probe)
+          (write-json-file (path output "checks.json")
+            (dict duration_seconds: duration true_peak_dbtp: peak
+                  acid_only_monitor_boost_db: 8
+                  combined_relative_levels_unchanged: #t)))
+        (write-text (path output "renderer.sha256") (str (out sha256sum ,motif) "\n"))
+        (display (str "Identification clip ready: " ogg "\n"))))))

@@ -151,3 +151,12 @@ David approved Tension V's added activity and requested it in the soundtrack.
 instruments, preserving every other album phrase. The new tense entry is at
 1:54.286 in the full album form. Historical game and album auditions stay
 available; no game asset is edited in this worktree.
+
+## 2026-09-22: Relay Ghost album II
+
+David approved the quieter contact/dust kit, original bell and 2 dB lower
+FM gritty bass (instrument 19). [Relay II](RELAY-II.md) adopts that mix in the
+full album form, retaining the original pluck and separate acid part.
+A future game backport can reuse instruments 2, 3 and 21 plus instrument 19's
+output gain. Gain requires the Motif feature in `b0d135e`; no game tune,
+runtime source or dependency is changed in this worktree.

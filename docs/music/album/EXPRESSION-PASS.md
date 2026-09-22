@@ -175,3 +175,12 @@ lower note volumes, because the acid patch's velocity also controls its filter.
 three-way audition: baseline at 0:00, upper synth down at 0:32.727, gritty bass
 down at 1:05.455. The gain implementation and its validation live in the Motif
 feature branch; Crash's runtime and public album are not upgraded by this test.
+
+## Relay Ghost selected mix
+
+David clarified that the gritty FM bass, including the squeaky harmonics he
+hears above it, is the part to lower by 2 dB. The quieter kit and original bell
+are retained; the original pluck also stays. [Album II](RELAY-II.md) adopts this
+combination and provides the requested complete track. The separate acid line
+is unchanged. Preserve the metallic bell for another context. Breach Vector
+is the suggested next phrase-development pass.
