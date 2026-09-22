@@ -69,7 +69,7 @@
 //   music       the soundtrack live from .cts (M1): a seeded pick repeated on the
 //               reload leg's second boot, the track heard, the ICE crossing landing
 //               on a bar row at or past the fill mark (read from the served .cts),
-//               NOW PLAYING = the tune's name:, the menu theme opened
+//               the title line ("♪ NAME") = the tune's name:, the menu theme opened
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -2338,7 +2338,7 @@ async function downTo(order, id, at = 0) {
 // strike: "section tense at P3 R3" at the tense mark on a bar row, within a
 // bar of the strike either way (the fill running into tense a little early,
 // or the jump landing at the next bar), and said once (the fill never
-// looped: David's phone, 2026-09-22); the pause panel said NOW PLAYING with
+// looped: David's phone, 2026-09-22); the pause panel said its title line with
 // the tune's name: ("crash: menu-playing TITLE"); the main menu opened its
 // theme ("crash: music open black-glass-title ..."). The return to calm has
 // no path in today's trace model (the counter phase never falls back), so
@@ -2399,10 +2399,10 @@ async function downTo(order, id, at = 0) {
     else if (Number(tenseAt.m[2]) % tune.barRows !== 0) detail = `tense began at row ${tenseAt.m[2]}, not a bar row (${tune.barRows} rows a bar)`;
     else if (Number(tenseAt.m[1]) !== tune.tense) detail = `tense began at order position ${tenseAt.m[1]}, not the tense mark ${tune.tense}`;
     else if (Math.abs(tenseAt.at - strikeAt) > slack) detail = `tense began ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s ${tenseAt.at > strikeAt ? "after" : "before"} the strike, over a bar (${(tune.barMs / 1000).toFixed(1)} s)`;
-    else if (!np) detail = "no \"crash: menu-playing TITLE\" line: the pause panel showed no NOW PLAYING";
-    else if (tune.name && np[1] !== tune.name) detail = `NOW PLAYING said "${np[1]}", the tune's name: is "${tune.name}"`;
+    else if (!np) detail = "no \"crash: menu-playing TITLE\" line: the pause panel showed no title line";
+    else if (tune.name && np[1] !== tune.name) detail = `the title line said "${np[1]}", the tune's name: is "${tune.name}"`;
     else if (!theme) detail = "the main menu never opened its theme (no \"crash: music open black-glass-title\" line)";
-    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; NOW PLAYING "${np[1]}"; menu theme opened`);
+    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; title line "${np[1]}"; menu theme opened`);
   }
   if (detail) fail("music", detail);
 }

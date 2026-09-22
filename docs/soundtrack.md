@@ -111,6 +111,7 @@ Console lines with `?trace` / `--trace`:
     crash: music section fill|tense|calm at POS ROW   the landing, a bar row (tense's also when the fill runs into it)
     crash: music fade out NAME
     crash: music rate N per-frame-ms M         the ladder stepped
-    crash: menu-playing TITLE                  the pause panel's NOW PLAYING line
+    crash: menu-playing TITLE                  the pause panel's title line
 
-The pause panel says `NOW PLAYING <name:>` under the share code.
+The pause panel says `♪ <NAME:>` (a note glyph, then the tune's `name:` upcased) under
+the share code; the tracker's header carries the same glyph before the tune's name.
