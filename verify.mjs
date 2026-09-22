@@ -1080,7 +1080,11 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
         mark = consoleLines.length;
         await tap(applyCtl.m[1], applyCtl.m[2]);
         const chose = await waitLine(/^crash: update apply$/, mark, 3000);
-        const boot3 = chose ? await waitLine(BOOT_ANY, chose.index + 1, 20000) : null;
+        // 60 s: APPLY reloads the page, and the reload is a full boot of the
+        // 33 MB wasm plus the worker's handover, which on a loaded box takes
+        // longer than the 20 s this waited for (M1 also made the precache
+        // twenty tunes). A genuinely stuck apply still reds.
+        const boot3 = chose ? await waitLine(BOOT_ANY, chose.index + 1, 60000) : null;
         const version = boot3 ? await evalJS(`window.crashUpdate.activeVersion()`) : null;
         if (!chose) detail = "tapping APPLY did not answer \"crash: update apply\"";
         else if (!boot3) detail = `applying the update did not reload the page (page state ${await evalJS("JSON.stringify({state: window.crashUpdate.state, told: window.crashUpdate.told, waiting: !!(window.crashUpdate.reg && window.crashUpdate.reg.waiting)})")})`;
