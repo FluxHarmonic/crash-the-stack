@@ -1511,15 +1511,17 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       await sleep(300);
       const m0 = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
-      const chose = await waitLine(/^crash: menu chose jack-in$/, m0, 3000);
-      const booted = chose && await waitLine(/^crash: hub open 1 0 /, m0, 5000);   // P5: JACK IN opens the hub
-      if (!chose) detail = "after the settle, a tap on JACK IN chose nothing (the menu was not live at once)";
-      else if (!booted) detail = "after the settle, JACK IN chosen but the hub did not open";
+      const pick = await menuOn("jack-in", m0);   // D65: JACK IN opens the difficulty pick
+      const chose = pick && (await tap(pick.rows["normal"].x, pick.rows["normal"].y), await waitLine(/^crash: menu chose normal$/, m0, 3000));
+      const booted = chose && await waitLine(/^crash: hub open 1 0 /, m0, 5000);   // P5: the pick opens the hub
+      if (!pick) detail = "after the settle, a tap on JACK IN opened no pick (the menu was not live at once)";
+      else if (!chose) detail = "after the settle, NORMAL on the pick chose nothing";
+      else if (!booted) detail = "after the settle, NORMAL chosen but the hub did not open";
     }
   }
   delete slowPaths["/assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
-  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose JACK IN and opened the hub`);
+  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap on JACK IN then NORMAL opened the hub`);
 }
 
 // ---- 9c'. slow-link: a boot on a throttled link loads every texture ----------
@@ -2052,10 +2054,18 @@ async function downTo(order, id, at = 0) {
       else {
         m0 = consoleLines.length;
         await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
-        const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-        opened = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, m0, 5000);
-        if (!start) detail = "JACK IN started no run";
-        else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+        // D65: JACK IN opens the difficulty pick (EASY NORMAL ELITE BACK), NORMAL preselected
+        const pick = await menuOn("jack-in", m0);
+        if (!pick) detail = "JACK IN opened no difficulty pick";
+        else if (pick.order.join(" ") !== "easy normal elite back") detail = `the pick's rows are ${pick.order.join(" ")}`;
+        else {
+          m0 = consoleLines.length;
+          await tap(pick.rows["normal"].x, pick.rows["normal"].y);
+          const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10}) normal$/, m0, 5000);
+          opened = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, m0, 5000);
+          if (!start) detail = "NORMAL on the pick started no run at normal";
+          else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+        }
       }
     }
   }

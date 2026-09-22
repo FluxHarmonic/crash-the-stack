@@ -326,6 +326,34 @@
                                    (down (+ dy 1)))))
                         (around (+ dx 1))))))))
 
+    ;; A daemon's tile: its kind and facing; a dormant hunter is folded.
+    (define (daemon-tile d)
+      (if (and (eq? (daemon-kind d) 'hunter) (not (daemon-awake? d)))
+          "hunter-dormant"
+          (string-append (symbol->string (daemon-kind d)) "-" (symbol->string (daemon-facing d)))))
+
+    ;; The shimmer (D65): SHIMMER-N motes spawned on the beat at hashed
+    ;; spots over the runner's body, rising SHIMMER-RISE px over the beat,
+    ;; their color stepping down the wire chain with age and their
+    ;; presence thinned by the Bayer mask as they fade: 2x2 px each, no
+    ;; alpha (the style bible), and nothing kept between frames (the beat
+    ;; and the tween are the state).
+    (define SHIMMER-N 4)
+    (define SHIMMER-RISE 12)
+    (define (draw-shimmer beat tween px py)
+      (let loop ((i 0))
+        (when (< i SHIMMER-N)
+          (let* ((seed (+ (* beat 37) (* i 101) 13))
+                 (x (+ px 8 (modulo seed 16)))
+                 (y0 (+ py 6 (modulo (quotient seed 16) 10)))
+                 (y (- y0 (exact (floor (* tween SHIMMER-RISE)))))
+                 (age (min 1.0 (+ tween (* 0.15 (modulo i 2)))))   ; every other mote a little older
+                 (b (vector-ref BAYER-4 (+ (modulo (quotient x 2) 4) (* 4 (modulo (quotient y 2) 4))))))
+            (when (< b (* 16 (- 1.0 age)))
+              (color! (role-color (cond ((< age 0.34) 'C-WIRE-LIT) ((< age 0.67) 'C-STATIC-A) (else 'C-WIRE-DARK))))
+              (draw-filled-rect x y 2 2)))
+          (loop (+ i 1)))))
+
     ;; The live node held at cell i (its board paused under DISCONNECT), or #f.
     (define (held-node-at w i)
       (let* ((l (world-layer w))
@@ -432,14 +460,23 @@
                                (when held (draw-held-cabinet held px py)))))))
                   (cols (+ lx 1))))
               (rows (+ ly 1))))
-          ;; the daemons the runner sees, sliding between beats
+          ;; the daemons the runner sees, sliding between beats, each its kind's
+          ;; silhouette facing where it looks (D65)
           (for-each (lambda (d)
                       (when (vector-ref *visible* (daemon-cell d))
                         (let ((at (hub-screen-daemon-at hs d)))
-                          (draw-lit 'cool "daemon" (vector-ref *light* (daemon-cell d)) (px-of (car at)) (py-of (cdr at))))))
+                          (draw-lit 'cool (daemon-tile d) (vector-ref *light* (daemon-cell d)) (px-of (car at)) (py-of (cdr at))))))
                     (world-daemons w))
-          ;; the runner, always lit
-          (draw-lit 'cool "runner" 4.0 (px-of cam-x) (py-of cam-y)))
+          ;; the runner as an inserted entity (D65): a one-cell afterimage on
+          ;; the cell he left for the first half of the beat, the core glyph
+          ;; always lit (the halo is the light map), shimmer rising off him
+          (let ((from (runner-cell (world-runner (hub-screen-prev hs))))
+                (here (runner-cell (world-runner w)))
+                (tween (hub-screen-tween hs)))
+            (when (and (not (= from here)) (< tween 0.5))
+              (draw-lit 'cool "runner" 1.0 (px-of (idx-x from width)) (py-of (idx-y from width))))
+            (draw-lit 'cool "runner" 4.0 (px-of cam-x) (py-of cam-y))
+            (draw-shimmer (world-beat w) tween (px-of cam-x) (py-of cam-y))))
         ;; the toasts, newest at the top of the board area
         (let toasts ((ts (hub-screen-toasts hs)) (y 8) (n 0))
           (when (and (pair? ts) (< n 3))

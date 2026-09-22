@@ -8,9 +8,10 @@
 ;;; answering, and the memory (the seen vector run-length encoded). The
 ;;; screen's part is its clock pin and its beat count; its tween and
 ;;; toasts start fresh. The store key is P4a's "run" (RUN-KEY), one
-;;; datum, version 3:
-;;;   (crash-run 3 (seed . S) (difficulty . EASY|NORMAL|ELITE) (depth . D) (attempt . A) (runner C F K)
-;;;              (nodes (I STATE ATTEMPTS HEAT) ...) (daemons (I C F STEP ALERT HUNTING RET) ...)
+;;; datum, version 4:
+;;;   (crash-run 4 (seed . S) (difficulty . EASY|NORMAL|ELITE) (depth . D) (attempt . A) (runner C F K)
+;;;              (nodes (I STATE ATTEMPTS HEAT) ...) (daemons (I C F STEP ALERT HUNTING RET AWAKE) ...)
+;;;              (last-seen . C|#f)
 ;;;              (keys ...) (opened ...) (taken ...) (dark (C . TTL) ...) (decoys (C . TTL) ...)
 ;;;              (inventory (TOOL . N) ...) (credits . N) (layer-credits . N) (trace . T) (beat . B)
 ;;;              (ledger CLEARED BEATS MOVES RECONNECTS SEVERED SEEN CREDITS)
@@ -33,7 +34,7 @@
 
   (begin
     (define RUN-KEY "run")
-    (define VERSION 3)   ; 3 (D65): the difficulty, the held nodes' heat
+    (define VERSION 4)   ; 3 (D65): the difficulty, the held nodes' heat; 4: the hunters' wake flag, the last seen cell
 
     ;; --- the memory, run-length encoded -----------------------------------------
     ;; (N0 N1 N2 ...): N0 unseen cells, then N1 seen, then N2 unseen, and so on.
@@ -69,7 +70,7 @@
               (cons 'nodes (map (lambda (n) (list (node-index n) (node-state n) (node-attempts n) (node-heat n))) (world-nodes w)))
               (cons 'daemons (map (lambda (d)
                                     (list (daemon-index d) (daemon-cell d) (daemon-facing d) (daemon-step d)
-                                          (daemon-alert d) (daemon-hunting d) (daemon-returning? d)))
+                                          (daemon-alert d) (daemon-hunting d) (daemon-returning? d) (daemon-awake? d)))
                                   (world-daemons w)))
               (cons 'keys (world-keys w))
               (cons 'opened (world-opened w))
@@ -84,6 +85,7 @@
               (list 'ledger (ledger-cleared g) (ledger-beats g) (ledger-moves g) (ledger-reconnects g)
                     (ledger-severed-layers g) (ledger-seen g) (ledger-credits g))
               (cons 'request (world-request w))
+              (cons 'last-seen (world-last-seen w))
               (cons 'seen (seen->runs (world-seen w)))
               (cons 'bpm (hub-screen-bpm-pin hs))
               (cons 'beats (hub-screen-beats hs)))))
@@ -121,6 +123,7 @@
                  (beat (field d 'beat))
                  (g (field d 'ledger))
                  (request (field d 'request))
+                 (last-seen (field d 'last-seen))
                  (seen (field d 'seen))
                  (bpm (field d 'bpm))
                  (beats (field d 'beats)))
@@ -136,6 +139,7 @@
                   (nat? credits) (nat? layer-credits) (nat? trace) (nat? beat)
                   (list? g) (= (length g) 7) (every nat? g)
                   (or (not request) (memq request (list 'launch 'market 'descend 'severed 'done)))
+                  (or (not last-seen) (nat? last-seen))
                   (nat-list? seen)
                   (or (not bpm) (and (number? bpm) (> bpm 0)))
                   (nat? beats)
@@ -151,15 +155,17 @@
                                           (world-nodes w0)))
                          (live-daemons (map (lambda (dm)
                                               (let ((e (assv (daemon-index dm) daemons)))
-                                                (if (and e (= (length e) 7) (nat? (cadr e)) (< (cadr e) size) (direction? (caddr e))
+                                                (if (and e (= (length e) 8) (nat? (cadr e)) (< (cadr e) size) (direction? (caddr e))
                                                          (nat? (cadddr e)) (< (cadddr e) (vector-length (daemon-route dm))))
                                                     (daemon dm cell: (cadr e) facing: (caddr e) step: (cadddr e)
                                                             alert: (let ((a (list-ref e 4))) (and (pair? a) (nat? (car a)) (< (car a) size) (integer? (cdr a)) a))
                                                             hunting: (let ((h (list-ref e 5))) (and (memq h (list 'runner 'decoy 'node)) h))
-                                                            returning?: (and (list-ref e 6) #t))
+                                                            returning?: (and (list-ref e 6) #t)
+                                                            awake?: (and (list-ref e 7) #t))
                                                     dm)))
                                             (world-daemons w0))))
                     (and (< (car r) size)
+                         (or (not last-seen) (< last-seen size))
                          (cell-walkable? (layer-cell l (car r)))
                          (every (lambda (c) (< c size)) opened)
                          (every (lambda (c) (< c size)) taken)
@@ -180,6 +186,7 @@
                                          ledger: (ledger cleared: (car g) beats: (cadr g) moves: (caddr g) reconnects: (cadddr g)
                                                          severed-layers: (list-ref g 4) seen: (list-ref g 5) credits: (list-ref g 6))
                                          request: request
+                                         last-seen: last-seen
                                          seen: (runs->seen seen size)
                                          done?: (eq? request 'done))))
                            (hub-screen-with-bpm (hub-screen world: w prev: w beats: beats

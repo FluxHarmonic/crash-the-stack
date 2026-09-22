@@ -69,6 +69,7 @@
               layer-credits: 0
               trace: 0
               beat: 0
+              last-seen: #f
               request: #f
               events: '()
               seen: (make-vector (layer-size l) #f))))
@@ -101,7 +102,10 @@
     ;; A daemon hunting the runner or an alerted node counts; one held by a
     ;; decoy does not (the decoy is the runner's move, not the layer's alarm).
     (define (any-daemon-alert? w)
-      (any (lambda (d) (and (daemon-alert d) (memq (daemon-hunting d) (list 'runner 'node)) #t)) (world-daemons w)))
+      (any (lambda (d) (and (daemon-alert d) (memq (daemon-hunting d) (list 'runner 'node))
+                            (not (eq? (daemon-kind d) 'hunter))   ; a hunter's own chase does not keep it awake
+                            #t))
+           (world-daemons w)))
 
     (define (hub-tense? w)
       (or (>= (hub-trace-fraction w) TENSE-AT) (any-daemon-alert? w)))
@@ -216,11 +220,30 @@
                              (err (if (<= e2 dx) (+ err dx) err)))
                         (loop x y err))))))))
 
-    ;; The cells a daemon sees: SIGHT cells ahead of its facing in a 90
-    ;; degree fan (across no farther than ahead), each with a line of
-    ;; sight from the daemon, plus its four neighbors whatever it faces.
-    ;; Ascending cell order, no repeats.
+    ;; The cells a daemon sees, by its kind (D65): a drone, a sentinel and
+    ;; an awake hunter see the fan; a dormant hunter nothing; a crawler
+    ;; the link line ahead. Ascending cell order, no repeats.
     (define (daemon-sight l d)
+      (cond ((not (daemon-awake? d)) '())
+            ((eq? (daemon-kind d) 'crawler) (link-line l d))
+            (else (daemon-fan l d))))
+
+    ;; A crawler's sight: the link cells straight ahead of its facing, up
+    ;; to SIGHT, stopping at the first cell that is not a link.
+    (define (link-line l d)
+      (let* ((w (layer-width l))
+             (h (layer-height l))
+             (f (daemon-facing d)))
+        (let loop ((at (daemon-cell d)) (k 0) (acc '()))
+          (let ((next (and (< k SIGHT) (step-cell at f w h))))
+            (if (and next (eq? (layer-cell l next) 'link))
+                (loop next (+ k 1) (cons next acc))
+                (reverse acc))))))
+
+    ;; The fan: SIGHT cells ahead of the facing in a 90 degree fan (across
+    ;; no farther than ahead), each with a line of sight from the daemon,
+    ;; plus its four neighbors whatever it faces.
+    (define (daemon-fan l d)
       (let* ((w (layer-width l))
              (h (layer-height l))
              (pos (daemon-cell d))
@@ -517,16 +540,35 @@
                 ((memv (car (car ds)) sight) (car ds))
                 (else (loop (cdr ds)))))))
 
+    ;; One move of a daemon, by its kind (D65). A sentinel turns a quarter
+    ;; instead of moving (a hunt only holds its facing on the target's
+    ;; side, its alert running down where it stands); a crawler patrols
+    ;; its link route and watches what it hunts without leaving the
+    ;; links; a drone and an awake hunter chase, return and patrol; a
+    ;; hunter with no hunt of its own walks toward the runner's last seen
+    ;; cell and waits there.
     (define (step-daemon w d)
       (let* ((width (layer-width (world-layer w)))
              (decoy (decoy-in-sight w d))
              (d (if decoy (daemon d alert: (cons (car decoy) (cdr decoy)) hunting: 'decoy returning?: #f) d))
-             (alert (daemon-alert d)))
-        (cond (alert
+             (alert (daemon-alert d))
+             (kind (daemon-kind d)))
+        (cond ((eq? kind 'sentinel)
+               (if alert
+                   (if (<= (cdr alert) 0)
+                       (daemon d alert: #f hunting: #f)
+                       (daemon d alert: (cons (car alert) (- (cdr alert) 1))
+                               facing: (or (direction-between (daemon-cell d) (car alert) width) (daemon-facing d))))
+                   (daemon d facing: (turn-right (daemon-facing d)))))
+              ((and (eq? kind 'crawler) alert)
+               (if (<= (cdr alert) 0)
+                   (daemon d alert: #f hunting: #f)
+                   (daemon d alert: (cons (car alert) (- (cdr alert) 1)))))
+              (alert
                (let ((target (car alert))
                      (ttl (cdr alert)))
                  (if (or (= (daemon-cell d) target) (<= ttl 0))
-                     (daemon d alert: #f hunting: #f returning?: #t)
+                     (daemon d alert: #f hunting: #f returning?: (not (eq? kind 'hunter)))
                      (let ((next (step-toward w (daemon-cell d) target)))
                        (daemon (if next (moved d next width) d)
                                alert: (cons target (- ttl 1)))))))
@@ -536,17 +578,36 @@
                      (daemon d returning?: #f)
                      (let ((next (step-toward w (daemon-cell d) home)))
                        (if next (moved d next width) d)))))
+              ((eq? kind 'hunter)
+               (let ((scent (world-last-seen w)))
+                 (if (or (not scent) (= scent (daemon-cell d)))
+                     d
+                     (let ((next (step-toward w (daemon-cell d) scent)))
+                       (if next (moved d next width) d)))))
               (else
                (let* ((route (daemon-route d))
                       (step (modulo (+ 1 (daemon-step d)) (vector-length route))))
                  (daemon (moved d (vector-ref route step) width) step: step))))))
 
-    ;; The daemons move on the difficulty's beats (D65): once a bar on EASY,
-    ;; every other beat on NORMAL, every beat on ELITE.
+    (define (turn-right d)
+      (cond ((eq? d 'up) 'right) ((eq? d 'right) 'down) ((eq? d 'down) 'left) (else 'up)))
+
+    ;; The daemons' beat (D65): the hunters wake while the layer is alert
+    ;; or hunted (the trace, or a drone's or sentinel's hunt) and sleep
+    ;; when it is quiet again, where they stand; an awake hunter moves
+    ;; every beat at every difficulty; the others on the difficulty's
+    ;; pace (once a bar at EASY, every other beat at NORMAL, every beat at
+    ;; ELITE).
     (define (daemon-phase w)
-      (if (= 0 (modulo (world-beat w) (daemon-pace (world-difficulty w))))
-          (world w daemons: (map (lambda (d) (step-daemon w d)) (world-daemons w)))
-          w))
+      (let* ((awake (not (eq? (hub-alert w) 'quiet)))
+             (w (world w daemons: (map (lambda (d) (if (eq? (daemon-kind d) 'hunter) (daemon d awake?: awake) d))
+                                       (world-daemons w))))
+             (paced? (= 0 (modulo (world-beat w) (daemon-pace (world-difficulty w))))))
+        (world w daemons: (map (lambda (d)
+                                 (cond ((eq? (daemon-kind d) 'hunter) (if (daemon-awake? d) (step-daemon w d) d))
+                                       (paced? (step-daemon w d))
+                                       (else d)))
+                               (world-daemons w)))))
 
     ;; --- detection ---------------------------------------------------------------
 
@@ -584,6 +645,7 @@
                                      spiking))
                    (w (world w
                              trace: (+ spike (world-trace w))
+                             last-seen: c   ; the hunters' scent
                              ledger: (if (null? spiking) (world-ledger w) (ledger-add (world-ledger w) 'seen 1))
                              daemons: (map (lambda (d)
                                              (if (memq d seen)

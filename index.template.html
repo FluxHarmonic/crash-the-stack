@@ -465,8 +465,15 @@
       }, 300);
       // P5: the hub's touch overlay buzzes on a press (navigator.vibrate(10)); the game
       // answers 1 once when a button was pressed; nothing natively
+      //   crash: page vibrate ok|blocked|absent      once per outcome change (a phone's console tells)
+      var vibrateSaid = "";
       setInterval(function () {
-        try { if (app.dispatch("vibrate", "asked?") === 1 && navigator.vibrate) navigator.vibrate(10); } catch (e) { /* no haptics */ }
+        try {
+          if (app.dispatch("vibrate", "asked?") === 1) {
+            var outcome = !navigator.vibrate ? "absent" : (navigator.vibrate(10) ? "ok" : "blocked");
+            if (outcome !== vibrateSaid) { vibrateSaid = outcome; console.log("crash: page vibrate " + outcome); }
+          }
+        } catch (e) { /* no haptics */ }
       }, 50);
       app.dispatch("version", "__VERSION__");
       if (params.has("ms")) app.dispatch("ms", "on");
@@ -564,8 +571,9 @@
     // one meaning by not letting any touch reach the document-level swipe
     // tracking. The page's own capture-phase gesture listeners above still
     // see them (capture runs before this bubble-phase stop).
+    var main = document.querySelector("main");
     ["touchstart", "touchmove", "touchend"].forEach(function (name) {
-      document.body.addEventListener(name, function (e) { e.stopPropagation(); }, { passive: true });
+      main.addEventListener(name, function (e) { e.stopPropagation(); }, { passive: true });
     });
 
     // Fullscreen toggles on the game container, buttons included, so the
@@ -575,7 +583,6 @@
     // recomputes the letterbox scale from the new buffer: nothing here or in
     // the game needs to know. The loader also reports this click as
     // ("click", "fullscreen") to the game, which ignores it.
-    var main = document.querySelector("main");
     document.getElementById("fullscreen").addEventListener("click", function () {
       if (document.fullscreenElement) {
         document.exitFullscreen();
@@ -592,12 +599,25 @@
     // lock is dropped by the browser when the page hides and taken again
     // when it shows. Needs a secure context; elsewhere the request rejects
     // and nothing happens.
-    var wakeLock = null;
+    // Taken again on every gesture while none is held (a lock the browser
+    // released, or a request that failed before the first activation); said
+    // once each way so a phone's console tells (D65: the hub lost it).
+    //   crash: page wakelock on
+    //   crash: page wakelock off REASON   ("absent" outside a secure context)
+    var wakeLock = null, wakeSaid = "";
     function keepAwake() {
-      if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
-      navigator.wakeLock.request("screen").then(function (lock) { wakeLock = lock; }).catch(function () {});
+      if (document.visibilityState !== "visible") return;
+      if (!("wakeLock" in navigator)) { if (wakeSaid !== "absent") { wakeSaid = "absent"; console.log("crash: page wakelock off absent"); } return; }
+      if (wakeLock && !wakeLock.released) return;
+      navigator.wakeLock.request("screen").then(function (lock) {
+        wakeLock = lock;
+        if (wakeSaid !== "on") { wakeSaid = "on"; console.log("crash: page wakelock on"); }
+      }).catch(function (err) {
+        if (wakeSaid !== "off") { wakeSaid = "off"; console.log("crash: page wakelock off " + (err && err.name ? err.name : err)); }
+      });
     }
     document.addEventListener("visibilitychange", keepAwake);
+    ["pointerup", "keydown"].forEach(function (name) { document.addEventListener(name, keepAwake, true); });
     keepAwake();
 
     // Tab is the keys-model cycle key; without this the browser also moves

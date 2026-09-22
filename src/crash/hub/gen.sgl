@@ -368,20 +368,71 @@
             (dy (- (idx-y b w) (idx-y a w))))
         (cond ((> dx 0) 'right) ((< dx 0) 'left) ((> dy 0) 'down) (else 'up))))
 
-    ;; A daemon in the room: two distinct cells, the walk between them
-    ;; and back as its route.
-    (define (place-daemon rnd cells room w index)
+    ;; A daemon of a kind (D65, the roster). A drone in the room: two
+    ;; distinct cells, the walk between them and back as its route. A
+    ;; sentinel: one cell, a random facing, a one-cell route (it never
+    ;; moves). A hunter: one cell, dormant. A crawler: a corridor's link
+    ;; cells end to end and back (a layer without a corridor of two cells
+    ;; gets a drone instead).
+    (define (place-daemon rnd cells room w h index kind)
       (let ((cs (room-cells room w)))
-        (and (>= (length cs) 2)
-             (let* ((a (list-ref cs (rnd (length cs))))
-                    (b (let loop () (let ((b (list-ref cs (rnd (length cs))))) (if (= b a) (loop) b))))
-                    (there (room-walk a b w)))
-               (let ((route (list->vector (append there (cdr (reverse (cdr there)))))))
-                 (daemon index: index
-                         cell: a
-                         facing: (direction-between a (cadr there) w)
-                         route: route
-                         step: 0))))))
+        (cond ((memq kind (list 'sentinel 'hunter))
+               (and (pair? cs)
+                    (let ((a (list-ref cs (rnd (length cs)))))
+                      (daemon index: index kind: kind cell: a
+                              facing: (list-ref (list 'up 'down 'left 'right) (rnd 4))
+                              route: (vector a) step: 0
+                              awake?: (not (eq? kind 'hunter))))))
+              ((eq? kind 'crawler)
+               (or (place-crawler rnd cells w h index)
+                   (place-daemon rnd cells room w h index 'drone)))
+              (else
+               (and (>= (length cs) 2)
+                    (let* ((a (list-ref cs (rnd (length cs))))
+                           (b (let loop () (let ((b (list-ref cs (rnd (length cs))))) (if (= b a) (loop) b))))
+                           (there (room-walk a b w)))
+                      (let ((route (list->vector (append there (cdr (reverse (cdr there)))))))
+                        (daemon index: index kind: 'drone
+                                cell: a
+                                facing: (direction-between a (cadr there) w)
+                                route: route
+                                step: 0))))))))
+
+    ;; The link cells beside a cell.
+    (define (link-neighbors cells i w h)
+      (filter (lambda (n) (and n (eq? (vector-ref cells n) 'link)))
+              (map (lambda (dir) (step-cell i dir w h)) (list 'up 'down 'left 'right))))
+
+    ;; A corridor as a path of link cells: from a random link cell, walk
+    ;; one way to an end (a cell with no further link neighbor, or a
+    ;; branch), then from that end back through the start as far as the
+    ;; corridor runs without branching.
+    (define (corridor-path cells start w h)
+      (let ((walk-through (lambda (from next)   ; from, then next, then on while the way is single
+                            (let loop ((at next) (prev from) (acc (list next from)))
+                              (let ((on (filter (lambda (n) (and (not (eqv? n prev)) (not (memv n acc))))
+                                                (link-neighbors cells at w h))))
+                                (if (= (length on) 1)
+                                    (loop (car on) at (cons (car on) acc))
+                                    (reverse acc)))))))
+        (let ((ns (link-neighbors cells start w h)))
+          (if (null? ns)
+              (list start)
+              (let* ((to-end (walk-through start (car ns)))
+                     (back (reverse to-end)))   ; the end first, then the cell before it
+                (walk-through (car back) (cadr back)))))))
+
+    (define (place-crawler rnd cells w h index)
+      (let ((links (let loop ((i (- (vector-length cells) 1)) (acc '()))
+                     (if (< i 0) acc (loop (- i 1) (if (eq? (vector-ref cells i) 'link) (cons i acc) acc))))))
+        (and (pair? links)
+             (let ((path (corridor-path cells (list-ref links (rnd (length links))) w h)))
+               (and (>= (length path) 2)
+                    (daemon index: index kind: 'crawler
+                            cell: (car path)
+                            facing: (direction-between (car path) (cadr path) w)
+                            route: (list->vector (append path (cdr (reverse (cdr path)))))
+                            step: 0))))))
 
     ;; --- the build -------------------------------------------------------------
 
@@ -542,10 +593,13 @@
                           (let ((patch (pick-patch rnd cells (list-ref rooms (rnd n)) w)))
                             (when patch (for-each (lambda (c) (vector-set! cells c 'shadow)) patch)))
                           (loop (+ i 1))))
-                      ;; the daemons, in rooms other than the entry
+                      ;; the daemons, in rooms other than the entry, their kinds cycled
+                      ;; over the descriptor's list (D65)
                       (let loop ((i 0))
                         (when (and (< i (descriptor-daemons d)) (pair? other-rooms))
-                          (let ((dm (place-daemon rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w i)))
+                          (let* ((kinds (descriptor-kinds d))
+                                 (kind (if (pair? kinds) (list-ref kinds (modulo i (length kinds))) 'drone))
+                                 (dm (place-daemon rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w h i kind)))
                             (when dm (set! daemons (cons dm daemons))))
                           (loop (+ i 1))))
                       ;; barriers: void beside anything walkable, eight ways

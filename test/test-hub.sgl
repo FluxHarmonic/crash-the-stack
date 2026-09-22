@@ -300,6 +300,75 @@
                  "#..........#\n"
                  "############"))
 
+(test-group "hub: the roster (D65)"
+  (test "a sentinel never moves; its facing turns a quarter on each paced beat, the fan sweeping; a hunt turns it toward the target"
+    (let* ((w (elite-world-of HALL 1))
+           (a (cell w 5 3))
+           (w (with-daemon w (daemon index: 0 kind: 'sentinel cell: a route: (vector a) facing: 'up)))
+           (w (world w runner: (runner (world-runner w) cloak: 100)))
+           (w1 (hub-step w 'wait))
+           (w2 (hub-step w1 'wait))
+           (w4 (steps w2 (list 'wait 'wait))))
+      (assert-equal 'right (daemon-facing (daemon-of w1 0)))
+      (assert-equal 'down (daemon-facing (daemon-of w2 0)))
+      (assert-equal 'up (daemon-facing (daemon-of w4 0)))
+      (assert-equal a (daemon-cell (daemon-of w4 0)))
+      (assert-true (memv (cell w 5 2) (daemon-sight (world-layer w) (daemon-of w 0))))   ; facing up: the cell above is in the fan
+      (let* ((hunt (with-daemon w (daemon (daemon-of w 0) alert: (cons (cell w 9 3) 3))))
+             (h1 (hub-step hunt 'wait)))
+        (assert-equal a (daemon-cell (daemon-of h1 0)))
+        (assert-equal 'right (daemon-facing (daemon-of h1 0)))
+        (assert-equal (cons (cell w 9 3) 2) (daemon-alert (daemon-of h1 0))))))
+  (test "a crawler rides its link route, sees the link line ahead one cell wide, and watches a hunt without leaving the links"
+    (let* ((w (elite-world-of "#############\n#@..........#\n#####=====..#\n#...........#\n#############" 1))
+           (a (cell w 5 2))
+           (w (world w runner: (runner (world-runner w) cloak: 100)))
+           (w (world w daemons: (list (daemon index: 0 kind: 'crawler cell: a facing: 'right
+                                     route: (vector a (+ a 1) (+ a 2) (+ a 3) (+ a 4) (+ a 3) (+ a 2) (+ a 1))))))
+           (l (world-layer w)))
+      (assert-equal (list (+ a 1) (+ a 2) (+ a 3) (+ a 4)) (daemon-sight l (daemon-of w 0)))   ; the four links ahead, not the floor past them
+      (let ((w1 (hub-step w 'wait)))
+        (assert-equal (+ a 1) (daemon-cell (daemon-of w1 0))))
+      (let* ((hunt (with-daemon w (daemon (daemon-of w 0) alert: (cons (cell w 3 3) 4) hunting: 'runner)))
+             (h2 (steps hunt (list 'wait 'wait))))
+        (assert-equal a (daemon-cell (daemon-of h2 0)))
+        (assert-equal (cons (cell w 3 3) 2) (daemon-alert (daemon-of h2 0))))))
+  (test "a hunter sleeps while the layer is quiet (no sight, no move) and wakes when it is alert, moving every beat at EASY toward the runner's last seen cell"
+    (let* ((w (world (world-of HALL 1) difficulty: 'easy))
+           (a (cell w 9 3))
+           (w (with-daemon w (daemon index: 0 kind: 'hunter cell: a route: (vector a) facing: 'left awake?: #f)))
+           (w (world w runner: (runner (world-runner w) cloak: 100)))
+           (w3 (steps w (list 'wait 'wait 'wait))))
+      (assert-equal '() (daemon-sight (world-layer w) (daemon-of w 0)))
+      (assert-equal a (daemon-cell (daemon-of w3 0)))
+      (assert-false (daemon-awake? (daemon-of w3 0)))
+      ;; the trace over ALERT-AT wakes it; the scent is the runner's last seen cell
+      (let* ((budget (descriptor-budget (descriptor-at 1)))
+             (hot (world w3 trace: (exact (ceiling (* ALERT-AT budget))) last-seen: (cell w 1 1)))
+             (h1 (hub-step hot 'wait))
+             (h2 (hub-step h1 'wait)))
+        (assert-true (daemon-awake? (daemon-of h1 0)))
+        (assert-false (= a (daemon-cell (daemon-of h1 0))))
+        (assert-false (= (daemon-cell (daemon-of h1 0)) (daemon-cell (daemon-of h2 0))))   ; every beat, at EASY
+        (assert-true (pair? (daemon-sight (world-layer w) (daemon-of h1 0)))))
+      ;; a hunter's own hunt does not keep the layer alert, so it sleeps again once the trace is quiet
+      (let* ((chasing (with-daemon (world w3 trace: 0) (daemon (daemon-of w3 0) awake?: #t alert: (cons (cell w 1 1) 5) hunting: 'runner)))
+             (c1 (hub-step chasing 'wait)))
+        (assert-equal 'quiet (hub-alert chasing))
+        (assert-false (daemon-awake? (daemon-of c1 0))))))
+  (test "the generator deals the kinds by depth: two at layer 1, all four by layer 3"
+    (let ((kinds (lambda (l) (map daemon-kind (layer-daemons l)))))
+      (assert-equal '(drone sentinel) (kinds (generate-layer 1 1 0)))
+      (assert-equal '(drone crawler sentinel) (kinds (generate-layer 1 2 0)))
+      (assert-equal '(drone sentinel crawler hunter) (kinds (generate-layer 1 3 0)))
+      ;; a crawler's route is link cells only, at least two of them; a hunter starts dormant
+      (let* ((l (generate-layer 1 3 0))
+             (crawler (find (lambda (d) (eq? (daemon-kind d) 'crawler)) (layer-daemons l)))
+             (hunter (find (lambda (d) (eq? (daemon-kind d) 'hunter)) (layer-daemons l))))
+        (assert-true (>= (vector-length (daemon-route crawler)) 2))
+        (assert-true (every (lambda (c) (eq? (layer-cell l c) 'link)) (vector->list (daemon-route crawler))))
+        (assert-false (daemon-awake? hunter))))))
+
 (test-group "hub: patrols, sight and the ICE on the beat"
   (test "a daemon walks its route one cell a beat (at ELITE), facing where it goes, and wraps"
     (let* ((w (elite-world-of HALL 1))

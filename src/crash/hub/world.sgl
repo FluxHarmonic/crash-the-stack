@@ -26,6 +26,7 @@
           ALERT-BEATS CLOAK-BEATS DECOY-BEATS JAM-BEATS JAM-RADIUS
           TENSE-AT HUNTED-AT ALERT-AT CARRY HIGH
           DIFFICULTIES difficulty? daemon-pace HELD-ALERT-AT
+          DAEMON-KINDS daemon-kind? daemon-kind daemon-awake?
           KEY-COLORS TOOLS tool-scope tool-table hub-tool? board-tool? tool-known?
           PRICES hub-tool-price
           ;; --- cells ---
@@ -35,7 +36,7 @@
           ;; --- descriptors ---
           descriptor descriptor? descriptor-depth descriptor-table descriptor-width descriptor-height
           descriptor-rooms descriptor-extra-links descriptor-required descriptor-optional
-          descriptor-daemons descriptor-ice descriptor-caches descriptor-shadows descriptor-market?
+          descriptor-daemons descriptor-kinds descriptor-ice descriptor-caches descriptor-shadows descriptor-market?
           descriptor-budget descriptor-calm-bpm descriptor-tense-bpm
           descriptor-bounty descriptor-optional-bounty descriptor-trace-at descriptor-sever-at
           descriptor-shop descriptor-loot descriptor-log descriptor-gibson descriptor-tier-scale
@@ -53,7 +54,7 @@
           ledger-severed-layers ledger-seen ledger-credits
           world world? world-run-seed world-difficulty world-depth world-attempt world-layer world-runner
           world-nodes world-daemons world-keys world-opened world-taken world-dark world-decoys
-          world-inventory world-credits world-layer-credits world-trace world-beat world-ledger world-seen world-seen?
+          world-inventory world-credits world-layer-credits world-trace world-beat world-ledger world-seen world-seen? world-last-seen
           world-request world-events world-done?
           world-node world-inventory-count)
 
@@ -183,6 +184,7 @@
       (required default: 2)           ; gated links on the path, one key node each
       (optional default: 1)           ; nodes with a bounty and loot, no key
       (daemons default: 2)
+      (kinds default: (list 'drone))  ; the daemons' kinds, cycled over the count (D65)
       (ice default: 1)                ; 2x2 fields
       (caches default: 2)
       (shadows default: 2)            ; 2x2 patches of cover
@@ -205,27 +207,27 @@
     ;; (the wasm literal hazard, (crash menu)).
     (define LAYERS
       (list (descriptor depth: 1 table: 'stack width: 40 height: 22 rooms: 6 extra-links: 1
-                        required: 2 optional: 1 daemons: 2 ice: 1 caches: 2 shadows: 2
+                        required: 2 optional: 1 daemons: 2 kinds: (list 'drone 'sentinel) ice: 1 caches: 2 shadows: 2
                         budget: 400 bounty: 40 optional-bounty: 25 trace-at: 180 sever-at: 220
                         loot: (list 'cloak))
             (descriptor depth: 2 table: 'cards width: 44 height: 24 rooms: 7 extra-links: 1
-                        required: 2 optional: 1 daemons: 2 ice: 2 caches: 2 shadows: 3 market?: #t
+                        required: 2 optional: 1 daemons: 3 kinds: (list 'drone 'crawler 'sentinel) ice: 2 caches: 2 shadows: 3 market?: #t
                         budget: 440 bounty: 50 optional-bounty: 35 trace-at: 180 sever-at: 220
                         shop: (list 'cloak 'decoy 'scramble) loot: (list 'scramble))
             (descriptor depth: 3 table: 'stack width: 48 height: 28 rooms: 8 extra-links: 2
-                        required: 3 optional: 2 daemons: 3 ice: 2 caches: 3 shadows: 3 market?: #t
+                        required: 3 optional: 2 daemons: 4 kinds: (list 'drone 'sentinel 'crawler 'hunter) ice: 2 caches: 3 shadows: 3 market?: #t
                         budget: 480 bounty: 60 optional-bounty: 45 trace-at: 170 sever-at: 210
                         shop: (list 'cloak 'decoy 'jam 'peek) loot: (list 'jam 'peek))
             (descriptor depth: 4 table: 'cards width: 52 height: 30 rooms: 9 extra-links: 2
-                        required: 3 optional: 2 daemons: 3 ice: 3 caches: 3 shadows: 4 market?: #t
+                        required: 3 optional: 2 daemons: 4 kinds: (list 'drone 'crawler 'sentinel 'hunter) ice: 3 caches: 3 shadows: 4 market?: #t
                         budget: 520 bounty: 70 optional-bounty: 55 trace-at: 160 sever-at: 200
                         shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'decoy 'scramble))
             (descriptor depth: 5 table: 'stack width: 60 height: 34 rooms: 11 extra-links: 3
-                        required: 4 optional: 3 daemons: 4 ice: 3 caches: 4 shadows: 5 market?: #t
+                        required: 4 optional: 3 daemons: 5 kinds: (list 'drone 'sentinel 'crawler 'hunter 'drone) ice: 3 caches: 4 shadows: 5 market?: #t
                         budget: 600 bounty: 80 optional-bounty: 65 trace-at: 150 sever-at: 190
                         shop: (list 'cloak 'decoy 'jam 'peek 'probe 'purge) loot: (list 'cloak 'probe 'purge))
             (descriptor depth: 6 table: 'cards width: 60 height: 34 rooms: 12 extra-links: 3
-                        required: 4 optional: 3 daemons: 4 ice: 4 caches: 4 shadows: 5 market?: #t
+                        required: 4 optional: 3 daemons: 5 kinds: (list 'hunter 'drone 'sentinel 'crawler 'hunter) ice: 4 caches: 4 shadows: 5 market?: #t
                         budget: 640 bounty: 90 optional-bounty: 75 trace-at: 140 sever-at: 180
                         shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'jam 'scramble 'decoy))))
 
@@ -256,21 +258,31 @@
       (attempts default: 0)
       (heat default: 0.0))            ; a held board's trace against its trace-at, 0..1 (D65: the cabinet shows it)
 
-    ;; A daemon on patrol. route: a vector of cells walked in a cycle;
-    ;; step: the index it stands at. alert: #f, or (target . ttl) while it
-    ;; hunts a cell; hunting: what sent it, runner | decoy | node | #f (the
-    ;; runner spikes the trace once per hunt of him, not while a decoy or
-    ;; an alerted node holds the daemon); returning?: walking back to its
-    ;; route after a hunt.
+    ;; A daemon. kind (D65, the roster): drone (a route patrol, the fan
+    ;; ahead), sentinel (never moves; its facing turns a quarter on each of
+    ;; its paced beats, the fan sweeping), crawler (rides link cells only,
+    ;; sees along the link one cell wide; it watches what it sees and does
+    ;; not chase), hunter (dormant, blind and still, while the layer is
+    ;; quiet; awake it moves every beat at every difficulty, toward the
+    ;; runner's last seen cell when it has no hunt of its own). route: a
+    ;; vector of cells walked in a cycle; step: the index it stands at.
+    ;; alert: #f, or (target . ttl) while it hunts a cell; hunting: what
+    ;; sent it, runner | decoy | node | #f (the runner spikes the trace
+    ;; once per hunt of him, not while a decoy or an alerted node holds
+    ;; the daemon); returning?: walking back to its route after a hunt.
+    (define DAEMON-KINDS (list 'drone 'sentinel 'crawler 'hunter))
+    (define (daemon-kind? k) (and (memq k DAEMON-KINDS) #t))
     (define-struct daemon
       (index default: 0)
+      (kind default: 'drone)
       (cell default: 0)
       (facing default: 'right)
       (route default: #())
       (step default: 0)
       (alert default: #f)
       (hunting default: #f)
-      (returning? default: #f))
+      (returning? default: #f)
+      (awake? default: #t))           ; a hunter's: #f while the layer is quiet (the others are always awake)
 
     ;; cells: a vector of CELL-KINDS symbols, w * h. gates: alist cell ->
     ;; color. nodes: the node structs as placed. caches: alist cell ->
@@ -345,6 +357,7 @@
       (dark default: '())
       (decoys default: '())
       (seen default: #())             ; memory: a vector over the layer's cells, #t once the runner has seen one (D61: fog)
+      (last-seen default: #f)         ; the cell the runner was last seen at this layer, or #f (the hunter's scent)
       (inventory default: '())
       (credits default: 0)
       (layer-credits default: 0)
