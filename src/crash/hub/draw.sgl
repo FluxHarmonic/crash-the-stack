@@ -396,16 +396,16 @@
           (draw-lit-part hue i (light-step light) (- x (* SCALE slide)) y 0 0 (quotient TILE-SIZE 2) TILE-SIZE)
           (draw-lit-part hue i (light-step light) (+ x (* SCALE slide)) y (quotient TILE-SIZE 2) 0 (quotient TILE-SIZE 2) TILE-SIZE))))
 
-    ;; A node on the beat it crashes (D64): the crashed cabinet wipes in
-    ;; from the left over the live one.
+    ;; A node on the beat it crashes (D64): the cabinet unfolds, one frame
+    ;; per quarter of the beat — the door's panel lifts row by row and the
+    ;; lit face comes up under it, ending on the crashed tile, which is what
+    ;; every frame after draws.
+    (define NODE-OPENING (list "node" "node-open-1" "node-open-2" "node-open-3" "node-cleared"))
     (define (draw-node-opening hue light x y tween)
-      (let ((live (tile-index "node"))
-            (open (tile-index "node-cleared"))
-            (step (light-step light))
-            (cut (max 1 (min TILE-SIZE (exact (floor (* tween TILE-SIZE)))))))
-        (when (and live open)
-          (draw-lit-part hue live step x y 0 0 TILE-SIZE TILE-SIZE)
-          (draw-lit-part hue open step x y 0 0 cut TILE-SIZE))))
+      (let* ((n (length NODE-OPENING))
+             (i (max 0 (min (- n 1) (exact (floor (* tween n))))))
+             (name (list-ref NODE-OPENING i)))
+        (draw-lit hue name light x y)))
 
     ;; The step a continuous light draws at (the dither is for the plane;
     ;; these one-beat pieces take the nearest step).
@@ -439,6 +439,36 @@
               (color! (role-color (cond ((< age 0.34) 'C-WIRE-LIT) ((< age 0.67) 'C-STATIC-A) (else 'C-WIRE-DARK))))
               (draw-filled-rect x y 2 2)))
           (loop (+ i 1)))))
+
+    ;; The loot a node crashed this beat yields, as (letter . cell), or #f:
+    ;; the reward leaves the cabinet and lands on the band's TOOLS count
+    ;; over the beat (D64), so a clear pays visibly rather than only in a
+    ;; toast.
+    (define (opening-loot w)
+      (let loop ((es (world-events w)))
+        (cond ((null? es) #f)
+              ((and (pair? (car es)) (eq? (car (car es)) 'cleared))
+               (let ((n (world-node w (cadr (car es)))))
+                 (and n (node-loot n)
+                      (cons (char-upcase (string-ref (symbol->string (node-loot n)) 0))
+                            (node-cell n)))))
+              (else (loop (cdr es))))))
+
+    ;; The ladder down while required nodes remain (D64): the tile draws
+    ;; under static that shifts every beat, which resolves to the plain
+    ;; ladder on the beat the last required node crashes. The static is
+    ;; four 2x2 blocks hashed from the beat, so it costs four quads and
+    ;; keeps no state.
+    (define (draw-ladder-locked hue light x y beat)
+      (draw-lit hue "ladder-down" light x y)
+      (color! (role-color (lit-role hue 7 (light-step light))))
+      (let loop ((k 0))
+        (when (< k 4)
+          (let* ((h (+ (* beat 61) (* k 149)))
+                 (bx (* 2 (modulo h 8)))
+                 (by (* 2 (modulo (quotient h 8) 8))))
+            (draw-filled-rect (+ x (* SCALE bx)) (+ y (* SCALE by)) (* SCALE 2) (* SCALE 2)))
+          (loop (+ k 1)))))
 
     ;; The live node held at cell i (its board paused under DISCONNECT), or #f.
     (define (held-node-at w i)
@@ -505,6 +535,8 @@
              (opening-nodes (filter-map (lambda (e) (and (pair? e) (eq? (car e) 'cleared)
                                                          (let ((n (world-node w (cadr e)))) (and n (node-cell n)))))
                                         (world-events w)))
+             (locked-ladder? (> (hub-required-left w) 0))   ; D64: the way down is encrypted until the layer is taken
+             (loot (opening-loot w))
              ;; pixel of a cell's top-left from its cell coordinates
              (px-of (lambda (cx) (exact (round (+ (/ vw 2.0) (* CELL-PX (- cx cam-x 0.5)))))))
              (py-of (lambda (cy) (exact (round (+ (/ top 2.0) (* CELL-PX (- cy cam-y 0.5)))))))
@@ -543,6 +575,8 @@
                              ;; already in world-opened, so item-tile has no tile for it
                              (cond ((memv i opening-gates) (draw-gate-opening hue "gate" light px py tween))
                                    ((memv i opening-nodes) (draw-node-opening hue light px py tween))
+                                   ((and locked-ladder? (eq? kind 'ladder-down))
+                                    (draw-ladder-locked hue light px py (world-beat w)))
                                    (else (let ((item (item-tile w i)))
                                            (when item (draw-lit hue item light px py)))))
                              (when (and (in-bounds? lx (- ly 1) width height)
@@ -574,7 +608,19 @@
             (when (and (not (= from here)) (< tween 0.5))
               (draw-lit 'cool "runner" 1.0 (px-of (idx-x from width)) (py-of (idx-y from width))))
             (draw-lit 'cool "runner" 4.0 (px-of cam-x) (py-of cam-y))
-            (draw-shimmer (world-beat w) tween (px-of cam-x) (py-of cam-y))))
+            (draw-shimmer (world-beat w) tween (px-of cam-x) (py-of cam-y)))
+          ;; the loot leaves the cabinet for the band's TOOLS count (D64)
+          (when loot
+            (let* ((from-x (px-of (idx-x (cdr loot) width)))
+                   (from-y (py-of (idx-y (cdr loot) width)))
+                   (to-x (- vw 120))
+                   (to-y (- vh BAND-H -6))
+                   (t tween))
+              (color! C-WIRE-LIT)
+              (draw-text (string (car loot))
+                         (exact (round (+ from-x (* t (- to-x from-x)))))
+                         (exact (round (+ from-y (* t (- to-y from-y)))))
+                         2))))
         ;; the toasts, newest at the top of the board area
         (let toasts ((ts (hub-screen-toasts hs)) (y 8) (n 0))
           (when (and (pair? ts) (< n 3))
