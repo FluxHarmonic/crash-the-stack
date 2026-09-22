@@ -101,6 +101,8 @@ self.addEventListener("fetch", function (event) {
   if (req.method !== "GET") return;
   var url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  // Stream the standalone album without the game cache or navigation fallback.
+  if (/^\/soundtrack(?:\/|$)/.test(url.pathname)) return;
   if (req.mode === "navigate") {
     event.respondWith(
       caches.open(CACHE).then(function (cache) {

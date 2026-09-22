@@ -1,0 +1,148 @@
+;;; Shared finite-score operations, derived from the first album pilot composer.
+(define-library (crash soundtrack album arrangement)
+  (import (sigil shell prelude)
+          (sigil list)
+          (crash soundtrack tools))
+  (export CHANNELS off attack? pattern put-cell empty-pattern add-notes phrase
+          transform level unchanged write-album phrase-rows)
+  (begin
+    (define CHANNELS '(1 2 3 4 5 6 7 8))
+    (define (off ch) (list ch "===" 0 0 "000"))
+    (define (attack? cell)
+      (not (member (cadr cell) '("..." "==="))))
+    (define (pattern source ident)
+      (or (list-find (lambda (p) (= (field p id:) ident))
+                    (cdr (child source 'patterns)))
+          (error "Missing pattern" ident)))
+
+    (define (put-cell p row cell)
+      (check (< row (field p rows:)) "Cell exceeds pattern" row)
+      (let* ((rows (skip p 5))
+             (old (or (list-find (lambda (r) (= (cadr r) row)) rows)
+                      (list 'row row)))
+             (cells (cons cell
+                          (filter (lambda (c) (not (= (car c) (car cell))))
+                                  (cddr old))))
+             (replacement
+               (append (take old 2)
+                       (list-sort (lambda (a b) (< (car a) (car b))) cells))))
+        (append (take p 5)
+                (list-sort (lambda (a b) (< (cadr a) (cadr b)))
+                  (cons replacement
+                        (filter (lambda (r) (not (= (cadr r) row))) rows))))))
+
+    (define (empty-pattern bars)
+      (list 'pattern id: 0 rows: (* bars 32)
+            (append '(row 0) (map off CHANNELS))))
+
+    ;;; A note spec is (row channel pitch instrument level held-rows).
+    ;;; End gates are explicit, including melodic responses in otherwise empty bars.
+    (define (phrase bars notes)
+      (fold-left
+        (lambda (p n)
+          (let* ((row (list-ref n 0))
+                 (ch (list-ref n 1))
+                 (cell (list ch
+                             (list-ref n 2)
+                             (list-ref n 3)
+                             (list-ref n 4)
+                             "000")))
+            (put-cell (put-cell p row cell)
+                      (+ row (list-ref n 5))
+                      (off ch))))
+        (empty-pattern bars)
+        notes))
+
+    ;;; A transform returns a cell or #f. Missing channels are released at entry,
+    ;;; so removing an instrument cannot accidentally sustain it across a section.
+    (define (transform p fn)
+      (let* ((rows
+               (filter (lambda (r) (pair? (cddr r)))
+                 (map (lambda (r)
+                        (append (take r 2)
+                          (filter (lambda (c) c)
+                            (map (lambda (c)
+                                   (let ((clean
+                                           (if (starts-with? (list-ref c 4) "B")
+                                               (append (take c 4) '("000"))
+                                               c)))
+                                     (fn (cadr r) clean)))
+                                 (cddr r)))))
+                      (skip p 5))))
+             (result (append (take p 5) rows))
+             (entry (or (list-find (lambda (r) (= (cadr r) 0)) rows)
+                        '(row 0))))
+        (each ch CHANNELS
+          (unless (assoc ch (cddr entry))
+            (set! result (put-cell result 0 (off ch)))))
+        result))
+
+    (define (level cell factor)
+      (if (attack? cell)
+          (append (take cell 3)
+                  (list (max 1 (round (* (list-ref cell 3) factor)))
+                        (list-ref cell 4)))
+          cell))
+
+    (define (unchanged row cell) cell)
+
+    (define (add-notes p notes)
+      (fold-left
+        (lambda (result note)
+          (let* ((row (car note))
+                 (ch (cadr note))
+                 (cell (append (list ch)
+                               (take (skip note 2) 3)
+                               '("000"))))
+            (put-cell (put-cell result row cell)
+                      (+ row (list-ref note 5))
+                      (off ch))))
+        p
+        notes))
+    (define (phrase-rows rows notes)
+      (add-notes (set-field (empty-pattern 1) rows: rows) notes))
+
+    (define (write-album motif output slug title base sections sources . provenance)
+      (let ((bar-rows (if (member meter: base) (apply * (field base meter:)) 16))
+            (patterns '())
+            (timeline '())
+            (offset 0)
+            (ident 0))
+        (each spec sections
+          (let* ((p (set-field (transform (cadr spec) unchanged) id: ident))
+                 (rows (field p rows:)))
+            (set! patterns (append patterns (list p)))
+            (set! timeline
+              (append timeline
+                (list (dict pattern: ident
+                            label: (car spec)
+                            start_bar: (+ 1 (quotient offset bar-rows))
+                            bars: (/ rows bar-rows)
+                            start_seconds: (/ (* offset 2.5 (field base speed:)) (field base tempo:))))))
+            (set! offset (+ offset rows))
+            (set! ident (+ ident 1))))
+        (let* ((score (set-field base name: title))
+               (destination (path output (str slug ".cts"))))
+          (set! score (replace-child score 'patterns (cons 'patterns patterns)))
+          (set! score
+            (replace-child score 'order
+              (cons 'order (map (lambda (p) (field p id:)) patterns))))
+          (set! score
+            (replace-child score 'history
+              (list 'history
+                (list "codex" "2026-09-21"
+                      (if (pair? provenance) (car provenance)
+                      "Album opening pair I: finite arrangement, composed entrance, bridge, reprise and ending. Game sources remain unchanged; provenance and section map accompany this score."))
+                (list "codex" "2026-09-21"
+                      (if (and (pair? provenance) (pair? (cdr provenance))) (cadr provenance)
+                      "Accepted instruments and onsets retained. Explicit final gates and two bars for natural room decay; no playback jumps. Arranged with album-compose-opening.sgl.")))))
+          (write-canonical motif destination score)
+          ($ ,motif tune check ,destination)
+          (write-json-file (path output (str slug "-map.json"))
+            (dict title: title
+                  duration_seconds: (/ (* offset 2.5 (field base speed:)) (field base tempo:))
+                  sources: (list->array sources)
+                  sections: (list->array timeline)))
+          (println "~a: ~a bars, ~a seconds" title (/ offset bar-rows)
+                   (/ (* offset 2.5 (field base speed:)) (field base tempo:))))))
+  ))

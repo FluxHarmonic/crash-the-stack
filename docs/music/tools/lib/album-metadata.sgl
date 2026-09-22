@@ -1,0 +1,72 @@
+;;; Public album identity, separate from its attribution credit.
+(define-library (crash soundtrack album metadata)
+  (import (sigil shell prelude) (sigil json) (crash soundtrack tools))
+  (export ALBUM-ARTIST ALBUM-TITLE music-tags mp3-art-tags check-mp3-tags prepare-mp3-cover)
+  (begin
+    (define ALBUM-ARTIST "David Wilson")
+    (define ALBUM-TITLE "Crash The Stack - Original Soundtrack")
+
+    ;; Keep the archival PNG intact; prepare a small portable APIC image per export.
+    (define (prepare-mp3-cover output)
+      (let* ((source (path (root) "docs/music/album/art/cover-i.png"))
+             (target (path output "embedded-cover.jpg"))
+             (argv
+               (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                     "-i" source "-vf" "scale=800:800"
+                     "-frames:v" "1" "-q:v" "5" target)))
+        (run-tool argv)
+        (check (< 0 (file-size target) 250000)
+               "Embedded cover exceeds the 250 KB budget" target)
+        (write-json-file (path output "cover-preparation.json")
+          (dict source_sha256: (out sha256sum ,source)
+                jpeg_sha256: (out sha256sum ,target)
+                bytes: (file-size target)
+                command: (list->array argv)))
+        target))
+
+    (define (music-tags title number total)
+      (list "-metadata" (string-append "title=" title)
+            "-metadata" (string-append "artist=" ALBUM-ARTIST)
+            "-metadata" (string-append "album_artist=" ALBUM-ARTIST)
+            "-metadata" (string-append "album=" ALBUM-TITLE)
+            "-metadata" (string-append "track="
+                                       (number->string number)
+                                       "/"
+                                       (number->string total))
+            "-metadata" "date=2026"
+            "-metadata" "copyright=CC BY 4.0; attribution: David Wilson"
+            "-metadata" "license=https://creativecommons.org/licenses/by/4.0/"
+            "-metadata" "comment=Album preview. Attribution: David Wilson; Crash The Stack - Original Soundtrack. https://crashthestack.com/soundtrack/"))
+
+    (define (check-mp3-tags file title number total)
+      (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,file))
+             (tags (dict-ref (dict-ref data format:) tags:))
+             (pictures
+               (filter
+                 (lambda (stream)
+                   (equal? (dict-ref stream codec_type:) "video"))
+                 (array->list (dict-ref data streams:)))))
+        (each expected
+          (list (cons title: title)
+                (cons artist: ALBUM-ARTIST)
+                (cons album_artist: ALBUM-ARTIST)
+                (cons album: ALBUM-TITLE)
+                (cons track: (str number "/" total))
+                (cons copyright: "CC BY 4.0; attribution: David Wilson")
+                (cons license: "https://creativecommons.org/licenses/by/4.0/"))
+          (check (equal? (dict-ref tags (car expected)) (cdr expected))
+                 "MP3 tag mismatch" file (car expected)))
+        (check (and (= (length pictures) 1)
+                    (= 1 (dict-ref (dict-ref (car pictures) disposition:) attached_pic:))
+                    (equal? "mjpeg" (dict-ref (car pictures) codec_name:))
+                    (= 800 (dict-ref (car pictures) width:))
+                    (= 800 (dict-ref (car pictures) height:)))
+               "Missing embedded MP3 cover" file)
+        tags))
+
+    (define (mp3-art-tags)
+      (list "-id3v2_version" "3"
+            "-write_id3v1" "0"
+            "-metadata:s:v" "title=Album cover"
+            "-metadata:s:v" "comment=Cover (front)"
+            "-disposition:v" "attached_pic"))))

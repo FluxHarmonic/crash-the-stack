@@ -1,0 +1,34 @@
+#!/usr/bin/env sigil
+;;; Match the controlled master to the clean audition for a fair listening test.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg))
+
+(cli "album-compare" (script-args) '()
+  (lambda (options)
+    (let* ((output (option-ref options 'output))
+           (reports
+             (array->list (json-decode (read-text (path output "album-render-check.json")))))
+           (commands '()))
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Comparison audio must stay outside the repository")
+      (each spec '(("black-glass" "Black Glass") ("quiet-array" "Quiet Array"))
+        (let* ((slug (car spec))
+               (report (car (filter (lambda (r) (equal? (dict-ref r title:) (cadr spec))) reports)))
+               (difference (- (dict-ref (dict-ref report wav:) integrated_lufs:)
+                              (dict-ref (dict-ref report controlled_comparison:) integrated_lufs:)))
+               (source (path output (str slug "-controlled-comparison.wav")))
+               (target (path output (str slug "-controlled-matched.wav")))
+               (argv (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" source
+                           "-af" (str "volume=" (number->string difference) "dB")
+                           "-c:a" "pcm_f32le" target)))
+          (run-tool argv)
+          (set! commands (append commands (list (list->array argv))))
+          ($ ffmpeg -hide_banner -nostats -i ,target
+            -af "ebur128=peak=true" -f null -
+            err: ,(path output (str slug "-matched-loudness.txt")))
+          (println "Matched ~a by ~a dB; compare against ~a.wav" slug difference slug)))
+      (write-json-file (path output "comparison-commands.json") (list->array commands)))))

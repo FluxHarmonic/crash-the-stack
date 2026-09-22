@@ -1,0 +1,99 @@
+#!/usr/bin/env sigil
+;;; Draft album mastering from fresh native lossless renders, never from OGG.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum git))
+
+(define ALBUM "Crash The Stack — Original Soundtrack")
+;; Independent clean gain, not a shared LUFS normalization target.
+(define PILOTS '(("black-glass" "Black Glass" 1 1)
+                 ("quiet-array" "Quiet Array" 7 3)))
+
+(cli "album-render" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (tracks (or (option-ref options 'tracks) (map car PILOTS)))
+           (commands '()))
+      (check (and (starts-with? output "/")
+                  (not (starts-with? output (str (root) "/"))))
+             "Album --output must be an absolute external artifact directory")
+      (check (not (file-exists? (path output "README-renders.txt")))
+             "Choose a fresh version directory; existing provenance is protected")
+      (each slug tracks
+        (check (assoc slug PILOTS) "Unknown pilot" slug))
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Album output resolves inside the repository")
+      (define (run args)
+        (set! commands (append commands (list (list->array args))))
+        (write-json-file (path output "render-commands.json") (list->array commands))
+        (run-tool args))
+      (define (measure file label)
+        (let ((log (path output (str label "-loudness.txt"))))
+          ($ ffmpeg -hide_banner -nostats -i ,file
+            -af "ebur128=peak=true" -f null - err: ,log)
+          ($ ffmpeg -hide_banner -nostats -i ,file
+            -af "astats=metadata=0:reset=0" -f null -
+            err: ,(path output (str label "-samples.txt")))
+          (write-text (path output (str label "-probe.json"))
+            (str (out ffprobe -v error -show_format -show_streams
+                      -of json ,file) "\n"))))
+      (write-text (path output "README-renders.txt")
+        (str "Album pilot I: fresh native stereo 44.1 kHz / 16-bit WAV input.\n"
+             "Run from the album worktree:\n"
+             "  sigil docs/music/tools/album-render.sgl --motif /path/to/motif --output /absolute/external/version-directory [--track SLUG]\n"
+             "Exact executed render/encode argv arrays: render-commands.json. Source CTS copies and hashes accompany each render.\n"
+             "Clean audition gain: Black Glass +1 dB; Quiet Array +3 dB. No extra compression/limiting on the sent auditions.\n"
+             "WAV and FLAC are 16-bit with triangular dither after gain; OGG Vorbis quality 7 derives from that WAV.\n"
+             "These are arrangement auditions, not final release masters. Higher-bit output would not recover precision from the native 16-bit source.\n"
+             "Private controlled comparison: clean gain plus 2 dB into a 4x-oversampled limiter, -1.5 dB ceiling, 5 ms attack, 80 ms release, auto-level off, latency compensated.\n"
+             "The comparison is for later level-matched listening, not an accepted master.\n"
+             "Measurements: ffmpeg -hide_banner -nostats -i FILE -af ebur128=peak=true -f null -\n"
+             "Sample checks: ffmpeg -hide_banner -nostats -i FILE -af astats=metadata=0:reset=0 -f null -\n"
+             "Measure decoded OGG too; lossy encoding can change true peaks.\n"))
+      (write-text (path output "revision.txt")
+        (str (out git rev-parse HEAD cwd: ,(root)) "\n"
+             (out sha256sum ,motif) "\n"))
+      (each slug tracks
+        (let* ((spec (assoc slug PILOTS))
+               (source (path (root) "docs/music/album" (str slug ".cts")))
+               (raw (path output (str slug "-native.wav")))
+               (wav (path output (str slug ".wav")))
+               (flac (path output (str slug ".flac")))
+               (ogg (path output "ogg" (str slug ".ogg"))))
+          (check spec "Unknown pilot" slug)
+          (check (not (file-exists? raw)) "Choose a fresh version directory" raw)
+          (ensure-directory (path output "ogg"))
+          (write-text (path output (str slug ".cts")) (read-text source))
+          (write-text (path output (str slug "-source.sha256")) (str (out sha256sum ,source) "\n"))
+          (check (equal? (read-text source) (canonical motif source)) "Noncanonical album score" slug)
+          ($ ,motif tune check ,source)
+          (write-text (path output (str slug "-info.txt")) (str (out ,motif tune info ,source) "\n"))
+          (run (list motif "tune" "render" source "-r" "44100" "-o" raw))
+          (let* ((tags (list "-metadata" (str "title=" (cadr spec))
+                             "-metadata" (str "album=" ALBUM)
+                             "-metadata" (str "track=" (caddr spec) "/15")
+                             "-metadata" "comment=Album arrangement pilot I; draft master"))
+                 (gain (number->string (list-ref spec 3))))
+            (run (append
+                   (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" raw
+                         "-af" (str "volume=" gain "dB,aresample=osf=s16:dither_method=triangular")
+                         "-c:a" "pcm_s16le")
+                   tags (list wav)))
+            (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                       "-map_metadata" "0" "-c:a" "flac" flac))
+            (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                       "-map_metadata" "0" "-c:a" "libvorbis" "-q:a" "7" ogg))
+            (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" raw
+                       "-af" (str "volume=" gain "dB,volume=2dB,aresample=176400,alimiter=limit=0.841395:attack=5:release=80:level=false:latency=true,aresample=44100")
+                       "-c:a" "pcm_f32le" (path output (str slug "-controlled-comparison.wav")))))
+          (measure raw (str slug "-native"))
+          (measure wav slug)
+          (measure ogg (str slug "-ogg"))
+          (measure (path output (str slug "-controlled-comparison.wav"))
+                   (str slug "-controlled"))
+          (println "Finished full album audition: ~a" ogg))))))

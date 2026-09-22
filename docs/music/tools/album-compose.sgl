@@ -1,0 +1,291 @@
+#!/usr/bin/env sigil
+;;; Standalone album pilots. Source game scores are read-only references.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define CHANNELS '(1 2 3 4 5 6 7 8))
+(define (off ch) (list ch "===" 0 0 "000"))
+(define (attack? cell)
+  (not (member (cadr cell) '("..." "==="))))
+(define (pattern source ident)
+  (or (list-find (lambda (p) (= (field p id:) ident))
+                (cdr (child source 'patterns)))
+      (error "Missing pattern" ident)))
+
+(define (put-cell p row cell)
+  (check (< row (field p rows:)) "Cell exceeds pattern" row)
+  (let* ((rows (skip p 5))
+         (old (or (list-find (lambda (r) (= (cadr r) row)) rows)
+                  (list 'row row)))
+         (cells (cons cell
+                      (filter (lambda (c) (not (= (car c) (car cell))))
+                              (cddr old))))
+         (replacement
+           (append (take old 2)
+                   (list-sort (lambda (a b) (< (car a) (car b))) cells))))
+    (append (take p 5)
+            (list-sort (lambda (a b) (< (cadr a) (cadr b)))
+              (cons replacement
+                    (filter (lambda (r) (not (= (cadr r) row))) rows))))))
+
+(define (empty-pattern bars)
+  (list 'pattern id: 0 rows: (* bars 32)
+        (append '(row 0) (map off CHANNELS))))
+
+;;; A note spec is (row channel pitch instrument level held-rows).
+;;; End gates are explicit, including melodic responses in otherwise empty bars.
+(define (phrase bars notes)
+  (fold-left
+    (lambda (p n)
+      (let* ((row (list-ref n 0))
+             (ch (list-ref n 1))
+             (cell (list ch
+                         (list-ref n 2)
+                         (list-ref n 3)
+                         (list-ref n 4)
+                         "000")))
+        (put-cell (put-cell p row cell)
+                  (+ row (list-ref n 5))
+                  (off ch))))
+    (empty-pattern bars)
+    notes))
+
+;;; A transform returns a cell or #f. Missing channels are released at entry,
+;;; so removing an instrument cannot accidentally sustain it across a section.
+(define (transform p fn)
+  (let* ((rows
+           (filter (lambda (r) (pair? (cddr r)))
+             (map (lambda (r)
+                    (append (take r 2)
+                      (filter (lambda (c) c)
+                        (map (lambda (c)
+                               (let ((clean
+                                       (if (starts-with? (list-ref c 4) "B")
+                                           (append (take c 4) '("000"))
+                                           c)))
+                                 (fn (cadr r) clean)))
+                             (cddr r)))))
+                  (skip p 5))))
+         (result (append (take p 5) rows))
+         (entry (or (list-find (lambda (r) (= (cadr r) 0)) rows)
+                    '(row 0))))
+    (each ch CHANNELS
+      (unless (assoc ch (cddr entry))
+        (set! result (put-cell result 0 (off ch)))))
+    result))
+
+(define (level cell factor)
+  (if (attack? cell)
+      (append (take cell 3)
+              (list (max 1 (round (* (list-ref cell 3) factor)))
+                    (list-ref cell 4)))
+      cell))
+
+(define (unchanged row cell) cell)
+
+(define (quiet-pilot source)
+  (let ((intro
+          (phrase 4
+            '((0 5 "F#3" 6 19 42)
+              (32 6 "C#4" 8 19 11)
+              (48 6 "A-3" 8 17 11)
+              (64 5 "D-3" 7 19 42)
+              (80 7 "C#4" 9 10 10)
+              (96 6 "C#4" 8 19 15)
+              (116 8 "C-5" 26 7 1))))
+        (bridge
+          (phrase 8
+            '((0 5 "B-2" 6 22 48)
+              (4 6 "F#4" 8 20 19)
+              (32 6 "D-4" 8 19 23)
+              (48 7 "A-3" 9 10 11)
+              (64 5 "F#3" 6 22 48)
+              (68 6 "C#4" 8 21 19)
+              (96 6 "A-3" 8 19 23)
+              (128 5 "D-3" 7 22 48)
+              (128 4 "D-2" 4 25 15)
+              (132 6 "E-4" 8 20 19)
+              (160 6 "C#4" 8 19 23)
+              (176 7 "A-3" 9 10 11)
+              (192 5 "C#3" 6 21 48)
+              (192 4 "C#2" 4 25 15)
+              (196 6 "B-3" 8 20 15)
+              (216 6 "G#3" 8 19 15)
+              (236 6 "C#4" 8 18 15))))
+        (ending
+          (phrase 4
+            '((0 4 "B-1" 4 25 15)
+              (0 5 "B-2" 6 19 27)
+              (0 6 "D-4" 8 20 19)
+              (16 2 "F#5" 2 12 1)
+              (32 4 "C#2" 4 23 15)
+              (32 5 "C#3" 6 18 27)
+              (32 6 "G#3" 8 19 19)
+              (64 4 "F#1" 4 23 19)
+              (64 5 "F#3" 6 20 48)
+              (64 6 "A-3" 8 19 11)
+              (80 6 "F#3" 8 19 23)
+              (96 7 "C#4" 9 9 15)))))
+    (append
+      (list (list "Entrance: harmony before pulse" intro))
+      (map (lambda (id)
+             (list (str "Calm phrase " (+ id 1)) (pattern source id)))
+           '(0 1 2 3))
+      (list (list "Exposed harmonic bridge" bridge)
+            (list "Ceramic transition" (pattern source 4)))
+      (map (lambda (id)
+             (list (str "Focused phrase " (- id 4)) (pattern source id)))
+           '(5 6 7 8))
+      (list
+        (list "Calm reprise: remembered resolution"
+          (transform (pattern source 3)
+            (lambda (row cell)
+              (level cell (if (member (car cell) '(1 2 3 8)) 0.75 0.9)))))
+        (list "B minor / C# minor / home" ending)
+        (list "Released room tail" (empty-pattern 2))))))
+
+(define (black-pilot title game)
+  (define (game-phrase id)
+    (transform (pattern game id)
+      (lambda (row cell)
+        (if (member (caddr cell) '(27 28)) (level cell 0.63) cell))))
+  (let ((intro
+          (phrase 8
+            '((0 4 "F-1" 4 27 11)
+              (4 5 "F-3" 6 19 14)
+              (32 8 "C-4" 26 8 2)
+              (64 7 "F-3" 30 18 11)
+              (84 7 "C-4" 30 16 11)
+              (104 7 "G#3" 30 16 15)
+              (128 4 "F-1" 4 29 11)
+              (132 5 "F-3" 6 20 14)
+              (160 8 "C-4" 26 9 2)
+              (168 7 "G-3" 30 17 11)
+              (192 7 "F-3" 30 18 19)
+              (224 1 "C-2" 1 38 7)
+              (240 3 "C-8" 3 12 3))))
+        (bridge
+          (phrase 8
+            '((4 5 "F-3" 6 21 18)
+              (8 7 "C-4" 30 17 19)
+              (40 7 "G#3" 30 16 15)
+              (68 5 "A#2" 6 21 18)
+              (72 7 "C#4" 30 17 19)
+              (104 7 "A#3" 30 16 15)
+              (128 4 "F-1" 4 27 12)
+              (132 5 "F-3" 6 21 18)
+              (136 7 "C-4" 30 17 19)
+              (168 7 "G#3" 30 16 15)
+              (192 4 "C-2" 4 25 12)
+              (196 5 "C-3" 6 20 18)
+              (200 7 "D#4" 30 17 15)
+              (224 7 "G-3" 30 16 19)
+              (248 8 "C-4" 26 9 2))))
+        (ending
+          (phrase 8
+            '((0 1 "C-2" 1 38 7)
+              (0 4 "F-1" 4 28 12)
+              (4 5 "F-3" 6 20 18)
+              (8 7 "F-4" 30 18 11)
+              (28 7 "C-5" 30 16 11)
+              (48 7 "G#4" 30 16 19)
+              (80 7 "G-4" 30 17 15)
+              (104 7 "F-4" 30 17 19)
+              (128 4 "F-1" 4 24 19)
+              (132 5 "F-3" 6 18 24)
+              (148 7 "C-4" 30 16 19)
+              (180 7 "G#3" 30 15 19)
+              (212 7 "F-3" 30 16 23)))))
+    (list
+      (list "Title ignition / first tracker stab" (pattern title 0))
+      (list "Theme statement" (pattern title 1))
+      (list "Low-pressure groove" (game-phrase 0))
+      (list "Reese answers" (game-phrase 1))
+      (list "Grit answers the theme" (pattern title 2))
+      (list "Theme development" (pattern title 3))
+      (list "Lower-register bridge" (pattern title 4))
+      (list "Exposed F minor / Bb minor / C minor" bridge)
+      (list "Distant theme / space before rebuild" intro)
+      (list "Pulse rebuild"
+        (transform (game-phrase 3)
+          (lambda (row cell)
+            (if (and (< row 128) (member (car cell) '(2 3)))
+                #f
+                (level cell (if (< row 128) 0.85 1))))))
+      (list "Lift with tracker pickup" (pattern title 5))
+      (list "Focused theme return" (pattern title 6))
+      (list "Tear variation" (pattern title 7))
+      (list "Rhythmic development / Bb shadow" (game-phrase 9))
+      (list "Grit breathes between phrases" (game-phrase 10))
+      (list "Final theme: percussion clears beneath opening"
+        (transform (pattern title 6)
+          (lambda (row cell)
+            (if (and (< row 32) (member (car cell) '(2 3))) #f cell))))
+      (list "Final answer" (pattern title 7))
+      (list "Release" (pattern title 8))
+      (list "Theme recedes"
+        (transform (pattern title 9)
+          (lambda (row cell)
+            (cond
+              ((and (>= row 128) (member (car cell) '(1 2 3 8))) #f)
+              ((member (car cell) '(1 2 3)) (level cell 0.8))
+              (else cell)))))
+      (list "F minor coda / last FM echo" ending)
+      (list "Released room tail" (empty-pattern 2)))))
+
+(define (write-pilot motif output slug title base sections sources)
+  (let ((patterns '())
+        (timeline '())
+        (offset 0)
+        (ident 0))
+    (each spec sections
+      (let* ((p (set-field (transform (cadr spec) unchanged) id: ident))
+             (rows (field p rows:)))
+        (set! patterns (append patterns (list p)))
+        (set! timeline
+          (append timeline
+            (list (dict pattern: ident
+                        label: (car spec)
+                        start_bar: (+ 1 (quotient offset 32))
+                        bars: (/ rows 32)
+                        start_seconds: (/ (* offset 7.5) (field base tempo:))))))
+        (set! offset (+ offset rows))
+        (set! ident (+ ident 1))))
+    (let* ((score (set-field base name: title))
+           (destination (path output (str slug ".cts"))))
+      (set! score (replace-child score 'patterns (cons 'patterns patterns)))
+      (set! score
+        (replace-child score 'order
+          (cons 'order (map (lambda (p) (field p id:)) patterns))))
+      (set! score
+        (replace-child score 'history
+          (list 'history
+            (list "codex" "2026-09-21"
+                  "Album pilot I: finite arrangement, composed entrance, bridge, reprise and ending. Game sources remain unchanged; provenance and section map accompany this score.")
+            (list "codex" "2026-09-21"
+                  "Accepted instruments and onsets retained. Explicit final gates and two bars for natural room decay; no playback jumps. Arranged with album-compose.sgl."))))
+      (write-canonical motif destination score)
+      ($ ,motif tune check ,destination)
+      (write-json-file (path output (str slug "-map.json"))
+        (dict title: title
+              duration_seconds: (/ (* offset 7.5) (field base tempo:))
+              sources: (list->array sources)
+              sections: (list->array timeline)))
+      (println "~a: ~a bars, ~a seconds" title (/ offset 32)
+               (/ (* offset 7.5) (field base tempo:))))))
+
+(cli "album-compose" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (quiet (read-score (path (root) "assets/tunes/quiet-array.cts")))
+           (game (read-score (path (root) "assets/tunes/black-glass.cts")))
+           (title (read-score (path (root) "assets/tunes/black-glass-title.cts"))))
+      (check (not (option-ref options 'tracks)) "This composer produces both pilots")
+      (write-pilot motif output "quiet-array" "Quiet Array"
+                   quiet (quiet-pilot quiet) '("assets/tunes/quiet-array.cts"))
+      (write-pilot motif output "black-glass" "Black Glass"
+                   title (black-pilot title game)
+                   '("assets/tunes/black-glass.cts" "assets/tunes/black-glass-title.cts")))))

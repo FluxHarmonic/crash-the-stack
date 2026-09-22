@@ -1,0 +1,84 @@
+#!/usr/bin/env sigil
+;;; Add portable identity and cover tags without re-encoding the accepted audio.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-metadata.sgl"))
+(import (crash soundtrack tools) (crash soundtrack album metadata))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (audio-hash file)
+  (out ffmpeg -v error -nostdin -i ,file
+       -map "0:a:0" -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "album-tag-mp3" (script-args)
+  (list (option name: 'bundle long: "bundle" value: "DIR"))
+  (lambda (options)
+    (let* ((bundle (option-ref options 'bundle))
+           (output (option-ref options 'output))
+           (album (json-decode (read-text (path bundle "album.json"))))
+           (tracks (array->list (dict-ref album tracks:)))
+           (cover #f)
+           (site (path output "soundtrack"))
+           (number 0)
+           (checks '())
+           (commands '()))
+      (check (and (starts-with? output "/") (not (file-exists? output)))
+             "Use a fresh absolute external output directory")
+      (check (not (starts-with? output (str (root) "/")))
+             "Keep rendered files outside the repository")
+      (ensure-directory site)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Output resolves inside the repository")
+      (set! cover (prepare-mp3-cover output))
+      (each track tracks
+        (let* ((relative (dict-ref track mp3:))
+               (source (path bundle relative))
+               (target (path site relative))
+               (title (dict-ref track title:)))
+          (check (and (starts-with? relative "audio/")
+                      (not (contains? relative "..")))
+                 "Expected a local bundle MP3 path")
+          (set! number (+ number 1))
+          (ensure-directory (dirname target))
+          (let ((argv
+                  (append
+                    (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                          "-i" source "-i" cover
+                          "-map" "0:a:0" "-map" "1:v:0"
+                          "-map_metadata" "-1" "-c" "copy")
+                    (music-tags title number (length tracks))
+                    (mp3-art-tags)
+                    (list target))))
+            (set! commands (append commands (list (list->array argv))))
+            (write-json-file (path output "tag-commands.json") (list->array commands))
+            (run-tool argv))
+          (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,target))
+                 (format (dict-ref data format:))
+                 (tags (dict-ref format tags:))
+                 (before (audio-hash source))
+                 (after (audio-hash target)))
+            (check-mp3-tags target title number (length tracks))
+            (check (equal? before after) "Decoded audio changed during tagging" title)
+            (check (< (abs (- (string->number (dict-ref format duration:))
+                             (dict-ref track duration_seconds:))) 0.1)
+                   "Duration changed" title)
+            (set! checks
+              (append checks
+                (list (dict title: title
+                            tags: tags
+                            embedded_cover: #t
+                            decoded_audio_identical: #t
+                            pcm_sha256: after
+                            file_sha256: (out sha256sum ,target)))))
+            (write-json-file (path output "tag-checks.json") (list->array checks))
+            (display (str "Tagged and checked " title "\n")))))
+      (each filename '("index.html" "style.css" "player.js")
+        (copy-file
+          (path (root) "docs/music/album/listen" filename)
+          (path site filename)))
+      (write-json-file (path site "album.json")
+        (dict title: ALBUM-TITLE
+              version: "Preview I - tagged"
+              duration_seconds: (dict-ref album duration_seconds:)
+              tracks: (list->array tracks))))))
