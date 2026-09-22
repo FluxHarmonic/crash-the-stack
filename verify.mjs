@@ -326,6 +326,22 @@ if (PHONE) {
   await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "fine" }, { name: "hover", value: "hover" }] });
 }
 
+// A navigation the browser answers with an errorText (net::ERR_ABORTED: seen
+// 2026-09-22 when the previous page had just registered its service worker
+// and the six GPU rules' shader compiles held its main thread) never lands;
+// the page stays where it was and the leg reads the wrong boot. Three tries,
+// a second apart, and the abort noted.
+async function navigate(url) {
+  let r = null;
+  consoleLines.push(`arm: navigate ${url.replace(/^.*index\.html/, "index.html")}`);   // the log says which boot is whose
+  for (let i = 0; i < 3; i++) {
+    r = await send("Page.navigate", { url });
+    if (!r.errorText) return r;
+    console.log(`note: Page.navigate ${r.errorText} (try ${i + 1}) for ${url.replace(/^.*index\.html/, "index.html")}`);
+    await sleep(1000);
+  }
+  return r;
+}
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
@@ -385,7 +401,7 @@ function timedOut(name) {
 
 // ---- 2. boot ----------------------------------------------------------------
 // ?trace switches on the game's console lines; a player's page prints nothing.
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
+await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -886,7 +902,7 @@ let iceLock = null;
   else {
     const inPlay = consoleLines.slice().reverse().map((l) => l.match(/^crash: (?:seed \d+|removed(?: \d+)+|undo|restored) tiles (\d+)/)).find(Boolean);
     mark = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
     const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
     if (!inPlay) fail("reload", "no \"tiles N\" line before the reload to hold the restore to");
     else if (inPlay[1] !== "142") fail("reload", `the legs before this one left ${inPlay[1]} tiles in play, not 142 (the sequence, not the restore, is off: ${inPlay[0]})`);
@@ -1027,7 +1043,7 @@ let iceLock = null;
     if (!detail) {
       // the next launch: the prompt, then a tap on the game's APPLY box
       mark = consoleLines.length;
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack` });
+      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
       const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 20000) : null;   // the worker registers once the board's boot is done (the ambient in ~18 frames)
       const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;
@@ -1186,7 +1202,7 @@ let iceLock = null;
   };
   const bootTitle = async (seed, listen) => {
     const from = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}` });
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}`);
     const opened = await openGate(from, listen, listen ? "read" : "skip");   // the first boot reads the card, the others tap it away
     if (opened.error) return opened;
     const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
@@ -1362,7 +1378,7 @@ let iceLock = null;
     const seedsSeen = [];
     for (let i = 0; i < 2 && !detail; i++) {
       const from = consoleLines.length;
-      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}` });
+      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}`);
       const gated = await openGate(from, false); if (gated.error) { detail = gated.error; break; }
       const head = await waitLine(/^crash: title seed (\d+) baud /, from, 20000);
       if (!head) detail = "no title line on a boot without ?seed";
@@ -1375,7 +1391,7 @@ let iceLock = null;
   // a tap during the reveal skips it and picks nothing
   if (!detail) {
     const from = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600` });
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600`);
     const gated2 = await openGate(from, false);
     const head = gated2.error ? null : await waitLine(/^crash: title seed /, from, 20000);
     if (!head) detail = "no title line on the slow boot";
@@ -1416,7 +1432,7 @@ let iceLock = null;
   slowPaths["/assets/audio/spy.ogg"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
   const menuLine = await waitLine(/^crash: menu top .*\bjack-in (-?[\d.]+) (-?[\d.]+)/, from, 20000);
   const gateP = await waitLine(/^crash: title gate /, from, 20000);
   let connect = null;
@@ -1496,8 +1512,12 @@ let iceLock = null;
   let detail = "";
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh` });
-  const first = await waitLine(/^crash: page /, from, 60000);
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
+  // the NEW page's first line ("crash: page dpr", the trace header), not any
+  // "crash: page ..." line: the page being left prints "crash: page hidden"
+  // as it unloads (the web-soak guard), and throttling on that line starved
+  // the new page's own wasm fetch (2026-09-22: no gate line in 20 s)
+  const first = await waitLine(/^crash: page dpr /, from, 60000);
   if (!first) detail = "the game never printed its first line";
   else await send("Network.emulateNetworkConditions", { offline: false, latency: SLOW_RTT, downloadThroughput: SLOW_KBPS * 1000 / 8, uploadThroughput: SLOW_KBPS * 1000 / 8 });
   const gateS = !detail && await waitLine(/^crash: title gate /, from, 20000);
@@ -1550,7 +1570,7 @@ let iceLock = null;
   const MENU_FRAME_FACTOR = 2.5;
   let detail = "";
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&ms&seed=1&fresh` });
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&ms&seed=1&fresh`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   let boardMs = null, menuMs = null;
@@ -1656,7 +1676,7 @@ let topAt = 0;
 // a fresh board, then Escape: the pause menu's top screen
 async function pauseMenu(extra = "") {
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}` });
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) return { error: "no boot line" };
   if (!(await waitLine(/^crash: boot done /, from, 20000))) return { error: "no \"crash: boot done\" within 20 s" };
@@ -1908,7 +1928,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1` });
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -1976,7 +1996,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1` });
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -2120,7 +2140,7 @@ async function downTo(order, id, at = 0) {
   if (!detail) {
     // ?code= deals the same
     const from = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&code=${code}` });
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${code}`);
     const read = await waitLine(/^crash: code read ([0-9A-Z]{10}) (\w+)$/, from, 20000);
     const spec = read && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, from, 10000);
     const dealt = spec && await waitLine(/^crash: cards seed (\d+) /, from, 10000);
@@ -2137,7 +2157,7 @@ async function downTo(order, id, at = 0) {
     const other = alphabet[(alphabet.indexOf(code[i]) + 1) % 32];
     flipped = code.slice(0, i) + other + code.slice(i + 1);
     const from = consoleLines.length;
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&code=${flipped}` });
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${flipped}`);
     const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, from, 20000);
     await sleep(1500);
     const after = consoleLines.slice(from);

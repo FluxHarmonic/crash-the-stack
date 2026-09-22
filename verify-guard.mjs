@@ -356,7 +356,14 @@ async function trapLeg(name, door) {
   await evalJS(`document.getElementById("reconnect").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))`);
   const again = await waitLine(BOOT_RE, mark2, 45000);
   if (!again) { fail(name, "no boot line within 45 s of the tap on the card (the reload did not happen)"); return; }
-  pass(name, `died of "${dead.m[1]}"; 1 FATAL, 1 RuntimeError, dispatch -1, no frame, audio ${audio}, card ${s1.word.w}x${s1.word.h} sel ${s1.word.sel} hi ${s1.word.hi}; the tap rebooted (seed ${again.m[1]})`);
+  // and its boot finished: the next leg navigates away as soon as this one
+  // returns, and a texture fetch still in flight then dies as "image fetch
+  // failed: TypeError: Failed to fetch" on the next leg's error count (seen
+  // once the six GPU rules' shader compiles pushed the card's texture past
+  // the seed line, 2026-09-22)
+  const booted = await waitLine(/^crash: boot done /, mark2, 45000);
+  if (!booted) { fail(name, "the reloaded page's boot never finished within 45 s of the tap on the card"); return; }
+  pass(name, `died of "${dead.m[1]}"; 1 FATAL, 1 RuntimeError, dispatch -1, no frame, audio ${audio}, card ${s1.word.w}x${s1.word.h} sel ${s1.word.sel} hi ${s1.word.hi}; the tap rebooted (seed ${again.m[1]}) and the boot finished`);
 }
 await trapLeg("trap-frame", "frame");
 await trapLeg("trap-dispatch", "now");
@@ -444,8 +451,10 @@ await trapLeg("trap-dispatch", "now");
     const mark2 = consoleLines.length;
     await evalJS(`document.getElementById("reconnect").dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }))`);
     const again = await waitLine(BOOT_RE, mark2, 45000);
+    const booted = again && await waitLine(/^crash: boot done /, mark2, 45000);   // as the trap legs: the next leg navigates at once
     if (!again) fail(name, "no boot line within 45 s of the tap on the card");
-    else pass(name, `"${dead.m[1]}": no FATAL, dispatch -1, no frame, the card; the tap rebooted (seed ${again.m[1]})`);
+    else if (!booted) fail(name, "the reloaded page's boot never finished within 45 s of the tap on the card");
+    else pass(name, `"${dead.m[1]}": no FATAL, dispatch -1, no frame, the card; the tap rebooted (seed ${again.m[1]}) and the boot finished`);
   }
 }
 
