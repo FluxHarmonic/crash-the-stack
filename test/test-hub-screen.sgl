@@ -1,0 +1,193 @@
+;;; The hub as a screen (P5 phase 2): the beat clock, one action per
+;;; beat, the late window, the held walk, the taps, the holds and the
+;;; panels, and the shell's requests. Hand-built layers through
+;;; (crash hub text); the clock driven by hand in ms.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash input)
+        (crash hub world)
+        (crash hub gen)
+        (crash hub rules)
+        (crash hub text)
+        (crash hub screen))
+
+(define ROOM
+  (string-append "#########\n"
+                 "#@..R..>#\n"
+                 "#..1.M$.#\n"
+                 "#########"))
+
+;; A screen over a hand-built layer at depth 2 (the market sells there), the clock pinned at 120 bpm (500 ms a beat).
+(define (screen-of text)
+  (let* ((w (hub-with-layer (world run-seed: 1) (text->layer text) 2 0))
+         (hs (hub-screen world: w prev: w)))
+    (hub-screen-with-bpm hs 120)))
+
+(define (cell hs x y) (idx x y (layer-width (world-layer (hub-screen-world hs)))))
+(define (runner-at hs) (runner-cell (world-runner (hub-screen-world hs))))
+(define (frame . pressed) (make-input-frame pressed '() #f))
+(define (held-frame . held) (make-input-frame '() held #f))
+(define (tap-frame vx vy) (make-input-frame '() '() (cons vx vy)))
+(define IDLE (make-input-frame '() '() #f))
+
+;; n frames of dt ms with no input
+(define (idle hs dt n)
+  (if (= n 0) hs (idle (hub-screen-tick hs dt IDLE) dt (- n 1))))
+
+(test-group "hub screen: the beat clock"
+  (test "a new screen: 500 ms a beat at 120 bpm, no beat before the clock fills, one when it does"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen-tick hs 300.0 IDLE)))
+      (assert-equal 500.0 (hub-screen-beat-ms hs))
+      (assert-equal 0 (hub-screen-beats hs))
+      (assert-equal 0 (world-beat (hub-screen-world hs)))
+      (let ((hs (hub-screen-tick hs 250.0 IDLE)))
+        (assert-equal 1 (hub-screen-beats hs))
+        (assert-equal 1 (world-beat (hub-screen-world hs)))
+        (assert-equal 'wait (hub-screen-last hs))
+        (assert-true (< (abs (- 50.0 (hub-screen-clock hs))) 0.001)))))
+  (test "a long frame steps several beats, at most MAX-CATCH-UP"
+    (let ((hs (hub-screen-tick (screen-of ROOM) 1600.0 IDLE)))
+      (assert-equal 3 (hub-screen-beats hs)))
+    (let ((hs (hub-screen-tick (screen-of ROOM) 10000.0 IDLE)))
+      (assert-equal MAX-CATCH-UP (hub-screen-beats hs))
+      (assert-equal 0.0 (hub-screen-clock hs))))
+  (test "the tempo follows the world: unpinned, the tense bpm once a daemon hunts"
+    (let* ((w0 (hub-with-layer (world run-seed: 1) (text->layer "#######\n#@..!.#\n#######") 1 0))
+           (w (world w0 daemons: (list (daemon (car (world-daemons w0)) facing: 'left))))   ; facing the runner
+           (hs (hub-screen world: w prev: w))
+           (calm (hub-screen-with-bpm hs #f))
+           (seen (hub-screen-tick calm 700.0 IDLE)))
+      (assert-equal (/ 60000.0 (descriptor-calm-bpm (descriptor-at 1))) (hub-screen-beat-ms calm))
+      (assert-true (hub-tense? (hub-screen-world seen)))
+      (assert-equal (/ 60000.0 (descriptor-tense-bpm (descriptor-at 1))) (hub-screen-beat-ms seen))))
+  (test "a hold stops the clock and the music does not care; lifting it resumes"
+    (let* ((hs (hub-screen-hold (screen-of ROOM) #t))
+           (hs (idle hs 400.0 5)))
+      (assert-equal 0 (hub-screen-beats hs))
+      (let ((hs (idle (hub-screen-hold hs #f) 400.0 5)))
+        (assert-equal 4 (hub-screen-beats hs))))))
+
+(test-group "hub screen: one action per beat"
+  (test "a press is queued and taken at the next beat; the last press before the beat wins"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen-tick hs 100.0 (frame 'down)))
+           (hs (hub-screen-tick hs 100.0 (frame 'right))))
+      (assert-equal (list 'move 'right) (hub-screen-queued hs))
+      (assert-equal (cell hs 1 1) (runner-at hs))
+      (let ((hs (hub-screen-tick hs 300.0 IDLE)))
+        (assert-equal (cell hs 2 1) (runner-at hs))
+        (assert-false (hub-screen-queued hs))
+        (assert-equal 0.0 (hub-screen-tween hs)))))
+  (test "the late window: a press just after a wait beat is that beat's, re-stepped from the world before it"
+    (let* ((hs (idle (screen-of ROOM) 500.0 1))           ; beat 1, a wait
+           (late (hub-screen-tick hs 100.0 (frame 'right))))
+      (assert-equal 1 (hub-screen-beats late))              ; the same beat, not a second
+      (assert-equal (cell hs 2 1) (runner-at late))         ; carried the move
+      (assert-equal (list 'move 'right) (hub-screen-last late))
+      (assert-equal 1 (world-beat (hub-screen-world late)))
+      ;; past the window the press waits for the next beat
+      (let* ((hs (idle (screen-of ROOM) 500.0 1))
+             (on-time (hub-screen-tick hs 250.0 (frame 'right))))
+        (assert-equal (cell hs 1 1) (runner-at on-time))
+        (assert-equal (list 'move 'right) (hub-screen-queued on-time)))))
+  (test "a held arrow walks one cell a beat while nothing else is queued"
+    (let* ((hs (screen-of ROOM))
+           (hs (idle-with hs (held-frame 'right) 250.0 4)))
+      (assert-equal (cell hs 3 1) (runner-at hs))
+      (assert-equal 2 (hub-screen-beats hs))))
+  (test "Space waits, Return is the cell's verb: enter on a node asks the shell for a launch and the world holds"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen-tick hs 500.0 (frame 'down)))
+           (hs (hub-screen-tick hs 500.0 (frame 'right)))
+           (hs (hub-screen-tick hs 500.0 (frame 'right))))
+      (assert-equal (cell hs 3 2) (runner-at hs))
+      (let* ((hs (hub-screen-tick hs 500.0 (frame 'return))))
+        (assert-equal 'launch (hub-screen-request hs))
+        (let ((l (hub-screen-launch hs 1 'vegas)))
+          (assert-true (and l #t)))
+        ;; held on the request: beats do not pass
+        (let ((held (idle hs 500.0 3)))
+          (assert-equal (hub-screen-beats hs) (hub-screen-beats held))))))
+  (test "Escape asks the shell for the menu; the request is taken once"
+    (let* ((hs (hub-screen-tick (screen-of ROOM) 10.0 (frame 'escape))))
+      (assert-equal 'menu (hub-screen-request hs))
+      (let ((taken (hub-screen-take-request hs)))
+        (assert-equal 'menu (car taken))
+        (assert-false (hub-screen-request (cdr taken)))))))
+
+(define (idle-with hs f dt n)
+  (if (= n 0) hs (idle-with (hub-screen-tick hs dt f) f dt (- n 1))))
+
+(test-group "hub screen: taps"
+  (test "a tap on an adjacent cell moves there; on the runner it is the verb; far away it steps once along the path"
+    (let* ((hs (screen-of ROOM))
+           (cx (* CELL-PX (/ VIEW-W 2.0)))          ; the runner's cell center on the view
+           (cy (* CELL-PX (/ VIEW-H 2.0))))
+      (assert-equal (list 'move 'right) (screen-action-for hs (tap-frame (+ cx CELL-PX) cy)))
+      (assert-equal (list 'move 'down) (screen-action-for hs (tap-frame cx (+ cy CELL-PX))))
+      (assert-equal 'wait (screen-action-for hs (tap-frame cx cy)))          ; the ladder up offers no verb
+      (assert-equal (list 'move 'down) (screen-action-for hs (tap-frame (+ cx (* 2 CELL-PX)) (+ cy CELL-PX))))   ; toward (3,2): the first step of the path
+      (assert-false (screen-action-for hs (tap-frame (+ cx (* 3 CELL-PX)) cy)))   ; the locked gate: no path
+      (assert-false (screen-action-for hs (tap-frame (+ cx (* 60 CELL-PX)) cy))))))   ; off the layer
+
+(test-group "hub screen: the panels"
+  (test "the market: Return on the market cell opens the panel (a hold), rows sell at their price without a beat, Escape leaves"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen hs world: (world (hub-screen-world hs) credits: 100)))
+           (hs (hub-screen-tick hs 500.0 (frame 'down)))
+           (hs (idle-with hs (held-frame 'right) 500.0 4)))
+      (assert-equal (cell hs 5 2) (runner-at hs))
+      (let* ((hs (hub-screen-tick hs 500.0 (frame 'return))))
+        (assert-equal 'market (hub-screen-panel hs))
+        (assert-false (world-request (hub-screen-world hs)))
+        (let ((beats (hub-screen-beats hs)))
+          (let* ((hs (idle hs 500.0 3))
+                 (hs (hub-screen-tick hs 10.0 (frame 'return))))   ; buy the first row: cloak at 30
+            (assert-equal beats (hub-screen-beats hs))
+            (assert-equal 1 (world-inventory-count (hub-screen-world hs) 'cloak))
+            (assert-equal 70 (world-credits (hub-screen-world hs)))
+            (let ((hs (hub-screen-tick hs 10.0 (frame 'escape))))
+              (assert-false (hub-screen-panel hs))
+              (assert-false (hub-screen-request hs))))))))
+  (test "a severed layer: the panel; Return reconnects (the layer regrows), Escape asks for the menu"
+    (let* ((hs (hub-screen-new 3))
+           (budget (descriptor-budget (descriptor-at 1)))
+           (hs (hub-screen hs world: (world (hub-screen-world hs) trace: (- budget 1) layer-credits: 30 credits: 12)))
+           (hs (hub-screen-tick hs (hub-screen-beat-ms hs) IDLE)))
+      (assert-equal 'severed (hub-screen-panel hs))
+      (assert-equal 'severed (world-request (hub-screen-world hs)))
+      (let ((jack-out (hub-screen-tick hs 10.0 (frame 'escape))))
+        (assert-equal 'menu (hub-screen-request jack-out))
+        (assert-equal 'severed (hub-screen-panel jack-out)))
+      (let ((re (hub-screen-tick hs 10.0 (frame 'return))))
+        (assert-false (hub-screen-panel re))
+        (assert-equal 1 (world-attempt (hub-screen-world re)))
+        (assert-equal 0 (world-layer-credits (hub-screen-world re)))
+        (assert-equal 12 (world-credits (hub-screen-world re)))
+        (assert-equal 1 (ledger-severed-layers (world-ledger (hub-screen-world re)))))))
+  (test "a board's outcome returns through the screen: a clear opens the node and the beat runs on"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen-tick hs 500.0 (frame 'down)))
+           (hs (idle-with hs (held-frame 'right) 500.0 2))
+           (hs (hub-screen-tick hs 500.0 (frame 'return))))
+      (assert-equal 'launch (hub-screen-request hs))
+      (let* ((hs (cdr (hub-screen-take-request hs)))
+             (hs (hub-screen-return hs (list 'cleared 60 20 0.1 '()))))
+        (assert-false (hub-screen-request hs))
+        (assert-equal 'cleared (node-state (world-node (hub-screen-world hs) 0)))
+        (assert-equal (list 'red) (world-keys (hub-screen-world hs)))
+        (let ((before (hub-screen-beats hs))
+              (after (hub-screen-beats (idle hs 500.0 1))))
+          (assert-equal (+ before 1) after)))))
+  (test "descend is taken at once: the next layer, its credits banked"
+    (let* ((hs (screen-of ROOM))
+           (hs (hub-screen hs world: (world (hub-screen-world hs) keys: (list 'red) layer-credits: 40)))
+           (hs (idle-with hs (held-frame 'right) 500.0 6))
+           (hs (hub-screen-tick hs 500.0 (frame 'return))))
+      (assert-equal 3 (world-depth (hub-screen-world hs)))
+      (assert-equal 40 (world-credits (hub-screen-world hs)))
+      (assert-false (hub-screen-panel hs))
+      (assert-equal 1 (ledger-cleared (world-ledger (hub-screen-world hs)))))))
