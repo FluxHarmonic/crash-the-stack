@@ -271,3 +271,10 @@ David requested hiding the player's download button. The native audio element
 now uses controlslist="nodownload". Supporting browsers hide that control while
 retaining native playback, seeking and volume. This is a presentation choice:
 the MP3 stream URLs remain accessible. No context-menu blocking is added.
+
+Published at https://eb656662.crashthestack.pages.dev (source 9d1930d).
+Live Chromium verification confirms native controls remain enabled,
+controlsList contains nodownload, the browser supports that token, and playback
+still advances with all fifteen tracks present. This functional check was muted.
+The single-HTML-change staging and deployment record are external in
+publication-player-controls-i/.
