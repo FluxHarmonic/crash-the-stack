@@ -278,3 +278,19 @@ controlsList contains nodownload, the browser supports that token, and playback
 still advances with all fifteen tracks present. This functional check was muted.
 The single-HTML-change staging and deployment record are external in
 publication-player-controls-i/.
+
+## Relay Ghost approved mix and master II
+
+David approved the complete mix and requested publication. The quieter contact
+and dust drums, original bell/pluck and gritty bass -2 dB now play from the new
+`soundtrack/relay-album-ii/relay-ghost.mp3` object. The release uses +0.5 dB
+mastering gain, retaining 10.8 LU LRA, measuring -16.7 LUFS-I and -1.6 dBTP
+in decoded MP3. Tags and embedded artwork pass the established checks.
+
+Publication https://340709c4.crashthestack.pages.dev changes only Relay Ghost's
+URL in the fifteen-track manifest. All public files in the previous deployment
+were fetched and hash-compared against the preserved stage; game, tracker,
+worker, player, other audio URLs and download-control hint remain intact.
+The new R2 object matches the local MP3 byte-for-byte; byte range 206, MIME and
+CORS checks pass. Evidence is external in publication-relay-ii/, r2-relay-ii/,
+relay-ii-release/ and relay-ii-mp3/.
