@@ -1,0 +1,361 @@
+;;; (crash hub screen) - The hub as a screen: the beat clock, the input
+;;; per beat, the tween, the holds, and what the shell must answer.
+;;;
+;;; Phase 2 of P5 (ruled 2026-09-22). The world ((crash hub rules)) moves
+;;; one hub-step per beat; this module decides WHEN a beat falls and
+;;; WHAT action it carries, and keeps what the draw needs between beats:
+;;; the previous world (so the runner, the daemons and the camera slide
+;;; from where they were to where they are over the beat), the tween's
+;;; progress, the toasts the events raised, and the panels that hold the
+;;; beat (the market, a severed link, the run's end). Pure over an
+;;; immutable struct like the rest of the family; the shell owns one and
+;;; replaces it every frame.
+;;;
+;;; The beat: an abstract clock at hub-tempo's bpm (calm or tense, from
+;;; the world), or the ?bpm= door's pin, until M1's live player lands;
+;;; then `beat-source` is the one seam to fill (a thunk answering the
+;;; player's beat count). One action per beat, the LAST input before the
+;;; beat wins; an input landing in the first LATE-WINDOW of a beat that
+;;; carried no action is taken as meant for that beat (the world is
+;;; re-stepped from the previous world with the action instead of the
+;;; wait: hub-step is pure, so the result is what an on-time press would
+;;; have given). A held direction key walks: one move per beat while
+;;; nothing else is queued.
+;;;
+;;; Keys: arrows / WASD / HJKL move; Space or . wait; Return or E the
+;;; context verb (enter on a node, descend on the ladder, the market's
+;;; panel on the market, else wait); 1 2 3 use cloak, decoy, jam; Escape
+;;; asks the shell for the menu. Taps: an adjacent cell moves there; the
+;;; runner's own cell is the context verb; a far cell steps once along
+;;; the shortest path toward it (beat-locked: each beat is the player's,
+;;; no auto-walk). A hold (a panel here, the shell's pause panel or a
+;;; board) stops the clock; the music plays on.
+
+(define-library (crash hub screen)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash input)
+          (crash hub world)
+          (crash hub gen)
+          (crash hub rules))
+
+  (export hub-screen hub-screen? hub-screen-new
+          hub-screen-world hub-screen-prev hub-screen-tween hub-screen-clock hub-screen-beat-ms
+          hub-screen-queued hub-screen-held? hub-screen-request hub-screen-toasts hub-screen-panel
+          hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats
+          hub-screen-tick hub-screen-hold hub-screen-take-request hub-screen-return hub-screen-launch
+          hub-screen-with-bpm hub-screen-shop hub-screen-camera hub-screen-daemon-at ease
+          SCALE CELL-PX VIEW-W VIEW-H
+          screen-action-for LATE-WINDOW TOAST-MS MAX-CATCH-UP
+          toast toast? toast-text toast-ms toast-kind)
+
+  (begin
+    (define LATE-WINDOW 0.4)          ; of a beat: a press this soon after a wait beat is that beat's
+    (define TOAST-MS 1500.0)
+    (define MAX-CATCH-UP 4)           ; beats stepped in one frame at most (a stall does not burst)
+    (define DEFAULT-BPM 90)
+    (define KEY-1 (string->symbol "1"))   ; the digits arrive as one-character symbols (the tool stack's rule)
+    (define KEY-2 (string->symbol "2"))
+    (define KEY-3 (string->symbol "3"))
+    (define KEY-DOT (string->symbol "."))
+
+    ;; The view (D61): 16 px tiles at 2x, a 20x11 window centered on the runner.
+    (define SCALE 2)
+    (define CELL-PX 32)
+    (define VIEW-W 20)
+    (define VIEW-H 11)
+
+    ;; A line for the player: text, ms left, kind (system | ice | gibson).
+    (define-struct toast
+      (text default: "")
+      (ms default: TOAST-MS)
+      (kind default: 'system))
+
+    ;; world: now. prev: at the last beat, for the tween. clock: ms into
+    ;; the beat. beat-ms: the beat's length at the tempo the beat began
+    ;; with. queued: the action for the next beat, or #f. tween: 0..1
+    ;; across the beat. held?: the shell's hold (the pause panel, a
+    ;; board). request: what the shell must answer (launch | menu), or
+    ;; #f. panel: this screen's own hold (market | severed | done), or
+    ;; #f; panel-row its selection. beats: beats stepped since the
+    ;; screen began. last: the action the last beat carried.
+    (define-struct hub-screen
+      (world default: #f)
+      (prev default: #f)
+      (clock default: 0.0)
+      (beat-ms default: 666.0)
+      (queued default: #f)
+      (tween default: 1.0)
+      (held? default: #f)
+      (request default: #f)
+      (toasts default: '())
+      (panel default: #f)
+      (panel-row default: 0)
+      (bpm-pin default: #f)
+      (beats default: 0)
+      (last default: 'wait))
+
+    (define (bpm-of hs)
+      (or (hub-screen-bpm-pin hs) (hub-tempo (hub-screen-world hs)) DEFAULT-BPM))
+
+    (define (beat-ms-of hs) (/ 60000.0 (bpm-of hs)))
+
+    (define (hub-screen-new run-seed)
+      (let* ((w (hub-new run-seed))
+             (hs (hub-screen world: w prev: w)))
+        (hub-screen hs beat-ms: (beat-ms-of hs))))
+
+    ;; ?bpm=N: the clock pinned (a dev door); #f follows the world's tempo.
+    (define (hub-screen-with-bpm hs bpm)
+      (let ((hs (hub-screen hs bpm-pin: (and bpm (> bpm 0) bpm))))
+        (hub-screen hs beat-ms: (beat-ms-of hs))))
+
+    (define (hub-screen-hold hs on?)
+      (hub-screen hs held?: on?))
+
+    ;; The shell reads a request and clears it.
+    (define (hub-screen-take-request hs)
+      (cons (hub-screen-request hs) (hub-screen hs request: #f)))
+
+    ;; The launch of the node under the runner (after a 'launch request).
+    (define (hub-screen-launch hs draw scoring)
+      (hub-launch (hub-screen-world hs) draw scoring))
+
+    ;; The market's rows: (tool price affordable?) for the descriptor's shop.
+    (define (hub-screen-shop hs)
+      (let ((w (hub-screen-world hs)))
+        (map (lambda (tool) (list tool (tool-price tool) (hub-can-buy? w tool)))
+             (descriptor-shop (hub-descriptor w)))))
+
+    ;; --- the camera --------------------------------------------------------------------
+
+    ;; Ease-out: fast off the mark, settling on the beat.
+    (define (ease t) (- 1.0 (* (- 1.0 t) (- 1.0 t))))
+
+    ;; A point between two cells, in cells: (x . y) floats.
+    (define (lerp-cell a b t width)
+      (cons (+ (idx-x a width) (* t (- (idx-x b width) (idx-x a width))))
+            (+ (idx-y a width) (* t (- (idx-y b width) (idx-y a width))))))
+
+    ;; Where the camera is this frame: the runner between his last cell
+    ;; and this one, eased over the beat. The draw and the taps share it.
+    (define (hub-screen-camera hs)
+      (let* ((w (hub-screen-world hs))
+             (p (hub-screen-prev hs))
+             (width (layer-width (world-layer w))))
+        (lerp-cell (runner-cell (world-runner p)) (runner-cell (world-runner w)) (ease (hub-screen-tween hs)) width)))
+
+    ;; A daemon between beats, by index: its cell in prev and now.
+    (define (hub-screen-daemon-at hs d)
+      (let* ((w (hub-screen-world hs))
+             (width (layer-width (world-layer w)))
+             (before (find (lambda (e) (= (daemon-index e) (daemon-index d))) (world-daemons (hub-screen-prev hs)))))
+        (lerp-cell (if before (daemon-cell before) (daemon-cell d)) (daemon-cell d) (ease (hub-screen-tween hs)) width)))
+
+    ;; --- input -> action -------------------------------------------------------------
+
+    (define (pressed? f key) (and (memq key (input-frame-pressed f)) #t))
+    (define (held? f key) (and (memq key (input-frame-held f)) #t))
+
+    (define (direction-pressed f)
+      (cond ((or (pressed? f 'up) (pressed? f 'w) (pressed? f 'k)) 'up)
+            ((or (pressed? f 'down) (pressed? f 's) (pressed? f 'j)) 'down)
+            ((or (pressed? f 'left) (pressed? f 'a) (pressed? f 'h)) 'left)
+            ((or (pressed? f 'right) (pressed? f 'd) (pressed? f 'l)) 'right)
+            (else #f)))
+
+    (define (direction-held f)
+      (cond ((or (held? f 'up) (held? f 'w) (held? f 'k)) 'up)
+            ((or (held? f 'down) (held? f 's) (held? f 'j)) 'down)
+            ((or (held? f 'left) (held? f 'a) (held? f 'h)) 'left)
+            ((or (held? f 'right) (held? f 'd) (held? f 'l)) 'right)
+            (else #f)))
+
+    ;; The verb the runner's cell offers: enter | descend | market | wait.
+    (define (context-verb w)
+      (cond ((let ((n (hub-node-here w))) (and n (not (eq? (node-state (world-node w (node-index n))) 'cleared)))) 'enter)
+            ((hub-can-descend? w) 'descend)
+            ((hub-at-market? w) 'market)
+            (else 'wait)))
+
+    ;; A tap at (vx, vy) in virtual pixels: the cell under it, given the
+    ;; camera the draw used (cam-x cam-y in cells, the view's center) and
+    ;; the cell size in pixels.
+    (define (tap-cell w vx vy cam-x cam-y cell-px view-w view-h)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (cx (+ cam-x 0.5 (/ (- vx (* cell-px (/ view-w 2.0))) cell-px)))   ; the camera cell is centered on the view
+             (cy (+ cam-y 0.5 (/ (- vy (* cell-px (/ view-h 2.0))) cell-px)))
+             (x (exact (floor cx)))
+             (y (exact (floor cy))))
+        (and (in-bounds? x y width height) (idx x y width))))
+
+    ;; The action an input frame asks for, or #f: the tap's cell decides
+    ;; move / verb / one step along the path; the keys as documented.
+    (define (screen-action-for hs f)
+      (let* ((w (hub-screen-world hs))
+             (l (world-layer w))
+             (width (layer-width l))
+             (here (runner-cell (world-runner w)))
+             (cam (hub-screen-camera hs))
+             (dir (direction-pressed f))
+             (click (input-frame-click f)))
+        (cond (dir (list 'move dir))
+              ((or (pressed? f 'space) (pressed? f KEY-DOT)) 'wait)
+              ((or (pressed? f 'return) (pressed? f 'e)) (context-verb w))
+              ((pressed? f KEY-1) (list 'use 'cloak))
+              ((pressed? f KEY-2) (list 'use 'decoy))
+              ((pressed? f KEY-3) (list 'use 'jam))
+              (click
+               (let ((target (tap-cell w (car click) (cdr click) (car cam) (cdr cam) CELL-PX VIEW-W VIEW-H)))
+                 (cond ((not target) #f)
+                       ((= target here) (context-verb w))
+                       ((cell-adjacent? target here width)
+                        (list 'move (cond ((= target (- here 1)) 'left)
+                                          ((= target (+ here 1)) 'right)
+                                          ((< target here) 'up)
+                                          (else 'down))))
+                       (else
+                        (let ((path (hub-path w target)))
+                          (and path (pair? path) (list 'move (car path))))))))
+              (else #f))))
+
+    ;; --- the beat --------------------------------------------------------------------------
+
+    (define (toasts-for w)
+      (filter-map
+       (lambda (e)
+         (cond ((eq? e 'ice-hit) (toast text: "ICE PULSE. TRACE SPIKED." kind: 'ice))
+               ((eq? e 'severed) (toast text: "LINK SEVERED." kind: 'ice))
+               ((eq? e 'gibson) (toast text: "Gibson noticed you." kind: 'gibson))
+               ((eq? e 'severed-layer) (toast text: "RECONNECTED. THE LAYER HAS CHANGED."))
+               ((not (pair? e)) #f)
+               ((eq? (car e) 'seen) (toast text: "SEEN. TRACE SPIKED." kind: 'ice))
+               ((eq? (car e) 'contact) (toast text: "CONTACT. TRACE SPIKED." kind: 'ice))
+               ((eq? (car e) 'pickup)
+                (if (eq? (cadr e) 'credits)
+                    (toast text: (string-append "CACHE: " (number->string (caddr e)) " CREDITS."))
+                    (toast text: (string-append "CACHE: " (string-upcase* (symbol->string (caddr e))) "."))))
+               ((eq? (car e) 'gate-opened) (toast text: "GATE OPEN."))
+               ((eq? (car e) 'used) (toast text: (string-append (string-upcase* (symbol->string (cadr e))) " ACTIVE.")))
+               ((eq? (car e) 'bought) (toast text: (string-append (string-upcase* (symbol->string (cadr e))) " BOUGHT.")))
+               ((eq? (car e) 'cleared) (toast text: "NODE CRASHED."))
+               ((eq? (car e) 'severed-board) (toast text: "BOARD SEVERED. ICE ALERTED." kind: 'ice))
+               ((eq? (car e) 'descended) (toast text: (string-append "LAYER " (number->string (cadr e)) ".")))
+               (else #f)))
+       (reverse (world-events w))))
+
+    (define (string-upcase* s)
+      (list->string (map char-upcase (string->list s))))
+
+    ;; One beat with `action`: the world steps, the tween restarts, the
+    ;; toasts join, the world's request becomes a panel or the shell's.
+    (define (beat hs action)
+      (let* ((w0 (hub-screen-world hs))
+             (w1 (hub-step w0 action))
+             (hs (hub-screen hs
+                             world: w1
+                             prev: w0
+                             tween: 0.0
+                             queued: #f
+                             last: action
+                             beats: (+ 1 (hub-screen-beats hs))
+                             toasts: (append (toasts-for w1) (hub-screen-toasts hs)))))
+        (route-request hs)))
+
+    ;; The world's request: launch and menu go to the shell; the market,
+    ;; a severed layer and the end are this screen's panels; descend is
+    ;; taken at once (the ledger interstitial is the shell's, later).
+    (define (route-request hs)
+      (let* ((w (hub-screen-world hs))
+             (r (world-request w)))
+        (cond ((not r) hs)
+              ((eq? r 'launch) (hub-screen hs request: 'launch))
+              ((eq? r 'market) (hub-screen hs world: (world w request: #f) panel: 'market panel-row: 0))
+              ((eq? r 'severed) (hub-screen hs panel: 'severed panel-row: 0))
+              ((eq? r 'descend)
+               (let ((w2 (hub-descend w)))
+                 (if (world-done? w2)
+                     (hub-screen hs world: w2 prev: w2 panel: 'done panel-row: 0
+                                 toasts: (append (toasts-for w2) (hub-screen-toasts hs)))
+                     (hub-screen hs world: w2 prev: w2 tween: 1.0
+                                 toasts: (append (toasts-for w2) (hub-screen-toasts hs))))))
+              ((eq? r 'done) (hub-screen hs panel: 'done panel-row: 0))
+              (else hs))))
+
+    ;; A panel's input: up/down move the row, Return picks, Escape leaves.
+    (define (panel-tick hs f)
+      (let ((panel (hub-screen-panel hs))
+            (row (hub-screen-panel-row hs))
+            (w (hub-screen-world hs)))
+        (cond ((eq? panel 'market)
+               (let ((rows (hub-screen-shop hs)))
+                 (cond ((pressed? f 'escape) (hub-screen hs panel: #f))
+                       ((or (pressed? f 'up) (pressed? f 'k)) (hub-screen hs panel-row: (max 0 (- row 1))))
+                       ((or (pressed? f 'down) (pressed? f 'j)) (hub-screen hs panel-row: (min (max 0 (- (length rows) 1)) (+ row 1))))
+                       ((and (pressed? f 'return) (pair? rows))
+                        (let ((w2 (hub-buy w (car (list-ref rows (min row (- (length rows) 1)))))))
+                          (hub-screen hs world: w2 prev: (hub-screen-prev hs)
+                                      toasts: (append (toasts-for w2) (hub-screen-toasts hs)))))
+                       (else hs))))
+              ((eq? panel 'severed)
+               (cond ((pressed? f 'return)
+                      ;; RECONNECT: the layer regrows (D23)
+                      (let ((w2 (hub-severed-layer w)))
+                        (hub-screen hs world: w2 prev: w2 tween: 1.0 panel: #f clock: 0.0
+                                    toasts: (append (toasts-for w2) (hub-screen-toasts hs)))))
+                     ((pressed? f 'escape) (hub-screen hs request: 'menu))   ; JACK OUT: the run holds as it stands
+                     (else hs)))
+              ((eq? panel 'done)
+               (if (or (pressed? f 'return) (pressed? f 'escape))
+                   (hub-screen hs request: 'menu)
+                   hs))
+              (else hs))))
+
+    (define (tick-toasts toasts dt)
+      (filter-map (lambda (t)
+                    (let ((ms (- (toast-ms t) dt)))
+                      (and (> ms 0) (toast t ms: ms))))
+                  toasts))
+
+    ;; One frame: dt in ms and the input frame. Answers the next screen.
+    (define (hub-screen-tick hs dt f)
+      (let* ((hs (hub-screen hs toasts: (tick-toasts (hub-screen-toasts hs) dt)))
+             (hs (hub-screen hs tween: (min 1.0 (+ (hub-screen-tween hs) (/ dt (hub-screen-beat-ms hs)))))))
+        (cond ((hub-screen-panel hs) (panel-tick hs f))
+              ((hub-screen-request hs) hs)                ; waiting on the shell
+              ((pressed? f 'escape) (hub-screen hs request: 'menu))
+              ((hub-screen-held? hs) hs)
+              (else
+               (let* ((action (screen-action-for hs f))
+                      ;; the late window: a press just after a wait beat is that beat's
+                      (hs (if (and action
+                                   (eq? (hub-screen-last hs) 'wait)
+                                   (> (hub-screen-beats hs) 0)
+                                   (< (hub-screen-clock hs) (* LATE-WINDOW (hub-screen-beat-ms hs)))
+                                   (not (world-request (hub-screen-prev hs))))
+                              (let ((late (beat (hub-screen hs world: (hub-screen-prev hs) beats: (- (hub-screen-beats hs) 1)) action)))
+                                (hub-screen late queued: #f tween: (hub-screen-tween hs)))
+                              (if action (hub-screen hs queued: action) hs)))
+                      (clock (+ (hub-screen-clock hs) dt)))
+                 (let loop ((hs hs) (clock clock) (n 0))
+                   (let ((beat-ms (hub-screen-beat-ms hs)))
+                     (cond ((or (< clock beat-ms) (hub-screen-request hs) (hub-screen-panel hs))
+                            (hub-screen hs clock: (if (or (hub-screen-request hs) (hub-screen-panel hs)) 0.0 clock)))
+                           ((= n MAX-CATCH-UP) (hub-screen hs clock: 0.0))
+                           (else
+                            (let* ((action (or (hub-screen-queued hs)
+                                               (let ((d (direction-held f))) (and d (list 'move d)))
+                                               'wait))
+                                   (hs (beat hs action))
+                                   (hs (hub-screen hs beat-ms: (beat-ms-of hs))))
+                              (loop hs (- clock beat-ms) (+ n 1))))))))))))
+
+    ;; A board's outcome back into the world (the shell, after a launch).
+    (define (hub-screen-return hs outcome)
+      (let* ((w (hub-return (hub-screen-world hs) outcome))
+             (hs (hub-screen hs world: w prev: w tween: 1.0 request: #f clock: 0.0
+                             toasts: (append (toasts-for w) (hub-screen-toasts hs)))))
+        (route-request hs)))))

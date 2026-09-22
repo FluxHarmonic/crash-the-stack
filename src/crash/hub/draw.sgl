@@ -25,63 +25,76 @@
           (crash hub tiles)
           (crash hub world)
           (crash hub gen)
-          (crash hub rules))
+          (crash hub rules)
+          (crash hub screen))
 
-  (export hub-door! hub-door-seed hub-door-world hub-door-prepare! hub-door-draw!
-          draw-hub-world lit-tiles-ensure! lit-role HUE-NAMES STEPS
-          VIEW-W VIEW-H CELL-PX SCALE)
+  (export hub-door! hub-bpm! hub-door-seed hub-door-world hub-door-prepare! hub-door-tick! hub-door-draw!
+          hub-live? hub-current hub-set! HUB-HELD-KEYS
+          draw-hub-screen lit-tiles-ensure! lit-ready? lit-role HUE-NAMES STEPS
+          BAND-H)
 
   (begin
-    (define SCALE 2)                  ; the tiles at 2x (D61)
-    (define CELL-PX (* SCALE TILE-SIZE))   ; 32 px a cell
-    (define VIEW-W 20)                ; cells across the 640 px view
-    (define VIEW-H 11)                ; cells down the 352 px board area
     (define BAND-H 48)                ; the status band below, the HUD's height
+    ;; The keys the shells report as held (beside the modifiers) so the
+    ;; screen walks on a held arrow: what (crash hub screen)'s direction-held reads.
+    (define HUB-HELD-KEYS (list 'up 'down 'left 'right 'w 'a 's 'd 'h 'j 'k 'l))
     ;; --- the door --------------------------------------------------------------
+    ;;
+    ;; ?hub=SEED / --hub SEED: the hub live on layer 1 of run seed SEED, in
+    ;; place of the menu, stepping on the beat and taking input; ?bpm=N
+    ;; pins the clock. The shells own nothing of it but four hooks: tick,
+    ;; prepare, draw, and the request they answer (a launch or the menu).
+    ;; The JACK IN wiring (phase 2, step 4) replaces the door with the run.
 
     (define *door-seed* #f)
-    (define *door-world* #f)
-    (define WALK-BEATS 12)            ; look 2 shows the world this many beats down the path to the first key
+    (define *door-bpm* #f)
+    (define *hub* #f)                 ; the live hub-screen, or #f
 
-    ;; ?hub=SEED / --hub SEED: arm the door with a run seed (a non-number disarms it).
     (define (hub-door! text)
       (let ((n (and (string? text) (string->number text))))
-        (set! *door-world* #f)
+        (set! *hub* #f)
         (set! *door-seed* (and n (exact? n) (integer? n) (>= n 0) (max 1 n)))))
 
+    (define (hub-bpm! text)
+      (let ((n (and (string? text) (string->number text))))
+        (set! *door-bpm* (and n (> n 0) n))
+        (when *hub* (set! *hub* (hub-screen-with-bpm *hub* *door-bpm*)))))
 
     (define (hub-door-seed) *door-seed*)
+    (define (hub-live?) (and *hub* #t))
+    (define (hub-current) *hub*)
+    (define (hub-set! hs) (set! *hub* hs))
 
-    ;; The door's world, built on first use: WALK-BEATS beats down the
-    ;; shortest path to the first key node (so the runner is off-center and
-    ;; the memory has a trail), the walk the scripted run's, one move per beat.
+    ;; The door's screen, built on first use.
     (define (hub-door-world)
-      (when (and *door-seed* (not *door-world*))
-        (let ((w (hub-new *door-seed*)))
-          (set! *door-world*
-                (let* ((n (find (lambda (n) (node-key n)) (world-nodes w)))
-                       (path (and n (hub-path w (node-cell n)))))
-                  (let walk ((w w) (path (or path '())) (k 0))
-                    (if (or (null? path) (= k WALK-BEATS) (world-request w))
-                        w
-                        (walk (hub-step w (list 'move (car path))) (cdr path) (+ k 1))))))))
-      *door-world*)
+      (when (and *door-seed* (not *hub*))
+        (set! *hub* (hub-screen-with-bpm (hub-screen-new *door-seed*) *door-bpm*)))
+      *hub*)
 
-    ;; Before the frame's passes: the bake (one (hue, step) per call), and
-    ;; the world itself on the first call (a generation inside the frame
-    ;; would be a one-time hitch).
+    ;; Before the frame's passes: the bake (one (hue, step) per call) and the
+    ;; screen on the first call.
     (define (hub-door-prepare!)
       (when *door-seed*
         (lit-tiles-ensure!)
         (hub-door-world)))
 
+    ;; The frame's tick while the door is live: the screen steps on its clock
+    ;; with this frame's input; answers #t when it took the frame (the shell
+    ;; skips its menu step), #f when the door is shut.
+    (define (hub-door-tick! dt-ms f)
+      (and *door-seed*
+           (let ((hs (hub-door-world)))
+             (set! *hub* (hub-screen-tick hs dt-ms f))
+             #t)))
+
     ;; Inside the frame: the screen, or #f when the door is shut so the
     ;; shell draws its own.
     (define (hub-door-draw! vw vh bg)
       (and *door-seed*
-           (let ((w (hub-door-world)))
-             (draw-hub-world w vw vh bg)
+           (let ((hs (hub-door-world)))
+             (draw-hub-screen hs vw vh bg)
              #t)))
+
     ;; --- helpers ---------------------------------------------------------------
 
     (define (rows-of-tone rows digit)
@@ -382,79 +395,161 @@
 
     ;; The 40x22 window centered on the runner, wherever he stands: the
     ;; map runs past the edges and the field shows beyond it.
-    (define (draw-hub-world w vw vh bg)
-      (light-map! w)
-      (let* ((l (world-layer w))
+    ;; The frame: the world as the screen holds it, the camera between the
+    ;; runner's last cell and this one (the camera cell centered on the
+    ;; board area), the runner and the daemons sliding the same way, the
+    ;; light map of the current world, the toasts, and a panel when the
+    ;; screen holds one. The field (bg) draws behind; the veil dims it in
+    ;; seen void; the fog covers the rest.
+    (define (draw-hub-screen hs vw vh bg)
+      (let* ((w (hub-screen-world hs))
+             (l (world-layer w))
              (width (layer-width l))
              (height (layer-height l))
              (top (- vh BAND-H))
+             (cam (hub-screen-camera hs))
+             (cam-x (car cam))
+             (cam-y (cdr cam))
              (r (world-runner w))
-             (s SCALE)
-             (cell-px CELL-PX)
-             (view-w VIEW-W)
-             (view-h VIEW-H)
-             (ox (- (idx-x (runner-cell r) width) (quotient view-w 2)))
-             (oy (- (idx-y (runner-cell r) width) (quotient view-h 2)))
-             (fans (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w)))
-             (daemon-cells (map daemon-cell (world-daemons w))))
-        (color! C-BG)
-        (draw-filled-rect 0 0 vw vh)
+             ;; pixel of a cell's top-left from its cell coordinates
+             (px-of (lambda (cx) (exact (round (+ (/ vw 2.0) (* CELL-PX (- cx cam-x 0.5)))))))
+             (py-of (lambda (cy) (exact (round (+ (/ top 2.0) (* CELL-PX (- cy cam-y 0.5)))))))
+             (x0 (- (exact (floor (- cam-x (/ VIEW-W 2.0)))) 1))
+             (y0 (- (exact (floor (- cam-y (/ VIEW-H 2.0)))) 1))
+             (fans (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w))))
+        (light-map! w)
+        (if bg
+            (draw-board-background vw vh top 0.0 bg 'off)
+            (begin (color! C-BG) (draw-filled-rect 0 0 vw vh)))
         (when (lit-ready?)
-          (let rows ((y 0))
-            (when (< y view-h)
-              (let cols ((x 0))
-                (when (< x view-w)
-                  (let* ((lx (+ x ox))
-                         (ly (+ y oy))
-                         (inside (in-bounds? lx ly width height))
+          (let rows ((ly y0))
+            (when (< ly (+ y0 VIEW-H 3))
+              (let cols ((lx x0))
+                (when (< lx (+ x0 VIEW-W 3))
+                  (let* ((inside (in-bounds? lx ly width height))
                          (i (and inside (idx lx ly width)))
                          (kind (if inside (layer-cell l i) 'void))
-                         (px (* x cell-px))
-                         (py (* y cell-px))
+                         (px (px-of lx))
+                         (py (py-of ly))
                          (light (if inside (vector-ref *light* i) 0.0))
                          (hue (if inside (vector-ref *hue* i) 'cool))
                          (visible? (and inside (vector-ref *visible* i))))
-                    (cond ((and (eq? kind 'void) (not (seen-void? w l lx ly)))
-                           (draw-lit 'cool "fog" 4.0 px py))            ; unseen: fog, whatever lies there (no outline leaks)
-                          ((eq? kind 'void)
-                           (draw-lit 'cool "veil" 4.0 px py))           ; the field under a veil (phase 2 draws the field)
-                          ((<= light 0.0)
-                           (draw-lit 'cool "fog" 4.0 px py))
-                          ((eq? kind 'barrier)
-                           (draw-lit hue (if (walkable-at? l lx (+ ly 1)) "barrier-front" "barrier-top") light px py))
-                          (else
-                           (draw-lit hue "floor" light px py)
-                           (let ((item (item-tile w i)))
-                             (when item (draw-lit hue item light px py)))
-                           (when (and (in-bounds? lx (- ly 1) width height)
-                                      (eq? (layer-cell l (idx lx (- ly 1) width)) 'barrier))
-                             (draw-lit hue "wall-shadow" light px py))
-                           (when (and visible? (memv i fans))
-                             (draw-sight-cell px py))
-                           (let ((k (key-label-for w i)))
-                             (when k
-                               (color! (role-color (cdr (assv 7 (cdr (assq hue HUES))))))
-                               (draw-text (number->string k) (+ px (* 2 s)) (+ py (* 2 s)) s)))
-                           (when (and visible? (memv i daemon-cells))
-                             (draw-lit 'cool "daemon" light px py))
-                           (when (= i (runner-cell r))
-                             (draw-lit 'cool "runner" 4.0 px py)))))
-                  (cols (+ x 1))))
-              (rows (+ y 1)))))
-        ;; the band
+                    (when (< py top)   ; nothing over the band
+                      (cond ((and (eq? kind 'void) (not (seen-void? w l lx ly)))
+                             (draw-lit 'cool "fog" 4.0 px py))
+                            ((eq? kind 'void)
+                             (draw-lit 'cool "veil" 4.0 px py))
+                            ((<= light 0.0)
+                             (draw-lit 'cool "fog" 4.0 px py))
+                            ((eq? kind 'barrier)
+                             (draw-lit hue (if (walkable-at? l lx (+ ly 1)) "barrier-front" "barrier-top") light px py))
+                            (else
+                             (draw-lit hue "floor" light px py)
+                             (let ((item (item-tile w i)))
+                               (when item (draw-lit hue item light px py)))
+                             (when (and (in-bounds? lx (- ly 1) width height)
+                                        (eq? (layer-cell l (idx lx (- ly 1) width)) 'barrier))
+                               (draw-lit hue "wall-shadow" light px py))
+                             (when (and visible? (memv i fans))
+                               (draw-sight-cell px py))
+                             (let ((k (key-label-for w i)))
+                               (when k
+                                 (color! (role-color (cdr (assv 7 (cdr (assq hue HUES))))))
+                                 (draw-text (number->string k) (+ px (* 2 SCALE)) (+ py (* 2 SCALE)) SCALE)))))))
+                  (cols (+ lx 1))))
+              (rows (+ ly 1))))
+          ;; the daemons the runner sees, sliding between beats
+          (for-each (lambda (d)
+                      (when (vector-ref *visible* (daemon-cell d))
+                        (let ((at (hub-screen-daemon-at hs d)))
+                          (draw-lit 'cool "daemon" (vector-ref *light* (daemon-cell d)) (px-of (car at)) (py-of (cdr at))))))
+                    (world-daemons w))
+          ;; the runner, always lit
+          (draw-lit 'cool "runner" 4.0 (px-of cam-x) (py-of cam-y)))
+        ;; the toasts, newest at the top of the board area
+        (let toasts ((ts (hub-screen-toasts hs)) (y 8) (n 0))
+          (when (and (pair? ts) (< n 3))
+            (let ((t (car ts)))
+              (color! (cond ((eq? (toast-kind t) 'ice) C-ICE) ((eq? (toast-kind t) 'gibson) C-GIBSON) (else C-TEXT)))
+              (draw-text (toast-text t) (- (/ vw 2) (/ (* 12 (string-length (toast-text t))) 2)) y 2)
+              (toasts (cdr ts) (+ y 18) (+ n 1)))))
+        (draw-hub-panel hs vw top)
+        ;; the band: the trace, the credits, the beat
         (color! C-BG)
         (draw-filled-rect 0 top vw BAND-H)
         (color! C-BAR-C)
         (draw-filled-rect 0 top vw 1)
+        (draw-hub-meter w 8 (+ top 6) 200 10)
         (color! C-TEXT)
         (draw-text (string-append "LAYER " (number->string (world-depth w)) "/" (number->string (layer-count))
-                                  "  TRACE " (number->string (world-trace w)) "/" (number->string (descriptor-budget (hub-descriptor w)))
-                                  "  CR " (number->string (world-layer-credits w))
-                                  "  BEAT " (number->string (world-beat w))
-                                  "  SEED " (number->string (world-run-seed w)))
-                   8 (+ top 8) 2)
+                                  "  CR " (number->string (+ (world-credits w) (world-layer-credits w)))
+                                  "  KEYS " (number->string (length (world-keys w)))
+                                  (let ((inv (world-inventory w)))
+                                    (if (null? inv) "" (string-append "  TOOLS " (number->string (fold-left (lambda (n e) (+ n (cdr e))) 0 inv))))))
+                   220 (+ top 6) 2)
         (color! C-TEXT-DIM)
-        (draw-text (string-append "HUB DOOR: LAYER 1 OF RUN SEED " (number->string (world-run-seed w)) ", BEAT " (number->string (world-beat w))
-                                  " OF A SCRIPTED WALK; "
-                                  (number->string (length (hub-runner-sight w))) " CELLS IN SIGHT")
-                   8 (+ top 28) 1)))))
+        (draw-text (string-append (alert-word (hub-alert w)) "  " (number->string (hub-tempo w)) " BPM  BEAT " (number->string (world-beat w))
+                                  "  SEED " (number->string (world-run-seed w)))
+                   8 (+ top 28) 1)))
+
+    (define (alert-word a)
+      (cond ((eq? a 'hunted) "HUNTED") ((eq? a 'alert) "ALERT") (else "QUIET")))
+
+    ;; The layer's trace as the boards' meter: filling toward the budget.
+    (define (draw-hub-meter w x y wd ht)
+      (let ((f (min 1.0 (hub-trace-fraction w))))
+        (color! C-BAR-C)
+        (draw-filled-rect x y wd ht)
+        (color! (if (>= f TENSE-AT) C-TRACE-HOT C-TRACE))
+        (draw-filled-rect (+ x 1) (+ y 1) (exact (floor (* (- wd 2) f))) (- ht 2))))
+
+    ;; The screen's own panels: the market's rows, the severed link, RUN COMPLETE.
+    (define (draw-hub-panel hs vw top)
+      (let ((panel (hub-screen-panel hs))
+            (w (hub-screen-world hs)))
+        (when panel
+          (let* ((pw 360) (ph 200) (px (quotient (- vw pw) 2)) (py (quotient (- top ph) 2)))
+            (color! C-BG)
+            (draw-filled-rect px py pw ph)
+            (color! C-BAR-C)
+            (draw-filled-rect px py pw 1) (draw-filled-rect px (+ py ph -1) pw 1)
+            (draw-filled-rect px py 1 ph) (draw-filled-rect (+ px pw -1) py 1 ph)
+            (cond ((eq? panel 'market)
+                   (color! C-TEXT)
+                   (draw-text "MARKET" (+ px 16) (+ py 12) 2)
+                   (color! C-TEXT-DIM)
+                   (draw-text (string-append "CREDITS " (number->string (+ (world-credits w) (world-layer-credits w))) "   ESC LEAVES") (+ px 16) (+ py 34) 1)
+                   (let rows ((rs (hub-screen-shop hs)) (i 0) (y (+ py 52)))
+                     (when (pair? rs)
+                       (let* ((row (car rs))
+                              (lit? (= i (hub-screen-panel-row hs))))
+                         (color! (cond ((not (caddr row)) C-TEXT-DIM) (lit? C-SELECTED) (else C-TEXT)))
+                         (draw-text (string-append (if lit? "> " "  ") (string-upcase* (symbol->string (car row)))
+                                                   "  " (number->string (cadr row)) " CR"
+                                                   "  X" (number->string (world-inventory-count w (car row))))
+                                    (+ px 16) y 2)
+                         (rows (cdr rs) (+ i 1) (+ y 20))))))
+                  ((eq? panel 'severed)
+                   (color! C-TRACE-HOT)
+                   (draw-text "LINK SEVERED." (+ px 16) (+ py 12) 2)
+                   (color! C-TEXT)
+                   (draw-text "THE TRACE FILLED. THE LAYER IS LOST;" (+ px 16) (+ py 48) 1)
+                   (draw-text "TOOLS KEPT, LAYER CREDITS GONE." (+ px 16) (+ py 60) 1)
+                   (color! C-SELECTED)
+                   (draw-text "> RECONNECT   (RETURN)" (+ px 16) (+ py 100) 2)
+                   (color! C-TEXT)
+                   (draw-text "  JACK OUT    (ESC)" (+ px 16) (+ py 124) 2))
+                  ((eq? panel 'done)
+                   (let ((g (world-ledger w)))
+                     (color! C-LABEL-LIT)
+                     (draw-text "RUN COMPLETE" (+ px 16) (+ py 12) 2)
+                     (color! C-TEXT)
+                     (draw-text (string-append "LAYERS " (number->string (ledger-cleared g)) "  BEATS " (number->string (ledger-beats g))) (+ px 16) (+ py 48) 1)
+                     (draw-text (string-append "MOVES " (number->string (ledger-moves g)) "  SEEN " (number->string (ledger-seen g))) (+ px 16) (+ py 60) 1)
+                     (draw-text (string-append "RECONNECTS " (number->string (ledger-reconnects g)) "  SEVERED LAYERS " (number->string (ledger-severed-layers g))) (+ px 16) (+ py 72) 1)
+                     (draw-text (string-append "CREDITS " (number->string (ledger-credits g))) (+ px 16) (+ py 84) 1)
+                     (color! C-SELECTED)
+                     (draw-text "> MENU   (RETURN)" (+ px 16) (+ py 124) 2))))))))
+
+    (define (string-upcase* s)
+      (list->string (map char-upcase (string->list s))))))

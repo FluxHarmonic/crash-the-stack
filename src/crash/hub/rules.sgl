@@ -36,12 +36,12 @@
           hub-alert hub-tense? hub-tempo hub-trace-fraction hub-pulse?
           hub-passable? hub-daemon-passable? hub-can-descend? hub-at-market? hub-can-buy?
           hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent? hub-runner-sight hub-path
-          hub-nearest-daemon hub-node-here
+          hub-nearest-daemon hub-node-here hub-buy hub-market-request
           launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson
           action-valid? ACTIONS)
 
   (begin
-    (define ACTIONS (list 'move 'wait 'use 'enter 'buy 'descend))
+    (define ACTIONS (list 'move 'wait 'use 'enter 'buy 'descend 'market))
 
     ;; The descriptor of the world's depth.
     (define (hub-descriptor w) (descriptor-at (world-depth w)))
@@ -319,7 +319,7 @@
     ;; --- the runner's phase ------------------------------------------------------
 
     (define (action-valid? a)
-      (or (memq a (list 'wait 'enter 'descend))
+      (or (memq a (list 'wait 'enter 'descend 'market))
           (and (pair? a) (pair? (cdr a)) (null? (cddr a))
                (or (and (eq? (car a) 'move) (direction? (cadr a)))
                    (and (eq? (car a) 'use) (tool-known? (cadr a)))
@@ -430,7 +430,10 @@
             (add-event (world w request: 'launch) (list 'enter (node-index n)))
             (add-event w (list 'refused 'enter)))))
 
-    (define (do-buy w tool)
+    ;; A purchase without a beat: the market is a hold (D61 phase 2, ruled:
+    ;; a panel); the shell calls this per row chosen. The beat form below
+    ;; stays for a policy that buys on the move.
+    (define (hub-buy w tool)
       (if (not (hub-can-buy? w tool))
           (add-event w (list 'refused 'buy tool))
           (let* ((price (tool-price tool))
@@ -442,6 +445,15 @@
                               inventory: (inventory-add (world-inventory w) tool 1))
                        (list 'bought tool price)))))
 
+    (define (do-buy w tool) (hub-buy w tool))
+
+    ;; Standing on the market: the runner asks for the panel (a hold). The
+    ;; verb takes a beat like the others.
+    (define (hub-market-request w)
+      (if (hub-at-market? w)
+          (add-event (world w request: 'market) 'market)
+          (add-event w (list 'refused 'market))))
+
     (define (do-descend w)
       (if (hub-can-descend? w)
           (add-event (world w request: 'descend) 'descend)
@@ -451,6 +463,7 @@
       (cond ((eq? action 'wait) w)
             ((eq? action 'enter) (do-enter w))
             ((eq? action 'descend) (do-descend w))
+            ((eq? action 'market) (hub-market-request w))
             ((eq? (car action) 'move) (do-move w (cadr action)))
             ((eq? (car action) 'use) (do-use w (cadr action)))
             (else (do-buy w (cadr action)))))
