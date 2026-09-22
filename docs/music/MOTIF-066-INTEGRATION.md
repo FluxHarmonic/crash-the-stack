@@ -91,3 +91,11 @@ listening page remains https://crashthestack.com/soundtrack/.
 The same seven browser checks also pass against the canonical public domain
 in a new browser profile after deployment, including measured audio output
 and Relay Ghost's gain-preserving share/save path.
+
+The first live run selected Breach position 16 and Obsidian position 4 because
+its 40 ms synthetic key holds were too brief under browser load. Its strict
+position assertions correctly failed those two checks. With 120 ms key holds
+and a two-second post-load pause, the rerun passes all seven checks and exits
+zero, selecting the intended tense positions 17 and 5. Both logs are retained;
+`crash-motif-066-browser-live-ii.log` is the successful final public run. No
+application or score change was required.
