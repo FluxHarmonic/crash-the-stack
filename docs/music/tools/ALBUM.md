@@ -1,3 +1,7 @@
+> Current authoring: [shared song sources](../songs/README.md). Use `songs.sgl`
+> to regenerate/check both game and album versions. Earlier composers below
+> remain historical tools; renderers and validators remain supported.
+
 # Album authoring and audio review
 
 These new tools extend the migrated Sigil workflow without changing game tools,

@@ -53,3 +53,13 @@ suggestions.
 - Play the `release` config (`scripts/dev sigil build --config release`,
   then `scripts/dev ./build/release/bin/crash-the-stack`): the `dev`
   bundle runs the game as bytecode at about 5 frames a second.
+
+## Music authoring
+
+Current game/title and album tunes are generated from `docs/music/songs/`.
+Use each song's Sigil entry point or `docs/music/tools/songs.sgl`; read
+`docs/music/songs/README.md` for the tracker reconciliation workflow. Commit
+shared parts/layouts and both generated arrangements with their maps/receipts.
+Run the all-song regeneration check before completing music changes. Tracker
+edits are valid work: preserve and reconcile them, never overwrite them merely
+to make generation pass. Historical composers are retained for experiments.

@@ -26,7 +26,7 @@ process.
 | 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
 | 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
-| 13 | Breach Vector | Edge pair I ready for listening | 3:30 actual |
+| 13 | Breach Vector | Phrases I and Percussion I approved; shared game/album source | 3:30 actual |
 | 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |
 | 15 | Glass Current | Closer I ready for listening | 3:57 actual |
 

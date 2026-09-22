@@ -1,3 +1,7 @@
+> Current authoring: [shared song sources](../songs/README.md). Use `songs.sgl`
+> to regenerate/check both game and album versions. Earlier composers below
+> remain historical tools; renderers and validators remain supported.
+
 # Soundtrack shell tools
 
 Run these with Sigil 0.22.2 or newer. The implementation follows the main
