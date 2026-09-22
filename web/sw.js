@@ -61,7 +61,9 @@ var SHELL = [
   "assets/tunes/spy.cts",
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
-  "assets/icon-512.png"
+  "assets/icon-512.png",
+  "assets/icon-maskable-192.png",
+  "assets/icon-maskable-512.png"
   // P4b (the URL move): the game is /jack-in/ and this worker's scope is
   // that directory; the tracker at /tracker/ is outside it, its own page,
   // and no longer precached or routed here.
