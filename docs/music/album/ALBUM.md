@@ -63,3 +63,7 @@ converting that file to 24-bit does not create a high-resolution master.
 Pilot arrangements and verification: [PILOT-I.md](PILOT-I.md).
 Mastering process and engine follow-ups: [MASTERING.md](MASTERING.md).
 Reproduction commands: [tools/ALBUM.md](../tools/ALBUM.md).
+
+2026-09-22: Obsidian Index now uses the approved Tension V details in its focused
+album phrases; see [album II](OBSIDIAN-II.md). Its sequence position and duration
+are unchanged. Previous album renders remain available for comparison.

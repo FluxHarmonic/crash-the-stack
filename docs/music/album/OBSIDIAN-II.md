@@ -26,3 +26,19 @@ same +5 dB mastering gain as album I. The renderer now uses the shared David
 Wilson metadata and accepts revision labels without replacing prior renders.
 The MP3 exporter selects this revision automatically, with track 12/15 and the
 compact embedded cover. Game runtime integration remains separate.
+
+## Verification and delivery
+
+The score has 870 attacks with zero compiled sample-clock error, no stray
+thirty-second attacks and all final gates released. The complete WAV, FLAC and
+OGG match 245.714286 seconds at stereo 44.1 kHz; WAV/FLAC decoded PCM is identical.
+With the existing +5 dB gain, the master measures -18.4 LUFS-I, 3.5 LU LRA and
+-1.5 dBTP; OGG peaks at -1.4 dBTP and MP3 at -1.5 dBTP. The final master second
+peaks at -90.3 dBFS. MP3 tags, cover, duration and format all pass validation.
+
+Telegram acknowledged the full album II OGG as message 1134. The complete
+updated local MP3 set is tagged-preview-iii/soundtrack/audio/; only Obsidian
+changes, and the previous set remains in tagged-preview-ii/. The isolated MP3
+export is obsidian-ii-mp3/. Publication uses the fresh R2 prefix
+soundtrack/obsidian-album-ii/ and changes only this track's URL in the existing
+fifteen-track player manifest.

@@ -236,3 +236,23 @@ Live browser playback confirmed artist David Wilson, the selected album title,
 the new audio URL and fifteen tracks. The browser check was muted and does not
 claim physical phone testing. Publication logs and verification are retained
 in publication-tagged-ii/ and r2-tagged-ii/ outside the repository.
+
+## Obsidian album II and restored page routing
+
+David approved Tension V's added activity for the album on 2026-09-22. The full
+4:05.714 track now carries it from 1:54.286 to 3:25.714. Only its MP3 URL changes;
+the other fourteen public audio objects remain the accepted tagged revision.
+The complete new local MP3 set is tagged-preview-iii/soundtrack/audio/.
+
+Production had advanced to 47c7fbb1 (game 08d3fb9). Its soundtrack HTML route
+returned the game page, although player.js, CSS and the album manifest were
+still available. Fetching index.html followed Pages' redirect to that fallback;
+HTTP 200 was insufficient to validate it. The first Obsidian publication
+76f82193 preserved that broken HTML, which the browser check caught. The final
+stage restores the repository's album HTML and worker bypass using version
+08d3fb9bfd4a-album-ii, preserving the current game and tracker binaries.
+
+The publisher now refuses an HTML bundle without the album audio element and
+a built worker without the soundtrack bypass, so stale build output fails
+before deployment. Existing controlled clients can accept the normal game
+update; no forced worker activation or game-storage clearing is introduced.

@@ -104,3 +104,7 @@ Breach Vector, Clock Edge and Glass Current still planned.
 Telegram acknowledged the complete Dead Sector album I OGG as message 1124 and
 Obsidian Index album I as message 1125. David asked to begin Breach Vector and
 Clock Edge immediately after delivery; feedback on this pair remains open.
+
+Obsidian's focused accompaniment was subsequently updated with David's approval;
+see [album II](OBSIDIAN-II.md). This report and stone-pair-i/ retain the original
+album arrangement and measurements. Dead Sector remains unchanged.
