@@ -1,0 +1,52 @@
+;;; The user data directory on each platform: (crash store)'s default root
+;;; and (crash tracker files)' tunes directory follow one chain,
+;;; XDG_DATA_HOME, then APPDATA (Windows: %APPDATA%, the Roaming profile;
+;;; David's ruling 2026-09-21 after the first Windows build), then
+;;; ~/.local/share, then the current directory. Real Windows sets neither
+;;; XDG_DATA_HOME nor HOME, so without the APPDATA step the save landed
+;;; next to wherever the game was started and vanished silently when that
+;;; was not writable. The environment is set and restored around each leg;
+;;; set-store-root! #f drops the cached root so the next store-root
+;;; resolves again.
+
+(import (sigil test)
+        (sigil process)
+        (crash store)
+        (crash tracker files))
+
+(define saved
+  (map (lambda (name) (cons name (getenv name)))
+       '("XDG_DATA_HOME" "APPDATA" "HOME")))
+
+(define (with-env xdg appdata home thunk)
+  (setenv! "XDG_DATA_HOME" xdg)
+  (setenv! "APPDATA" appdata)
+  (setenv! "HOME" home)
+  (set-store-root! #f)
+  (let ((result (thunk)))
+    (for-each (lambda (pair) (setenv! (car pair) (cdr pair))) saved)
+    (set-store-root! #f)
+    result))
+
+(test-group "store: the data directory chain"
+  (test "XDG_DATA_HOME wins over everything"
+    (assert-equal "/xdg/crash-the-stack"
+      (with-env "/xdg" "C:/Users/dw/AppData/Roaming" "/home/dw" store-root))
+    (assert-equal "/xdg/crash-the-stack/tunes"
+      (with-env "/xdg" "C:/Users/dw/AppData/Roaming" "/home/dw" user-tunes-dir)))
+  (test "APPDATA (Windows) comes before HOME"
+    (assert-equal "C:/Users/dw/AppData/Roaming/crash-the-stack"
+      (with-env #f "C:/Users/dw/AppData/Roaming" "/home/dw" store-root))
+    (assert-equal "C:/Users/dw/AppData/Roaming/crash-the-stack/tunes"
+      (with-env #f "C:/Users/dw/AppData/Roaming" "/home/dw" user-tunes-dir)))
+  (test "real Windows: APPDATA set, XDG_DATA_HOME and HOME absent"
+    (assert-equal "C:/Users/dw/AppData/Roaming/crash-the-stack"
+      (with-env #f "C:/Users/dw/AppData/Roaming" #f store-root)))
+  (test "Linux: HOME/.local/share when the two are absent"
+    (assert-equal "/home/dw/.local/share/crash-the-stack"
+      (with-env #f #f "/home/dw" store-root))
+    (assert-equal "/home/dw/.local/share/crash-the-stack/tunes"
+      (with-env #f #f "/home/dw" user-tunes-dir)))
+  (test "nothing set: the current directory"
+    (assert-equal "./crash-the-stack"
+      (with-env #f #f #f store-root))))

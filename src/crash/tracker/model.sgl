@@ -1,0 +1,701 @@
+;;; (crash tracker model) - The tracker editor's state and every edit
+;;;
+;;; Pure: a state is an immutable struct, an action is a symbol or a small
+;;; list, and (tracker-apply s action) answers the next state. Nothing here
+;;; draws, plays or reads a key; (crash tracker keys) turns keys into
+;;; actions, (crash tracker draw) draws a state, (crash tracker play) acts
+;;; on the state's `request`. The tune is (motif tune)'s model and every
+;;; edit goes through its cell operations, so what the editor writes is
+;;; what motif prints.
+;;;
+;;; Cursor columns (FT2's): 0 note, 1 inst hi, 2 inst lo, 3 vol hi,
+;;; 4 vol lo, 5 fx command, 6 fx x, 7 fx y.
+;;;
+;;; Actions:
+;;;   up down left right home end page-up page-down next-channel prev-channel
+;;;   (note MIDI) note-off clear (hex N) (octave N) inst-up inst-down
+;;;   toggle-edit play-row play-loop stop
+;;;   order-prev order-next order-insert order-delete order-pattern-up
+;;;   order-pattern-down
+;;;   insert-row delete-row
+;;;   (mark DIR) copy cut paste (order-set N) (scroll ROWS)
+;;;   zoom save open share new undo redo
+;;;   (mute CH) mute-cursor solo unmute-all
+;;;   panel panel-up panel-down panel-inc panel-dec panel-inc-big panel-dec-big
+;;;   (panel-type CHAR) panel-commit panel-backspace panel-close panel-bus meter-next spectrum
+;;; A movement in edit mode after a note entry advances one row (FT2's
+;;; edit skip of 1).
+
+(define-library (crash tracker model)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (motif tune)
+          (motif synth))
+
+  (export tstate tstate? tstate-tune tstate-pos tstate-row tstate-ch tstate-col
+          tstate-octave tstate-inst tstate-edit tstate-zoom tstate-view-ch
+          tstate-mark tstate-clip tstate-message tstate-dirty tstate-request
+          tstate-past tstate-future
+          tstate-playing tstate-name
+          tracker-new tracker-apply tracker-take-request tracker-with-playing
+          tracker-with-tune tracker-with-message tracker-with-name
+          tracker-pattern tracker-pattern-id tracker-rows tracker-channels
+          tracker-cell tracker-block tracker-muted? tstate-mutes tstate-solo tstate-panel
+          tracker-panel-lines tstate-panel-page tstate-spectrum meter-signature meter-row-kind
+          COLUMNS ZOOM-CHANNELS PAGE-ROWS)
+
+  (begin
+    (define COLUMNS 8)
+    (define ZOOM-CHANNELS 4)
+    (define PAGE-ROWS 16)
+
+    (define-struct tstate
+      (tune)
+      (name default: "untitled")   ; the file name (no extension) the tune came from or goes to
+      (pos default: 0)             ; order position
+      (row default: 0)
+      (ch default: 1)
+      (col default: 0)
+      (octave default: 4)
+      (inst default: 1)
+      (edit default: #f)
+      (zoom default: #f)
+      (view-ch default: 1)         ; first visible channel in the zoom
+      (mark default: #f)           ; #f or (row . ch): the block anchor
+      (clip default: #f)           ; #f or (rows chans cells) with cells relative to the block's corner
+      (message default: #f)
+      (dirty default: #f)
+      (request default: #f)        ; play-row | play-loop | stop | save | open | share | #f
+      (playing default: #f)        ; #f or (pos . row) under the audio, set by the mode
+      ;; undo/redo: the tune is an immutable value, so these are two
+      ;; stacks of tune values (David, 2026-09-20), unbounded in the session
+      (past default: '())
+      (future default: '())
+      ;; per-channel mute flags (vector, index 1..n) and the solo channel or #f
+      (mutes default: #f)
+      (solo default: #f)
+      ;; the instrument panel: #f, or (row . entry) with row the selected
+      ;; line (0 = the kind, 1.. the parameters) and entry #f or the text
+      ;; being typed for the selected value
+      (panel default: #f)
+      ;; which page the panel shows: inst (the cursor's instrument) or bus
+      ;; (the tune's reverb and compressor settings)
+      (panel-page default: 'inst)
+      ;; the spectrum strip under the header (David, 2026-09-21), Alt-S
+      (spectrum default: #t))
+
+    ;; ------------------------------------------------------------
+    ;; Lookups
+    ;; ------------------------------------------------------------
+
+    (define (tracker-pattern-id s)
+      (let ((order (tune-order (tstate-tune s))))
+        (if (and (>= (tstate-pos s) 0) (< (tstate-pos s) (length order)))
+            (list-ref order (tstate-pos s))
+            0)))
+
+    (define (tracker-pattern s)
+      (tune-find-pattern (tstate-tune s) (tracker-pattern-id s)))
+
+    (define (tracker-rows s)
+      (let ((p (tracker-pattern s)))
+        (if p (tune-pattern-rows p) 64)))
+
+    (define (tracker-channels s)
+      (tune-channels (tstate-tune s)))
+
+    (define (tracker-cell s row ch)
+      (tune-cell-at (tstate-tune s) (tracker-pattern-id s) row ch))
+
+    (define (first-instrument-id t)
+      (let ((is (tune-instruments t)))
+        (if (pair? is) (tune-instrument-id (car is)) 1)))
+
+    (define (tracker-new t name)
+      (tstate tune: t name: name inst: (first-instrument-id t)
+              mutes: (make-vector (+ (tune-channels t) 1) #f)))
+
+    (define (tracker-with-tune s t)
+      (tstate s tune: t dirty: #t))
+
+    (define (tracker-with-message s m) (tstate s message: m))
+    (define (tracker-with-name s n) (tstate s name: n))
+    (define (tracker-with-playing s p) (tstate s playing: p))
+
+    ;; The mode reads and clears the request.
+    (define (tracker-take-request s)
+      (cons (tstate-request s) (tstate s request: #f)))
+
+    ;; The marked block as (row0 ch0 row1 ch1), or the cursor cell alone.
+    (define (tracker-block s)
+      (let ((m (tstate-mark s)))
+        (if m
+            (list (min (car m) (tstate-row s)) (min (cdr m) (tstate-ch s))
+                  (max (car m) (tstate-row s)) (max (cdr m) (tstate-ch s)))
+            (list (tstate-row s) (tstate-ch s) (tstate-row s) (tstate-ch s)))))
+
+    ;; ------------------------------------------------------------
+    ;; Movement
+    ;; ------------------------------------------------------------
+
+    (define (clamp x lo hi) (max lo (min hi x)))
+
+    (define (wrap-row s row)
+      (let ((n (tracker-rows s)))
+        (modulo row n)))
+
+    (define (set-row s row) (tstate s row: (wrap-row s row) mark: #f))
+
+    (define (clamp-view s)
+      ;; keep the cursor channel visible in the zoom
+      (if (not (tstate-zoom s))
+          s
+          (let* ((ch (tstate-ch s))
+                 (v (tstate-view-ch s))
+                 (v (cond ((< ch v) ch)
+                          ((>= ch (+ v ZOOM-CHANNELS)) (- ch (- ZOOM-CHANNELS 1)))
+                          (else v))))
+            (tstate s view-ch: (clamp v 1 (max 1 (- (tracker-channels s) (- ZOOM-CHANNELS 1))))))))
+
+    (define (move-col s d)
+      (let* ((col (+ (tstate-col s) d))
+             (nch (tracker-channels s)))
+        (cond
+          ((< col 0)
+           (if (> (tstate-ch s) 1)
+               (clamp-view (tstate s ch: (- (tstate-ch s) 1) col: (- COLUMNS 1) mark: #f))
+               s))
+          ((>= col COLUMNS)
+           (if (< (tstate-ch s) nch)
+               (clamp-view (tstate s ch: (+ (tstate-ch s) 1) col: 0 mark: #f))
+               s))
+          (else (tstate s col: col mark: #f)))))
+
+    (define (move-channel s d)
+      (let ((ch (clamp (+ (tstate-ch s) d) 1 (tracker-channels s))))
+        (clamp-view (tstate s ch: ch col: 0 mark: #f))))
+
+    ;; Shift+arrow: extend the block from the anchor (the cursor before the move).
+    (define (mark-move s dir)
+      (let* ((anchor (or (tstate-mark s) (cons (tstate-row s) (tstate-ch s))))
+             (s2 (case dir
+                   ((up) (tstate s row: (max 0 (- (tstate-row s) 1))))
+                   ((down) (tstate s row: (min (- (tracker-rows s) 1) (+ (tstate-row s) 1))))
+                   ((left) (tstate s ch: (max 1 (- (tstate-ch s) 1))))
+                   ((right) (tstate s ch: (min (tracker-channels s) (+ (tstate-ch s) 1))))
+                   (else s))))
+        (clamp-view (tstate s2 mark: anchor))))
+
+    ;; ------------------------------------------------------------
+    ;; Cell edits
+    ;; ------------------------------------------------------------
+
+    (define (cell-or-empty s)
+      (or (tracker-cell s (tstate-row s) (tstate-ch s))
+          (make-cell (tstate-row s) (tstate-ch s) #f 0 0 "000")))
+
+    (define (put-cell s c)
+      (tracker-with-tune s (tune-set-cell (tstate-tune s) (tracker-pattern-id s) c)))
+
+    (define (advance s)
+      (set-row s (+ (tstate-row s) 1)))
+
+    (define (enter-note s midi)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (c2 (make-cell (cell-row c) (cell-channel c) midi
+                                (tstate-inst s)
+                                (cell-vol c) (cell-fx c))))
+            (advance (put-cell s c2)))))
+
+    (define (enter-note-off s)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (c2 (make-cell (cell-row c) (cell-channel c) 'off 0 (cell-vol c) (cell-fx c))))
+            (advance (put-cell s c2)))))
+
+    (define (clear-cell s)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (col (tstate-col s))
+                 (c2 (cond
+                       ((= col 0) (make-cell (cell-row c) (cell-channel c) #f 0 (cell-vol c) (cell-fx c)))
+                       ((<= col 2) (make-cell (cell-row c) (cell-channel c) (cell-note c) 0 (cell-vol c) (cell-fx c)))
+                       ((<= col 4) (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) 0 (cell-fx c)))
+                       (else (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) (cell-vol c) "000")))))
+            (advance (put-cell s c2)))))
+
+    (define (hex-char n)
+      (string-ref "0123456789ABCDEF" n))
+
+    (define (set-string-char str i ch)
+      (let ((l (string->list str)))
+        (list->string
+          (let loop ((l l) (k 0))
+            (cond ((null? l) '())
+                  ((= k i) (cons ch (loop (cdr l) (+ k 1))))
+                  (else (cons (car l) (loop (cdr l) (+ k 1)))))))))
+
+    ;; A hex digit typed on the instrument, volume or effect columns. The
+    ;; instrument and volume columns are decimal-shaped two-digit numbers
+    ;; as FT2 shows them (01..99 and 00..64), typed a digit at a time;
+    ;; the effect column is three hex digits.
+    (define (enter-hex s n)
+      (if (not (tstate-edit s))
+          s
+          (let* ((c (cell-or-empty s))
+                 (col (tstate-col s)))
+            (define (two-digit old hi? limit)
+              (let* ((hi (quotient old 10))
+                     (lo (modulo old 10))
+                     (d (min n 9))
+                     (v (if hi? (+ (* d 10) lo) (+ (* hi 10) d))))
+                (min v limit)))
+            (cond
+              ((= col 0) s)
+              ((<= col 2)
+               (let ((v (two-digit (cell-inst c) (= col 1) 99)))
+                 (put-cell (tstate s col: (if (= col 1) 2 1) row: (if (= col 2) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s)))
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) v (cell-vol c) (cell-fx c)))))
+              ((<= col 4)
+               (let ((v (two-digit (cell-vol c) (= col 3) 64)))
+                 (put-cell (tstate s col: (if (= col 3) 4 3) row: (if (= col 4) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s)))
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) v (cell-fx c)))))
+              (else
+               (let* ((i (- col 5))
+                      (fx (set-string-char (cell-fx c) i (hex-char n)))
+                      (next-col (if (= i 2) 5 (+ col 1)))
+                      (next-row (if (= i 2) (wrap-row s (+ (tstate-row s) 1)) (tstate-row s))))
+                 (put-cell (tstate s col: next-col row: next-row)
+                           (make-cell (cell-row c) (cell-channel c) (cell-note c) (cell-inst c) (cell-vol c) fx))))))))
+
+    ;; ------------------------------------------------------------
+    ;; Rows, order, block
+    ;; ------------------------------------------------------------
+
+    (define (insert-row s)
+      (if (not (tstate-edit s))
+          s
+          (tracker-with-tune s (tune-insert-row (tstate-tune s) (tracker-pattern-id s) (tstate-row s)))))
+
+    (define (delete-row s)
+      (if (not (tstate-edit s))
+          s
+          (tracker-with-tune s (tune-delete-row (tstate-tune s) (tracker-pattern-id s) (tstate-row s)))))
+
+    (define (set-order s order pos)
+      (tstate (tracker-with-tune s (tune-with-order (tstate-tune s) order))
+              pos: (clamp pos 0 (max 0 (- (length order) 1)))
+              row: 0 mark: #f))
+
+    (define (list-insert-at l i x)
+      (if (or (null? l) (= i 0)) (cons x l) (cons (car l) (list-insert-at (cdr l) (- i 1) x))))
+
+    (define (list-remove-at l i)
+      (cond ((null? l) '())
+            ((= i 0) (cdr l))
+            (else (cons (car l) (list-remove-at (cdr l) (- i 1))))))
+
+    (define (list-set-at l i x)
+      (cond ((null? l) '())
+            ((= i 0) (cons x (cdr l)))
+            (else (cons (car l) (list-set-at (cdr l) (- i 1) x)))))
+
+    (define (max-pattern-id t)
+      (fold-left (lambda (m p) (max m (tune-pattern-id p))) -1 (tune-patterns t)))
+
+    ;; Step the pattern number at the order position; past the last id a
+    ;; new empty pattern (same row count as the current one) is added.
+    (define (order-pattern s d)
+      (let* ((t (tstate-tune s))
+             (order (tune-order t))
+             (pid (tracker-pattern-id s))
+             (next (+ pid d)))
+        (cond
+          ((< next 0) s)
+          ((tune-find-pattern t next)
+           (set-order s (list-set-at order (tstate-pos s) next) (tstate-pos s)))
+          ((> d 0)
+           (let* ((new-id (+ (max-pattern-id t) 1))
+                  (p (tune-pattern id: new-id rows: (meter-rows t) cells: '()))
+                  (t2 (tune-with-patterns t (append (tune-patterns t) (list p)))))
+             (set-order (tstate s tune: t2 dirty: #t)
+                        (list-set-at order (tstate-pos s) new-id)
+                        (tstate-pos s))))
+          (else s))))
+
+    (define (block-cells s)
+      (let* ((b (tracker-block s))
+             (r0 (car b)) (c0 (cadr b)) (r1 (caddr b)) (c1 (cadddr b))
+             (p (tracker-pattern s)))
+        (list (+ 1 (- r1 r0)) (+ 1 (- c1 c0))
+              (if p
+                  (filter (lambda (c) #t)
+                          (map (lambda (c)
+                                 (make-cell (- (cell-row c) r0) (- (cell-channel c) c0)
+                                            (cell-note c) (cell-inst c) (cell-vol c) (cell-fx c)))
+                               (filter (lambda (c)
+                                         (and (>= (cell-row c) r0) (<= (cell-row c) r1)
+                                              (>= (cell-channel c) c0) (<= (cell-channel c) c1)))
+                                       (tune-pattern-cells p))))
+                  '()))))
+
+    (define (copy-block s)
+      (tstate s clip: (block-cells s) mark: #f message: "COPIED"))
+
+    (define (clear-block s)
+      (let* ((b (tracker-block s))
+             (r0 (car b)) (c0 (cadr b)) (r1 (caddr b)) (c1 (cadddr b)))
+        (let loop ((r r0) (t (tstate-tune s)))
+          (if (> r r1)
+              (tstate s tune: t dirty: #t mark: #f)
+              (loop (+ r 1)
+                    (let cl ((c c0) (t t))
+                      (if (> c c1)
+                          t
+                          (cl (+ c 1) (tune-set-cell t (tracker-pattern-id s) (make-cell r c #f 0 0 "000"))))))))))
+
+    (define (cut-block s)
+      (if (not (tstate-edit s))
+          s
+          (tstate (clear-block (tstate s clip: (block-cells s))) message: "CUT")))
+
+    (define (paste-block s)
+      (let ((clip (tstate-clip s)))
+        (if (or (not clip) (not (tstate-edit s)))
+            s
+            (let ((r0 (tstate-row s)) (c0 (tstate-ch s))
+                  (nrows (tracker-rows s)) (nch (tracker-channels s)))
+              (let loop ((cs (caddr clip)) (t (tstate-tune s)))
+                (if (null? cs)
+                    (tstate s tune: t dirty: #t message: "PASTED")
+                    (let* ((c (car cs))
+                           (r (+ r0 (cell-row c)))
+                           (ch (+ c0 (cell-channel c))))
+                      (loop (cdr cs)
+                            (if (and (< r nrows) (<= ch nch))
+                                (tune-set-cell t (tracker-pattern-id s)
+                                               (make-cell r ch (cell-note c) (cell-inst c) (cell-vol c) (cell-fx c)))
+                                t)))))))))
+
+    ;; ------------------------------------------------------------
+    ;; Mute and solo (the mode applies them to the player)
+    ;; ------------------------------------------------------------
+
+    (define (tracker-muted? s ch)
+      (and (tstate-mutes s) (< ch (vector-length (tstate-mutes s))) (vector-ref (tstate-mutes s) ch)))
+
+    (define (toggle-mute s ch)
+      (let ((v (vector-copy (or (tstate-mutes s) (make-vector (+ (tracker-channels s) 1) #f)))))
+        (when (< ch (vector-length v)) (vector-set! v ch (not (vector-ref v ch))))
+        (tstate s mutes: v)))
+
+    ;; ------------------------------------------------------------
+    ;; The instrument panel: the current instrument's kind and parameters
+    ;; ------------------------------------------------------------
+
+    ;; The panel's lines for the cursor's instrument: ((key . value) ...)
+    ;; where the first is (kind . KIND) and the rest every parameter of the
+    ;; kind's defaults with the instrument's own values on top.
+    (define (tracker-panel-lines s)
+      (if (eq? (tstate-panel-page s) 'bus)
+          (bus-lines (tstate-tune s))
+          (instrument-lines s)))
+
+    ;; The meter (David, 2026-09-21): the tune's (rows-per-beat . beats-per-bar)
+    ;; and its denominator (the beat's note value), shown as a time signature
+    ;; with the resolution ("3/4  4 ROWS/BEAT"). Ctrl-M cycles these five
+    ;; signatures; the bus page takes any BEATS 1..16, DENOM 1..32, ROWS/BEAT
+    ;; 1..16 typed or stepped. Each preset: (rows beats denominator).
+    (define METER-PRESETS '((4 4 4) (4 3 4) (2 6 8) (2 7 8) (4 5 4)))
+
+    (define (meter-signature t)
+      (list (car (tune-meter t)) (cdr (tune-meter t)) (tune-meter-denominator t)))
+
+    ;; What a row is under the meter: bar (its first row), beat, or #f. The
+    ;; draw tints by this; pinned by test-tracker-model with two meters.
+    (define (meter-row-kind t row)
+      (let* ((m (tune-meter t))
+             (rpb (car m))
+             (bar (* rpb (cdr m))))
+        (cond ((= 0 (modulo row bar)) 'bar)
+              ((= 0 (modulo row rpb)) 'beat)
+              (else #f))))
+
+    ;; rows of a new pattern: a bar of beats, four bars
+    (define (meter-rows t)
+      (let ((m (tune-meter t)))
+        (* (car m) (cdr m) 4)))
+
+    (define (put-meter s rows beats denom)
+      (let* ((t2 (tune (tstate-tune s) meter: (cons rows beats) meter-denominator: denom))
+             (errs (tune-errors t2)))
+        (if (null? errs)
+            (tracker-with-tune s t2)
+            (tstate s message: "OUT OF RANGE"))))
+
+    ;; The bus page: the meter's three rows first (BEATS, DENOM, ROWS/BEAT),
+    ;; then every bus key with the defaults filled in. A tune without a bus
+    ;; section starts from mix 0, so opening the page and changing the
+    ;; compressor does not switch a reverb on.
+    (define (bus-lines t)
+      (append (list (cons 'beats (cdr (tune-meter t)))
+                    (cons 'denom (tune-meter-denominator t))
+                    (cons 'rows/beat (car (tune-meter t))))
+              (bus-canonical (or (tune-bus t) '((mix . 0.0))))))
+
+    (define (meter-key? key) (memq key '(beats denom rows/beat)))
+
+    (define (put-meter-key s key value)
+      (let ((m (meter-signature (tstate-tune s))))
+        (if (and (integer? value) (exact? value))
+            (case key
+              ((beats) (put-meter s (car m) value (caddr m)))
+              ((denom) (put-meter s (car m) (cadr m) value))
+              (else (put-meter s value (cadr m) (caddr m))))
+            (tstate s message: "OUT OF RANGE"))))
+
+    ;; the symbol-valued bus keys and what they cycle through
+    (define BUS-CHOICES '((reverb zitarev revsc) (comp on off)))
+
+    ;; A bus edit that the validator refuses (a value out of range) is
+    ;; dropped with a message; the tune value only ever holds valid text.
+    (define (put-bus s key value)
+      (if (meter-key? key) (put-meter-key s key value) (put-bus-key s key value)))
+
+    (define (put-bus-key s key value)
+      (let* ((t (tstate-tune s))
+             (bus (bus-canonical (or (tune-bus t) (quote ((mix . 0.0))))))   ; the bus keys alone (the meter rows are the tune header's)
+             (bus2 (map (lambda (kv) (if (eq? (car kv) key) (cons key value) kv)) bus))
+             (t2 (tune t bus: bus2))
+             (errs (tune-errors t2)))
+        (if (null? errs)
+            (tracker-with-tune s t2)
+            (tstate s message: "OUT OF RANGE"))))
+
+    (define (bus-step s d big?)
+      (let* ((lines (bus-lines (tstate-tune s)))
+             (row (car (tstate-panel s))))
+        (if (>= row (length lines))
+            s
+            (let* ((line (list-ref lines row))
+                   (key (car line))
+                   (v (cdr line))
+                   (choices (assq key BUS-CHOICES)))
+              (cond
+                (choices
+                 (let* ((cs (cdr choices))
+                        (idx (let find ((xs cs) (n 0)) (cond ((null? xs) 0) ((eq? (car xs) v) n) (else (find (cdr xs) (+ n 1)))))))
+                   (put-bus s key (list-ref cs (modulo (+ idx d) (length cs))))))
+                ((number? v)
+                 (let* ((step (if (and (exact? v) (integer? v)) 1 0.05))
+                        (step (if big? (* step 10) step))
+                        (nv (+ v (* d step)))
+                        (nv (if (and (exact? v) (integer? v)) nv (/ (round (* nv 1000)) 1000.0))))
+                   (put-bus s key nv)))
+                (else s))))))
+
+    (define (instrument-lines s)
+      (let ((i (tune-find-instrument (tstate-tune s) (tstate-inst s))))
+        (if (not i)
+            '()
+            (let* ((kind (tune-instrument-kind i))
+                   (defaults (if (memq kind (synth-kinds)) (synth-default-params kind) '()))
+                   (own (tune-instrument-params i)))
+              (cons (cons 'kind kind)
+                    (map (lambda (d)
+                           (let ((o (assq (car d) own)))
+                             (cons (car d) (if o (cdr o) (cdr d)))))
+                         defaults))))))
+
+    (define (put-instrument s i)
+      (tracker-with-tune s (tune-with-instruments
+                             (tstate-tune s)
+                             (map (lambda (x) (if (= (tune-instrument-id x) (tune-instrument-id i)) i x))
+                                  (tune-instruments (tstate-tune s))))))
+
+    ;; Step the selected panel line: the kind cycles through the synth
+    ;; kinds; a number moves by 1 when it is an integer-valued parameter,
+    ;; else by 0.05 (big: x10); a list (an fm4 operator) is not editable here.
+    (define (panel-step s d big?)
+      (if (eq? (tstate-panel-page s) 'bus)
+          (bus-step s d big?)
+          (instrument-step s d big?)))
+
+    (define (instrument-step s d big?)
+      (let* ((lines (tracker-panel-lines s))
+             (row (car (tstate-panel s)))
+             (i (tune-find-instrument (tstate-tune s) (tstate-inst s))))
+        (cond
+          ((or (not i) (>= row (length lines))) s)
+          ((= row 0)
+           (let* ((kinds (synth-kinds))
+                  (idx (let find ((ks kinds) (n 0)) (cond ((null? ks) 0) ((eq? (car ks) (tune-instrument-kind i)) n) (else (find (cdr ks) (+ n 1))))))
+                  (next (list-ref kinds (modulo (+ idx d) (length kinds)))))
+             (put-instrument s (tune-instrument i kind: next params: '()))))
+          (else
+           (let* ((line (list-ref lines row))
+                  (key (car line))
+                  (v (cdr line)))
+             (if (not (number? v))
+                 (tstate s message: "NOT EDITABLE HERE")
+                 (let* ((step (if (and (exact? v) (integer? v)) 1 0.05))
+                        (step (if big? (* step 10) step))
+                        (nv (+ v (* d step)))
+                        (nv (if (and (exact? v) (integer? v)) nv (/ (round (* nv 1000)) 1000.0))))
+                   (put-instrument s (tune-instrument i params: (alist-set (tune-instrument-params i) key nv))))))))))
+
+    ;; Typing a value for the selected line: digits, - and . accumulate;
+    ;; Enter commits (a number), Backspace deletes, Escape drops it.
+    (define (panel-type s ch)
+      (let ((entry (or (cdr (tstate-panel s)) "")))
+        (tstate s panel: (cons (car (tstate-panel s)) (string-append entry (string ch))))))
+
+    (define (panel-commit s)
+      (let* ((entry (cdr (tstate-panel s)))
+             (row (car (tstate-panel s)))
+             (lines (tracker-panel-lines s))
+             (bus? (eq? (tstate-panel-page s) 'bus))
+             (i (tune-find-instrument (tstate-tune s) (tstate-inst s)))
+             (n (and entry (string->number entry))))
+        (cond
+          ((not entry) s)
+          ((or (not n) (>= row (length lines)) (if bus? (assq (car (list-ref lines row)) BUS-CHOICES) (or (= row 0) (not i))))
+           (tstate s panel: (cons row #f) message: "NOT A NUMBER"))
+          (else
+           (tstate (if bus?
+                       (put-bus s (car (list-ref lines row)) n)
+                       (put-instrument s (tune-instrument i params: (alist-set (tune-instrument-params i) (car (list-ref lines row)) n))))
+                   panel: (cons row #f))))))
+
+    (define (step-instrument s d)
+      (let* ((ids (list-sort < (map tune-instrument-id (tune-instruments (tstate-tune s)))))
+             (cur (tstate-inst s)))
+        (if (null? ids)
+            s
+            (let* ((idx (let find ((l ids) (i 0)) (cond ((null? l) 0) ((= (car l) cur) i) (else (find (cdr l) (+ i 1))))))
+                   (next (clamp (+ idx d) 0 (- (length ids) 1))))
+              (tstate s inst: (list-ref ids next))))))
+
+    ;; ------------------------------------------------------------
+    ;; The dispatcher
+    ;; ------------------------------------------------------------
+
+    (define (undo s)
+      (if (null? (tstate-past s))
+          (tstate s message: "NOTHING TO UNDO")
+          (tstate s tune: (car (tstate-past s))
+                  past: (cdr (tstate-past s))
+                  future: (cons (tstate-tune s) (tstate-future s))
+                  dirty: #t mark: #f message: "UNDO")))
+
+    (define (redo s)
+      (if (null? (tstate-future s))
+          (tstate s message: "NOTHING TO REDO")
+          (tstate s tune: (car (tstate-future s))
+                  future: (cdr (tstate-future s))
+                  past: (cons (tstate-tune s) (tstate-past s))
+                  dirty: #t mark: #f message: "REDO")))
+
+    ;; Every action goes through here: when it changed the tune, the
+    ;; previous value is pushed and the redo stack cleared.
+    (define (tracker-apply s a)
+      (cond
+        ((eq? a 'undo) (undo s))
+        ((eq? a 'redo) (redo s))
+        (else
+         (let ((s2 (apply-action s a)))
+           (if (eq? (tstate-tune s2) (tstate-tune s))
+               s2
+               (tstate s2 past: (cons (tstate-tune s) (tstate-past s)) future: '()))))))
+
+    (define (apply-action s a)
+      (let ((s (tstate s message: #f)))
+        (cond
+          ((pair? a)
+           (case (car a)
+             ((note) (enter-note s (cadr a)))
+             ((hex) (enter-hex s (cadr a)))
+             ((octave) (tstate s octave: (clamp (cadr a) 0 8)))
+             ((mark) (mark-move s (cadr a)))
+             ((mute) (toggle-mute s (cadr a)))
+             ;; a click on the order list (David, 2026-09-21): that entry, row 0
+             ((order-set) (let ((n (length (tune-order (tstate-tune s)))))
+                            (if (and (>= (cadr a) 0) (< (cadr a) n)) (tstate s pos: (cadr a) row: 0 mark: #f) s)))
+             ;; the wheel: rows, the sign of the delta, three rows a notch
+             ((scroll) (tstate s row: (max 0 (min (- (tracker-rows s) 1) (+ (tstate-row s) (cadr a)))) mark: #f))
+             ((panel-type) (if (tstate-panel s) (panel-type s (cadr a)) s))
+             (else s)))
+          (else
+           (case a
+             ((up) (set-row s (- (tstate-row s) 1)))
+             ((down) (set-row s (+ (tstate-row s) 1)))
+             ((left) (move-col s -1))
+             ((right) (move-col s 1))
+             ((home) (set-row s 0))
+             ((end) (set-row s (- (tracker-rows s) 1)))
+             ((page-up) (tstate s row: (max 0 (- (tstate-row s) PAGE-ROWS)) mark: #f))
+             ((page-down) (tstate s row: (min (- (tracker-rows s) 1) (+ (tstate-row s) PAGE-ROWS)) mark: #f))
+             ((next-channel) (move-channel s 1))
+             ((prev-channel) (move-channel s -1))
+             ((note-off) (enter-note-off s))
+             ((clear) (clear-cell s))
+             ((inst-up) (step-instrument s 1))
+             ((inst-down) (step-instrument s -1))
+             ((toggle-edit) (tstate s edit: (not (tstate-edit s))))
+             ((play-row) (tstate s request: 'play-row))
+             ((play-loop) (tstate s request: 'play-loop))
+             ((stop) (tstate s request: 'stop mark: #f))
+             ((order-prev) (tstate s pos: (max 0 (- (tstate-pos s) 1)) row: 0 mark: #f))
+             ((order-next) (tstate s pos: (min (- (length (tune-order (tstate-tune s))) 1) (+ (tstate-pos s) 1)) row: 0 mark: #f))
+             ((order-insert)
+              (let ((order (tune-order (tstate-tune s))))
+                (set-order s (list-insert-at order (+ (tstate-pos s) 1) (tracker-pattern-id s)) (+ (tstate-pos s) 1))))
+             ((order-delete)
+              (let ((order (tune-order (tstate-tune s))))
+                (if (<= (length order) 1)
+                    s
+                    (set-order s (list-remove-at order (tstate-pos s)) (tstate-pos s)))))
+             ((order-pattern-up) (order-pattern s 1))
+             ((order-pattern-down) (order-pattern s -1))
+             ((insert-row) (insert-row s))
+             ((delete-row) (delete-row s))
+             ((copy) (copy-block s))
+             ((cut) (cut-block s))
+             ((paste) (paste-block s))
+             ((zoom) (clamp-view (tstate s zoom: (not (tstate-zoom s)))))
+             ((save) (tstate s request: 'save))
+             ((open) (tstate s request: 'open))
+             ((share) (tstate s request: 'share))
+             ((new) (tstate s request: 'new))
+             ((mute-cursor) (toggle-mute s (tstate-ch s)))
+             ((solo) (tstate s solo: (if (eqv? (tstate-solo s) (tstate-ch s)) #f (tstate-ch s))))
+             ((unmute-all) (tstate s mutes: (make-vector (+ (tracker-channels s) 1) #f) solo: #f))
+             ((panel) (tstate s panel: (if (and (tstate-panel s) (eq? (tstate-panel-page s) 'inst)) #f (cons 0 #f)) panel-page: 'inst))
+             ((panel-bus) (tstate s panel: (if (and (tstate-panel s) (eq? (tstate-panel-page s) 'bus)) #f (cons 0 #f)) panel-page: 'bus))
+             ((panel-up) (if (tstate-panel s) (tstate s panel: (cons (max 0 (- (car (tstate-panel s)) 1)) #f)) s))
+             ((panel-down) (if (tstate-panel s) (tstate s panel: (cons (min (- (length (tracker-panel-lines s)) 1) (+ (car (tstate-panel s)) 1)) #f)) s))
+             ((panel-inc) (if (tstate-panel s) (panel-step s 1 #f) s))
+             ((panel-dec) (if (tstate-panel s) (panel-step s -1 #f) s))
+             ((panel-inc-big) (if (tstate-panel s) (panel-step s 1 #t) s))
+             ((panel-dec-big) (if (tstate-panel s) (panel-step s -1 #t) s))
+             ((panel-commit) (if (tstate-panel s) (panel-commit s) s))
+             ((panel-backspace) (if (and (tstate-panel s) (cdr (tstate-panel s)))
+                                    (let ((e (cdr (tstate-panel s))))
+                                      (tstate s panel: (cons (car (tstate-panel s)) (if (<= (string-length e) 1) #f (substring e 0 (- (string-length e) 1))))))
+                                    s))
+             ((panel-close) (tstate s panel: #f))
+             ((spectrum) (tstate s spectrum: (not (tstate-spectrum s))))
+             ;; Ctrl-M: the next of the five signatures (4/4 3/4 6/8 7/8 5/4); any meter is typed on the bus page
+             ((meter-next)
+              (let* ((m (meter-signature (tstate-tune s)))
+                     (rest (member m METER-PRESETS))
+                     (next (cond ((and rest (pair? (cdr rest))) (cadr rest)) (else (car METER-PRESETS)))))
+                (put-meter s (car next) (cadr next) (caddr next))))
+             (else s))))))
+
+    ))

@@ -11,12 +11,12 @@
 ;;; cells over the board area; every cell holds a value in [0, 1) and
 ;;; the renderer maps it onto a ramp of RAMP palette tones with a 2x2
 ;;; ordered dither between neighboring tones (four levels per step, so
-;;; the surface reads as continuous at 8 px). The rules are a table,
-;;; RULES, one entry per rule (its name, how it seeds a field, how it
-;;; steps one, how a cell's state reads as a value), so a new rule is one
-;;; entry and a name in the switch, and room is left for more. One today
-;;; (the voter model LIFE, the first cut's rule, left the pool on
-;;; 2026-09-21, David: "the pool is REACTION alone for now"):
+;;; the surface reads as continuous at 8 px). The rule table,
+;;; RULES, holds the CPU reference for REACTION and the STILL rule (a
+;;; seeded gradient that never steps, the BACKGROUND setting's calm
+;;; choice); GPU-MODES names the six shader-only rules in (crash gpu
+;;; rules) that join REACTION in the LIVE pool (BG1, 2026-09-21). The
+;;; voter model LIFE, the first cut's rule, left on 2026-09-21.
 ;;;
 ;;;   reaction  Gray-Scott reaction-diffusion (two substances per cell, a
 ;;;             nine-point laplacian, feed and kill rates in the regime
@@ -33,23 +33,23 @@
 ;;; (every value decays toward the ground).
 ;;;
 ;;; Two implementations of one rule (P3c, ruling D35). The field's home
-;;; is the GPU: (crash gpu bg) runs the same rule as fragment shaders
-;;; over a pair of render targets, one step per pass, and the cell state
-;;; never touches the CPU. This module is the rule's definition and the
-;;; oracle: the CPU field (`?bg=reaction-cpu`, the fallback) and the GPU
-;;; field must agree cell for cell after any number of steps from one
-;;; seed, and the browser arm holds them to it.
+;;; is the GPU: (crash gpu bg) runs the field rules as fragment
+;;; shaders over a pair of render targets, one step per pass, and the
+;;; cell state never touches the CPU. This module is the rule's
+;;; definition and the oracle: the CPU field (`?bg=reaction-cpu`, the
+;;; fallback) and the GPU field must agree cell for cell after any
+;;; number of steps from one seed, and the browser arm holds them to it.
 ;;; So every rule here is a function each cell can compute alone from the
 ;;; previous state: no stream of random visits (a shader cannot replay a
 ;;; sequence), but a hash of (step key, cell) per cell, and the step's own
 ;;; random choices (the rain and the kill patch of the reaction) drawn
 ;;; from the key on the CPU and handed to the shader as uniforms. The
-;;; state is stored as the GPU stores it: the two quantities quantized
-;;; to 1/65535 after every iteration (the 16-bit packing of the RGBA8
-;;; target; 8 bits freeze Gray-Scott). The hash is lowbias32's shape on
-;;; 31-bit words with 22-bit multipliers, so no value passes 2^31 and no
-;;; product 2^53: the wasm build's small integers are 32-bit signed, and
-;;; its doubles are where a product lives.
+;;; REACTION state is stored as two quantities quantized to 1/65535
+;;; after every iteration (the 16-bit packing of the RGBA8 target; 8 bits
+;;; freeze Gray-Scott). The hash is lowbias32's shape on 31-bit words
+;;; with 22-bit multipliers, so no value passes 2^31 and no product
+;;; 2^53: the wasm build's small integers are 32-bit signed, and its
+;;; doubles are where a product lives.
 ;;;
 ;;; Everything is a pure function of the seed, and the arithmetic is the
 ;;; same on both targets (the determinism leg holds two runs of one seed
@@ -79,9 +79,9 @@
           bg-cell-tones
           still-params STILL-OFFSET STILL-BAND-MAX STILL-TONES
           hash31 mul31 add31
-          CELL GRID-W GRID-H CELLS RAMP MODES RULES STRIDE
+          CELL GRID-W GRID-H CELLS RAMP MODES GPU-MODES RULES STRIDE
           DOMINANT-CAP
-          COLLAPSE-RATE
+          FIELD-COLLAPSE
           REACT-STEPS REACT-STEPS-MAX REACT-FEED REACT-KILL REACT-DA REACT-DB REACT-DT
           REACT-RAIN REACT-SEED REACT-KILL-EVERY REACT-SHOWN-SCALE REACT-SHOWN-MAX
           AGITATION-TRACE AGITATION-ICE AGITATION-BURST AGITATION-SEVERED
@@ -96,7 +96,7 @@
     (define RAMP 8)              ; palette tones in the ramp (crash render maps them)
     (define STRIDE 3)            ; ticks between steps of the field (the phone's budget)
     (define DOMINANT-CAP 0.9)    ; no tone may hold more of the half cells than this: a flat field is dead
-    (define COLLAPSE-RATE 0.985) ; per step once severed, every value
+    (define FIELD-COLLAPSE 0.985) ; per step once severed, every value
     (define REACT-STEPS 2)       ; Gray-Scott iterations per field step at agitation 1
     (define REACT-STEPS-MAX 4)   ; and never more than this under the ICE
     (define REACT-FEED 0.046)    ; the regime measured 2026-09-19: fronts cover 25..50 % and keep moving
@@ -150,14 +150,15 @@
 
     ;; --- state ---------------------------------------------------------------------
 
-    ;; field: the value per cell, row-major: the reaction's second
-    ;; substance; sub: its first. steps: field steps taken (the rule's
-    ;; clock, and the GPU field's target). hold: a step count the field stops at,
+    ;; field: the value per cell, row-major: the second substance for
+    ;; REACTION or a GPU rule's seed; sub: REACTION's first substance.
+    ;; steps: field steps taken (the rule's clock,
+    ;; and the GPU field's target). hold: a step count the field stops at,
     ;; or #f (the arm's door). gpu?: the cell work is the GPU's; this
     ;; struct keeps the schedule only, and the field holds the seed the
     ;; GPU draws once.
     (define-struct bg
-      (mode default: 'reaction)          ; the game's default rule (David, 2026-09-20), and the pool's only one
+      (mode default: 'reaction)          ; the game's default rule (David, 2026-09-20)
       (gpu? default: #f)
       (field default: (vector))
       (sub default: (vector))
@@ -191,16 +192,49 @@
       (let ((rng (prng-next rng)))
         (cons (/ (prng-index rng 1000000) 1000000.0) rng)))
 
-    ;; A field seeded by the stream, through the rule's own seeder: the
-    ;; reaction from a full first substance with REACT-SPOTS spots of the
-    ;; second. The runs are built once here and then at every step. rest:
-    ;; the mode, then gpu?.
+    ;; A field seeded by the stream, through the rule's own seeder:
+    ;; REACTION starts from a full first substance with REACT-SPOTS spots
+    ;; of the second; STILL from the seed itself (its parameters); a GPU
+    ;; rule from its own seed vector. The CPU runs are built once here
+    ;; and then at every step. rest: the mode, then gpu?.
     (define (bg-new seed . rest)
-      (let* ((mode (if (and (pair? rest) (memq (car rest) MODES)) (car rest) 'reaction))
-             (gpu? (and (pair? rest) (pair? (cdr rest)) (cadr rest)))
-             (b ((rule-seed (rule-ref mode)) mode (prng-seed seed) seed))   ; the stream, and the seed itself (the still rule's parameters)
+      (let* ((mode (if (and (pair? rest)
+                            (memq (car rest) (append MODES GPU-MODES)))
+                       (car rest)
+                       'reaction))
+             (gpu? (or (and (memq mode GPU-MODES) #t)
+                       (and (pair? rest) (pair? (cdr rest)) (cadr rest))))
+             (b (if (memq mode GPU-MODES)
+                    (seed-gpu mode (prng-seed seed))
+                    ((rule-seed (rule-ref mode)) mode (prng-seed seed) seed)))   ; the stream, and the seed itself (the still rule's parameters)
              (b (bg b seed: seed gpu?: gpu?)))
         (if gpu? b (bg b runs-held: (build-runs b)))))
+
+    ;; GPU-only additions keep MODES/RULES as the CPU oracle's table.
+    ;; Their seed vectors are drawn once by (crash gpu bg). Cyclic starts
+    ;; with independent phases; flow starts with smooth scalar islands.
+    ;; Signal starts with a few falling heads before its seeded lanes fill.
+    (define GPU-MODES
+      (list 'cyclic
+            'flow
+            'signal
+            'echo
+            'synapse
+            'flame))
+
+    (define (seed-gpu mode rng)
+      (let ((field (make-vector CELLS 0)))
+        (let loop ((i 0) (rng rng))
+          (if (= i CELLS)
+              (bg mode: mode
+                  field: (if (eq? mode 'flow) (smooth (smooth field)) field))
+              (let ((u (draw-unit rng)))
+                (vector-set! field i
+                             (case mode
+                               ((cyclic) (exact (floor (* 16 (car u)))))
+                               ((signal) (if (< (car u) 0.02) 1 0))
+                               (else (car u))))
+                (loop (+ i 1) (cdr u)))))))
 
     ;; REACT-SPOTS 3x3 spots of the second substance in a full first: the
     ;; fronts grow out of them from the first tick (a dozen left the field
@@ -231,6 +265,19 @@
 
     (define (at field x y)
       (vector-ref field (+ (modulo x GRID-W) (* (modulo y GRID-H) GRID-W))))
+
+    ;; A box blur over the four neighbors and the cell (FLOW's seed:
+    ;; smooth scalar islands; master dropped it with LIFE, Codex kept it).
+    (define (smooth field)
+      (let ((out (make-vector CELLS 0.0)))
+        (let loop ((i 0))
+          (when (< i CELLS)
+            (let ((x (modulo i GRID-W)) (y (quotient i GRID-W)))
+              (vector-set! out i (/ (+ (at field x y) (at field (- x 1) y) (at field (+ x 1) y)
+                                       (at field x (- y 1)) (at field x (+ y 1)))
+                                    5.0)))
+            (loop (+ i 1))))
+        out))
 
     ;; --- the phase machine's inputs -----------------------------------------------
 
@@ -357,14 +404,14 @@
 
     ;; --- one step -------------------------------------------------------------------------
 
-    ;; Severed: every value falls toward the ground, the reaction's second
-    ;; substance scaled by COLLAPSE-RATE on the grid.
+    ;; Severed: REACTION's second substance decays on the 16-bit grid.
     (define (collapse b)
       (let* ((f (bg-field b))
              (out (make-vector CELLS 0)))
         (let loop ((i 0))
           (when (< i CELLS)
-            (vector-set! out i (q16 (* COLLAPSE-RATE (vector-ref f i))))
+            (vector-set! out i
+                         (q16 (* FIELD-COLLAPSE (vector-ref f i))))
             (loop (+ i 1))))
         (bg b field: out)))
 
@@ -490,7 +537,12 @@
 
     ;; A cell's stored state as the value the dither maps.
     (define (bg-shown-value b state)
-      ((rule-shown (rule-ref (bg-mode b))) state))
+      (case (bg-mode b)
+        ((cyclic) (/ 32.0 256.0))
+        ((flow) (/ (floor (+ (* state state 255.0) 0.5)) 256.0))
+        ((signal) (/ (if (> state 0) 200.0 16.0) 256.0))
+        ((echo synapse flame) (/ (floor (* state 32.0)) 256.0))
+        (else ((rule-shown (rule-ref (bg-mode b))) state))))
 
     ;; One tick of the clock: the burst counts down every tick; the field
     ;; steps (and its runs are rebuilt) once every STRIDE ticks, collapsing

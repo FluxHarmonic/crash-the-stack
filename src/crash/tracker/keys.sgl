@@ -1,0 +1,217 @@
+;;; (crash tracker keys) - FastTracker II's key model, keys to actions
+;;;
+;;; (tracker-actions pressed held col edit?) answers the model actions for
+;;; one frame's keys: `pressed` the keys that went down this frame,
+;;; `held` the modifiers down (ctrl shift alt right-shift), `col` the
+;;; cursor column (0 = the note column: letters are notes there and hex
+;;; digits elsewhere), `edit?` whether edit mode is on. Key names are the
+;;; native ones (sigil-desktop 0.10.1: f1, page-up, period, ...) or the
+;;; DOM's as the web shell hands them (F1, PageUp, "." as a symbol): both
+;;; normalise here.
+;;;
+;;; The table (the design note's, plus the native fallback that costs no
+;;; FT2 key):
+;;;   arrows           move; Shift+arrows mark a block
+;;;   PgUp/PgDn        16 rows          (fallback Alt-Up/Alt-Down)
+;;;   Home/End         first/last row
+;;;   Tab/Shift-Tab    next/previous channel
+;;;   Z S X D C V G B H N J M         lower octave
+;;;   Q 2 W 3 E R 5 T 6 Y 7 U         upper octave
+;;;   I 9 O 0 P, and , L . ; /        the octave above that
+;;;   ` or 1           note off (FT2 uses the key left of 1)
+;;;   Delete           clear the cell  (fallback Backspace)
+;;;   Insert           insert a row; Shift-Delete deletes the row
+;;;   F1..F8           octave (OCT in the header; the piano rows span OCT and OCT+1)
+;;;   Ctrl-Up/Down     instrument
+;;;   0-9 A-F          on the instrument, volume and effect columns
+;;;   Space            edit mode
+;;;   Enter            play from the row; Ctrl-Enter or Right Shift loops the pattern
+;;;   Escape           stop
+;;;   Ctrl-Left/Right  order position; Ctrl-Insert/Ctrl-Delete edit the order list
+;;;   Alt-Left/Right   the pattern number at the order position (past the last: a new pattern)
+;;;   Ctrl-C/X/V       copy, cut, paste the block
+;;;   Ctrl-Z / Ctrl-Y  undo / redo (two stacks of tune values)
+;;;   Alt-Z            zoom (4 channels at scale 2)
+;;;   Ctrl-S / Ctrl-O / Ctrl-E / Ctrl-N   save, open the next tune, share, new
+;;;   Ctrl-I / Ctrl-B  the instrument panel / the bus page (see panel-actions)
+;;;   Ctrl-M           the next common meter (4/4 3/4 6/8 7/8 5/4); any meter is typed on the bus page
+;;;   Alt-S            the spectrum strip on/off
+;;;   Alt-1..8 / Alt-M mute a channel / the cursor channel; Alt-9 solo the cursor channel; Alt-0 unmute all
+
+(define-library (crash tracker keys)
+  (import (sigil list))
+
+  (export tracker-actions normalize-key TRACKER-KEYS TRACKER-MODIFIERS
+          key->semitone)
+
+  (begin
+    ;; Every key the native shell polls for the tracker (sigil-desktop names).
+    (define TRACKER-KEYS
+      '(a b c d e f g h i j k l m n o p q r s t u v w x y z
+        |0| |1| |2| |3| |4| |5| |6| |7| |8| |9|
+        up down left right home end page-up page-down insert delete
+        tab space return escape backspace minus
+        f1 f2 f3 f4 f5 f6 f7 f8
+        comma period semicolon slash grave))
+
+    (define TRACKER-MODIFIERS '(ctrl shift alt right-shift))
+
+    ;; DOM names to the native names; anything else is itself.
+    (define (normalize-key k)
+      (case k
+        ((PageUp pageup) 'page-up)
+        ((PageDown pagedown) 'page-down)
+        ((Home) 'home)
+        ((End) 'end)
+        ((Insert) 'insert)
+        ((Delete) 'delete)
+        ((F1) 'f1) ((F2) 'f2) ((F3) 'f3) ((F4) 'f4) ((F5) 'f5) ((F6) 'f6) ((F7) 'f7) ((F8) 'f8)
+        ((Enter enter) 'return)
+        ((Backspace) 'backspace)
+        ((Escape esc) 'escape)
+        ((Tab) 'tab)
+        ((Shift) 'shift)
+        ((Control) 'ctrl)
+        ((Alt) 'alt)
+        (else
+         (let ((s (symbol->string k)))
+           (cond
+             ((string=? s ",") 'comma)
+             ((string=? s ".") 'period)
+             ((string=? s ";") 'semicolon)
+             ((string=? s "/") 'slash)
+             ((string=? s "?") 'slash)   ; the web shell names / as ? (the keys line's toggle)
+             ((string=? s "`") 'grave)
+             (else k))))))
+
+    ;; The piano rows: key -> semitones above C of the current octave.
+    (define PIANO
+      '((z . 0) (s . 1) (x . 2) (d . 3) (c . 4) (v . 5) (g . 6) (b . 7) (h . 8) (n . 9) (j . 10) (m . 11)
+        (q . 12) (|2| . 13) (w . 14) (|3| . 15) (e . 16) (r . 17) (|5| . 18) (t . 19) (|6| . 20) (y . 21) (|7| . 22) (u . 23)
+        (i . 24) (|9| . 25) (o . 26) (|0| . 27) (p . 28)
+        (comma . 24) (l . 25) (period . 26) (semicolon . 27) (slash . 28)))
+
+    (define (key->semitone k)
+      (let ((e (assq k PIANO)))
+        (and e (cdr e))))
+
+    (define HEX
+      '((|0| . 0) (|1| . 1) (|2| . 2) (|3| . 3) (|4| . 4) (|5| . 5) (|6| . 6) (|7| . 7) (|8| . 8) (|9| . 9)
+        (a . 10) (b . 11) (c . 12) (d . 13) (e . 14) (f . 15)))
+
+    (define OCTAVE-KEYS '((f1 . 1) (f2 . 2) (f3 . 3) (f4 . 4) (f5 . 5) (f6 . 6) (f7 . 7) (f8 . 8)))
+
+    ;; The actions for one frame. `octave` is the model's current octave so
+    ;; a note key can be turned into a MIDI number here.
+    ;; With the instrument panel open the keys belong to it: Up/Down the
+    ;; line, Left/Right step (Shift: x10), digits - . type a value, Enter
+    ;; commits, Backspace deletes, Escape or Ctrl-I closes; the piano rows
+    ;; still audition (they are handed back as notes).
+    (define (panel-actions keys ctrl shift octave)
+      (filter (lambda (a) a)
+              (map (lambda (k)
+                     (cond
+                       ((and ctrl (eq? k 'i)) 'panel)
+                       ((and ctrl (eq? k 'b)) 'panel-bus)
+                       ((eq? k 'escape) 'panel-close)
+                       ((eq? k 'up) 'panel-up)
+                       ((eq? k 'down) 'panel-down)
+                       ((eq? k 'right) (if shift 'panel-inc-big 'panel-inc))
+                       ((eq? k 'left) (if shift 'panel-dec-big 'panel-dec))
+                       ((eq? k 'return) 'panel-commit)
+                       ((eq? k 'backspace) 'panel-backspace)
+                       ((eq? k 'minus) (list 'panel-type #\-))
+                       ((eq? k 'period) (list 'panel-type #\.))
+                       ((assq k HEX) => (lambda (h) (if (< (cdr h) 10) (list 'panel-type (string-ref "0123456789" (cdr h))) #f)))
+                       ((key->semitone k) => (lambda (semi) (list 'note (+ (* 12 (+ octave 1)) semi))))
+                       (else #f)))
+                   keys)))
+
+    (define (tracker-actions pressed held col edit? octave . opt)
+      (let* ((keys (map normalize-key pressed))
+             (ctrl (and (memq 'ctrl held) #t))
+             (shift (and (memq 'shift held) #t))
+             (alt (and (memq 'alt held) #t))
+             (rshift (and (memq 'right-shift held) #t))
+             (panel? (and (pair? opt) (car opt))))
+        (define (one k)
+          (cond
+            ;; with ctrl
+            (ctrl
+             (case k
+               ((up) 'inst-up)
+               ((down) 'inst-down)
+               ((left) 'order-prev)
+               ((right) 'order-next)
+               ((insert) 'order-insert)
+               ((delete) 'order-delete)
+               ((return) 'play-loop)
+               ((c) 'copy)
+               ((x) 'cut)
+               ((v) 'paste)
+               ((z) 'undo)
+               ((y) 'redo)
+               ((s) 'save)
+               ((o) 'open)
+               ((e) 'share)
+               ((n) 'new)
+               ((i) 'panel)
+               ((b) 'panel-bus)
+               ((m) 'meter-next)
+               (else #f)))   ; the Ctrl-1..7 octave fallback is gone: F1..F8 reach both targets (sigil-desktop 0.10.1)
+            ;; with alt
+            (alt
+             (case k
+               ((left) 'order-pattern-down)
+               ((right) 'order-pattern-up)
+               ((up) 'page-up)
+               ((down) 'page-down)
+               ((z) 'zoom)
+               ((s) 'spectrum)
+               ((|1|) '(mute 1)) ((|2|) '(mute 2)) ((|3|) '(mute 3)) ((|4|) '(mute 4))
+               ((|5|) '(mute 5)) ((|6|) '(mute 6)) ((|7|) '(mute 7)) ((|8|) '(mute 8))
+               ((|9|) 'solo)
+               ((|0|) 'unmute-all)
+               ((m) 'mute-cursor)
+               (else #f)))
+            ;; with shift
+            (shift
+             (case k
+               ((up) '(mark up))
+               ((down) '(mark down))
+               ((left) '(mark left))
+               ((right) '(mark right))
+               ((tab) 'prev-channel)
+               ((delete) 'delete-row)
+               (else (plain k))))
+            (else (plain k))))
+        (define (plain k)
+          (case k
+            ((up) 'up) ((down) 'down) ((left) 'left) ((right) 'right)
+            ((home) 'home) ((end) 'end)
+            ((page-up) 'page-up) ((page-down) 'page-down)
+            ((tab) 'next-channel)
+            ((space) 'toggle-edit)
+            ((return) (if rshift 'play-loop 'play-row))
+            ((escape) 'stop)
+            ((delete backspace) 'clear)
+            ((insert) 'insert-row)
+            (else
+             (let ((o (assq k OCTAVE-KEYS)))
+               (cond
+                 (o (list 'octave (cdr o)))
+                 ;; the note column: notes; the others: hex digits
+                 ((= col 0)
+                  (cond
+                    ((memq k '(grave |1|)) 'note-off)
+                    ((key->semitone k)
+                     => (lambda (semi) (list 'note (+ (* 12 (+ octave 1)) semi))))
+                    (else #f)))
+                 (else
+                  (let ((h (assq k HEX)))
+                    (if h (list 'hex (cdr h)) #f))))))))
+        (if panel?
+            (panel-actions keys ctrl shift octave)
+            (filter (lambda (a) a) (map one keys)))))
+
+    ))

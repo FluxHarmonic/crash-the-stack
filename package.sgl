@@ -9,6 +9,7 @@
 ;;;
 ;;;   scripts/dev sigil build                            native
 ;;;   scripts/dev sigil build --config web               browser (manifest has binaryen)
+;;;                                                      (and the tracker's own wasm into build/web/tracker/)
 ;;;   scripts/serve-web                                  host build/web on wg0
 
 (import (sigil process) (sigil string) (sigil time) (sigil math) (sigil fs))
@@ -17,6 +18,7 @@
 (define app-repo "codeberg:sigil/sigil-desktop")
 (define graphics-repo "codeberg:sigil/sigil-graphics")
 (define audio-repo "codeberg:sigil/sigil-audio")
+(define motif-repo "codeberg:sigil/motif")
 
 ;; The web build's version, for the service worker and the page: the git
 ;; commit, plus the build's second when the tree was dirty so two dirty
@@ -45,6 +47,36 @@
       (display "  dropped ") (display refs) (newline))
     ctx))
 
+;; --- the tracker's wasm (David, 2026-09-21) --------------------------------
+
+;; Before the tracker link: the package entry becomes (crash tracker main),
+;; so link-web-application's "modules reachable from the entry" is the
+;; tracker family, motif and the sigil runtime and nothing of the game.
+;; The context and the package are immutable records; a copy with the one
+;; field changed is the whole step.
+(define (tracker-entry ctx)
+  (context ctx package: (package (context-package ctx) entry: '(crash tracker main))))
+
+;; The tracker's page: tracker.template.html with the loader's mount and
+;; script tag where the marker is (the html: 'manual mode leaves the page
+;; to us; the template file name is fixed to index.template.html otherwise).
+(define (tracker-page ctx)
+  (let* ((out (path-join (config-output-dir (context-config ctx)) "tracker"))
+         (tmpl (read-file-string "tracker.template.html"))
+         (mount "<div id=\"status\"></div>\n    <script src=\"assets/sigil-web-app.js\" data-wasm=\"crash-tracker\" data-base=\"\" data-mount=\"status\"></script>")
+         (page (string-replace (string-replace tmpl "<!--sigil:app-->" mount) "__VERSION__" (web-version))))
+    ;; the link copied every asset artifact under tracker/assets/ too (the
+    ;; game's textures, refs, tunes): only the loader's scripts belong here;
+    ;; the tunes are fetched from ../assets/tunes/
+    (process-run "sh" "-c" (string-append "cd " out "/assets && find . -mindepth 1 -maxdepth 1 ! -name 'sigil-*.js' -exec rm -rf {} +"))
+    ;; styles.css stays (the link copies it): the game page, landed here by
+    ;; the service worker, speculatively fetches tracker/styles.css before
+    ;; its guard script runs, and a copy answers 200 instead of a 404
+    (process-run "rm" "-f" (path-join out "asyncify-onlylist.generated.txt"))
+    (write-file-string (path-join out "index.html") page)
+    (display "  tracker page ") (display (path-join out "index.html")) (newline)
+    ctx))
+
 ;; After link-web-application on a wasm target: copy web/sw.js into the
 ;; build with its version stamped, web/_headers as it is, and stamp the
 ;; page's __VERSION__ too.
@@ -68,7 +100,7 @@
 (package
   name: "crash-the-stack"
   version: "0.0.1"
-  sigil: "0.22"
+  sigil: "0.22.3"   ; the runtime that roots native literals and frees trampoline arguments (the web leak, t-098f50)
   description: "Cyberpunk takes on the classics: Mahjongg solitaire, Klondike, and more"
   license: "GPL-3.0-or-later"
   authors: (list "David Wilson <david@daviwil.com>")
@@ -106,34 +138,64 @@
       debug?: #f
       optimize: 2
       bundle?: #t
-      features: '(web wasm graphics)))
+      features: '(web wasm graphics))
+    ;; Windows x86_64 through zig (P4b, D37: a Windows artifact every
+    ;; release). The release config's shape (native backend, optimize 2,
+    ;; the bundle) on the x86_64-windows-gnu target; the same config name
+    ;; sigil-desktop, sigil-graphics and sigil-audio carry, so the
+    ;; dependency gates below match it. Built from Linux:
+    ;;   scripts/dev sigil build --config windows-amd64
+    ;; and run under Wine or on Windows; docs/windows/README.md.
+    (config
+      name: 'windows-amd64
+      output-dir: "build/windows-amd64"
+      toolchain: 'zig
+      target: "x86_64-windows-gnu"
+      static?: #t
+      backend: 'native
+      debug?: #f
+      optimize: 2
+      bundle?: #t
+      ;; A GUI-subsystem program: no console window beside the game when
+      ;; Explorer starts it (David, 2026-09-22); crash-native.c attaches
+      ;; to a parent console so a launch from a terminal still prints.
+      ;; A config's link-flags reach every bundle of the config, and every
+      ;; bundle links every native archive, so motif.exe (a CLI, bundled
+      ;; beside the game because motif declares an entry) is GUI too; it
+      ;; is not part of the artifact (docs/windows/README.md).
+      link-flags: '("-Wl,--subsystem,windows")
+      features: '(release cross windows)))
 
   dependencies: (list
     ;; Windowing and input (sigil-desktop, GLFW: a Wayland or X11 window,
     ;; picked at startup). Native only: its C cannot build
     ;; for wasm32-wasi, so it is gated to the native configs.
-    (from-git url: app-repo version: "^0.10.0" configs: '(dev release))
+    (from-git url: app-repo version: "^0.10.2" configs: '(dev release windows-amd64))
     ;; Drawing, both targets (its own web config excludes sigil-desktop the same way).
     (from-git url: graphics-repo version: "^0.11.4")
     ;; Web only: the wasm runtime (the generic loader sigil-web-app.js and
     ;; the sigil_wasm_* entry ABI) and the raw-WebGL2 binding sigil-graphics'
     ;; sokol backend draws through, plus its (sigil browser gles3) app shell.
-    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22" configs: '(web))
-    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22.3" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22.3" configs: '(web))
     ;; Web only: localStorage for the saved board ((crash store)).
-    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22.3" configs: '(web))
     ;; Sound (P3, ruling D9: sigil-audio at its current tag). The facade
     ;; (sigil audio sink) is sigil-audio's on both targets; its C (miniaudio,
     ;; vorbis) is skipped on wasm by its own package, and the web
     ;; backend is the monorepo's WebAudio bridge.
     (from-git url: audio-repo version: "^0.12.2")
-    (from-git url: sigil-repo package: "sigil-wasm-audio" version: ">=0.22" configs: '(web)))
+    ;; The tracker (P3b, (crash tracker ...)): the .cts tune model and the
+    ;; tick engine that plays it, and the live player, both targets (motif 0.6.2:
+    ;; the meter with its denominator and the spectrum, tagged 2026-09-21).
+    (from-git url: motif-repo version: "^0.6.2")
+    (from-git url: sigil-repo package: "sigil-wasm-audio" version: ">=0.22.3" configs: '(web)))
 
   ;; Built only when tests are built (sigil 0.22.2), so a plain
   ;; `build --config web` no longer compiles the runner's closure for wasm.
   dev-dependencies: (list
-    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22")
-    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22"))
+    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22.3")
+    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22.3"))
 
 
   ;; The game's own C ((crash native): the music mixer's inner loop and
@@ -180,7 +242,21 @@
           (if (memq (target-os ctx) '(wasm wasi))
               ;; link-web-application generates the sigil_wasm_app_register that
               ;; calls sigil-graphics' native-init (sigil 0.22.2), so the sokol C
-              ;; is linked in and the wasm imports `gl`.
-              (drop-refs (stamp-web-version ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx)))
+              ;; is linked in and the wasm imports `gl`. Then the tracker's wasm
+              ;; (David, 2026-09-21): a second link from the same compiled
+              ;; modules with (crash tracker main) as the entry
+              ;; (link-web-application takes "the modules reachable from the
+              ;; package entry"), its own page, into build/web/tracker/ where
+              ;; /tracker/ serves it. The same task and config because a
+              ;; dependency's config is matched by NAME (a second config built
+              ;; the deps' native arms) and `sigil run -t` runs a task without
+              ;; the build context a link needs. No assets of its own: the
+              ;; tunes are the game's.
+              (drop-refs
+                (tracker-page
+                  ((link-web-application name: "crash-tracker" html: 'manual output-dir: "build/web/tracker")
+                   (tracker-entry
+                     (stamp-web-version
+                       ((link-web-application name: "crash-the-stack" html-mount-id: "status") ctx))))))
               ctx)))))   ; native: the bundle wants every linked asset in place, refs included
 )

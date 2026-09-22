@@ -23,6 +23,11 @@
  *     7.5 MB tune decoded a character at a time in Sigil took whole
  *     frames per 16 KB; here a 512 KB chunk is under a millisecond.
  *
+ *   (%fatal!) -> never returns
+ *     The page guard's trap door (?trap): a FATAL line on stderr and abort(),
+ *     the runtime's own out-of-memory shape, so the browser arm can kill the
+ *     instance on demand.
+ *
  *   (%decode-ogg path) -> (rate channels bytevector) or #f
  *     The whole file decoded by stb_vorbis to s16le interleaved PCM.
  *     Native only: on the web the page decodes with decodeAudioData and
@@ -42,8 +47,41 @@
  * allocation is not a root otherwise */
 extern void sigil__gc_push_temp_root(SigilVM *vm, Value v);
 extern void sigil__gc_pop_temp_root(SigilVM *vm);
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <stdio.h>
+/* The Windows build links as a GUI-subsystem program (the windows-amd64
+ * config's link-flags: no console window beside the game from Explorer;
+ * David, 2026-09-22), so it starts with no standard streams. From a
+ * terminal, attach to the parent's console and point stdout/stderr at
+ * it, so the diagnostics (crash: ..., sigil-desktop:, miniaudio) print
+ * there as on Linux; from Explorer there is no parent console and this
+ * does nothing. A console-subsystem build already owns a console and
+ * AttachConsole fails harmlessly. */
+/* A standard stream the process already has (a redirect such as
+ * `crash-the-stack.exe > log.txt`, or an inherited handle) is kept;
+ * only a missing one is pointed at the parent console. */
+static int std_stream_present(DWORD which)
+{
+    HANDLE h = GetStdHandle(which);
+    return h != NULL && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+}
+
+static void attach_parent_console(void)
+{
+    int out_ok = std_stream_present(STD_OUTPUT_HANDLE);
+    int err_ok = std_stream_present(STD_ERROR_HANDLE);
+    if (out_ok && err_ok) return;
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (!out_ok && freopen("CONOUT$", "w", stdout)) setvbuf(stdout, NULL, _IONBF, 0);
+        if (!err_ok && freopen("CONOUT$", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    }
+}
+#endif
 
 #ifndef __wasm__
 /* stb_vorbis is linked already: sigil-audio's audio.c includes the
@@ -164,8 +202,29 @@ static Value native_decode_ogg(SigilVM *vm, int argc, Value *args)
 #endif
 }
 
+/* (%fatal!) -> never returns
+ *   The page guard's trap door (the web soak row, 2026-09-21): the same
+ *   two steps the runtime's own out-of-memory path takes in
+ *   gc-generational.c (a "FATAL: ..." line on stderr, then abort(), which
+ *   is the wasm `unreachable` trap Trev's console showed), so the arm can
+ *   kill the instance on demand and count the FATAL lines that follow: one
+ *   means nothing dispatched into the dead instance after the guard fired.
+ *   Reached only through the web shell's ("trap", ...) dispatch, which the
+ *   page sends for ?trap; never on a player's page. */
+static Value native_fatal(SigilVM *vm, int argc, Value *args)
+{
+    (void)vm; (void)argc; (void)args;
+    fprintf(stderr, "FATAL: crash: the trap door fired (?trap)\n");
+    fflush(stderr);
+    abort();
+    return SIGIL_FALSE;
+}
+
 void sigil__init_crash_native_module(SigilVM *vm)
 {
+#ifdef _WIN32
+    attach_parent_console();
+#endif
     SigilModule *module = sigil_begin_module(vm, "(crash native)");
     if (!module) return;
     sigil_module_register_native(vm, "%mix-track!", native_mix_track, SIGIL_ARITY_EXACT(8),
@@ -174,8 +233,11 @@ void sigil__init_crash_native_module(SigilVM *vm)
                                  "Decode an OGG Vorbis file to (rate channels s16-bytevector), or #f");
     sigil_module_register_native(vm, "%b64-decode", native_b64_decode, SIGIL_ARITY_EXACT(1),
                                  "Decode a base64 string to a bytevector");
+    sigil_module_register_native(vm, "%fatal!", native_fatal, SIGIL_ARITY_EXACT(0),
+                                 "The page guard's trap door: a FATAL line on stderr, then abort()");
     sigil_module_export(vm, "%mix-track!");
     sigil_module_export(vm, "%decode-ogg");
     sigil_module_export(vm, "%b64-decode");
+    sigil_module_export(vm, "%fatal!");
     sigil_end_module(vm);
 }

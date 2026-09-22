@@ -1,0 +1,189 @@
+;;; (crash tracker play) - The tune through motif's live player into the sink
+;;;
+;;; (play-start! tune pos row loop?) opens a (motif tune player) at the
+;;; sink's rate from (pos . row) and registers it as (crash audio)'s
+;;; source: every pump pulls the frames the sink has room for straight
+;;; out of the player (no allocation). The player walks the tune a chunk
+;;; ahead of the render, so the editor's live edits (play-set-tune!),
+;;; mutes, solos and tempo changes are heard on the next tick. A pattern
+;;; loop is a one-entry order; a plain play loops at the tune's own loop
+;;; point (or its start) until Escape.
+;;;
+;;; An audition (play-audition! tune inst midi) is a second, short-lived
+;;; player on a one-note tune mixed into the same pull, so a note key
+;;; sounds the current instrument whether or not it is written.
+;;;
+;;; The clock: (play-position) is the (pos . row) under the listener: the
+;;; player's timeline entry at (render position - the sink's depth), so a
+;;; slow frame moves the cursor by audio time. (play-peaks) is the per-
+;;; channel peak since the last frame; (play-chunk-ms) the wall time of
+;;; the last pull per 1024 frames, the number the gate pins.
+
+(define-library (crash tracker play)
+  (import (sigil math)
+          (sigil time)
+          (sigil list)
+          (motif tune)
+          (motif tune player)
+          (crash audio))
+
+  (export play-start! play-stop! play-position play-playing? play-loop?
+          play-set-tune! play-mute! play-solo! play-peaks
+          play-audition! play-chunk-ms play-rendered-frames play-spectrum
+          TUNE-GAIN AUDITION-ROWS)
+
+  (begin
+    (define TUNE-GAIN 0.9)
+    (define AUDITION-ROWS 12)     ; an auditioned note holds this many rows at 125/6 (1.4 s)
+
+    (define *player* #f)
+    (define *audition* #f)
+    (define *scratch* #f)         ; the audition's pull buffer
+    (define *loop* #f)
+    (define *chunk-ms* 0.0)
+    (define *rendered* 0)
+    (define *peaks* '())
+    (define *mutes* '())          ; the channels muted, applied to every new player
+    (define *solo* #f)
+
+    (define (play-playing?) (and *player* #t))
+    (define (play-loop?) *loop*)
+    (define (play-chunk-ms) *chunk-ms*)
+    (define (play-rendered-frames) *rendered*)
+    ;; The peaks since the last frame: the max over every pull since the
+    ;; last read (a pump can pull several times, or nothing, per frame).
+    (define (play-peaks)
+      (let ((p *peaks*))
+        (set! *peaks* '())
+        p))
+
+    (define (merge-peaks! new)
+      (set! *peaks*
+            (let loop ((a *peaks*) (b new) (acc '()))
+              (cond ((and (null? a) (null? b)) (reverse acc))
+                    ((null? a) (loop a (cdr b) (cons (car b) acc)))
+                    ((null? b) (loop (cdr a) b (cons (car a) acc)))
+                    (else (loop (cdr a) (cdr b) (cons (max (car a) (car b)) acc)))))))
+
+    (define (apply-mutes! p)
+      (let loop ((ch 1))
+        (when (<= ch (tune-channels (player-tune p)))
+          (player-mute! p ch (and (memv ch *mutes*) #t))
+          (loop (+ ch 1))))
+      (player-solo! p *solo*))
+
+    ;; Pull n frames into out at byte-offset; #t while something plays.
+    (define (pull! out byte-offset n)
+      (let ((t0 (current-milliseconds))
+            (main-on (and *player* (player-pull! *player* out byte-offset n))))
+        (when (and *player* (not main-on))
+          (player-close! *player*)
+          (set! *player* #f))
+        (when (and *player* (> n 0))
+          (merge-peaks! (player-peaks *player*)))
+        ;; the audition on top
+        (when *audition*
+          (unless *scratch* (set! *scratch* (make-bytevector (* 8 4096) 0)))
+          (if (player-pull! *audition* *scratch* 0 n)
+              (let loop ((i 0))
+                (when (< i (* 2 n))
+                  (let ((o (+ byte-offset (* 4 i))))
+                    (bytevector-ieee-single-set!
+                      out o
+                      (+ (if main-on (bytevector-ieee-single-ref out o 'little) 0.0)
+                         (bytevector-ieee-single-ref *scratch* (* 4 i) 'little))
+                      'little))
+                  (loop (+ i 1))))
+              (begin (player-close! *audition*) (set! *audition* #f))))
+        (when (and (not main-on) (not *audition*) (not *player*))
+          ;; nothing left: silence this chunk and drop the source
+          (let loop ((i 0))
+            (when (< i (* 2 n))
+              (bytevector-ieee-single-set! out (+ byte-offset (* 4 i)) 0.0 'little)
+              (loop (+ i 1)))))
+        (set! *rendered* (+ *rendered* n))
+        (let ((ms (- (current-milliseconds) t0)))
+          (when (> n 0) (set! *chunk-ms* (/ (* 1024.0 ms) n))))
+        (or (and *player* #t) (and *audition* #t))))
+
+    ;; The spectrum (levels . holds) of the main player, or #f when nothing plays
+    ;; (the strip then shows nothing); read once a frame by the draw.
+    (define (play-spectrum)
+      (and *player* (player-spectrum *player*)))
+
+    (define (ensure-source!)
+      (audio-set-source! pull! TUNE-GAIN))
+
+    (define (play-start! t0 pos row loop-pattern?)
+      (when *player* (player-close! *player*))
+      (let* ((sr (audio-rate))
+             (t (if loop-pattern? (tune t0 order: (list (list-ref (tune-order t0) pos))) t0))
+             (start (if loop-pattern? (cons 0 row) (cons pos row)))
+             (p (open-tune-player t sr start: start loop: #t)))
+        (set! *player* p)
+        (set! *loop* loop-pattern?)
+        (set! *origin* (cons pos row))
+        (set! *rendered* 0)
+        (apply-mutes! p)
+        (ensure-source!)
+        #t))
+
+    (define (play-stop!)
+      (when *player*
+        (player-close! *player*)
+        (set! *player* #f))
+      (when *audition*
+        (player-close! *audition*)
+        (set! *audition* #f))
+      (audio-set-source! #f 0.0)
+      (set! *peaks* '()))
+
+    ;; A live edit while playing: the player reads the new tune value at
+    ;; its next tick. In pattern-loop mode the looped pattern is refreshed.
+    (define (play-set-tune! t0)
+      (when *player*
+        (let ((t (if *loop*
+                     (tune t0 order: (tune-order (player-tune *player*)))
+                     t0)))
+          (player-set-tune! *player* t))))
+
+    (define (play-mute! ch on?)
+      (set! *mutes* (if on? (if (memv ch *mutes*) *mutes* (cons ch *mutes*))
+                        (filter (lambda (c) (not (= c ch))) *mutes*)))
+      (when *player* (player-mute! *player* ch on?)))
+
+    (define (play-solo! ch-or-false)
+      (set! *solo* ch-or-false)
+      (when *player* (player-solo! *player* ch-or-false)))
+
+    ;; One note on one channel with the instrument, AUDITION-ROWS long.
+    (define (play-audition! t0 inst midi)
+      (when *audition* (player-close! *audition*))
+      (let* ((sr (audio-rate))
+             (t (tune t0
+                      channels: 1
+                      patterns: (list (tune-pattern id: 0 rows: (+ AUDITION-ROWS 4)
+                                                    cells: (list (make-cell 0 1 midi inst 0 "000")
+                                                                 (make-cell AUDITION-ROWS 1 'off 0 0 "000"))))
+                      order: '(0)
+                      chart: '()))
+             (p (open-tune-player t sr)))
+        (set! *audition* p)
+        (ensure-source!)
+        #t))
+
+    ;; The (pos . row) now leaving the device, or #f when not playing.
+    (define (play-position)
+      (and *player*
+           (let ((pos (player-position *player* (audio-source-depth))))
+             (and pos
+                  (if *loop*
+                      (cons (car (player-position-origin)) (cdr pos))
+                      pos)))))
+
+    ;; the pattern-loop player runs a one-entry order; the editor's order
+    ;; position is remembered here
+    (define *origin* (cons 0 0))
+    (define (player-position-origin) *origin*)
+
+    ))

@@ -134,12 +134,13 @@
           (crash stats)
           (crash sfx)
           (crash audio)
+          (crash audio transfer)
           (crash shell)
           (crash code)
           (crash run)
           (only (crash scores) scores-best scores-streak)
           (only (crash daily) daily-date)
-          (only (crash native) %b64-decode)
+          (only (crash native) %b64-decode %fatal!)
           (only (crash credits) credits-parse CREDITS-PATH)
           (crash store)
           (crash cards save)
@@ -155,6 +156,9 @@
     (define *geom* #f)
     (define *fx* #f)         ; the effects and their clock, (crash fx)
     (define *last-ms* #f)    ; the previous frame's requestAnimationFrame timestamp
+    (define *trap-armed* #f)  ; ?trap: #f, or the door armed: (quote frame) fires on the next frame dispatch, (quote any) on the next dispatch of any kind; once fired, any
+    (define *skip* (quote ()))  ; ?skip=audio,draw,frame,sim: parts of the tick left out (the soak's bisection door)
+    (define (skip? part) (and (memq part *skip*) #t))
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
@@ -187,7 +191,7 @@
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
     (define *bg* #f)         ; the living background, (crash bg), stepped by whichever table is up
-    (define *bg-mode* 'reaction) ; the rule before the first deal (the menu's field); ?bg=reaction|reaction-cpu|off pins one (a dev door)
+    (define *bg-mode* 'reaction) ; the rule before the first deal (the menu's field); ?bg=reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off pins one (a dev door)
     (define *bg-asked* #f)   ; ?bg= was given: it wins over the FIELD setting for this boot
     (define *bg-hold* #f)    ; ?bghold=N: the field stops after N steps (the field leg's door)
     (define *bg-stride* #f)  ; ?bgstride=N: ticks between field steps (STRIDE by default; David's comparison door)
@@ -218,9 +222,13 @@
     (define *frame-n* 0)     ; frames presented (the probe alternates on it)
     (define *advance-ms* 0.0) ; the last frame's bg-advance time (the CPU field's step, the GPU field's bookkeeping)
     (define *frame-ms* 0.0)   ; the frame's wall dt, ms
+    (define *ms-reset-pending* #f)
+    (define *ms-window* 0)
+    (define *ms-underruns0* 0)
+    (define *ms-skip* 1)     ; the first tick has no previous frame to sample
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
-    (define *ambient-chunks* '()) ; the ambient PCM's decoded chunks, newest first
+    (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
@@ -244,7 +252,7 @@
     (define *ms-flush* 0.0)
     (define *tick-start* 0.0)
     (define *tick-ms* 0.0)       ; the whole web-tick, wasm side
-    (define *boot-ms* 0.0)       ; boot-tick!
+    (define *boot-ms* 0.0)       ; initial boot!, boot-tick!, ambient-tick!
     (define *count-ms* 0.0)      ; count-frame! (the stats bookkeeping, a gc-stats read)
     (define *pump-ms* 0.0)       ; audio-pump!
     (define *ms-tick* 0.0)
@@ -298,11 +306,15 @@
                            *part-step* *part-save* *part-cues*
                            (/ (- (cadddr now) (cadddr was)) 1000000.0)
                            (- (+ (car now) (cadr now)) (+ (car was) (cadr was)))
-                           *tick-ms* *pump-ms* (other-ms)))))
+                           *tick-ms* *pump-ms* (other-ms)
+                           *flush-ms* *boot-ms* *count-ms*))))
 
     ;; The summary's first line: the build, the mode, the doors in force.
     (define (stats-header)
       (string-append "crash-the-stack " (or *version* "unversioned")
+                     " window " (if (= *ms-window* 0)
+                                      "startup"
+                                      (string-append "reset-" (number->string *ms-window*)))
                      " bg " (if *bg* (string-append (symbol->string (bg-mode *bg*)) (if (bg-gpu? *bg*) "" "-cpu")) "off")
                      " dpr " *dpr*
                      " stride " (number->string (if *bg* (bg-stride *bg*) 0))
@@ -318,9 +330,43 @@
     ;;   crash: clipboard TEXT
     ;;   crash: stats copied N
     (define (copy-stats!)
-      (let ((text (stats-summary (stats-header))))
+      (let ((text (string-append
+                   (stats-summary (stats-header))
+                   "\naudio state " (symbol->string (or (audio-state) 'unavailable))
+                   " rate " (number->string (audio-rate))
+                   " starved-frames " (number->string (- (audio-underruns) *ms-underruns0*)))))
         (println "~a" (string-append "crash: clipboard " (string-replace text "\n" "~")))
         (say "stats" "copied" (stats-count))))
+
+    ;; Apply a requested reset at a frame boundary, outside the input and
+    ;; report callbacks. Skip the old frame and the reset-bearing frame.
+    (define (reset-ms!)
+      (stats-reset!)
+      (set! *ms-reset-pending* #f)
+      (set! *ms-window* (+ 1 *ms-window*))
+      (set! *ms-underruns0* (audio-underruns))
+      (set! *ms-skip* 2)
+      (set! *ms-n* 0)
+      (set! *ms-sum* 0.0)
+      (set! *ms-max* 0.0)
+      (set! *ms-step* 0.0)
+      (set! *ms-present* 0.0)
+      (set! *ms-sim* 0.0)
+      (set! *ms-draw* 0.0)
+      (set! *ms-flush* 0.0)
+      (set! *ms-tick* 0.0)
+      (set! *ms-pump* 0.0)
+      (set! *ms-other* 0.0)
+      (set! *ms-boot* 0.0)
+      (set! *ms-count* 0.0)
+      (set! *worst* #f)
+      (set! *worst-text* "")
+      (set! *gc-frame* (gc-snapshot))
+      (set! *gc-last* *gc-frame*)
+      (set! *gc-tick* 0)
+      (set! *underruns-last* (audio-underruns))
+      ;; The page resets its callback and audio-load samples on this line.
+      (println "crash: stats reset ~a" *ms-window*))
 
     (define (count-frame! dt)
       (let ((ms (* 1000.0 dt)))
@@ -436,7 +482,8 @@
     ;; The page fetches and decodes each tune under assets/audio/ (there is
     ;; no bytes fetch in the bridges the wasm has; the page has fetch and
     ;; decodeAudioData) and hands the PCM over as ("track", name), then
-    ;; ("audio-chunk", base64) dispatches, then ("audio-done", count): see
+    ;; ("audio-size", byte-count), ("audio-chunk", base64) dispatches, then
+    ;; ("audio-done", count): see
     ;; the music below. Decoded here into one s16le bytevector a track.
     ;;   crash: audio open|closed             the context and sink at boot
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
@@ -445,13 +492,14 @@
     ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a 7.5 MB
     ;; tune decoded in Sigil a character at a time cost whole frames per
     ;; 16 KB chunk (2026-09-20, the ambient's delivery; the tune is six
-    ;; times the ambient), so the page now hands 512 KB a frame and the
-    ;; decode is under a millisecond.
+    ;; times the ambient). The page now adapts small conversion/delivery
+    ;; batches to a time budget; the receiver copies into one track buffer.
     (define (b64-decode text) (%b64-decode text))
 
     ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
     ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
-    ;; ("audio-chunk", b64) appends, ("audio-done", n) closes it into the
+    ;; ("audio-size", bytes) reserves its buffer, ("audio-chunk", b64) fills
+    ;; it, and ("audio-done", n) publishes the complete buffer to the
     ;; player. The menu theme (spy) is what the boot's audio step waits for
     ;; (the ambient's old place, and its lines: the arms read them):
     ;;   crash: track NAME FRAMES             a track landed (0: given up)
@@ -461,17 +509,19 @@
 
     (define (track! payload)
       (set! *track-name* (string->symbol payload))
-      (set! *ambient-chunks* '())
+      (set! *track-transfer* #f)
       0)
 
     (define (audio-chunk! payload)
-      (set! *ambient-chunks* (cons (b64-decode payload) *ambient-chunks*))
+      (set! *track-transfer*
+            (transfer-append *track-transfer* (b64-decode payload)))
       0)
 
     (define (audio-done! payload)
-      (let ((bytes (apply bytevector-append (reverse *ambient-chunks*)))
+      (let ((bytes (or (transfer-finish *track-transfer* (string->number payload))
+                       (bytevector)))
             (name *track-name*))
-        (set! *ambient-chunks* '())
+        (set! *track-transfer* #f)
         ;; no chunks: the page gave the track up (a failed fetch); the
         ;; boot's audio step does not wait on the theme then
         (when (> (bytevector-length bytes) 0)
@@ -913,13 +963,14 @@
         (set! *announced* #t))
       (let* ((before *session*)
              (t0 (now-ms))
-             (x (fx-frame *fx* dt))
+             (x (if (skip? (quote sim)) *fx* (fx-frame *fx* dt)))
              (t1 (now-ms))
-             (stepped (if *demo-armed*
-                          (begin (set! *demo-armed* #f) (session-demo-finish before))
-                          (session-step before f *geom*)))
+             (stepped (cond ((skip? (quote sim)) before)
+                            (*demo-armed*
+                             (begin (set! *demo-armed* #f) (session-demo-finish before)))
+                            (else (session-step before f *geom*))))
              (t2 (now-ms))
-             (advanced (session-advance stepped (clock-steps (fx-clock x))))
+             (advanced (if (skip? (quote sim)) stepped (session-advance stepped (clock-steps (fx-clock x)))))
              (t3 (now-ms))
              (after (save-session-after-frame! before advanced))
              (t4 (now-ms))
@@ -948,7 +999,14 @@
                   (lambda ()
                     (if *bg-only*
                         (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (background) *copper*)
-                        (draw-session after *geom* x (background) *copper*))))))
+                        (draw-session after *geom* x (background) *copper*))))
+        ;; a texture fetch in flight (the boot's steps on a ?stack or ?code boot,
+        ;; which open on this table with no menu tick to run the retry clock):
+        ;; serviced here with the real dt, as the menu and the card table do for
+        ;; theirs. Without it a fetch that failed on such a boot was never asked
+        ;; for again and the boot never finished (measured 2026-09-21: one 500
+        ;; on backdrop.png, no "try 2" in 30 s, no "crash: boot done").
+        (ensure-texture! dt #f)))
 
     ;; The tool stack opening or closing, and while it opens each entry's
     ;; center and whether it can fire, so the arm taps what the player sees:
@@ -1267,21 +1325,31 @@
     ;; the page measures around the callback and appends to the summary.
     (define (web-tick dt)
       (set! *tick-start* (now-ms))
-      (unless *booted* (boot!))
+      (when *ms-reset-pending* (reset-ms!))
+      ;; Sample the completed previous tick before replacing any phase
+      ;; timings with this tick's work. dt is the interval it occupied.
+      (let ((t0 (now-ms)))
+        (when *ms*
+          (if (> *ms-skip* 0)
+              (set! *ms-skip* (- *ms-skip* 1))
+              (count-frame! dt)))
+        (set! *count-ms* (- (now-ms) t0)))
+      (set! *boot-ms* 0.0)
+      (unless *booted*
+        (let ((t0 (now-ms)))
+          (boot!)
+          (set! *boot-ms* (- (now-ms) t0))))
       (set! *since-boot* (+ *since-boot* dt))
       (set! *frame-ms* (* 1000.0 dt))
       ;; the pump first: the ring is fed for the frame before the boot's steps and the
       ;; draw can run long (it was last, after everything); PUMP is both pumps' time
       (let ((t0 (now-ms)))
-        (audio-pump!)
+        (unless (skip? (quote audio)) (audio-pump!))
         (set! *pump-ms* (- (now-ms) t0)))
       (let ((t0 (now-ms)))
         (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
         (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
-        (set! *boot-ms* (- (now-ms) t0)))
-      (let ((t0 (now-ms)))
-        (when *ms* (count-frame! dt))
-        (set! *count-ms* (- (now-ms) t0)))
+        (set! *boot-ms* (+ *boot-ms* (- (now-ms) t0))))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
       (set! *draw-ms* 0.0)
@@ -1289,7 +1357,7 @@
       (gles3-resize-to-display)
       (tick-screen (input-this-frame) dt)
       (let ((t0 (now-ms)))
-        (audio-pump!)   ; and again after the draw: a cue queued this frame goes out now
+        (unless (skip? (quote audio)) (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
         (set! *pump-ms* (+ *pump-ms* (- (now-ms) t0))))
       (set! *tick-ms* (- (now-ms) *tick-start*)))
 
@@ -1676,6 +1744,8 @@
                ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
                ((daily-cards) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'cards)))
                ((update) (update-chosen!))
+               ;; TRACKER (P3b): its own page under tracker/; the page follows the line
+               ((tracker) (println "~a" "crash: open tracker"))
                ((copy) (copy-code!))
                ((code-refused) (say "code" "refused" (menu-code *menu*)))
                (else #f)))))
@@ -1727,6 +1797,9 @@
     ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
+      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? (quote draw)) (lambda () #f) draw))))
+
+    (define (present-frame! cascading? draw)
       (set! *sim-ms* (- (now-ms) *tick-t0*))
       (let ((t1 (now-ms)))
         (frame-begin!)
@@ -1833,6 +1906,13 @@
       0)
 
     (define (web-dispatch type payload)
+      ;; the door armed for the next frame fires only on a frame (the copy poll or a
+      ;; gesture could otherwise take it first, inside a try/catch: the review); once
+      ;; it fires, every later dispatch fires too, so the FATAL count after the
+      ;; first is the count of dispatches that reached the dead instance
+      (when (and *trap-armed* (or (eq? *trap-armed* (quote any)) (string=? type "frame")))
+        (set! *trap-armed* (quote any))
+        (%fatal!))
       (cond ((string=? type "frame") (web-tick (frame-dt payload)) 0)
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
@@ -1852,7 +1932,7 @@
                          ;; clamped to the share code's range, so the board and its code agree
                          (when (and n (exact? n) (integer? n) (>= n 0)) (set! *seed* (min n SEED-MAX)))))))
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
-            ;; ?bg=reaction|reaction-cpu|off (a name outside the rule table is off)
+            ;; ?bg=reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off (a name outside the rule table is off); it wins over the BACKGROUND setting
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)) (set! *bg-asked* #t))))
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
             ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
@@ -1867,6 +1947,11 @@
             ((string=? type "dpr") (param! (lambda () (set! *dpr* payload))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) (title-stamp! payload) 0)
+            ((string=? type "stats")
+             (cond ((string=? payload "reset")
+                    (when *ms* (set! *ms-reset-pending* #t)))
+                   ((string=? payload "copy") (copy-stats!)))
+             0)
             ((string=? type "ms") (param! (lambda () (set! *ms* (string=? payload "on")))))
             ;; ?baud=N: the title reveal's pace (P3d)
             ((string=? type "baud") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (title-baud! n))))))
@@ -1891,12 +1976,18 @@
              (when *menu* (set! *menu* (menu-with-credits *menu* (credits-parse payload))))   ; a board boot has no menu yet: launch-menu takes them later
              (say "credits" (length (credits-parse payload)))
              0)
+            ;; the game's UTC day right now (the arm's rollover oracle: the epoch door plus
+            ;; the time since, as the daily and the scoreboard read it)
+            ((string=? type "day") (today))
             ((string=? type "epoch") (param! (lambda () (let ((n (string->number payload))) (when (and n (integer? n) (> n 0)) (set! *clock-at* (now-ms)) (set-clock-source! (lambda () (+ n (exact (floor (/ (- (now-ms) *clock-at*) 1000.0)))))))))))
             ;; ?code=XXXXX-XXXXX: the board of a share code, dealt at boot (P4)
             ((string=? type "code") (param! (lambda () (set! *code* payload))))
             ;; the page polls for a COPY (1 once): it reads the store's "code" key then
             ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
             ((string=? type "track") (track! payload))
+            ((string=? type "audio-size")
+             (set! *track-transfer* (transfer-new (string->number payload)))
+             0)
             ((string=? type "audio-chunk") (audio-chunk! payload))
             ((string=? type "gesture") (gesture! payload))
             ;; the ambient off (the browser arm mutes it to hear a cue alone)
@@ -1912,4 +2003,41 @@
                    ;; registers the worker then, so its precache never runs in the boot window
                    ((string=? payload "live?") (if (and *booted* (boot-done?) (or (not *menu*) (not (menu-title *menu*)) (title-settled? (menu-title *menu*)))) 1 0))
                    (else 0)))
+            ;; the page's visibility (the web soak row): the tab hidden or shown
+            ;; again. The browser stops requestAnimationFrame while a tab is
+            ;; hidden, so nothing ticks meanwhile; the first frame back must not
+            ;; carry the hours between as one dt (the fixed clock caps it, the
+            ;; ms readout and the stats ring would take it whole), so the frame
+            ;; clock restarts. The page suspends the audio context itself.
+            ;;   crash: visibility hidden|visible
+            ((string=? type "visibility")
+             (set! *last-ms* #f)
+             (say "visibility" payload)
+             0)
+            ;; ?trap: the page guard's trap door. "now" fires at once, inside this
+            ;; dispatch (the page's own dispatch path); "frame" arms it for the
+            ;; next frame tick (the gles3 loop's path, where Trev's died). Once
+            ;; armed, EVERY dispatch fires it: the count of FATAL lines after the
+            ;; first is the count of dispatches that reached the dead instance.
+            ;; ?skip=a,b: parts of the tick left out, the soak's bisection door: audio (the
+            ;; pump), draw (the frame's draw thunk), frame (frame-begin!/end-frame too), sim
+            ;; (fx-frame, session-step, session-advance)
+            ((string=? type "skip")
+             (set! *skip* (map string->symbol (string-split payload ",")))
+             0)
+            ((string=? type "trap")
+             (set! *trap-armed* (if (string=? payload "now") (quote any) (quote frame)))
+             (when (string=? payload "now") (%fatal!))
+             0)
+            ;; ?soak: one line of the runtime's memory numbers for the soak's
+            ;; minute log (the page adds the wasm memory size and the GL counts):
+            ;;   crash: soak gc ALLOCATED peak PEAK next NEXT young YOUNG minor N major N gcms MS tracks BYTES
+            ((string=? type "soak")
+             (let* ((stats (guard (e (#t '())) (gc-stats)))
+                    (get (lambda (key) (let ((p (assq key stats))) (if p (cdr p) 0)))))
+               (say "soak" "gc" (get 'bytes-allocated) "peak" (get 'heap-peak-bytes) "next" (get 'next-gc)
+                    "young" (get 'young-bytes) "minor" (get 'minor-collections) "major" (get 'major-collections)
+                    "gcms" (tenth (/ (+ (get 'minor-time-ns) (get 'major-time-ns)) 1000000.0))
+                    "tracks" (audio-track-bytes)))
+             0)
             (else 0)))))

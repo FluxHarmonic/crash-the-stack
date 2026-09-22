@@ -1,0 +1,293 @@
+;;; (crash tracker web) - The tracker's own web shell: the entry of crash-tracker.wasm
+;;;
+;;; The tracker ships as its own wasm behind /tracker/ (David, 2026-09-21),
+;;; so the game's wasm carries none of motif and a player never loads an
+;;; editor. This is the whole shell: a canvas, the audio sink, one frame per
+;;; requestAnimationFrame dispatch, the tracker's keys and taps, and the tune
+;;; text the page hands over in base64 chunks. It imports the tracker family,
+;;; sigil, motif and the three leaves the family may use (font, palette,
+;;; audio): no board, cards, menu, title or game shell, which
+;;; test/test-imports.sgl holds.
+;;;
+;;; The page (tracker.template.html) is the other half: it fetches a bundled
+;;; tune (../assets/tunes/NAME.cts) on "crash: tune-fetch NAME", decodes a
+;;; shared one from the fragment (#t=<deflate-raw, base64url>) and hands
+;;; either over as ("tune-chunk", base64) dispatches then ("tune-done",
+;;; NAME); it turns "crash: tune-share NAME BASE64" into the share URL; and it
+;;; forwards modifier chords the loader drops.
+;;;
+;;; Dispatches: frame keydown keyup pointerdown wheel gesture touch dpr trace
+;;;             tune (a bundled name to fetch) tune-chunk tune-done
+;;; Lines (with ?trace unless said otherwise):
+;;;   crash: tracker open NAME        (always) the screen is up
+;;;   crash: tune loaded NAME | crash: tune unreadable MSG
+;;;   crash: tracker play P R | crash: tracker stop P R
+;;;   crash: tracker tap X Y touch|mouse
+;;;   crash: tune-fetch NAME          (always) the page fetches ../assets/tunes/NAME.cts
+;;;   crash: tune-share NAME BASE64   (always) the page makes the share URL
+
+(define-library (crash tracker web)
+  (import (sigil core)
+          (sigil math)
+          (sigil list)
+          (sigil string)
+          (sigil io)
+          (sigil graphics)
+          (sigil browser gles3)
+          (crash tracker)
+          (crash tracker model)
+          (crash tracker play)
+          (crash audio))
+
+  (export tracker-web-main tracker-web-dispatch)
+
+  (begin
+    (define VW 640)
+    (define VH 400)
+    (define BUNDLED-TUNES '("spy" "breaker" "groove" "demo-columns"))
+
+    (define *state* #f)
+    (define *keys* '())          ; held keys (symbols), modifiers among them
+    (define *pressed* '())       ; keys that went down since the last frame
+    (define *click* #f)          ; (x . y) virtual, once
+    (define *wheel* 0)           ; wheel notches since the last frame (+ down)
+    (define *touch* #f)
+    (define *trace* #f)
+    (define *tune-chunks* '())
+    (define *tune-name* "untitled")
+    (define *playing* #f)
+    (define *last-ms* #f)
+    (define *audio-ready* #f)
+    (define *booted* #f)
+    (define *want* #f)           ; a bundled name asked for before the boot
+
+    (define MODIFIERS '(ctrl shift alt))
+
+    (define (say . parts)
+      (when *trace*
+        (println "~a" (apply str "crash:" (map (lambda (p) (str " " p)) parts)))))
+
+    (define (tell . parts)
+      (println "~a" (apply str "crash:" (map (lambda (p) (str " " p)) parts))))
+
+    ;; --- keys, as the game's web shell names them ------------------------------
+    (define (dom-key->sym k)
+      (cond ((string=? k "ArrowLeft") 'left)
+            ((string=? k "ArrowRight") 'right)
+            ((string=? k "ArrowUp") 'up)
+            ((string=? k "ArrowDown") 'down)
+            ((string=? k " ") 'space)
+            ((string=? k "Enter") 'return)
+            ((string=? k "Backspace") 'backspace)
+            ((string=? k "Tab") 'tab)
+            ((string=? k "Escape") 'escape)
+            ((string=? k "Shift") 'shift)
+            ((string=? k "Control") 'ctrl)
+            ((string=? k "Alt") 'alt)
+            ((string=? k "Meta") 'ctrl)
+            ((= (string-length k) 1) (string->symbol (string-downcase k)))
+            (else (string->symbol k))))
+
+    (define (key-down! k)
+      (let ((sym (dom-key->sym k)))
+        (unless (memq sym *keys*)
+          (set! *keys* (cons sym *keys*))
+          (set! *pressed* (cons sym *pressed*)))))
+
+    (define (key-up! k)
+      (let ((sym (dom-key->sym k)))
+        (set! *keys* (filter (lambda (x) (not (eq? x sym))) *keys*))))
+
+    ;; --- pointer: "x,y,mods" in canvas buffer pixels -> virtual --------------
+    (define (frame->virtual fw fh x y)
+      (let* ((scale (min (/ fw VW) (/ fh VH)))
+             (ox (/ (- fw (* VW scale)) 2))
+             (oy (/ (- fh (* VH scale)) 2)))
+        (cons (/ (- x ox) scale) (/ (- y oy) scale))))
+
+    (define (pointer-down! payload)
+      (gesture!)
+      (let ((parts (string-split payload ",")))
+        (when (>= (length parts) 2)
+          (let ((x (string->number (car parts)))
+                (y (string->number (cadr parts))))
+            (when (and x y)
+              (set! *click* (frame->virtual (gles3-canvas-width) (gles3-canvas-height) x y)))))))
+
+    ;; A user gesture: resume the context whenever the browser suspended it.
+    (define (gesture!)
+      (when (and *audio-ready* (not (eq? (audio-state) 'running)))
+        (audio-resume!))
+      0)
+
+    ;; --- the tune text from the page --------------------------------------------
+    (define B64 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+    (define B64-TABLE
+      (let ((t (make-vector 128 #f)))
+        (let loop ((i 0))
+          (when (< i 64)
+            (vector-set! t (char->integer (string-ref B64 i)) i)
+            (loop (+ i 1))))
+        t))
+
+    (define (b64-decode text)
+      (let* ((bytes (string->utf8 text))
+             (n (bytevector-length bytes))
+             (pads (cond ((and (>= n 2) (= (bytevector-u8-ref bytes (- n 1)) 61) (= (bytevector-u8-ref bytes (- n 2)) 61)) 2)
+                         ((and (>= n 1) (= (bytevector-u8-ref bytes (- n 1)) 61)) 1)
+                         (else 0)))
+             (out (make-bytevector (quotient (* (- n pads) 3) 4) 0))
+             (len (bytevector-length out)))
+        (let loop ((i 0) (acc 0) (bits 0) (k 0))
+          (if (= i n)
+              out
+              (let* ((c (bytevector-u8-ref bytes i))
+                     (v (and (< c 128) (vector-ref B64-TABLE c))))
+                (if (not v)
+                    (loop (+ i 1) acc bits k)
+                    (let ((acc (+ (* acc 64) v))
+                          (bits (+ bits 6)))
+                      (if (>= bits 8)
+                          (let* ((bits (- bits 8))
+                                 (byte (quotient acc (expt 2 bits))))
+                            (when (< k len)
+                              (bytevector-u8-set! out k byte))
+                            (loop (+ i 1) (- acc (* byte (expt 2 bits))) bits (+ k 1)))
+                          (loop (+ i 1) acc bits k)))))))))
+
+    (define (b64-encode bytes)
+      (let* ((n (bytevector-length bytes))
+             (out (make-string (* 4 (quotient (+ n 2) 3)) #\=)))
+        (let loop ((i 0) (o 0))
+          (when (< i n)
+            (let* ((b0 (bytevector-u8-ref bytes i))
+                   (b1 (if (< (+ i 1) n) (bytevector-u8-ref bytes (+ i 1)) 0))
+                   (b2 (if (< (+ i 2) n) (bytevector-u8-ref bytes (+ i 2)) 0))
+                   (v (+ (* b0 65536) (* b1 256) b2)))
+              (string-set! out o (string-ref B64 (quotient v 262144)))
+              (string-set! out (+ o 1) (string-ref B64 (modulo (quotient v 4096) 64)))
+              (when (< (+ i 1) n) (string-set! out (+ o 2) (string-ref B64 (modulo (quotient v 64) 64))))
+              (when (< (+ i 2) n) (string-set! out (+ o 3) (string-ref B64 (modulo v 64))))
+              (loop (+ i 3) (+ o 4)))))
+        out))
+
+    (define (tune-chunk! payload)
+      (set! *tune-chunks* (cons (b64-decode payload) *tune-chunks*))
+      0)
+
+    (define (tune-done! name)
+      (let* ((bytes (apply bytevector-append (reverse *tune-chunks*)))
+             (text (utf8->string bytes)))
+        (set! *tune-chunks* '())
+        (let ((s (tracker-open-text text (if (> (string-length name) 0) name "untitled"))))
+          (if (tracker-error s)
+              (begin
+                (say "tune" "unreadable" (tracker-error s))
+                (when *state* (set! *state* (tracker-with-message *state* "UNREADABLE"))))
+              (begin
+                (set! *tune-name* (if (> (string-length name) 0) name "untitled"))
+                (say "tune" "loaded" *tune-name*)
+                (play-stop!)
+                (set! *state* (tracker-with-message (zoomed s) (string-upcase *tune-name*))))))
+        0))
+
+    ;; a phone starts zoomed: four channels at scale 2, the bar closes the screen
+    (define (zoomed s)
+      (if (and *touch* (not (tstate-zoom s))) (tracker-apply s 'zoom) s))
+
+    (define (next-bundled-tune)
+      (let loop ((xs BUNDLED-TUNES))
+        (cond ((null? xs) (car BUNDLED-TUNES))
+              ((string=? (car xs) *tune-name*) (if (pair? (cdr xs)) (cadr xs) (car BUNDLED-TUNES)))
+              (else (loop (cdr xs))))))
+
+    ;; --- the boot and the frame ---------------------------------------------------
+    (define (boot!)
+      (set! *booted* #t)
+      (set! *audio-ready* (audio-open!))
+      (audio-set-ambient! #f 22050)
+      (unless *state* (set! *state* (zoomed (tracker-blank))))   ; a tune may have landed before the first frame
+      (when *want*
+        (set! *tune-name* *want*)
+        (tell "tune-fetch" *want*))
+      (tell "tracker" "open" *tune-name*)
+      (say "audio" (if *audio-ready* "open" "closed")))
+
+    (define (frame-dt payload)
+      (let* ((ms (string->number payload))
+             (dt (if (and ms *last-ms*) (/ (- ms *last-ms*) 1000.0) 0.0)))
+        (when ms (set! *last-ms* ms))
+        dt))
+
+    (define (tick dt)
+      (unless *booted* (boot!))
+      (audio-pump!)
+      (gles3-resize-to-display)
+      ;; the wheel scrolls the cursor row, three rows a notch (David, 2026-09-21)
+      (unless (= *wheel* 0)
+        (set! *state* (tracker-apply *state* (list 'scroll (* 3 *wheel*))))
+        (set! *wheel* 0))
+      (let* ((pressed (reverse *pressed*))
+             (held (filter (lambda (k) (memq k MODIFIERS)) *keys*))
+             (click *click*))
+        (set! *pressed* '())
+        (set! *click* #f)
+        (when click (say "tracker" "tap" (car click) (cdr click) (if *touch* "touch" "mouse")))
+        (let* ((ch0 (tstate-ch *state*))
+               (r (tracker-frame *state* pressed held click VW VH *touch*))
+               (s (car r))
+               (req (cdr r)))
+          (set! *state*
+                (case req
+                  ((share save)
+                   (tell "tune-share" *tune-name* (b64-encode (string->utf8 (tracker-text s))))
+                   (tracker-with-message s "SHARE URL MADE"))
+                  ((open)
+                   (let ((name (next-bundled-tune)))
+                     (tell "tune-fetch" name)
+                     (tracker-with-message s (string-append "FETCHING " (string-upcase name)))))
+                  ((new) (set! *tune-name* "untitled") (zoomed (tracker-blank)))
+                  ;; Escape with nothing playing: there is no menu here; stay
+                  (else s)))
+          ;; the cursor channel, when it moves (the arm's focus leg reads it)
+          (unless (= ch0 (tstate-ch *state*))
+            (say "tracker" "channel" (tstate-ch (car r))))
+          (let ((playing (play-playing?)))
+            (unless (eq? playing *playing*)
+              (set! *playing* playing)
+              (say "tracker" (if playing "play" "stop")
+                   (let ((p (tstate-playing *state*))) (if p (car p) (tstate-pos *state*)))
+                   (let ((p (tstate-playing *state*))) (if p (cdr p) (tstate-row *state*))))))))
+      (begin-frame)
+      (set-blend-mode 'normal)
+      (tracker-draw *state* VW VH *touch*)
+      (end-frame)
+      (audio-pump!)
+      0)
+
+    (define (tracker-web-dispatch type payload)
+      (cond ((string=? type "frame") (tick (frame-dt payload)))
+            ((string=? type "keydown") (key-down! payload) 0)
+            ((string=? type "keyup") (key-up! payload) 0)
+            ((string=? type "pointerdown") (pointer-down! payload) 0)
+            ((string=? type "gesture") (gesture!))
+            ((string=? type "wheel") (let ((n (string->number payload))) (when n (set! *wheel* (+ *wheel* (if (> n 0) 1 -1))))) 0)
+            ((string=? type "touch") (set! *touch* (string=? payload "on")) 0)
+            ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
+            ((string=? type "dpr") 0)
+            ((string=? type "tune") (set! *want* (and (> (string-length payload) 0) payload)) 0)
+            ((string=? type "tune-chunk") (tune-chunk! payload))
+            ((string=? type "tune-done") (tune-done! payload))
+            (else 0)))
+
+    (define (tracker-web-main)
+      (unless (gles3-use-canvas "#stage")
+        (error "crash tracker web: no WebGL2 context for #stage"))
+      (gles3-resize-to-display)
+      (gfx-setup)
+      (set-viewport VW VH)
+      (set-letterbox-color 0.0 0.0 0.0)
+      (gles3-start-loop "crash-tracker-tick")
+      0)
+
+    ))
