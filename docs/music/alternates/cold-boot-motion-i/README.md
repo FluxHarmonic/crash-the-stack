@@ -74,3 +74,11 @@ Audio and measurements live under
 `~/Ops/artifacts/crash-the-stack-album/cold-boot-motion-i/`, with delivered OGGs
 in `ogg/`. The accepted song pool, generated game/album arrangements and public
 master remain intact while this proposal is reviewed.
+
+## Source and timing checks
+
+The candidate has 2,368 compiled attacks with zero sample timing error, the
+same four intentional 32nd-note fill hits, and all final gates released. Its
+complete duration is 214.5454545 seconds. Both generated before snapshots match
+the current accepted versions. All fifteen maintained shared songs pass their
+regeneration check; this audition leaves those sources and outputs unchanged.
