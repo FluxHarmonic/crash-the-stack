@@ -33,6 +33,7 @@
 (define-library (crash menu)
   (import (sigil struct)
           (sigil math)
+          (only (sigil string) string>?)
           (crash input)
           (crash title)
           (crash settings)
@@ -43,6 +44,7 @@
           menu-title menu-with-title menu-settings menu-with-settings
           menu-version menu-code-line menu-with-code-line menu-copy menu-code menu-page
           menu-scores menu-with-scores menu-run menu-open-run-done
+          menu-news menu-news-seen menu-with-news menu-news-unread? menu-news-newest-date menu-post menu-row-label
           menu-new-overlay menu-new-layer-done menu-home menu-table menu-row-note
           menu-step menu-entry-rect menu-hit menu-cues menu-live?
           menu-label menu-row-value menu-row-kind menu-heading menu-code-display
@@ -66,6 +68,7 @@
             (list 'settings "SETTINGS")
             (list 'credits "CREDITS")
             (list 'update "UPDATE")
+            (list 'news "NEWS")   ; P4b (D20): the devlog's posts, beside UPDATE; NEW while unread
             (list 'stack "STACK")
             (list 'cards "DEFRAG")
             (list 'daily-stack "DAILY STACK")
@@ -91,7 +94,10 @@
     ;; The screens: each with its entries in order and its heading (the
     ;; top screen has the logo instead).
     (define SCREENS
-      (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update 'exit)
+      (list (list 'top #f 'continue 'jack-in 'free-play 'settings 'credits 'update 'news 'exit)
+            ;; NEWS (P4b, D20): the posts as rows (post-N ids, filled by open-screen
+            ;; from the menu's news), each opening the post outside the game
+            (list 'news "NEWS" 'back)
             (list 'free "FREE PLAY" 'stack 'cards 'daily-stack 'daily-cards 'code 'scores 'tracker 'version 'back)
             (list 'settings "SETTINGS" 'back)   ; the general rows (D51), filled from (crash settings)' group by open-screen
             (list 'credits "CREDITS")   ; the crawl: no rows; Escape, Backspace or a tap leaves
@@ -173,6 +179,8 @@
       (home default: 'top)       ; the screen a sub-screen closes to: top, or pause for the table's overlay
       (table default: #f)        ; the overlay's table (stack | cards): its GAME SETTINGS rows
       (y-offset default: 0)      ; the overlay's rows and heading shifted down to center its panel on the table
+      (news default: '())        ; P4b: the devlog's posts, newest first, each (title date url); '() until the page hands them over
+      (news-seen default: "")    ; the newest post's date the player has seen (the store's news-seen key); "" for none
       (frames default: 0)        ; menu frames so far
       (ms default: 0.0))         ; milliseconds so far: the cursor's blink (the same at 60 and 120 Hz)
 
@@ -181,6 +189,33 @@
     (define (menu-with-code-line m code . rest)
       (menu m code-line: code copy: (and (pair? rest) (car rest) #t)))
     (define (menu-with-scores m s) (menu m scores: s))
+
+    ;; --- NEWS (P4b, ruling D20) -------------------------------------------------
+    ;; The posts the page read from the site's JSON Feed (newest first) and
+    ;; the last seen date; the row shows NEW while the newest post's date is
+    ;; later than the seen one. A post's row id is post-N.
+    (define (menu-with-news m posts seen)
+      (menu m news: posts news-seen: (or seen "")))
+    (define (menu-news-unread? m)
+      (and (pair? (menu-news m))
+           (string>? (cadr (car (menu-news m))) (menu-news-seen m))))
+    (define (menu-news-newest-date m)
+      (if (pair? (menu-news m)) (cadr (car (menu-news m))) ""))
+    (define (post-id i) (string->symbol (string-append "post-" (number->string i))))
+    (define (post-ids posts)
+      (let loop ((i 0) (acc '()))
+        (if (>= i (length posts)) (reverse acc) (loop (+ i 1) (cons (post-id i) acc)))))
+    ;; The post a row id names, (title date url), or #f.
+    (define (menu-post m id)
+      (let ((text (symbol->string id)))
+        (and (> (string-length text) 5)
+             (string=? (substring text 0 5) "post-")
+             (let ((i (string->number (substring text 5 (string-length text)))))
+               (and i (< i (length (menu-news m))) (list-ref (menu-news m) i))))))
+    ;; The NEWS screen opened: every post's date is seen now (the shell
+    ;; writes the store's key from menu-news-newest-date).
+    (define (menu-news-seen! m)
+      (menu m news-seen: (menu-news-newest-date m)))
     (define (menu-with-credits m items)
       (menu m credits: items crawl: (cons (credits-height items) (credits-layout items))))
     (define (menu-crawl-height m) (if (menu-crawl m) (car (menu-crawl m)) 0))
@@ -197,14 +232,22 @@
               ((setting-ref id) (setting-name (setting-ref id)))
               (else "?"))))
 
+    ;; A row's label with the menu in hand: a post's row is its title (the
+    ;; small font on the NEWS screen draws it), anything else menu-label.
+    (define (menu-row-label m id)
+      (let ((post (and (eq? (menu-screen m) 'news) (menu-post m id))))
+        (if post (car post) (menu-label id))))
+
     ;; item (a choice) or value (a row that steps). The overlay's exit row
     ;; and its CODE row show a value but pick as items.
     (define (menu-row-kind m id)
-      (if (or (eq? id 'version) (setting-ref id)) 'value 'item))
+      (if (or (eq? id 'version) (setting-ref id)) 'value 'item))   ; NEWS shows a value (NEW) but is an item: Enter opens it
 
     ;; The value a row shows, as text, or #f for a plain item.
     (define (menu-row-value m id)
       (cond ((eq? id 'version) (if (eq? (menu-version m) 'original) "ORIGINAL" "HACKER"))
+            ((eq? id 'news) (and (menu-news-unread? m) "NEW"))   ; P4b: the unread mark
+            ((and (eq? (menu-screen m) 'news) (menu-post m id)) (cadr (menu-post m id)))   ; a post's date
             ((setting-ref id) (setting-value-label id (settings-value (menu-settings m) id)))
             (else #f)))
 
@@ -426,6 +469,9 @@
                               (append (settings-group (or (menu-table m) 'stack)) (list 'back)))
                              ((eq? screen 'settings)
                               (append (settings-group 'general) (list 'back)))
+                             ;; NEWS (P4b): a row per post, newest first, then BACK
+                             ((eq? screen 'news)
+                              (append (post-ids (menu-news m)) (list 'back)))
                              ;; TRACKER (P3b) is a link the page follows (as COPY is a clipboard the
                              ;; page writes): shown only where a page is there to act, the same flag
                              ((and (eq? screen (quote free)) (not (menu-copy m)))
@@ -443,6 +489,7 @@
                       ((free) 'free-play)
                       ((settings) 'settings)
                       ((credits) 'credits)
+                      ((news) 'news)
                       ((scores code) 'free-play)
                       ((run-done jack-in) 'jack-in)
                       ((pause-game) 'game-settings)
@@ -474,6 +521,9 @@
               ((eq? id 'settings) (cons (open-screen m 'settings) #f))
               ((eq? id 'game-settings) (cons (open-screen m 'pause-game) #f))
               ((eq? id 'credits) (cons (open-screen m 'credits) #f))
+              ((eq? id 'news) (cons (menu-news-seen! (open-screen m 'news)) 'news-seen))   ; the shell stores the seen date
+              ((and (eq? (menu-screen m) 'news) (menu-post m id))
+               (cons m (cons 'open (caddr (menu-post m id)))))   ; the shell opens the post outside the game
               ((eq? id 'scores) (cons (open-screen m 'scores) #f))
               ((eq? id 'code) (cons (open-screen m 'code) #f))
               ((eq? id 'back) (cons (close-screen m) #f))

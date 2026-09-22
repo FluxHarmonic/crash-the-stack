@@ -22,7 +22,10 @@
 // tracker sit outside it).
 
 var VERSION = "__VERSION__";
-var CACHE = "crash-the-stack-" + VERSION;
+// P4b: the game's caches are "crash-jack-in-<version>"; the old root-scoped
+// worker's were "crash-the-stack-<version>", which the root tombstone
+// (web/sw-tombstone.js) deletes by that prefix without touching these.
+var CACHE = "crash-jack-in-" + VERSION;
 var SHELL = [
   "./",
   "styles.css",
@@ -80,7 +83,7 @@ self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (names) {
       return Promise.all(names.map(function (name) {
-        if (name !== CACHE && name.indexOf("crash-the-stack-") === 0) return caches.delete(name);
+        if (name !== CACHE && (name.indexOf("crash-jack-in-") === 0 || name.indexOf("crash-the-stack-") === 0)) return caches.delete(name);
         return null;
       }));
     }).then(function () { return self.clients.claim(); })

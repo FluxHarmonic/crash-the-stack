@@ -133,7 +133,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "news", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -2631,6 +2631,88 @@ async function downTo(order, id, at = 0) {
     else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; title line "${np[1]}"; menu theme opened`);
   }
   if (detail) fail("music", detail);
+}
+
+// ---- 9f. news: NEWS in the main menu reads the site's JSON Feed (P4b, D20) ------
+// A fixture feed (two posts, the newest dated 2099) served by this arm at
+// BASE + "news-fixture.json" and pointed at by ?news=. A fresh origin has
+// seen nothing: the top screen's NEWS row carries the value NEW; opening
+// it lists the two posts newest first (post-0, post-1) and BACK; Enter on
+// the first post prints "crash: open URL" and the page opens the post in
+// a NEW browsing context (the game's own page is unchanged: same URL,
+// still the NEWS screen); after a reload the row has no NEW (the seen
+// date is stored). Then the feed is taken away: a boot without ?news=
+// (the arm serves no ../devlog/feed.json) has no NEWS row at all.
+{
+  let detail = "";
+  const fixture = JSON.stringify({ version: "https://jsonfeed.org/version/1.1", title: "fixture", items: [
+    { id: "https://crashthestack.com/devlog/newest/", url: "https://crashthestack.com/devlog/newest/", title: "The newest post", date_published: "2099-01-02T00:00:00Z" },
+    { id: "https://crashthestack.com/devlog/older/", url: "https://crashthestack.com/devlog/older/", title: "An older post", date_published: "2026-09-22T10:00:00Z" } ] });
+  substitutePaths[BASE + "news-fixture.json"] = Buffer.from(fixture);
+  await evalJS(`localStorage.removeItem("news-seen")`);
+  const r = await pauseMenu(`&news=${BASE}news-fixture.json`);
+  let opened = null;
+  if (r.error) detail = r.error;
+  else {
+    // the feed is read after the tunes and the credits (15 s on this box):
+    // the top screen is rebuilt with the row when it lands
+    const got = await waitLine(/^crash: news (\d+)$/, 0, 40000);
+    const top = r.top.rows.news ? r.top : await menuOn("top", r.from, 40000);
+    if (!got || got.m[1] !== "2") detail = `the game did not take the two fixture posts (${got ? got.m[0] : "no crash: news line"})`;
+    else if (!top || !top.rows.news) detail = `no NEWS row on the top screen (${top ? top.order.join(" ") : "no line"})`;
+    else if (top.rows.news.value !== "NEW") detail = `the NEWS row reads ${JSON.stringify(top.rows.news.value)} on a fresh origin, want NEW`;
+    else {
+      const m1 = consoleLines.length;
+      await downTo(top.order, "news", topAt);
+      await press("Enter");
+      const screen = await menuOn("news", m1, 3000);
+      if (!screen) detail = "Enter on NEWS opened no NEWS screen";
+      else if (screen.order.join(" ") !== "post-0 post-1 back") detail = `the NEWS screen lists ${screen.order.join(" ")}`;
+      else if (screen.rows["post-0"].value !== "2099-01-02") detail = `the first post's date reads ${screen.rows["post-0"].value}`;
+      else {
+        const before = (await send("Target.getTargets")).targetInfos.filter((t) => t.type === "page").length;
+        const here = await evalJS("location.href");
+        const m2 = consoleLines.length;
+        await press("Enter");
+        const said = await waitLine(/^crash: open (\S+)$/, m2, 3000);
+        await sleep(1500);
+        const targets = (await send("Target.getTargets")).targetInfos.filter((t) => t.type === "page");
+        opened = targets.find((t) => t.url === "https://crashthestack.com/devlog/newest/");
+        const still = await evalJS("location.href");
+        if (!said) detail = "Enter on the first post printed no crash: open line";
+        else if (said.m[1] !== "https://crashthestack.com/devlog/newest/") detail = `opened ${said.m[1]}`;
+        else if (targets.length !== before + 1 || !opened) detail = `no new browsing context at the post's URL (targets ${targets.map((t) => t.url).join(" ")})`;
+        else if (still !== here) detail = `the game's page moved to ${still}`;
+        else if (!(await menuOn("news", m1, 100))) detail = "the NEWS screen is gone";
+        if (opened) await send("Target.closeTarget", { targetId: opened.targetId }).catch(() => {});
+      }
+    }
+  }
+  if (!detail) {
+    // seen: the reload's row has no NEW
+    const r2 = await pauseMenu(`&news=${BASE}news-fixture.json`);
+    const top2 = r2.error ? null : (r2.top.rows.news ? r2.top : await menuOn("top", r2.from, 40000));
+    if (r2.error) detail = r2.error;
+    else if (!top2 || !top2.rows.news) detail = "no NEWS row after the reload";
+    else if (top2.rows.news.value) detail = `the NEWS row still reads ${top2.rows.news.value} after the posts were seen`;
+  }
+  // no feed: no row (build/web alone; the staged deploy tree beside a site
+  // has the real ../devlog/feed.json, and then the row is the site's posts)
+  const siteFeed = fs.existsSync(path.join(GAME, "..", "devlog", "feed.json"));
+  if (!detail && !siteFeed) {
+    const r3 = await pauseMenu();
+    if (r3.error) detail = r3.error;
+    else {
+      const failedLine = await waitLine(/^crash: news (failed|empty)/, r3.from - 200 > 0 ? r3.from - 200 : 0, 40000);
+      const top3 = await menuOn("top", r3.from, 1000) || r3.top;
+      if (!failedLine) detail = "no crash: news failed line without a feed";
+      else if (top3.rows.news) detail = "a NEWS row with no feed to read";
+    }
+  }
+  delete substitutePaths[BASE + "news-fixture.json"];
+  await evalJS(`localStorage.removeItem("news-seen")`);
+  if (detail) fail("news", detail);
+  else pass("news", `two fixture posts: NEW on the top screen's NEWS row, the screen lists post-0 (2099-01-02) post-1 back, Enter opened the post in a new browsing context with the game's page unchanged, no NEW after the reload${siteFeed ? " (the site's own feed sits beside this tree: the no-feed case not run)" : ", no row without a feed"}`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------

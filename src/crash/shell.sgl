@@ -41,6 +41,7 @@
           (crash title)
           (sigil math)
           (sigil time)
+          (sigil string)
           (crash font)
           (crash glyphs)
           (crash glyphs tools)
@@ -58,6 +59,7 @@
           settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code take-layer-cleared! credits-text!
+          news-posts! news-posts news-seen news-seen! NEWS-SEEN-KEY
           set-clock-source! now-second today
           music-frame! music-fresh! music-off! music-readout music-title set-trace-at-door!
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
@@ -676,6 +678,7 @@
             (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest)))
             (exit? (and (>= (length rest) 5) (list-ref rest 4))))
         (set! *title-shown* #t)
+        (menu-with-news
         (menu-with-credits
          (menu-with-scores
           (menu-with-code-line
@@ -683,6 +686,7 @@
            (menu-new (append (if continue? (list 'continue) '())
                              (list 'jack-in 'free-play 'settings 'credits)   ; built with list, not quoted (the wasm literal hazard)
                              (if update-waiting? (list 'update) '())
+                             (if (pair? *news*) (list 'news) '())   ; NEWS once the posts are in (P4b)
                              (if exit? (list 'exit) '()))
                      (if continue? 'continue 'jack-in)
                      seed)
@@ -690,7 +694,32 @@
            code-line
            copy?)
           (scores-in-force))
-         *credits*)))
+         *credits*)
+         *news* (news-seen))))
+
+    ;; --- NEWS (P4b, ruling D20) -------------------------------------------------
+    ;; The devlog's posts as the page (or the native shell) hands them over:
+    ;; one per line, "DATE<tab>TITLE<tab>URL", newest first; the shell keeps
+    ;; them for launch-menu, and the store's NEWS-SEEN-KEY holds the newest
+    ;; date the player has opened the NEWS screen on (the unread mark).
+    (define NEWS-SEEN-KEY "news-seen")
+    (define *news* '())
+    (define (news-posts) *news*)
+    (define (news-posts! text)
+      (set! *news*
+            (let loop ((lines (string-split text "\n")) (acc '()))
+              (if (null? lines)
+                  (reverse acc)
+                  (let ((parts (string-split (car lines) "\t")))
+                    (loop (cdr lines)
+                          (if (and (= (length parts) 3) (> (string-length (car parts)) 0))
+                              (cons (list (cadr parts) (car parts) (caddr parts)) acc)   ; (title date url)
+                              acc)))))))
+    (define (news-seen)
+      (let ((d (store-read-datum NEWS-SEEN-KEY)))
+        (if (string? d) d "")))
+    (define (news-seen! date)
+      (store-write-datum! NEWS-SEEN-KEY date))
 
     ;; The CREDITS crawl's items, parsed once from the text the shell
     ;; hands in (the native reads assets/credits.txt beside the binary,

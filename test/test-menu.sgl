@@ -54,7 +54,7 @@
               MENU-ENTRIES))
   (test "the removed prototype entries are not entries any more (rulings D32, D34, D48)"
     (assert-equal '(jack-in) (menu-entries (menu-new '(look hud depth jack-in))))
-    (assert-equal 25 (length MENU-ENTRIES)))   ; P4c's 21 + P3b's TRACKER + D65's three difficulties
+    (assert-equal 26 (length MENU-ENTRIES)))   ; P4c's 21 + P3b's TRACKER + D65's three difficulties + P4b's NEWS
   (test "EXIT is the top screen's last row when the shell asks for it (the native build), absent otherwise"
     (assert-equal '(jack-in credits exit) (menu-entries (menu-new '(exit jack-in credits))))
     (assert-equal 'exit (cdr (step (step* (menu-new '(jack-in exit)) 'down) '(return))))
@@ -345,3 +345,41 @@
     (test "picking it is the choice tracker"
       (assert-equal 'tracker (cdr (step (step* paged 'down 'down 'down 'down 'down 'down) '(return)))))
     (test "its label" (assert-equal "TRACKER" (menu-label 'tracker)))))
+
+;; NEWS (P4b, ruling D20): the devlog's posts beside UPDATE. The row shows
+;; NEW while the newest post's date is later than the seen one; opening the
+;; screen is the choice news-seen (the shell stores the newest date) and the
+;; screen lists the posts newest first as post-N rows, each the choice
+;; (open . url); BACK closes to NEWS.
+(test-group "NEWS"
+  (let* ((posts (list (list "RELEASE 0.1" "2026-09-22" "https://crashthestack.com/devlog/release-0-1/")
+                      (list "THREE TRIES" "2026-09-20" "https://crashthestack.com/devlog/three-tries/")))
+         (m (menu-with-news (menu-new '(jack-in news)) posts "")))
+    (test "the row sits after CREDITS and UPDATE, before EXIT, in the canonical order"
+      (assert-equal '(jack-in free-play settings credits update news exit)
+                    (menu-entries (menu-new '(exit news update credits settings free-play jack-in)))))
+    (test "unread while the newest date is past the seen one: the value NEW; read once seen"
+      (assert-true (menu-news-unread? m))
+      (assert-equal "NEW" (menu-row-value m 'news))
+      (assert-equal 'item (menu-row-kind m 'news))
+      (let ((seen (menu-with-news (menu-new '(jack-in news)) posts "2026-09-22")))
+        (assert-false (menu-news-unread? seen))
+        (assert-false (menu-row-value seen 'news)))
+      (assert-false (menu-news-unread? (menu-with-news (menu-new '(jack-in news)) '() ""))))
+    (test "picking NEWS opens its screen with a row per post and BACK, marks them seen, and is the choice news-seen"
+      (let ((r (step (step* m 'down) '(return))))
+        (assert-equal 'news-seen (cdr r))
+        (let ((o (car r)))
+          (assert-equal 'news (menu-screen o))
+          (assert-equal '(post-0 post-1 back) (menu-entries o))
+          (assert-equal "2026-09-22" (menu-news-seen o))
+          (assert-equal "RELEASE 0.1" (menu-row-label o 'post-0))
+          (assert-equal "2026-09-22" (menu-row-value o 'post-0))
+          (assert-equal posts (list (menu-post o 'post-0) (menu-post o 'post-1))))))
+    (test "Enter on a post is the choice (open . url); BACK closes to the NEWS row"
+      (let* ((o (car (step (step* m 'down) '(return))))
+             (r (step o '(return))))
+        (assert-equal (cons 'open "https://crashthestack.com/devlog/release-0-1/") (cdr r))
+        (let ((closed (car (step (step* o 'down 'down) '(return)))))
+          (assert-equal 'top (menu-screen closed))
+          (assert-equal 'news (list-ref (menu-entries closed) (menu-highlight closed))))))))

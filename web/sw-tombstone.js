@@ -20,6 +20,7 @@ self.addEventListener("install", function () {
 self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (keys) {
+      // the old worker's caches only; the game's own are "crash-jack-in-*"
       return Promise.all(keys.filter(function (k) { return k.indexOf("crash-the-stack-") === 0; })
                              .map(function (k) { return caches.delete(k); }));
     }).then(function () {
