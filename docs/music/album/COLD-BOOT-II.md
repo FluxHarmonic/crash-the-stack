@@ -29,3 +29,13 @@ covering 4/4/4/3 songs). Both generated outputs match the approved candidates,
 and the adopted album is byte-identical to the rendered native source snapshot.
 The existing timing/audio audits therefore apply without resynthesis. No other
 song source or generated arrangement changes in this adoption.
+
+## Album-level master prepared
+
+The approved native WAV is copied losslessly to `cold-boot-ii-release/` with
+source and renderer hashes. The established +1.5 dB input gain and oversampled
+peak limiter produce -15.9 LUFS-I / -1.5 dBTP WAV and -15.8 LUFS-I / -1.4 dBTP
+OGG. Loudness range remains 3.3 LU. Duration and all format checks pass;
+WAV/FLAC decoded PCM is identical and the final second peaks at -90.3 dBFS.
+The exporter now selects this master for Cold Boot. Publication follows after
+the tagged MP3 and preserved live-site snapshot pass their checks.
