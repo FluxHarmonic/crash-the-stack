@@ -139,3 +139,17 @@ machine-readable checks live in the external delivery directory.
 Telegram acknowledged the A/B file as message 1135, complete before as 1136,
 and complete after as 1137. Listening approval is pending. These are auditions,
 not an adopted album revision or public-site update.
+
+## First listening feedback
+
+David prefers the quieter Expression I drums because they leave the rest of
+the arrangement more space. Keep that kit in the next auditions. He finds the
+metallic bell interesting and requested a calm-section comparison against the
+existing bell, which he also likes. The wire pluck and choir remain unapproved.
+
+[Calm bell comparison I](../alternates/relay-bell-calm-i/README.md) holds the new
+kit and original pluck constant, comparing sixteen calm bars with only the bell
+changed. Existing bell first; metallic bell at 0:32.727. He also raised the
+level of the squeaky upper bass line as a possible issue; identification of
+the higher acid line versus the main gritty bass is pending before a separate
+level audition.

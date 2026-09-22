@@ -91,3 +91,9 @@ and renderer identity, then remeasures them; changed cases render normally.
 Delivery refuses sources changed since synthesis and uses equal monitoring
 gain within every pair. See `../album/EXPRESSION-PASS.md` for the listening
 protocol and current section map. All scripts use the Sigil shell interface.
+
+`relay-bell-context.sgl --motif PATH --output EXTERNAL_DIR` produces the focused
+calm bell A/B: sixteen identical bars with the preferred contact/dust kit and
+original pluck, first using the existing bell and then the metallic prototype.
+It checks all compiled ticks, allows only instrument 9 to differ, and writes
+a single OGG comparison plus source snapshots and measurement records.
