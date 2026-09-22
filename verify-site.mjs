@@ -335,7 +335,11 @@ else {
     // unregisters and reloads the client through the landing
     let at = null;
     const t0 = Date.now();
-    while (Date.now() - t0 < 120000) {
+    // five minutes: the old page installs the tombstone, which activates,
+    // clears the caches and navigates it. On a loaded box (three web builds
+    // and another arm's Chrome) that round trip has taken over two minutes,
+    // and the leg is about what happens, not how fast
+    while (Date.now() - t0 < 300000) {
       at = await evalJS("location.href").catch(() => null);
       if (at === `${origin}/jack-in/?trace&code=${CODE}`) break;
       await sleep(250);
