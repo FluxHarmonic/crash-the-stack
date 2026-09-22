@@ -51,6 +51,38 @@ extern void sigil__gc_pop_temp_root(SigilVM *vm);
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <stdio.h>
+/* The Windows build links as a GUI-subsystem program (the windows-amd64
+ * config's link-flags: no console window beside the game from Explorer;
+ * David, 2026-09-22), so it starts with no standard streams. From a
+ * terminal, attach to the parent's console and point stdout/stderr at
+ * it, so the diagnostics (crash: ..., sigil-desktop:, miniaudio) print
+ * there as on Linux; from Explorer there is no parent console and this
+ * does nothing. A console-subsystem build already owns a console and
+ * AttachConsole fails harmlessly. */
+/* A standard stream the process already has (a redirect such as
+ * `crash-the-stack.exe > log.txt`, or an inherited handle) is kept;
+ * only a missing one is pointed at the parent console. */
+static int std_stream_present(DWORD which)
+{
+    HANDLE h = GetStdHandle(which);
+    return h != NULL && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+}
+
+static void attach_parent_console(void)
+{
+    int out_ok = std_stream_present(STD_OUTPUT_HANDLE);
+    int err_ok = std_stream_present(STD_ERROR_HANDLE);
+    if (out_ok && err_ok) return;
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (!out_ok && freopen("CONOUT$", "w", stdout)) setvbuf(stdout, NULL, _IONBF, 0);
+        if (!err_ok && freopen("CONOUT$", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    }
+}
+#endif
+
 #ifndef __wasm__
 /* stb_vorbis is linked already: sigil-audio's audio.c includes the
  * implementation with external linkage (a second copy here clashed at
@@ -190,6 +222,9 @@ static Value native_fatal(SigilVM *vm, int argc, Value *args)
 
 void sigil__init_crash_native_module(SigilVM *vm)
 {
+#ifdef _WIN32
+    attach_parent_console();
+#endif
     SigilModule *module = sigil_begin_module(vm, "(crash native)");
     if (!module) return;
     sigil_module_register_native(vm, "%mix-track!", native_mix_track, SIGIL_ARITY_EXACT(8),
