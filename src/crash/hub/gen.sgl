@@ -256,8 +256,8 @@
     ;; phone, 2026-09-22: 94 GC pauses totalling 1006 ms over the twenty
     ;; seconds after a JACK IN).
     (define (fold-orthogonal i w h acc f)
-      (let* ((x (idx-x i w))
-             (y (idx-y i w))
+      (let* ((x (modulo i w))
+             (y (quotient i w))
              (acc (if (> y 0) (f acc (- i w)) acc))
              (acc (if (< y (- h 1)) (f acc (+ i w)) acc))
              (acc (if (> x 0) (f acc (- i 1)) acc))
@@ -292,8 +292,8 @@
     ;; corridor beside a floor cell is a door into it.
     (define (carvable? cells regions room-index w h touch region c)
       (and (eq? (vector-ref cells c) 'void)
-           (>= (idx-x c w) 1) (< (idx-x c w) (- w 1))
-           (>= (idx-y c w) 1) (< (idx-y c w) (- h 1))
+           (let ((x (modulo c w)) (y (quotient c w)))
+             (and (>= x 1) (< x (- w 1)) (>= y 1) (< y (- h 1))))
            (fold-orthogonal c w h #t
                             (lambda (ok n)
                               (and ok
@@ -615,21 +615,34 @@
                                  (dm (place-daemon rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w h i kind)))
                             (when dm (set! daemons (cons dm daemons))))
                           (loop (+ i 1))))
-                      ;; barriers: void beside anything walkable, eight ways
-                      (let loop ((c 0))
-                        (when (< c size)
-                          (when (and (eq? (vector-ref cells c) 'void)
-                                     (let ((x (idx-x c w)) (y (idx-y c w)))
-                                       (let around ((dx -1))
-                                         (and (<= dx 1)
-                                              (or (let down ((dy -1))
-                                                    (and (<= dy 1)
-                                                         (or (and (in-bounds? (+ x dx) (+ y dy) w h)
-                                                                  (cell-walkable? (vector-ref cells (idx (+ x dx) (+ y dy) w))))
-                                                             (down (+ dy 1)))))
-                                                  (around (+ dx 1)))))))
-                            (vector-set! cells c 'barrier))
-                          (loop (+ c 1))))
+                      ;; barriers: void beside anything walkable, eight ways.
+                      ;; Walked from the WALKABLE cells out (a layer has far
+                      ;; fewer of those than void ones, and the neighbours of
+                      ;; one are eight vector-refs rather than nine cells'
+                      ;; worth of bounds arithmetic): the same set of cells
+                      ;; either way, since "void beside walkable" is
+                      ;; symmetric. Measured at depth 6 (2040 cells):
+                      ;; 234 ms before, and the whole layer 601 ms (2026-09-22).
+                      (let ((mark '()))
+                        (let loop ((c 0))
+                          (when (< c size)
+                            (when (cell-walkable? (vector-ref cells c))
+                              (let ((x (modulo c w)) (y (quotient c w)))
+                                (let around ((dy -1))
+                                  (when (<= dy 1)
+                                    (let ((ny (+ y dy)))
+                                      (when (and (>= ny 0) (< ny h))
+                                        (let across ((dx -1))
+                                          (when (<= dx 1)
+                                            (let ((nx (+ x dx)))
+                                              (when (and (>= nx 0) (< nx w))
+                                                (let ((n (+ (* ny w) nx)))
+                                                  (when (eq? (vector-ref cells n) 'void)
+                                                    (set! mark (cons n mark))))))
+                                            (across (+ dx 1))))))
+                                    (around (+ dy 1))))))
+                            (loop (+ c 1))))
+                        (for-each (lambda (n) (vector-set! cells n 'barrier)) mark))
                       (and (not failed)
                            (layer depth: (descriptor-depth d)
                                   seed: seed
