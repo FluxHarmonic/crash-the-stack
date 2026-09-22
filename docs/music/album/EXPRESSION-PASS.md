@@ -223,3 +223,8 @@ from one proposed shared patch bank; the accepted shared source remains intact
 pending listening feedback. No transport LFO or automation feature is added.
 The Motif gain release and public integration are now complete; see
 [the integration record](../MOTIF-066-INTEGRATION.md).
+
+David approved both Cold Boot changes, finding the mix less muddy and busy.
+[Album II's selected mix](COLD-BOOT-II.md) is adopted in the shared source and
+regenerated into both arrangements. Further composition changes are not
+proposed; mastering and publication remain the next release step.

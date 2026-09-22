@@ -101,3 +101,21 @@ as 1150, and the complete candidate as 1151. The source/tool commit is
 `1bf4743`. Listening approval is pending; the public album and accepted shared
 song remain unchanged. The updated game arrangement is staged with the audition
 for adoption together with the album if these patches are selected.
+
+## Listener decision and adoption
+
+David approved the improvements, describing the mix as much less muddy and
+busy. Adopt both the metallic hats and pressure-filter colors; no further
+instrument or arrangement changes are proposed in this pass.
+
+The maintained shared pool now includes these five approved patches. Its
+regenerated game and album arrangements are byte-identical to the complete
+candidates preserved here. The current public master and deployed score assets
+have not been replaced by this source adoption; album II mastering/publication
+is the next release step. The measured candidate native WAV can be reused
+losslessly after verifying its score snapshot against the adopted album.
+
+To reproduce this historical comparison, use the source tree at `1bf4743`.
+The composer reads the then-current shared pool; rerunning it against today's
+approved pool would use the new patches on both sides, and its refusal to
+overwrite the preserved reference protects the original audition.

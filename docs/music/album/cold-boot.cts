@@ -3,17 +3,17 @@
   (instruments
     (instrument id: 1 name: "deep-kick" patch: (chip-kick decay: 0.24 drive: 0.6 index: 1.8 sweep: 2.8 sweep-decay: 0.028) volume: 50 pan: 0)
     (instrument id: 2 name: "roll-knock" patch: (chip-snare body: 0.45 crush-bits: 12 hp: 1500 noise: 0.3 noise-decay: 0.034) volume: 44 send: 0.035 pan: 0)
-    (instrument id: 3 name: "closed-grain" patch: (chip-noise attack: 0.001 crush-bits: 11 cutoff: 7000 decay: 0.024 drive: 0.1 hp: 3500 osc-amp: 0.6 release: 0.01 sustain: 0) volume: 22 pan: 0.22)
+    (instrument id: 3 name: "closed-machine-tick" patch: (chip-hat crush-bits: 12 decay: 0.022 hp: 4800 metal: 0.4 noise: 0.13) volume: 22 pan: 0.22)
     (instrument id: 4 name: "deep-sub" patch: (chip-sub attack: 0.003 decay: 0.12 drive: 0.12 osc-amp: 0.8 release: 0.025 sustain: 0.85) volume: 37 pan: 0)
     (instrument id: 6 name: "shadow-minor" patch: (fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 release: 0.12) volume: 26 send: 0.2 layers: ((fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 ratio: 1.1892071 release: 0.12 octave: 0 volume: 0.55) (fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 ratio: 1.4983071 release: 0.12 octave: 0 volume: 0.4)) pan: -0.24)
     (instrument id: 7 name: "shadow-friction" patch: (fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 release: 0.12) volume: 23 send: 0.2 layers: ((fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 ratio: 1.1892071 release: 0.12 octave: 0 volume: 0.5) (fm4-stab cutoff: 1100 decay: 0.34 index: 0.55 ratio: 1.4142136 release: 0.12 octave: 0 volume: 0.28)) pan: -0.24)
     (instrument id: 9 name: "distant-metal" patch: (fm4-bell amp-attack: 0.002 amp-decay: 0.8 amp-release: 0.32 amp-sustain: 0 index: 0.65) volume: 21 send: 0.28 pan: 0.3)
-    (instrument id: 12 name: "pressure-180" patch: (saw-acid attack: 0.002 cutoff: 180 cutoff-env: 550 decay: 0.18 drive: 0.8 filter-decay: 0.095 release: 0.022 resonance: 0.58 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
-    (instrument id: 14 name: "pressure-320" patch: (saw-acid attack: 0.002 cutoff: 320 cutoff-env: 1050 decay: 0.18 drive: 0.8 filter-decay: 0.095 release: 0.022 resonance: 0.58 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
-    (instrument id: 16 name: "pressure-500" patch: (saw-acid attack: 0.002 cutoff: 500 cutoff-env: 1750 decay: 0.18 drive: 0.8 filter-decay: 0.095 release: 0.022 resonance: 0.58 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
+    (instrument id: 12 name: "pressure-180" patch: (saw-acid attack: 0.002 cutoff: 140 cutoff-env: 380 decay: 0.18 drive: 0.8 filter-decay: 0.07 release: 0.022 resonance: 0.58 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
+    (instrument id: 14 name: "pressure-320" patch: (saw-acid attack: 0.002 cutoff: 260 cutoff-env: 900 decay: 0.18 drive: 0.8 filter-decay: 0.08 release: 0.022 resonance: 0.58 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
+    (instrument id: 16 name: "pressure-500" patch: (saw-acid attack: 0.002 cutoff: 560 cutoff-env: 2050 decay: 0.18 drive: 0.8 filter-decay: 0.075 release: 0.022 resonance: 0.61 sustain: 0.45 velocity-cutoff: 1600) volume: 28 pan: 0.08)
     (instrument id: 18 name: "machine-knock" patch: (chip-snare body: 0.45 crush-bits: 12 hp: 1500 noise: 0.24 noise-decay: 0.028) volume: 32 send: 0.035 pan: 0)
     (instrument id: 20 name: "air-pressure" patch: (chip-noise attack: 1.5 cutoff: 6000 decay: 0.4 hp: 2200 osc-amp: 0.3 release: 0.045 sustain: 0.55) volume: 22 send: 0.12 pan: -0.15)
-    (instrument id: 21 name: "open-grain" patch: (chip-hat crush-bits: 11 decay: 0.09 hp: 4500 metal: 0.42 noise: 0.22) volume: 23 pan: 0.22)
+    (instrument id: 21 name: "open-machine-tick" patch: (chip-hat crush-bits: 12 decay: 0.07 hp: 4800 metal: 0.48 noise: 0.14) volume: 23 pan: 0.22)
     (instrument id: 26 name: "relay-blip" patch: (fm4-bell amp-attack: 0.001 amp-decay: 0.04 amp-release: 0.012 amp-sustain: 0 index: 0.35) volume: 19 send: 0.06 pan: -0.15))
   (patterns
     (pattern id: 0 rows: 256
