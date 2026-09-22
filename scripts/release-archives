@@ -1,0 +1,68 @@
+#!/bin/sh
+# The release artifacts (P4b, ruling D37: a Linux and a Windows build every
+# release, attached to the tagged release, sold nowhere): two archives and
+# their SHA256SUMS under dist/.
+#
+#   scripts/release-archives VERSION      e.g. v0.1.0; the builds must be there:
+#                                          build/release (scripts/dev sigil build --config release)
+#                                          build/windows-amd64 (scripts/dev sigil build --config windows-amd64)
+#
+# Each archive unpacks to crash-the-stack-VERSION/ with bin/ (the game
+# alone: motif's own executable is bundled beside it by the build because
+# motif declares an entry, and is not part of the artifact), assets/ (the
+# tiles, cards, audio, tunes, the manifest, the credits; never assets/refs,
+# the generator references, nor assets/src, the art sources), LICENSE,
+# NOTICE, assets/LICENSE and assets/RESERVED.md as they are, README-run.txt
+# and a VERSION file the game reads for its title stamp. The binary finds
+# assets/ beside bin/ from wherever it is started (enter-install-dir! in
+# the native shell).
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+VERSION="${1:-}"
+[ -n "$VERSION" ] || { echo "release-archives: give the version, e.g. v0.1.0"; exit 1; }
+[ -x build/release/bin/crash-the-stack ] || { echo "release-archives: build/release/bin/crash-the-stack missing; build --config release first"; exit 1; }
+[ -f build/windows-amd64/bin/crash-the-stack.exe ] || { echo "release-archives: build/windows-amd64/bin/crash-the-stack.exe missing; build --config windows-amd64 first"; exit 1; }
+NAME="crash-the-stack-$VERSION"
+DIST="dist"
+rm -rf "$DIST/$NAME-linux-amd64" "$DIST/$NAME-windows-amd64"
+mkdir -p "$DIST"
+
+fill() {   # fill DIR SOURCE-BUILD-DIR EXE-NAME
+  dir="$1"; src="$2"; exe="$3"
+  mkdir -p "$dir/bin"
+  cp "$src/bin/$exe" "$dir/bin/$exe"
+  cp -r "$src/assets" "$dir/assets"
+  rm -rf "$dir/assets/refs" "$dir/assets/src"
+  cp LICENSE NOTICE "$dir/"
+  printf '%s\n' "$VERSION" > "$dir/VERSION"
+  cat > "$dir/README-run.txt" <<TXT
+Crash The Stack $VERSION
+https://crashthestack.com
+
+Run bin/$exe. It finds assets/ beside bin/ on its own, from a terminal,
+a desktop file or a double-click. Saves live under your data directory
+(XDG_DATA_HOME or ~/.local/share on Linux, %APPDATA% on Windows), in
+crash-the-stack/.
+
+  --stack, --cards       straight to a table
+  --seed N               the board a fresh deal starts from
+  --tracker              the tune editor with a blank tune
+  --tune assets/tunes/spy.cts   a shipped tune in the tracker
+
+The code is GPL-3.0-or-later (LICENSE); the art, audio and content
+CC-BY-4.0 (assets/LICENSE) except the marks in assets/RESERVED.md;
+the third-party notices are in NOTICE. Windows 10 or later; Linux amd64
+with a GL driver and PulseAudio or PipeWire.
+TXT
+}
+
+fill "$DIST/$NAME-linux-amd64/$NAME" build/release crash-the-stack
+fill "$DIST/$NAME-windows-amd64/$NAME" build/windows-amd64 crash-the-stack.exe
+
+(cd "$DIST/$NAME-linux-amd64" && tar czf "../$NAME-linux-amd64.tar.gz" "$NAME")
+(cd "$DIST/$NAME-windows-amd64" && rm -f "../$NAME-windows-amd64.zip" && guix shell zip -- zip -qr "../$NAME-windows-amd64.zip" "$NAME")
+rm -rf "$DIST/$NAME-linux-amd64" "$DIST/$NAME-windows-amd64"
+(cd "$DIST" && sha256sum "$NAME-linux-amd64.tar.gz" "$NAME-windows-amd64.zip" > SHA256SUMS)
+echo "release-archives: $DIST/"
+ls -la "$DIST"
+cat "$DIST/SHA256SUMS"
