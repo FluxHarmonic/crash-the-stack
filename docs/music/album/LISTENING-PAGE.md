@@ -264,3 +264,10 @@ correct album metadata; all fifteen tracks were present. The check was muted
 and paused afterward. R2 checksum, MIME, range and CORS verification passed.
 Final deployment records are in publication-obsidian-ii/deployment-restored.txt;
 its publication.json records preserved game hashes and the worker restoration.
+
+## Native download control
+
+David requested hiding the player's download button. The native audio element
+now uses controlslist="nodownload". Supporting browsers hide that control while
+retaining native playback, seeking and volume. This is a presentation choice:
+the MP3 stream URLs remain accessible. No context-menu blocking is added.
