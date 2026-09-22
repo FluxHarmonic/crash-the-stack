@@ -56,8 +56,10 @@
             (set! p (put-cell p 0 entry))))
         (each effect effects
           (let* ((row (list-find (lambda (r) (= (cadr r) (car effect))) (skip p 5)))
-                 (cell (and row (assoc (cadr effect) (cddr row)))))
-            (check (and cell (equal? (list-ref cell 4) "000"))
+                 (cell (or (and row (assoc (cadr effect) (cddr row)))
+                           (list (cadr effect) "..." 0 0 "000"))))
+            ;; Canonical printing omits empty cells; restore the transport cell.
+            (check (equal? (list-ref cell 4) "000")
                    "Transport overlay conflicts with edited phrase" name effect)
             (set! p
               (put-cell p (car effect)
@@ -137,15 +139,24 @@
                (list (str directory "/parts.cts")
                      (str directory "/arrangements.sgl")
                      (str "docs/music/songs/" slug ".sgl")))
+             (hashes
+               (map (lambda (file) (dict path: file sha256: (song-hash (path (root) file))))
+                    source-files))
              (parts (read-score (path (root) (car source-files))))
              (layout (read-score (path (root) (cadr source-files))))
              (receipt (str directory "/generated.json"))
              (baseline (json-decode (read-text (path (root) receipt))))
              (outputs '())
-             (mapping '())
-             (hashes
-               (map (lambda (file) (dict path: file sha256: (song-hash (path (root) file))))
-                    source-files)))
+             (mapping '()))
+        (each p (cdr (child parts 'patterns))
+          (each row (skip p 5)
+            (each cell (cddr row)
+              (check (not (and (= (cadr row) 0) (equal? (cadr cell) "===")))
+                     "Pattern entry gates belong in arrangement entry-offs"
+                     slug (field p id:) (car cell))
+              (check (not (member (substring (list-ref cell 4) 0 1) '("B" "D" "F")))
+                     "Transport belongs in arrangement overlays, not shared phrases"
+                     slug (field p id:) (cadr row)))))
         (each arrangement (cdr (child layout 'arrangements))
           (let* ((destination (field arrangement destination:))
                  (score (build-song-score parts layout arrangement))
