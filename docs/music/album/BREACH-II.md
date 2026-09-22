@@ -43,3 +43,7 @@ was muted and paused afterward.
 
 Future game deployments must retain the manifest in
 `publication-breach-ii/site/soundtrack/` or the current production equivalent.
+
+The complete current local MP3 collection is now
+`tagged-preview-v/soundtrack/audio/`; it copies revision IV and replaces only
+Breach Vector with the new tagged export. Its revision record retains the hash.
