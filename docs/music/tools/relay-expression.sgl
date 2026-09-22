@@ -1,0 +1,106 @@
+#!/usr/bin/env sigil
+;;; Build controlled A/B scores and a complete, unadopted Relay Ghost variant.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/expression-patches.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack expression patches))
+(initialize (path (script-dir) "../../.."))
+
+(define (excerpt source id start rows channels)
+  (let* ((original (pattern source id))
+         (cropped
+           (append (list 'pattern id: 0 rows: rows)
+             (map (lambda (row)
+                    (append (list 'row (- (cadr row) start)) (cddr row)))
+                  (filter (lambda (row)
+                            (<= start (cadr row) (- (+ start rows) 1)))
+                          (skip original 5))))))
+    (transform cropped
+      (lambda (row cell)
+        (and (member (car cell) channels) cell)))))
+
+(cli "relay-expression" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference "docs/music/album/relay-ghost.cts")
+           (source (read-score (path (root) reference)))
+           (revised (replace-instruments source '(2 3 8 21)))
+           (clips '()))
+      (ensure-directory output)
+      (write-canonical motif (path output "relay-ghost-before.cts") source)
+      (write-canonical motif (path output "relay-ghost-after.cts") revised)
+      (check (equal? (child source 'patterns) (child revised 'patterns))
+             "Patch audition changed the notes")
+      (check (equal? (child source 'bus) (child revised 'bus))
+             "Patch audition changed the bus")
+      (each spec
+        (list
+          (list "kit" "Percussion" '(2 3 21)
+                (excerpt source 1 0 128 '(1 2 3)))
+          (list "wire" "Plucked answer" '(8)
+                (excerpt source 1 64 64 '(6)))
+          (list "calm" "Calm full mix" '(2 3 8 21)
+                (pattern source 1))
+          (list "tense" "Tense full mix" '(2 3 8 21)
+                (pattern source 8))
+          (list "metal" "Bell / metallic prototype" '(9)
+                (excerpt source 1 0 128 '(7)))
+          (list "choir" "Sustained chord / choir prototype" '(6)
+                (phrase 4 '((0 5 "E-3" 6 23 52)
+                            (0 6 "G-3" 6 18 52)
+                            (0 7 "B-3" 6 17 52)
+                            (64 5 "A-2" 6 23 52)
+                            (64 6 "C-3" 6 18 52)
+                            (64 7 "E-3" 6 17 52)))))
+        (let* ((stem (car spec))
+               (label (cadr spec))
+               (ids (caddr spec))
+               (music (list-ref spec 3))
+               ;; Two bars of release separate every fresh render. Neither
+               ;; variant inherits a different compressor/reverb/voice state.
+               (sections (list (list label music)
+                               (list "Release / comparison gap" (empty-pattern 2))))
+               (base
+                 (if (equal? stem "choir")
+                     ;; Compare a sustained chord against a new sustained chord,
+                     ;; not the original very short stabs. State this explicitly.
+                     (replace-child source 'instruments
+                       (cons 'instruments
+                         (map (lambda (inst)
+                                (if (= (field inst id:) 6)
+                                    '(instrument id: 6 name: "warm-pad reference"
+                                       patch: (warm-pad attack: 0.18 release: 0.65)
+                                       volume: 20 send: 0.12 pan: -0.25)
+                                    inst))
+                              (cdr (child source 'instruments)))))
+                     source)))
+          (each variant '("before" "after")
+            (let ((slug (str stem "-" variant)))
+              (write-album motif output slug
+                (str "Relay Ghost audition: " label " / " variant)
+                (if (equal? variant "before") base (replace-instruments base ids))
+                sections (list reference)
+                "Expression I: controlled A/B patch audition, not an accepted album revision."
+                "Same notes, gates, clock and bus within each pair. Choir compares a warm-pad reference; it is not in the accepted Relay Ghost arrangement."
+                "2026-09-22")
+              (set! clips
+                (append clips
+                  (list (dict stem: slug label: (str label " / " variant)
+                              audition_gain_db: (cond ((equal? stem "wire") 14)
+                                                     ((member stem '("metal" "choir")) 6)
+                                                     (else 0))
+                              duration_seconds:
+                                (/ (* (+ (field music rows:) 64) 7.5) 132)))))))))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Relay Ghost - Expression I A/B"
+              full_duration_seconds: (/ (* (fold-left + 0
+                                         (map (lambda (id)
+                                                (field (pattern source id) rows:))
+                                              (cdr (child source 'order))))
+                                      7.5)
+                                   132)
+              clips: (list->array clips)))
+      (display "Built patch collection, controlled comparisons and full alternate.\n"))))

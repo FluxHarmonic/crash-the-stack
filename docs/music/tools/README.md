@@ -73,3 +73,21 @@ sigil docs/music/tools/send-telegram.sgl --env-file /path/to/private.env /path/t
 Historical reports retain their listening decisions and measurements. Their
 sources are immutable references; use SOUNDTRACK.md and catalog.json for the
 current selections. No album arrangements or mastering are performed here.
+
+### Controlled expression auditions
+
+`relay-expression.sgl --motif PATH --output DIR` generates a preserved album
+reference, full patch alternate, six before/after phrase pairs and their maps.
+`expression-audit.sgl --motif PATH --output EXTERNAL_DIR` verifies the committed
+pairs and exact full-track compiled ticks. The patches are reusable Sigil data
+in `(crash soundtrack expression patches)`; accepted game/album scores remain
+unchanged.
+
+`expression-render.sgl --motif PATH --output EXTERNAL_DIR --stage native`
+renders and measures all cases; `--stage delivery` creates the sequential A/B
+and both full OGGs. `--input DIR` selects the generated case directory. Optional
+`--reuse PRIOR_EXTERNAL_DIR` reuses only native WAVs with identical score bytes
+and renderer identity, then remeasures them; changed cases render normally.
+Delivery refuses sources changed since synthesis and uses equal monitoring
+gain within every pair. See `../album/EXPRESSION-PASS.md` for the listening
+protocol and current section map. All scripts use the Sigil shell interface.

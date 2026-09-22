@@ -1,0 +1,110 @@
+# Expression pass and controlled comparisons
+
+David approved exploring a small instrument collection and a Relay Ghost
+revision, then asked to hear old and new sounds side by side. Each change now
+gets a controlled comparison before adoption. The first deliverable is patch
+work using existing Motif capabilities; it does not yet implement the proposed
+transport modulation, smooth automation or tracker delay features.
+
+## Listening protocol
+
+Keep the accepted source and renderer identity. Create a finite temporary
+composition for each comparison: the same notes, velocities, gates, tempo,
+channel placement and bus, with only the declared patches changed. Render each
+half from a fresh engine state, including two release bars, then concatenate
+before and after. This prevents a different preceding phrase or reverb tail
+from favoring either half. Include full calm and tense passages as well as
+exposed instruments; a good solo sound can still be wrong in the arrangement.
+
+Balance patches before delivery using measurements as a check, then let the
+listener decide. Equal integrated loudness does not guarantee equal perceived
+attack or brightness. Preserve meaningful transient differences. Apply the
+same monitoring gain to both halves of a quiet solo pair, document that gain,
+and keep the full mixes at their actual relative levels. Do not normalize each
+half independently or hide the comparison behind different mastering settings.
+The comparison uses gain only, with no additional limiter or compression; the
+score's existing shared bus remains active. Compare full renders afterward.
+
+Record source and renderer hashes, exact commands, section timestamps,
+duration, encoded true peak, final decay and compiled note timing. Keep the
+accepted album and game sources untouched until the audition is approved.
+Numerical checks establish those properties, not subjective listening quality.
+Use Sigil for authoring, analysis orchestration and delivery; Node is the
+fallback if Sigil cannot reasonably perform a task.
+
+## Relay Ghost: Expression I
+
+The candidate changes the backbeat into a short FM contact snap with a small
+noise edge, shortens the hat dust, and replaces the distant FM pluck with a
+Karplus–Strong wire. The kick, bass, chords, bell, filter sequence, transition
+notes and entire arrangement remain. The same contact patch also covers the
+fill; there is no return to the old snare during the roll.
+
+Two additional pairs audition a less harmonic metallic bell and an airy FM
+choir. These are not included in the full Relay Ghost candidate. The choir's
+reference is a newly voiced warm-pad chord, explicitly not an existing part of
+Relay Ghost. Its purpose is to compare possible future sustained textures.
+The metallic voice is an FM approximation, not a physical modal resonator.
+
+| Pair | Before starts | After starts | Same boost on both |
+|---|---:|---:|---:|
+| Percussion | 0:00.000 | 0:10.909 | 0 dB |
+| Plucked answer | 0:21.818 | 0:29.091 | +14 dB |
+| Calm full mix | 0:36.364 | 0:54.545 | 0 dB |
+| Tense full mix | 1:12.727 | 1:30.909 | 0 dB |
+| Bell / metallic prototype | 1:49.091 | 2:00.000 | +6 dB |
+| Warm pad / choir prototype | 2:10.909 | 2:21.818 | +6 dB |
+
+The comparison lasts 2:32.727; both complete arrangements last 3:27.273.
+The delivery report records the additional common safety gain used for all
+files. The pluck monitoring boost is for judging timbre; it does not raise the
+pluck's level in the full composition.
+
+Score prototypes and snapshots: `../alternates/relay-expression-i/`.
+Patch definitions: `../tools/lib/expression-patches.sgl`.
+Composer: `../tools/relay-expression.sgl`.
+Renderer: `../tools/expression-render.sgl`.
+Audit: `../tools/expression-audit.sgl`.
+External audio: `~/Ops/artifacts/crash-the-stack-album/relay-expression-i-delivery/`.
+Earlier measurement attempts remain in `relay-expression-i/` and
+`relay-expression-i-review/`; they are not listening releases.
+
+An instrument's `volume:` is a default for notes without an explicit volume.
+The soundtrack specifies note volumes, so adjusting the instrument default
+alone did not change those rendered notes. Change a supported patch gain or
+FM carrier levels when balancing a timbre without altering the performance.
+The Karplus–Strong decay is its natural ringing time; note-off does not act
+like a conventional ADSR release. Check the rendered tail as well as gates.
+
+## Follow-on work
+
+The expression engine branch is `feat/codex-expression` in the isolated Motif
+worktree `task-motif-expression`, based on 0.6.5 (`2ed1aa4`). Its baseline builds.
+No expression DSP changes have been made yet. These are the next independent
+feature steps, each needing its own audible A/B and native/live parity checks:
+
+1. Beat-synchronized modulation with explicit phase and note-reset behavior.
+   Use an actual tempo-aware transport; the existing renderer's header-BPM
+   clock alone is insufficient for Fxx changes, live tempo edits and seeking.
+2. Smooth score-recorded parameter automation. Avoid rebuilding a voice on
+   every parameter step, which would restart envelopes. Define seeking,
+   looping and calm/tense transition behavior before committing a format.
+3. Tempo-synchronized filtered delay exposed to tracker tunes. Motif already
+   has a layer delay; define dry-preserving send behavior and channel routing,
+   and distinguish wet-output filtering from filtering inside the feedback.
+4. Evaluate a dedicated metallic resonator after hearing the FM prototype.
+   Keep the accepted patch defaults and render behavior compatible.
+
+After patch feedback, develop Relay Ghost's replies and late return as a
+separate arrangement comparison. Review the other fourteen tracks one at a
+time for phrase completion, fill continuity and composed endings. Do not apply
+the same new instrument to every track or fill the quiet songs with decoration.
+Black Glass's chirpy bass/retro stabs, Shadow Protocol's subtle tension,
+Blind Spot and Quiet Array's space, Obsidian's pedal and side pads, and Glass
+Current's closing role are protected listener-approved identities.
+
+A separate instrument gain is also a useful engine extension: it should scale
+the base voice and layers after note dynamics, default to unity, and leave the
+tracker's existing `volume:` default semantics intact. Explicit note volume
+winning over the default is intentional, not a playback bug. This gain control
+is proposed; it is not present in the current audition renderer.

@@ -49,3 +49,12 @@ experiments are particularly useful when you want to demonstrate a phrase or
 learn why it works. Neither is a prerequisite for the other. Game auditions
 are approved for album use separately; feedback on one does not silently alter
 the other or the public listening page.
+
+## Side-by-side auditions
+
+The next refinement pass includes a short before/after composition alongside
+both full versions. See [Expression pass](EXPRESSION-PASS.md) for the exact
+comparison process and the Relay Ghost timestamp map. Give feedback against
+that render version; note whether the preference holds in the full mix as well
+as the exposed instrument. A quieter, brighter or more percussive sound is not
+automatically a better fit.
