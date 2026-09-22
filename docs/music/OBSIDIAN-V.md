@@ -49,3 +49,18 @@ stereo 44.1 kHz, decoded OGG and true-peak headroom. It also compares the first
 4,536,000 PCM frames, covering calm plus the complete transition, against the
 reference. Raw commands, source snapshots, hashes, audit and measurement logs
 remain beside the external render. Measurements are not listening approval.
+
+## Render checks
+
+Both full WAVs are stereo 44.1 kHz and 194.285714 seconds. The first 4,536,000
+PCM frames are identical, confirming unchanged calm and transition audio.
+All 788 compiled attacks have zero sample-clock error. Tense-section loudness
+moves from -23.6 to -22.9 LUFS, a 0.7 LU increase. Full revision loudness is
+-23.1 LUFS with -6.3 dBTP; its OGG measures -6.2 dBTP and decodes cleanly.
+No normalization or limiter was added. This verifies signal integrity and
+headroom; David's listening determines whether the contrast succeeds.
+
+The full delivery file is
+~/Ops/artifacts/crash-the-stack-codex-content/obsidian-tension-v/ogg/obsidian-index-tension-v-full.ogg.
+The reference WAV, revised WAV, source snapshots, full/tense loudness logs,
+render-checks.json, exact commands and hashes live in the parent directory.
