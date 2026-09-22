@@ -65,7 +65,12 @@
       (assert-false (menu-code-line m))
       (assert-false (menu-heading m))
       (assert-equal (settings-defaults) (menu-settings m))
-      (assert-equal 'hacker (menu-version m)))))
+      (assert-equal 'hacker (menu-version m 'stack))
+      (assert-equal 'hacker (menu-version m 'cards))))
+  (test "the versions come in per game (D66): a pair per game, a missing game reads hacker"
+    (let ((m (menu-with-versions (menu-new TOP) (list (cons 'cards 'original)))))
+      (assert-equal 'hacker (menu-version m 'stack))
+      (assert-equal 'original (menu-version m 'cards)))))
 
 (test-group "keys"
   (let ((m (menu-new '(continue free-play settings))))
@@ -114,45 +119,77 @@
         (assert-false (code-line-rect m VW VH))
         (assert-false (cdr (menu-step p (click-frame (cons 320 CODE-LINE-Y)) VW VH)))))))
 
-(test-group "FREE PLAY"
+(test-group "FREE PLAY (D66: the games first, each with its own screen)"
   (let* ((m (menu-new TOP 'free-play))
-         (f (car (step m '(return)))))
+         (f (car (step m '(return))))
+         (g (car (step f '(return))))                 ; STACK's screen
+         (d (car (step (step* f 'down) '(return)))))  ; DEFRAG's screen
     (test "opens with its rows, its heading, the first row highlighted; the rows sit under the heading"
       (assert-equal 'free (menu-screen f))
       (assert-equal "FREE PLAY" (menu-heading f))
-      (assert-equal '(stack cards daily-stack daily-cards code scores version back) (menu-entries f))
+      (assert-equal '(stack cards code scores back) (menu-entries f))
       (assert-equal 0 (menu-highlight f))
       (assert-equal SUB-ENTRIES-Y (cadr (menu-entry-rect f 0 VW VH)))
-      (assert-true (<= (+ (cadr (menu-entry-rect f 7 VW VH)) ENTRY-H) 376)))
-    (test "STACK, DEFRAG and the dailies are choices"
-      (assert-equal 'stack (cdr (step f '(return))))
-      (assert-equal 'cards (cdr (step (step* f 'down) '(return))))
-      (assert-equal 'daily-stack (cdr (step (step* f 'down 'down) '(return))))
-      (assert-equal 'daily-cards (cdr (step (step* f 'down 'down 'down) '(return)))))
-    (test "VERSION is a value row: HACKER by default, ORIGINAL after a step, back after another; left steps too; no choice"
-      (let* ((v (step* f 'up 'up))   ; wraps to version
+      (assert-true (<= (+ (cadr (menu-entry-rect f 4 VW VH)) ENTRY-H) 376)))
+    (test "STACK and DEFRAG open the game's screen (no choice): NEW BOARD, DAILY BOARD, VERSION, BACK under the game's name"
+      (assert-false (cdr (step f '(return))))
+      (assert-equal 'free-stack (menu-screen g))
+      (assert-equal "STACK" (menu-heading g))
+      (assert-equal '(new-board daily-board version back) (menu-entries g))
+      (assert-equal 0 (menu-highlight g))
+      (assert-equal 'free-cards (menu-screen d))
+      (assert-equal "DEFRAG" (menu-heading d))
+      (assert-equal '(new-board daily-board version back) (menu-entries d)))
+    (test "NEW BOARD and DAILY BOARD are the game's choices"
+      (assert-equal 'stack (cdr (step g '(return))))
+      (assert-equal 'daily-stack (cdr (step (step* g 'down) '(return))))
+      (assert-equal 'cards (cdr (step d '(return))))
+      (assert-equal 'daily-cards (cdr (step (step* d 'down) '(return)))))
+    (test "VERSION is a value row: HACKER by default, CLASSIC after a step, back after another; left steps too; the choice says which game"
+      (let* ((v (step* g 'down 'down))
              (r1 (step v '(return)))
              (r2 (step (car r1) '(left))))
         (assert-equal 'version (list-ref (menu-entries v) (menu-highlight v)))
         (assert-equal "HACKER" (menu-row-value v 'version))
         (assert-equal 'value (menu-row-kind v 'version))
-        (assert-false (cdr r1))
-        (assert-equal 'original (menu-version (car r1)))
-        (assert-equal "ORIGINAL" (menu-row-value (car r1) 'version))
-        (assert-equal 'hacker (menu-version (car r2)))
+        (assert-equal (cons 'version (cons 'stack 'original)) (cdr r1))
+        (assert-equal 'original (menu-version (car r1) 'stack))
+        (assert-equal 'hacker (menu-version (car r1) 'cards))   ; the other game keeps its own
+        (assert-equal "CLASSIC" (menu-row-value (car r1) 'version))
+        (assert-equal (cons 'version (cons 'stack 'hacker)) (cdr r2))
+        (assert-equal 'hacker (menu-version (car r2) 'stack))
         (assert-true (> (caddr (menu-entry-rect v (menu-highlight v) VW VH)) ENTRY-W))))
-    (test "BACK closes to the top screen with FREE PLAY highlighted; Escape and Backspace too"
+    (test "DEFRAG's VERSION row is its own"
+      (let ((r (step (step* d 'down 'down) '(return))))
+        (assert-equal (cons 'version (cons 'cards 'original)) (cdr r))
+        (assert-equal 'original (menu-version (car r) 'cards))
+        (assert-equal 'hacker (menu-version (car r) 'stack))))
+    (test "BACK on a game's screen closes to FREE PLAY with the game highlighted; Escape and Backspace too"
+      (let ((b (step (step* d 'up) '(return))))
+        (assert-false (cdr b))
+        (assert-equal 'free (menu-screen (car b)))
+        (assert-equal 'cards (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
+      (assert-equal 'free (menu-screen (car (step g '(escape)))))
+      (assert-equal 'stack (list-ref (menu-entries (car (step g '(escape)))) (menu-highlight (car (step g '(escape))))))
+      (assert-equal 'free (menu-screen (car (step g '(backspace))))))
+    (test "the cues: a game's screen opening is the match cue, closing to FREE PLAY the mismatch cue, as any screen's"
+      (assert-equal (list 'match) (menu-cues f g))
+      (assert-equal (list 'mismatch) (menu-cues g (car (step g '(escape)))))
+      (assert-equal (list 'mismatch) (menu-cues f (car (step f '(escape))))))
+    (test "BACK closes FREE PLAY to the top screen with FREE PLAY highlighted; Escape and Backspace too"
       (let ((b (step (step* f 'up) '(return))))
         (assert-false (cdr b))
         (assert-equal 'top (menu-screen (car b)))
         (assert-equal 'free-play (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
       (assert-equal 'top (menu-screen (car (step f '(escape)))))
       (assert-equal 'top (menu-screen (car (step f '(backspace))))))
-    (test "a tap on a row picks it; on the version row it steps it"
-      (assert-equal 'cards (cdr (menu-step f (click-frame (center f 1)) VW VH)))
-      (let ((r (menu-step f (click-frame (center f 6)) VW VH)))
-        (assert-false (cdr r))
-        (assert-equal 'original (menu-version (car r)))))))
+    (test "a tap on a game's row opens its screen; on the version row it steps it"
+      (let ((t (menu-step f (click-frame (center f 1)) VW VH)))
+        (assert-false (cdr t))
+        (assert-equal 'free-cards (menu-screen (car t))))
+      (let ((r (menu-step g (click-frame (center g 2)) VW VH)))
+        (assert-equal (cons 'version (cons 'stack 'original)) (cdr r))
+        (assert-equal 'original (menu-version (car r) 'stack))))))
 
 (test-group "SETTINGS (the general five, D51)"
   (let* ((m (menu-new TOP 'settings))
@@ -266,14 +303,14 @@
         (assert-equal 'top (menu-screen (car (step c '(return)))))
         (assert-equal 'top (menu-screen (car (menu-step c (click-frame (cons 320 200)) VW VH))))))
     (test "SCORES opens from FREE PLAY, BACK returns to the top screen"
-      (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down 'down 'down) '(return)))))
+      (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down) '(return)))))
         (assert-equal 'scores (menu-screen sc))
         (assert-equal "SCORES" (menu-heading sc))
         (assert-equal 'top (menu-screen (car (step sc '(escape)))))))))
 
 (test-group "CODE"
   (let* ((f (car (step (menu-new TOP 'free-play) '(return))))
-         (c (car (step (step* f 'down 'down 'down 'down) '(return))))
+         (c (car (step (step* f 'down 'down) '(return))))
          (code (encode (spec-new 'cards 'original 3 'standard 'turtle 280))))
     (test "opens empty; typed letters and digits append in upper case, up to ten; the display dashes after five"
       (assert-equal 'code (menu-screen c))
@@ -339,11 +376,11 @@
          (paged (car (step (menu-with-code-line m #f #t) '(return)))))
     (test "natively (no page to act) the row is not there"
       (assert-false (memq 'tracker (menu-entries plain))))
-    (test "with a page (the COPY flag) it sits after SCORES, before VERSION, and fits the screen"
-      (assert-equal '(stack cards daily-stack daily-cards code scores tracker version back) (menu-entries paged))
-      (assert-true (<= (+ (cadr (menu-entry-rect paged 8 VW VH)) ENTRY-H) 376)))
+    (test "with a page (the COPY flag) it sits after the games, before CODE (D66), and fits the screen"
+      (assert-equal '(stack cards tracker code scores back) (menu-entries paged))
+      (assert-true (<= (+ (cadr (menu-entry-rect paged 5 VW VH)) ENTRY-H) 376)))
     (test "picking it is the choice tracker"
-      (assert-equal 'tracker (cdr (step (step* paged 'down 'down 'down 'down 'down 'down) '(return)))))
+      (assert-equal 'tracker (cdr (step (step* paged 'down 'down) '(return)))))
     (test "its label" (assert-equal "TRACKER" (menu-label 'tracker)))))
 
 ;; NEWS (P4b, ruling D20): the devlog's posts beside UPDATE. The row shows

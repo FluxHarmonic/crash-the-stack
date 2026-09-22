@@ -1766,6 +1766,19 @@ async function downTo(order, id, at = 0) {
   const n = order.length, i = order.indexOf(id);
   for (let k = 0; k < (i - at + n) % n; k++) await press("ArrowDown");
 }
+// a board from FREE PLAY (D66): the game's row opens the game's screen
+// (free-stack, free-cards), whose NEW BOARD or DAILY BOARD deals; false
+// when the game's screen did not open
+async function dealFrom(free, table, row = "new-board") {
+  const m0 = consoleLines.length;
+  await downTo(free.order, table);
+  await press("Enter");
+  const g = await menuOn(`free-${table}`, m0);
+  if (!g) return false;
+  await downTo(g.order, row);
+  await press("Enter");
+  return true;
+}
 
 
 // screens: every entry of every screen reachable by keyboard and by tap
@@ -1775,12 +1788,19 @@ async function downTo(order, id, at = 0) {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards daily-stack daily-cards code scores tracker version back",   // TRACKER: P3b, a link the page follows
+    const want = { free: "stack cards tracker code scores back",   // D66: the games first; TRACKER: P3b, a link the page follows
+                   "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
+                   "free-cards": "new-board daily-board version back",
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
-    // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; SCORES and CODE from FREE PLAY
-    const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null], ["free-play", "free", "scores"], ["free-play", "free", "code"]];
+    // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; the games' screens,
+    // SCORES and CODE from FREE PLAY (a sub is [row, screen]; a game's screen
+    // closes to FREE PLAY, the others to the top)
+    const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null],
+                  ["free-play", "free", ["stack", "free-stack"]], ["free-play", "free", ["cards", "free-cards"]],
+                  ["free-play", "free", ["scores", "scores"]], ["free-play", "free", ["code", "code"]]];
+    const rowsOf = (s) => s.order.map((id) => s.rows[id].value ? `${id}=${s.rows[id].value}` : id).join(" ");
     for (const [id, screen, sub] of walk) {
       if (detail) break;
       let m0 = consoleLines.length;
@@ -1791,19 +1811,28 @@ async function downTo(order, id, at = 0) {
       if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
       if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
       if (sub) {
+        const [row, sc] = sub;
         m0 = consoleLines.length;
-        await downTo(s.order, sub);
+        await downTo(s.order, row);
         await press("Enter");
-        const s2 = await menuOn(sub, m0);
-        if (!s2) { detail = `Enter on ${sub} did not open the ${sub} screen (keyboard)`; break; }
-        if (sub === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
-        if (sub === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
-        seen.push(`${sub} (keys)`);
+        const s2 = await menuOn(sc, m0);
+        if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
+        if (s2.order.join(" ") !== want[sc]) { detail = `the ${sc} screen's rows are ${s2.order.join(" ")}, not ${want[sc]}`; break; }
+        if (sc.startsWith("free-") && s2.rows.version.value !== "HACKER") { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
+        if (sc === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
+        if (sc === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
+        seen.push(`${sc} (keys)`);
+        if (sc.startsWith("free-")) {   // Escape on a game's screen: FREE PLAY, the game's row highlighted
+          m0 = consoleLines.length;
+          await press("Escape");
+          const back = await menuOn("free", m0);
+          if (!back) { detail = `Escape on ${sc} did not return to FREE PLAY`; break; }
+        }
       }
       seen.push(`${screen} (keys)`);
       m0 = consoleLines.length;
       await press("Escape");
-      if (!(await menuOn("top", m0))) { detail = `Escape on ${sub || screen} did not return to the top screen`; break; }
+      if (!(await menuOn("top", m0))) { detail = `Escape on ${sub ? sub[1] : screen} did not return to the top screen`; break; }
     }
     // by tap: the same screens from the row centers; the sub-screens' BACK row by tap
     if (!detail && !EXPECT_NO_SELECTION) {
@@ -1815,17 +1844,24 @@ async function downTo(order, id, at = 0) {
         if (!s) { detail = `a tap on ${id} did not open the ${screen} screen`; break; }
         let backRow = s.rows.back || { x: 320, y: 200 };   // the crawl: any tap leaves
         if (sub) {
+          const [row, sc] = sub;
           m0 = consoleLines.length;
-          await tap(s.rows[sub].x, s.rows[sub].y);
-          const s2 = await menuOn(sub, m0);
-          if (!s2) { detail = `a tap on ${sub} did not open the ${sub} screen`; break; }
-          seen.push(`${sub} (tap)`);
-          backRow = s2.rows.back;
+          await tap(s.rows[row].x, s.rows[row].y);
+          const s2 = await menuOn(sc, m0);
+          if (!s2) { detail = `a tap on ${row} did not open the ${sc} screen`; break; }
+          seen.push(`${sc} (tap)`);
+          if (sc.startsWith("free-")) {   // a tap on the game screen's BACK: FREE PLAY again
+            m0 = consoleLines.length;
+            await tap(s2.rows.back.x, s2.rows.back.y);
+            const back = await menuOn("free", m0);
+            if (!back) { detail = `a tap on BACK did not leave the ${sc} screen for FREE PLAY`; break; }
+            backRow = back.rows.back;
+          } else backRow = s2.rows.back;
         }
         seen.push(`${screen} (tap)`);
         m0 = consoleLines.length;
         await tap(backRow.x, backRow.y);
-        if (!(await menuOn("top", m0))) { detail = `a tap on BACK did not leave the ${sub || screen} screen`; break; }
+        if (!(await menuOn("top", m0))) { detail = `a tap on BACK did not leave the ${sub ? sub[1] : screen} screen`; break; }
       }
     }
     // Escape on the pause menu is CONTINUE (D14): the board comes back
@@ -1885,11 +1921,11 @@ async function downTo(order, id, at = 0) {
       if (!free) detail = "FREE PLAY did not open";
       else {
         m0 = consoleLines.length;
-        await downTo(free.order, "stack");
-        await press("Enter");
-        const field = await waitLine(/^crash: field (\w+) (\d+)$/, m0, 5000);
+        const opened = await dealFrom(free, "stack");
+        const field = opened && await waitLine(/^crash: field (\w+) (\d+)$/, m0, 5000);
         const spec = field && await waitLine(/^crash: spec stack \w+ (\d+) /, m0, 5000);
-        if (!field) detail = "FREE PLAY -> STACK said no field line";
+        if (!opened) detail = "FREE PLAY -> STACK did not open the game's screen";
+        else if (!field) detail = "STACK -> NEW BOARD said no field line";
         else if (field.m[1] !== "still") detail = `the deal's field is ${field.m[1]}, not still`;
         else if (!spec || spec.m[1] !== field.m[2]) detail = `the still field's seed ${field.m[2]} is not the board's ${spec ? spec.m[1] : "?"}`;
         else {
@@ -1934,10 +1970,9 @@ async function downTo(order, id, at = 0) {
     const free = await menuOn("free", m0);
     if (!free) return { error: "FREE PLAY did not open" };
     m0 = consoleLines.length;
-    await downTo(free.order, "cards");
-    await press("Enter");
+    if (!(await dealFrom(free, "cards"))) return { error: "FREE PLAY -> DEFRAG did not open the game's screen" };
     const dealt = await waitLine(/^crash: cards seed (\d+) moves \d+ draw (\d) scoring (\w+)$/, m0, 5000);
-    if (!dealt) return { error: "FREE PLAY -> DEFRAG dealt no seed line" };
+    if (!dealt) return { error: "DEFRAG -> NEW BOARD dealt no seed line" };
     await sleep(300);
     return { dealt };
   };
@@ -1988,8 +2023,78 @@ async function downTo(order, id, at = 0) {
       }
     }
   }
+  // D66: a game's VERSION is remembered per game. CLASSIC stepped on STACK's
+  // screen is stored (version-stack), DEFRAG's row still reads HACKER after
+  // a reload, STACK's reads CLASSIC and its NEW BOARD deals original; then
+  // HACKER back.
+  let versionNote = "";
+  if (!detail) {
+    const gameScreen = async (table) => {
+      const r = await pauseMenu();
+      if (r.error) return { error: r.error };
+      let m0 = consoleLines.length;
+      await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+      await press("Enter");
+      const free = await menuOn("free", m0);
+      if (!free) return { error: "FREE PLAY did not open" };
+      m0 = consoleLines.length;
+      await downTo(free.order, table);
+      await press("Enter");
+      const g = await menuOn(`free-${table}`, m0);
+      return g ? { g, free } : { error: `${table}'s screen did not open` };
+    };
+    let g = await gameScreen("stack");
+    if (g.error) detail = g.error;
+    else {
+      await downTo(g.g.order, "version");
+      let m0 = consoleLines.length;
+      await press("ArrowRight");
+      const stepped = await menuOn("free-stack", m0);
+      const stored = await evalJS(`[localStorage.getItem("version-stack"), localStorage.getItem("version-cards")]`);
+      if (!stepped || stepped.rows.version.value !== "CLASSIC") detail = `STACK's VERSION stepped reads ${stepped ? stepped.rows.version.value : "no re-said menu"}, not CLASSIC`;
+      else if (stored[0] !== "original" || stored[1] !== null) detail = `after the step the store holds version-stack=${stored[0]} version-cards=${stored[1]}`;
+      else {
+        g = await gameScreen("cards");   // a reload
+        if (g.error) detail = g.error;
+        else if (g.g.rows.version.value !== "HACKER") detail = `after the reload DEFRAG's VERSION reads ${g.g.rows.version.value}, not HACKER`;
+        else {
+          m0 = consoleLines.length;
+          await press("Escape");
+          const free = await menuOn("free", m0);
+          if (!free) detail = "Escape on DEFRAG's screen did not return to FREE PLAY";
+          else {
+            m0 = consoleLines.length;
+            await downTo(free.order, "stack", free.order.indexOf("cards"));
+            await press("Enter");
+            const gs = await menuOn("free-stack", m0);
+            if (!gs) detail = "STACK's screen did not open after DEFRAG's";
+            else if (gs.rows.version.value !== "CLASSIC") detail = `after the reload STACK's VERSION reads ${gs.rows.version.value}, not CLASSIC`;
+            else {
+              m0 = consoleLines.length;
+              await downTo(gs.order, "new-board");
+              await press("Enter");
+              const spec = await waitLine(/^crash: spec stack (\w+) /, m0, 5000);
+              if (!spec) detail = "STACK -> NEW BOARD under CLASSIC said no spec line";
+              else if (spec.m[1] !== "original") detail = `STACK's NEW BOARD under CLASSIC dealt ${spec.m[1]}, not original`;
+              else versionNote = "; STACK's VERSION stepped to CLASSIC is stored (version-stack=original), reads back after a reload while DEFRAG's stays HACKER, and NEW BOARD dealt original";
+            }
+          }
+        }
+      }
+      // HACKER back
+      const back = await gameScreen("stack");
+      if (!back.error) {
+        await downTo(back.g.order, "version");
+        m0 = consoleLines.length;
+        await press("ArrowRight");
+        const reset = await menuOn("free-stack", m0);
+        const held = await evalJS(`localStorage.getItem("version-stack")`);
+        if (!detail && (!reset || reset.rows.version.value !== "HACKER" || held !== "hacker")) detail = `VERSION back to HACKER reads ${reset ? reset.rows.version.value : "no re-said menu"} with version-stack=${held}`;
+      } else if (!detail) detail = back.error;
+    }
+  }
   if (detail) fail("settings", detail);
-  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil background (defaults on/on/10/on/on/live); BACKGROUND STILL dealt a still field seeded by the board with no step; DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored");
+  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil background (defaults on/on/10/on/on/live); BACKGROUND STILL dealt a still field seeded by the board with no step; DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored" + versionNote);
 }
 
 // pause (D51): Escape on the board opens the table's own overlay over the
@@ -2352,10 +2457,10 @@ async function downTo(order, id, at = 0) {
     if (!free) detail = "FREE PLAY did not open";
     else {
       m0 = consoleLines.length;
-      await downTo(free.order, "cards");
-      await press("Enter");
-      const spec = await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-      if (!spec) detail = "FREE PLAY -> DEFRAG said no spec line";
+      const opened = await dealFrom(free, "cards");
+      const spec = opened && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+      if (!opened) detail = "FREE PLAY -> DEFRAG did not open the game's screen";
+      else if (!spec) detail = "DEFRAG -> NEW BOARD said no spec line";
       else { table = spec.m[1]; seed = spec.m[3]; code = spec.m[4]; }
     }
   }
@@ -2481,8 +2586,7 @@ async function downTo(order, id, at = 0) {
     const free = await menuOn("free", m0);
     if (!free) return { error: "FREE PLAY did not open" };
     m0 = consoleLines.length;
-    await downTo(free.order, which);
-    await press("Enter");
+    if (!(await dealFrom(free, which === "daily-stack" ? "stack" : "cards", "daily-board"))) return { error: `${which}: the game's screen did not open` };
     const day = await waitLine(/^crash: daily (\d+) (\d+-\d+-\d+)$/, m0, 3000);
     const spec = day && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
     if (!day) return { error: `${which} said no daily line` };
