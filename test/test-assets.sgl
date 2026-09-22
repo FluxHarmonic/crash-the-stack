@@ -163,26 +163,34 @@
 
 ;; --- leg 2: every asset path in the source resolves ----------------------
 
-;; Every "assets/..." string literal in a file.
-(define (asset-literals path)
-  (let ((text (read-file-string path)))
-    (let loop ((i 0) (acc '()))
-      (let ((at (string-index-of text "\"assets/" i)))
-        (if (not at)
-            (reverse acc)
-            (let* ((start (+ at 1))
-                   (end (string-index-of text "\"" start)))
-              (if (not end)
-                  (reverse acc)
-                  (loop (+ end 1) (cons (substring text start end) acc)))))))))
+;; Read source as data so comments and escaped quotes are handled by Sigil.
+(define (asset-strings value)
+  (cond
+    ((string? value)
+     (if (starts-with? value "assets/") (list value) '()))
+    ((pair? value)
+     (append (asset-strings (car value))
+             (asset-strings (cdr value))))
+    ((vector? value)
+     (asset-strings (vector->list value)))
+    (else '())))
 
-(define (string-index-of text needle from)
-  (let ((n (string-length needle))
-        (len (string-length text)))
-    (let loop ((i from))
-      (cond ((> (+ i n) len) #f)
-            ((string=? (substring text i (+ i n)) needle) i)
-            (else (loop (+ i 1)))))))
+(define (asset-literals path)
+  (call-with-input-file path
+    (lambda (port)
+      (asset-strings (read-all port)))))
+
+(test-group "assets: source reader ignores comments without hiding literals"
+  (test "comments are skipped, including commented-out expressions"
+    (assert-equal '("assets/real.png" "assets/vector.png")
+      (call-with-input-string
+        (string-append
+          "; (load \"assets/comment.png\")\n"
+          "#| \"assets/block.png\" |#\n"
+          "#;(load \"assets/skipped.png\")\n"
+          "(load \"assets/real.png\") #(\"assets/vector.png\")")
+        (lambda (port)
+          (asset-strings (read-all port)))))))
 
 (test-group "assets: every asset path in src/ resolves (leg 2)"
   (let* ((files (find-files "src" (lambda (p) (string-ends-with? p ".sgl"))))
