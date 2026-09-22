@@ -228,3 +228,8 @@ David approved both Cold Boot changes, finding the mix less muddy and busy.
 [Album II's selected mix](COLD-BOOT-II.md) is adopted in the shared source and
 regenerated into both arrangements. Further composition changes are not
 proposed; mastering and publication remain the next release step.
+
+Cold Boot II mastering and publication are complete. Closed Loop is the next
+suggested review: preserve its accepted snap-click kit and examine pluck/bell
+call-and-response in the later phrases and final return. Any changes should
+remain separate controlled auditions; no Closed Loop revision is adopted yet.

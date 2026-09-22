@@ -1,41 +1,61 @@
-# Cold Boot album II: approved mix
+# Cold Boot album II
 
 David approved Motion I's metallic hats and pressure-filter contrast, hearing
-less mud and less busyness in the mix. This completes the musical pass. The
-kick, sub, integrated knock/fill, chord stabs, distant bell, all notes, accents,
-gates, bus and 3:34.545 arrangement stay as approved previously.
+less mud and less busyness, then requested mastering and publication. The
+approved mix is now live on the soundtrack page. The musical pass is finished.
 
-The five patch changes are adopted in `../songs/cold-boot/parts.cts`. Both game
-and album outputs regenerate from that source and exactly match the Motion I
-candidates. See [the audition record](../alternates/cold-boot-motion-i/README.md)
-for the independent comparisons, measured levels and listening receipts.
+The five patches are maintained in `../songs/cold-boot/parts.cts`. Game and album
+outputs regenerate from that source and exactly match the approved candidates.
+The kick, sub, integrated knock/fill, chord stabs, distant bell, all notes,
+accents, gates, bus and 3:34.545 form stay intact. All fifteen shared-song checks
+pass. See [the audition record](../alternates/cold-boot-motion-i/README.md).
 
-Mastering and publication are pending. The current website still serves album
-I, and deployed game/tracker assets still predate this source adoption. Reuse
-`cold-boot-motion-i/cold-boot-after.wav` under the external album artifacts root
-as the lossless native source after checking its source snapshot; it is the
-approved performance. Evaluate the established Cold Boot album gain (+1.5 dB)
-and limiter recipe against the revised mix, then check encoded true peak,
-duration and ending decay before release. Do not use the gain-adjusted audition
-OGG as a mastering source.
+## Master and exports
 
-At publication, update the automatic MP3 master selection, metadata-bearing
-export, immutable audio object and soundtrack manifest together. Preserve the
-other fourteen tracks and both earlier masters and comparisons. No new engine
-feature is needed for this revision.
+The approved `cold-boot-motion-i/cold-boot-after.wav` is reused losslessly.
+Its source snapshot matches the adopted album byte for byte; renderer and source
+hashes are retained. The established +1.5 dB input gain and oversampled peak
+limiter preserve the revised mix without another composition or patch change.
 
-Adoption validation passes for all fifteen songs (four independent check groups
-covering 4/4/4/3 songs). Both generated outputs match the approved candidates,
-and the adopted album is byte-identical to the rendered native source snapshot.
-The existing timing/audio audits therefore apply without resynthesis. No other
-song source or generated arrangement changes in this adoption.
+| Format | LUFS-I | True peak | LRA |
+|---|---:|---:|---:|
+| WAV | -15.9 | -1.5 dBTP | 3.3 LU |
+| OGG | -15.8 | -1.4 dBTP | 3.3 LU |
+| MP3 | -15.9 | -1.5 dBTP | 3.3 LU |
 
-## Album-level master prepared
+Duration/format checks pass, WAV/FLAC decoded PCM matches, and the last WAV
+second peaks at -90.3 dBFS. The 256 kbps MP3 includes the compact cover, David
+Wilson artist/album-artist credit, soundtrack album title, track 2/15 and CC BY
+metadata. The automatic exporter selects this master for future MP3 bundles.
 
-The approved native WAV is copied losslessly to `cold-boot-ii-release/` with
-source and renderer hashes. The established +1.5 dB input gain and oversampled
-peak limiter produce -15.9 LUFS-I / -1.5 dBTP WAV and -15.8 LUFS-I / -1.4 dBTP
-OGG. Loudness range remains 3.3 LU. Duration and all format checks pass;
-WAV/FLAC decoded PCM is identical and the final second peaks at -90.3 dBFS.
-The exporter now selects this master for Cold Boot. Publication follows after
-the tagged MP3 and preserved live-site snapshot pass their checks.
+## Publication
+
+Published at https://014fbd1d.crashthestack.pages.dev from `560f743` and live at
+https://crashthestack.com/soundtrack/. Only Cold Boot's MP3 URL changed. All
+other player, game and tracker files were verified against deployment
+`c3e7651a` and retained; the other fourteen track entries are unchanged.
+
+The public object is `soundtrack/cold-boot-album-ii/cold-boot.mp3`, addressed
+with `?v=b268d1999e4a`. That content-hash query bypasses the cached 404 from the
+pre-upload existence check. The final URL returns the exact tagged MP3 bytes,
+correct MIME/CORS headers and HTTP 206 ranges. A fresh browser context selected
+Cold Boot, advanced playback beyond one second, reported correct Media Session
+metadata, and retained all fifteen tracks. The check was muted and paused.
+
+Source adoption synchronizes game and album scores. This page-only publication
+preserves the currently deployed game/tracker score assets; those receive the
+updated Cold Boot score through the next normal game deployment.
+
+External collateral beneath `~/Ops/artifacts/crash-the-stack-album/`:
+
+- `cold-boot-ii-release/`: native provenance, WAV/FLAC/OGG, commands and checks.
+- `cold-boot-ii-mp3/`: tagged MP3, cover, export report and decoded measurements.
+- `r2-cold-boot-ii/`: immutable upload plan, receipt and HTTP verification.
+- `publication-cold-boot-ii/`: complete preserved site, staging/version scripts,
+  previous/current manifests, deployment and browser evidence.
+- `tagged-preview-vi/soundtrack/audio/`: complete current local MP3 collection,
+  retaining revision V's fourteen other files and replacing only Cold Boot.
+
+Future game publishes must use `publication-cold-boot-ii/site/soundtrack/` as
+`CRASH_SOUNDTRACK_DIR`, or preserve an equivalent newer production manifest.
+Previous masters, source snapshots and before/after auditions remain intact.

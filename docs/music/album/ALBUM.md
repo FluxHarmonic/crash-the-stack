@@ -15,7 +15,7 @@ process.
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|
 | 1 | Black Glass | Composition liked; album-level trial promising | 4:24 actual |
-| 2 | Cold Boot | Motion I mix approved and synchronized; album II mastering pending | 3:35 actual |
+| 2 | Cold Boot | Album II mix approved, synchronized and published | 3:35 actual |
 | 3 | Relay Ghost | Album II mix approved; mastered for publication | 3:27 actual |
 | 4 | Closed Loop | Composition liked; detail review open | 3:16 actual |
 | 5 | Shadow Protocol | Composition liked; detail review open | 3:50 actual |

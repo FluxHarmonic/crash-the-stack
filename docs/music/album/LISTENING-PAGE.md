@@ -302,3 +302,20 @@ snare. Only track 13's URL changes to
 `soundtrack/breach-album-ii/breach-vector.mp3`. Public checksum, range, CORS,
 metadata and browser playback checks pass. See [BREACH-II.md](BREACH-II.md).
 Use `publication-breach-ii/site/soundtrack/` for subsequent game publication.
+
+## Cold Boot album II publication
+
+Cold Boot's approved cleaner mix is mastered and live in deployment `014fbd1d`
+(source `560f743`). The MP3 selector uses `cold-boot-ii-release` / `-album-ii`.
+The preserved current page bundle is
+`~/Ops/artifacts/crash-the-stack-album/publication-cold-boot-ii/site/soundtrack/`;
+use it as `CRASH_SOUNDTRACK_DIR` for later game publishes. The complete local
+MP3 collection is `tagged-preview-vi/soundtrack/audio/` under the album artifact
+root. The other fourteen files are retained from revision V.
+
+The release URL includes `?v=b268d1999e4a`, the MP3 hash prefix. An existence
+probe through the public CDN before upload cached a 404; this query avoids that
+negative cache. For future uploads, check object existence through the storage
+API rather than requesting an unpublished CDN URL. Always verify the exact URL
+that goes into the manifest after upload, including byte identity, range/CORS
+behavior and actual browser playback. See [Cold Boot II](COLD-BOOT-II.md).
