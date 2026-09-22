@@ -82,3 +82,11 @@ the before/after decoded peaks are -2.6/-2.5 dBTP. The A/B montage is -17.2
 LUFS-I and -3.5 dBTP. Duration, stereo 44.1 kHz, source identity and final
 release checks pass. Equal reported loudness is measured, not independently
 normalized. The composer reproduces the complete candidate byte for byte.
+
+## Delivery
+
+Telegram acknowledged the A/B montage as message 1143, complete before as
+1144, and complete candidate as 1145 on 2026-09-22. The canonical Breach Vector
+album/game scores and public recording remain unchanged pending feedback.
+Delivery receipts and hashes are beside the external audio. Source commit:
+5880119. No claim of subjective listening approval is implied by the checks.

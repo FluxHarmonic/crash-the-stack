@@ -103,3 +103,8 @@ new URL with all fifteen tracks, correct artist and download hint intact.
 That functional check was muted and paused afterward. The complete current
 local MP3 set is `tagged-preview-iv/soundtrack/audio/`. Future game publication
 must carry `publication-relay-ii/site/soundtrack/` or the current live manifest.
+
+The album-level OGG was also sent to Telegram as message 1142, distinct from
+the quieter comparison delivery 1140. Both files remain in their respective
+external directories with API receipts; 1142 matches the release master used
+for the new public MP3.
