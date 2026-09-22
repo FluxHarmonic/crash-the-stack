@@ -90,3 +90,11 @@ Telegram acknowledged the montage as message 1146, complete reference as 1147
 and complete candidate as 1148. Source commit: 6e62208. All three deliveries
 use the approved phrasing. This percussion choice awaits listener feedback;
 no public upload or game change was made.
+
+## Listener decision
+
+David strongly approved the candidate, hearing more dynamics in the other
+drums where the original snare filled the space. Retain this patch together
+with approved Phrases I. Game synchronization remains pending under the album
+worktree's asset restriction; the concrete backport notes are in
+`../../album/NOTES.md`. No additional instrument revision is proposed now.

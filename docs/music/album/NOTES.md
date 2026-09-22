@@ -160,3 +160,26 @@ full album form, retaining the original pluck and separate acid part.
 A future game backport can reuse instruments 2, 3 and 21 plus instrument 19's
 output gain. Gain requires the Motif feature in `b0d135e`; no game tune,
 runtime source or dependency is changed in this worktree.
+
+## Breach Vector percussion approved; game synchronization pending
+
+David strongly prefers Percussion I: reducing snare noise reveals the other
+drums' dynamics and space. Phrases I and Percussion I together are the accepted
+listening direction. No further instrument change is proposed before checking
+the complete mix and eventual game transitions. The current accepted audition
+is `../alternates/breach-percussion-i/breach-vector-after.cts`.
+
+The latest work has not updated game assets. The album assignment explicitly
+keeps assets/tunes/ untouched and records backports here. The snare is a direct
+instrument-2 replacement for the adaptive game score, preserving notes and
+all 14 fill hits. For the phrase pass, album patterns 40/41 correspond to game
+patterns 34/35: the late pipe cadence and relaxed second-half signal can be
+reviewed there. Album patterns 11 and 30 are album-specific bridge/development;
+pattern 31 develops a repeated game-18 phrase. These should be mapped by musical
+role and auditioned in the adaptive sequence, not copied by album order number.
+
+Pending shared sound changes: Relay Ghost's instruments 2/3/21 and gritty-bass
+instrument 19 output gain, plus Breach Vector's approved instrument 2. Verify
+Motif instrument-gain support in the game dependency before Relay's backport.
+Preserve the game's marks, loops, calm/tense behavior and SFX headroom. Album
+mastering gain/limiting belongs to the listening release, not this asset sync.
