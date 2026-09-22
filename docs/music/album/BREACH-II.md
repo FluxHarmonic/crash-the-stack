@@ -31,3 +31,15 @@ Publication changes only Breach Vector's URL in the existing fifteen-track
 manifest. Every preserved public file is compared against the preceding
 production deployment before uploading the page. Game integration is a separate
 step following the Motif gain release.
+
+## Publication complete
+
+Published at https://cfb7d2bb.crashthestack.pages.dev (source `853dbc4`). The
+public MP3 is byte-identical to the tagged export; MIME, CORS and HTTP 206 byte
+ranges pass. Decoded MP3 is -16.9 LUFS-I and -1.7 dBTP. A fresh browser context
+selected Breach Vector and advanced playback from the new URL with correct
+Media Session metadata and all fifteen tracks present. The functional test
+was muted and paused afterward.
+
+Future game deployments must retain the manifest in
+`publication-breach-ii/site/soundtrack/` or the current production equivalent.

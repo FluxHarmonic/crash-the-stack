@@ -294,3 +294,11 @@ worker, player, other audio URLs and download-control hint remain intact.
 The new R2 object matches the local MP3 byte-for-byte; byte range 206, MIME and
 CORS checks pass. Evidence is external in publication-relay-ii/, r2-relay-ii/,
 relay-ii-release/ and relay-ii-mp3/.
+
+## Breach Vector approved master II
+
+Publication `cfb7d2bb` adopts the approved phrase development and shorter contact
+snare. Only track 13's URL changes to
+`soundtrack/breach-album-ii/breach-vector.mp3`. Public checksum, range, CORS,
+metadata and browser playback checks pass. See [BREACH-II.md](BREACH-II.md).
+Use `publication-breach-ii/site/soundtrack/` for subsequent game publication.
