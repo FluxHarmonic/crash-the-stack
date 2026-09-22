@@ -1,7 +1,10 @@
 # Motif Tracker
 
-Motif Tracker is the game's tune editor: a FastTracker II-style tracker
-over motif's `.cts` tune file and its live player. Eight channels, XM's
+Motif Tracker is the game's tune editor, embedded in the game for now (a
+standalone release comes later): a FastTracker II-style tracker over
+motif's `.cts` tune file and its live player. (The extension is a
+leftover from an earlier name; it is changing to `.mts`, Motif Tracker
+Source, in a later release.) Eight channels, XM's
 four columns per cell (note, instrument, volume, effect), an order list
 of patterns, the starter instrument bank, a reverb bus and a mix-bus
 compressor in the file, and everything you change is heard at the next
@@ -10,11 +13,17 @@ tick while the tune plays.
 The tune file format is motif's; `motif tune check FILE.cts` validates
 one, `motif tune render` renders it to WAV, and `motif mcp` lets an
 agent edit the same file. The soundtrack's twenty tunes ship in
-`assets/tunes/` (the game plays them live: docs/soundtrack.md) with `demo-columns`, which
-touches every column, every effect and every instrument.
+`assets/tunes/` (the game plays them live: docs/soundtrack.md): `spy`,
+`groove`, `breaker`, `black-glass`, `black-glass-title`,
+`basement-circuit`, `blind-spot`, `breach-vector`, `clock-edge`,
+`closed-loop`, `cold-boot`, `dead-sector`, `dirty-cache`,
+`glass-current`, `obsidian-index`, `quiet-array`, `relay-ghost`,
+`sector-drift` and `shadow-protocol`, with `demo-columns`, which touches
+every column, every effect and every instrument.
 
 ## Running it
 
+The tracker ships inside the game today; a standalone build is planned.
 Native (the desktop build):
 
     crash-the-stack --tune assets/tunes/spy.cts    a tune

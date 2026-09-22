@@ -1,6 +1,6 @@
 # Crash The Stack
 
-Cyberpunk takes on the classic solitaire games. STACK is Mahjongg solitaire
+Cyberpunk takes on the classic casual games. STACK is Mahjongg solitaire
 under a trace; DEFRAG is Klondike as a memory dump; the hub ties the runs
 together. Written in [Sigil](https://usesigil.org) for the desktop and the
 web from one codebase.
@@ -8,12 +8,13 @@ web from one codebase.
 **Play:** [crashthestack.com/jack-in/](https://crashthestack.com/jack-in/),
 free, in the browser; it installs as an app from the browser's menu.
 The site has the [About page](https://crashthestack.com/about/), the
-[devlog](https://crashthestack.com/devlog/) and the
-[tracker manual](https://crashthestack.com/docs/tracker/).
+[devlog](https://crashthestack.com/devlog/), the
+[soundtrack](https://crashthestack.com/soundtrack/) and the
+[docs](https://crashthestack.com/docs/) (how to play, the tracker manual).
 
 ## How it was made
 
-I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I review all of it, I play every build, and I decide what stays. The design, the art direction and the opinions are mine. If that's a dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
+I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I review all of it, I play every build, and I decide what stays. The design, the art direction and the opinions are mine. If the use of AI is dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
 
 ## Building it
 
