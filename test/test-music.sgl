@@ -105,6 +105,14 @@
     (assert-equal 'fill (music-section 'trace 7000.0 3000.0 'fill))    ; the window lost 4 s of queue
     (assert-equal 'fill (music-section 'trace 7000.0 #f 'fill))        ; and the whole window with it
     (assert-equal 'fill (music-section 'trace 50000.0 8000.0 'fill)))  ; even far from the trace
+  ;; the latch holds on the window, never on the landing itself: a flip to
+  ;; clean mode during the run-up (the trace allows it while the phase is
+  ;; trace) takes the landing away, and a latched fill would otherwise run
+  ;; into a tense that loops for a game that has no ICE
+  (test "the latch is released when the landing goes away (a twist -> clean flip mid-run-up)"
+    (assert-equal 'calm (music-section 'trace #f 8000.0 'fill))
+    (assert-equal 'calm (music-section 'trace #f #f 'fill))
+    (assert-equal 'fill (music-section 'trace 0.0 8000.0 'fill)))   ; but zero is a landing: the strike is the next frame
   (test "the latch is the fill's alone: tense and calm re-decide every frame"
     (assert-equal 'calm (music-section 'trace 50000.0 8000.0 'tense))
     (assert-equal 'fill (music-section 'trace 1000.0 8000.0 'tense))
@@ -147,3 +155,57 @@
       (let ((text (b64-encode bytes)))
         (assert-equal n (bytevector-length (%b64-decode text)))
         (assert-equal bytes (%b64-decode text))))))
+
+;; The tense region loops because every tune's last tense pattern ends with
+;; a Bxx position jump to its own tense mark, not because the player wraps
+;; it: the region's end is the order's length, which the walk never reaches
+;; (motif ends the walk there instead). A tune shipped without that jump
+;; would play tense once and fall back to its loop point (position 0, calm)
+;; with the model still in tense, and a later strike would find nothing to
+;; jump to. Nothing in the format or in `motif tune check` requires the
+;; jump, so the invariant is asserted here (the reviewer's re-read, 2026-09-22).
+(define (hex->int s)
+  (let loop ((i 0) (n 0))
+    (if (>= i (string-length s)) n
+        (let* ((c (char-upcase (string-ref s i)))
+               (d (cond ((and (char>=? c #\0) (char<=? c #\9)) (- (char->integer c) 48))
+                        ((and (char>=? c #\A) (char<=? c #\F)) (+ 10 (- (char->integer c) 65)))
+                        (else #f))))
+          (and d (loop (+ i 1) (+ (* 16 n) d)))))))
+
+;; the last "Bxx" of the text: the trailing jump of the last tense pattern
+;; (a character scan: string-find takes no start index)
+(define (last-position-jump text)
+  (let ((n (string-length text)))
+    (let loop ((i 0) (found #f))
+      (if (>= i (- n 4))
+          found
+          (loop (+ i 1)
+                (if (and (char=? (string-ref text i) #\")
+                         (char=? (string-ref text (+ i 1)) #\B)
+                         (char=? (string-ref text (+ i 4)) #\"))
+                    (or (hex->int (substring text (+ i 2) (+ i 4))) found)
+                    found))))))
+
+(define (tense-mark-of text)
+  (let* ((marks (string-find text "(marks "))
+         (rest (and marks (substring text marks (min (string-length text) (+ marks 120)))))
+         (at (and rest (string-find rest "tense: "))))
+    (and at (let loop ((i (+ at 7)) (n #f))
+              (let ((c (string-ref rest i)))
+                (if (and (char>=? c #\0) (char<=? c #\9))
+                    (loop (+ i 1) (+ (* 10 (or n 0)) (- (char->integer c) 48)))
+                    n))))))
+
+(test-group "music: every pooled tune's tense region loops on itself"
+  (for-each
+   (lambda (name)
+     (let* ((text (tune-text name))
+            (tense (tense-mark-of text))
+            (jump (last-position-jump text)))
+       (test (string-append (symbol->string name) ": the last position jump is to its tense mark ("
+                            (if jump (number->string jump) "none") " against " (if tense (number->string tense) "no tense mark") ")")
+         (assert-true (and tense #t))
+         (assert-true (and jump #t))
+         (assert-equal tense jump))))
+   (append (music-pool 'stack) (music-pool 'cards) (music-pool 'hub) CANDIDATES)))
