@@ -1348,7 +1348,7 @@
       (let ((click (input-frame-click f)))
         (case *screen*
           ((menu) (menu-tick f dt))
-          ((hub) (hub-tick f dt))   ; P5
+          ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
                  ((or (menu-frame? f)
@@ -1414,9 +1414,9 @@
     ;; free play) lands on the main menu with CONTINUE.
     ;;   crash: pause on|off TICKS            the overlay opened or closed; the table's clock (it holds between)
     (define (table-ticks)
-      (if (eq? *screen* 'cards)
-          (trace-ticks (deal-trace *deal*))
-          (trace-ticks (session-trace *session*))))
+      (cond ((eq? *screen* 'hub) (world-beat (hub-screen-world (hub-run-in-force))))   ; P5: the hub's beats
+            ((eq? *screen* 'cards) (trace-ticks (deal-trace *deal*)))
+            (else (trace-ticks (session-trace *session*)))))
 
     (define (open-overlay!)
       (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
@@ -1433,7 +1433,7 @@
     ;; A tap on the bar's MENU button while the overlay is up: RESUME.
     (define (overlay-button-tap? f)
       (let ((click (input-frame-click f)))
-        (and click
+        (and click (not (eq? *screen* 'hub))   ; the hub has no bar button (P5)
              (eq? 'menu
                   (if (eq? *screen* 'cards)
                       (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click))
@@ -1468,13 +1468,16 @@
       (when *overlay*
         (present! #f
                   (lambda ()
-                    (if (eq? *screen* 'cards)
-                        (begin
-                          (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
-                          (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*))))
-                        (begin
-                          (draw-session *session* *geom* *fx* (background) *copper* #t)
-                          (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
+                    (cond ((eq? *screen* 'hub)   ; P5
+                           (hub-draw! VW VH (background))
+                           (draw-overlay *overlay* VW VH BOARD-H))
+                          ((eq? *screen* 'cards)
+                                                (begin
+                                                  (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
+                                                  (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*))))
+                          (else
+                                                  (draw-session *session* *geom* *fx* (background) *copper* #t)
+                                                  (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*))))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -1674,7 +1677,9 @@
                (open-spec! (launch-spec l)))))
           ((menu)
            (hub-run-set! (cdr (hub-screen-take-request hs)))
-           (open-menu!))
+           ;; the pause panel over the world (P5): RESUME, SETTINGS, DISCONNECT = RUN HELD
+           (set! *overlay* (menu-new-overlay 'hub #t (settings-in-force) #f #f))
+           (say "pause" "on" (table-ticks)))
           (else #f))
         (when (eq? *screen* 'hub)
           (when *trace* (say "hub" "present"))
@@ -1819,7 +1824,7 @@
           (tiles-ensure! *geom*))
         ;; the menu's and the overlay's bakes, before the passes (they are passes)
         (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
-              ((eq? *screen* 'hub) (hub-prepare!))   ; P5: the tile bake is a pass
+              ((eq? *screen* 'hub) (hub-prepare!) (when *overlay* (menu-prepare! *overlay*)))   ; P5: the tile bake is a pass, and the pause panel's
               (*overlay* (menu-prepare! *overlay*)))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
         ;; the phosphor's compose pass first, then the frame (or the composed
