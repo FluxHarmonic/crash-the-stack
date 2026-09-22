@@ -43,9 +43,9 @@
   (export hub-screen hub-screen? hub-screen-new
           hub-screen-world hub-screen-prev hub-screen-tween hub-screen-clock hub-screen-beat-ms
           hub-screen-queued hub-screen-held? hub-screen-request hub-screen-toasts hub-screen-panel
-          hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats hub-screen-last hub-screen-touch? hub-screen-walk
+          hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats hub-screen-last hub-screen-touch? hub-screen-walk hub-screen-buzz
           hub-screen-with-touch hub-screen-teleport hub-panel-rect hub-panel-hit hub-touch-buttons hub-touch-hit PANEL-W PANEL-H PANEL-ROW-Y PANEL-ROW-H BOARD-H PAD VIEW-PX-W
-          hub-screen-tick hub-screen-hold hub-screen-take-request hub-screen-return hub-screen-launch
+          hub-screen-tick hub-screen-hold hub-screen-take-request hub-screen-return hub-screen-launch hub-screen-hold-board
           hub-screen-with-bpm hub-screen-shop hub-screen-camera hub-screen-daemon-at beat-ease
           SCALE CELL-PX VIEW-W VIEW-H
           screen-action-for LATE-WINDOW TOAST-MS MAX-CATCH-UP
@@ -96,6 +96,7 @@
       (bpm-pin default: #f)
       (touch? default: #f)              ; a coarse pointer: the touch overlay is up
       (walk default: #f)                ; the d-pad's walk: a direction taken every beat until WAIT or a bump
+      (buzz default: #f)                ; a touch-overlay button was pressed this frame (the page vibrates)
       (beats default: 0)
       (last default: 'wait))
 
@@ -315,6 +316,7 @@
                ((eq? (car e) 'used) (toast text: (string-append (string-upcase* (symbol->string (cadr e))) " ACTIVE.")))
                ((eq? (car e) 'bought) (toast text: (string-append (string-upcase* (symbol->string (cadr e))) " BOUGHT.")))
                ((eq? (car e) 'cleared) (toast text: "NODE CRASHED."))
+               ((eq? (car e) 'held) (toast text: "BOARD HELD. ENTER THE NODE TO RESUME."))
                ((eq? (car e) 'severed-board) (toast text: "BOARD SEVERED. ICE ALERTED." kind: 'ice))
                ((eq? (car e) 'descended) (toast text: (string-append "LAYER " (number->string (cadr e)) ".")))
                (else #f)))
@@ -407,7 +409,7 @@
 
     ;; One frame: dt in ms and the input frame. Answers the next screen.
     (define (hub-screen-tick hs dt f)
-      (let* ((hs (hub-screen hs toasts: (tick-toasts (hub-screen-toasts hs) dt)))
+      (let* ((hs (hub-screen hs toasts: (tick-toasts (hub-screen-toasts hs) dt) buzz: #f))
              (hs (hub-screen hs tween: (min 1.0 (+ (hub-screen-tween hs) (/ dt (hub-screen-beat-ms hs)))))))
         (cond ((hub-screen-panel hs) (panel-tick hs f))
               ((hub-screen-request hs) hs)                ; waiting on the shell
@@ -415,6 +417,9 @@
               ((hub-screen-held? hs) hs)
               (else
                (let* ((raw (screen-action-for hs f))
+                      (click (input-frame-click f))
+                      ;; a press on the overlay's buttons buzzes (the page reads the flag)
+                      (hs (if (and click (hub-screen-touch? hs) (hub-touch-hit VIEW-PX-W (car click) (cdr click))) (hub-screen hs buzz: #t) hs))
                       ;; the d-pad: an arrow starts a walk (and moves now), WAIT stops it
                       (hs (cond ((pressed? f 'pointer-up) (hub-screen hs walk: #f))   ; the finger lifted: the walk ends (a quick tap still moves once: its move is queued)
                                 ((and (pair? raw) (eq? (car raw) 'walk)) (hub-screen hs walk: (cadr raw)))
@@ -449,6 +454,12 @@
                                            hs))
                                    (hs (hub-screen hs beat-ms: (beat-ms-of hs))))
                               (loop hs (- clock beat-ms) (+ n 1))))))))))))
+
+    ;; DISCONNECT on the board: held at its node, the runner back in the world.
+    (define (hub-screen-hold-board hs)
+      (let ((w (hub-hold-board (hub-screen-world hs))))
+        (route-request (hub-screen hs world: w prev: w tween: 1.0 request: #f clock: 0.0
+                                   toasts: (append (toasts-for w) (hub-screen-toasts hs))))))
 
     ;; A board's outcome back into the world (the shell, after a launch).
     (define (hub-screen-return hs outcome)
