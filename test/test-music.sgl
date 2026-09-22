@@ -1,13 +1,20 @@
-;;; The music model (P4, ruling D50): which track plays where, in which
-;;; mode, and the player's fades in (crash audio): a cross-fade sums to
-;;; one track's level, a track resumes where it left off, 'top starts
-;;; it over, MUSIC off and the master volume scale the mix, the inner
-;;; loop ((crash native)'s %mix-track!) resamples and loops.
+;;; The music model (M1, ruling D59; P4's OGG table before it): which
+;;; tune plays where, pure, so the tests can hold the table without a
+;;; player. The pools are data (David re-sorts by ear); the pick is the
+;;; seed's hash over the table's pool, never the last pick when the pool
+;;; allows, so a share code or the daily always gets the same tune; the
+;;; section a phase asks for is the one function that couples the trace
+;;; to the music: CALM while the trace runs, TENSE once it completes.
+;;; Every pooled tune and the menu theme is a .cts under assets/tunes/
+;;; with its marks. Then the page's base64 delivery ((crash native)).
 
 (import (sigil test)
         (sigil math)
+        (sigil list)
+        (sigil fs)
+        (sigil io)
+        (sigil string)
         (crash music)
-        (crash audio)
         (crash native)
         (only (sigil io) string->utf8))
 
@@ -29,109 +36,69 @@
           (loop (+ i 3) (+ o 4)))))
     out))
 
-(test-group "music: the table"
-  (test "three tracks with their files under assets/audio/"
-    (assert-equal '(spy groove breaker) TRACKS)
-    (for-each (lambda (name) (assert-true (and (music-file name) #t))) TRACKS)
-    (assert-equal "assets/audio/spy.ogg" (music-file 'spy))
-    (assert-false (music-file 'nothing)))
-  (test "the menu is the theme, resumed; the rest tracks: spy on the stack, groove on DEFRAG"
-    (assert-equal '(spy . resume) (music-track-for 'menu #f #f))
-    (assert-equal 'spy (music-rest-track 'stack))
-    (assert-equal 'groove (music-rest-track 'cards)))
-  (test "a fresh deal starts the rest track from the top; a continued board resumes it"
-    (assert-equal '(spy . top) (music-track-for 'stack 'trace #t))
-    (assert-equal '(spy . resume) (music-track-for 'stack 'trace #f))
-    (assert-equal '(groove . top) (music-track-for 'cards 'trace #t))
-    (assert-equal '(groove . resume) (music-track-for 'cards 'trace #f)))
-  (test "traced (the counter-hack phase) is BREAKER from the top on both tables; cleared and severed are silence"
-    (assert-equal '(breaker . top) (music-track-for 'stack 'counter #f))
-    (assert-equal '(breaker . top) (music-track-for 'cards 'counter #t))
-    (assert-false (music-track-for 'stack 'cleared #f))
-    (assert-false (music-track-for 'cards 'severed #f))))
 
-;; a 1 s test track at 22050: a constant 0.5 (s16 16384)
-(define (constant-track frames value)
-  (let ((bv (make-bytevector (* 2 frames) 0)))
-    (let loop ((i 0))
-      (when (< i frames)
-        (bytevector-u8-set! bv (* 2 i) (modulo value 256))
-        (bytevector-u8-set! bv (+ 1 (* 2 i)) (quotient value 256))
-        (loop (+ i 1))))
-    bv))
+(define (tune-text name) (read-file-string (music-tune-path name)))
+(define (has-marks? name) (string-find (tune-text name) "(marks calm:"))
 
-(define (rms bv n)
-  (let loop ((i 0) (acc 0.0))
-    (if (= i n)
-        (sqrt (/ acc n))
-        (let ((v (bytevector-ieee-single-ref bv (* 8 i) 'little)))
-          (loop (+ i 1) (+ acc (* v v)))))))
+(test-group "music: the pools and the theme"
+  (test "three pools, stack, cards and the hub, each with tunes; BREACH VECTOR is in the two tables' pools"
+    (assert-equal '(stack cards hub) (map car POOLS))
+    (assert-true (> (length (music-pool 'hub)) 1))
+    (assert-true (> (length (music-pool 'stack)) 1))
+    (assert-true (> (length (music-pool 'cards)) 1))
+    (assert-true (and (memq 'breach-vector (music-pool 'stack)) #t))
+    (assert-true (and (memq 'breach-vector (music-pool 'cards)) #t))
+    (assert-equal '() (music-pool 'nothing)))
+  (test "DEAD SECTOR is the hub's, on neither table; SHADOW PROTOCOL (the original sneaking track) moved to the hub; CLOCK EDGE is a candidate in no pool until David hears it"
+    (for-each (lambda (name)
+                (assert-false (memq name (music-pool 'stack)))
+                (assert-false (memq name (music-pool 'cards)))
+                (assert-true (and (memq name (music-pool 'hub)) #t)))
+              '(dead-sector shadow-protocol))
+    (assert-equal '(clock-edge) CANDIDATES)
+    (for-each (lambda (name) (assert-false (memq name (music-pool 'stack))) (assert-false (memq name (music-pool 'cards))) (assert-false (memq name (music-pool 'hub)))) CANDIDATES))
+  (test "every pooled tune and the theme is a .cts under assets/tunes/ with its marks"
+    (for-each (lambda (name)
+                (assert-true (file-exists? (music-tune-path name)))
+                (assert-true (and (has-marks? name) #t)))
+              (append (music-pool 'stack) (music-pool 'cards) (music-pool 'hub) CANDIDATES (list MENU-THEME))))
+  (test "the menu theme is Black Glass (David's commissioned main theme)"
+    (assert-equal 'black-glass-title MENU-THEME)
+    (assert-equal "assets/tunes/black-glass-title.cts" (music-tune-path MENU-THEME))))
 
-(define (mean bv n)
-  (let loop ((i 0) (acc 0.0))
-    (if (= i n) (/ acc n) (loop (+ i 1) (+ acc (bytevector-ieee-single-ref bv (* 8 i) 'little))))))
+(test-group "music: the pick"
+  (test "the same seed on the same table picks the same tune; the pick is in the pool"
+    (for-each (lambda (seed)
+                (let ((a (music-pick 'stack seed #f)) (b (music-pick 'stack seed #f)))
+                  (assert-equal a b)
+                  (assert-true (and (memq a (music-pool 'stack)) #t))))
+              '(0 1 7 175561140 277501568 4294967295)))
+  (test "seeds spread over the pool (no seed-blind pick)"
+    (let ((picks (let loop ((seeds (iota 64)) (acc '())) (if (null? seeds) acc (let ((p (music-pick 'stack (car seeds) #f))) (loop (cdr seeds) (if (memq p acc) acc (cons p acc))))))))
+      (assert-true (> (length picks) 1))))
+  (test "never the last pick when the pool allows"
+    (for-each (lambda (seed)
+                (let* ((first (music-pick 'stack seed #f))
+                       (again (music-pick 'stack seed first)))
+                  (assert-false (eq? first again))
+                  (assert-true (and (memq again (music-pool 'stack)) #t))))
+              (iota 32)))
+  (test "an empty pool picks nothing; a seed of #f reads as 0"
+    (assert-false (music-pick 'nothing 5 #f))
+    (assert-equal (music-pick 'cards 0 #f) (music-pick 'cards #f #f))))
 
-(test-group "audio: the track player"
-  (audio-add-track! 'a (constant-track 22050 16384) 22050)   ; 0.5
-  (audio-add-track! 'b (constant-track 22050 8192) 22050)    ; 0.25
-  (let ((out (make-bytevector (* 8 512) 0)))
-    (test "a track plays at TRACK-GAIN times its level after its fade-in; a second play with 'resume keeps it"
-      (audio-play! 'a 'top)
-      (assert-equal 'a (audio-playing))
-      ;; the fade-in is FADE-IN-MS at the context's rate (44100 in the test bank): run 2 s of chunks
-      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
-      (audio-mix-chunk! out 512)
-      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01))
-      (audio-play! 'a 'resume)
-      (audio-mix-chunk! out 512)
-      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01)))
-    (test "a cross-fade: the new track comes in as the old goes out, and the old leaves at silence with its position kept"
-      (audio-play! 'b 'top)
-      (assert-equal 'b (audio-playing))
-      (assert-true (> (audio-player-gain 'a) 0.9))
-      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
-      (audio-mix-chunk! out 512)
-      (assert-true (< (abs (- (mean out 512) (* 0.55 0.25))) 0.01))
-      (assert-equal 0.0 (audio-player-gain 'a))
-      (assert-true (> (cdr (assq 'a (audio-positions))) 0.0)))
-    (test "'resume returns to the kept position, 'top to the start"
-      (let ((kept (cdr (assq 'a (audio-positions)))))
-        (audio-play! 'a 'resume)
-        (assert-true (< (abs (- (cadr (assq 'a (audio-players))) kept)) 1.0))
-        (audio-play! 'a 'top)
-        (assert-equal 0.0 (cadr (assq 'a (audio-players))))))
-    (test "MUSIC off silences the mix and keeps the position moving; the volume scales it"
-      (audio-play! 'b 'top)
-      (let loop ((k 0)) (when (< k 200) (audio-mix-chunk! out 512) (loop (+ k 1))))
-      (audio-set-music! #f)
-      (let ((p0 (cadr (assq 'b (audio-players)))))
-        (audio-mix-chunk! out 512)
-        (assert-equal 0.0 (rms out 512))
-        (assert-true (> (cadr (assq 'b (audio-players))) p0)))
-      (audio-set-music! #t)
-      (audio-set-volume! 0.5)
-      (audio-mix-chunk! out 512)
-      (assert-true (< (abs (- (mean out 512) (* 0.5 0.55 0.25))) 0.01))
-      (audio-set-volume! 1.0))
-    (test "a fade-out empties the players; a track that is not there is ignored"
-      (audio-fade-out! 100)
-      (let loop ((k 0)) (when (< k 40) (audio-mix-chunk! out 512) (loop (+ k 1))))
-      (assert-false (audio-playing))
-      (assert-equal '() (audio-players))
-      (audio-play! 'nothing 'top)
-      (assert-false (audio-playing)))
-    (test "the loop wraps: a 1 s track played for 3 s keeps its level"
-      (audio-play! 'a 'top)
-      (let loop ((k 0)) (when (< k 300) (audio-mix-chunk! out 512) (loop (+ k 1))))
-      (audio-mix-chunk! out 512)
-      (assert-true (< (abs (- (mean out 512) (* 0.55 0.5))) 0.01))
-      (audio-fade-out! 0)
-      (audio-mix-chunk! out 512))))
+(test-group "music: the section a phase asks for (the trace -> music coupling)"
+  (test "the counter-hack phase is TENSE; everything else is CALM"
+    (assert-equal 'tense (music-section 'counter))
+    (assert-equal 'calm (music-section 'trace))
+    (assert-equal 'calm (music-section #f))
+    (assert-equal 'calm (music-section 'cleared))
+    (assert-equal 'calm (music-section 'severed))))
 
-;; The page hands each tune over as base64 (the only payload the bridge
-;; carries); the decode is (crash native)'s C. RFC 4648's vectors, then
-;; padding absent, whitespace between the digits, and a run long enough
-;; to cross the chunk the page sends (512 KB of bytes is 700 KB of text).
+;; The page hands a tune's text over as base64 (the only payload the
+;; bridge carries); the decode is (crash native)'s C. RFC 4648's vectors,
+;; then padding absent, whitespace between the digits, and a run long
+;; enough to cross a chunk.
 (test-group "music: the base64 decode (the page's delivery)"
   (test "RFC 4648's vectors"
     (assert-equal (bytevector) (%b64-decode ""))

@@ -406,7 +406,7 @@ if (firstURL) {
   const gate = await waitLine(/^crash: literal-check ok$/, from, 40000);
   await sleep(1500);
   await press("Enter");   // the title gate
-  const live = await waitLine(/^crash: ambient start$/, from, 60000);   // the menu live (the music began)
+  const live = await waitLine(/^crash: music start$/, from, 60000);   // the menu live (the music began)
   const top = await waitLine(/^crash: menu top /, from, 5000);
   let detail = "";
   if (!gate || !live || !top) detail = `gate ${!!gate}, live ${!!live}, top line ${!!top}`;

@@ -62,7 +62,7 @@
 //               the same tick digests and another seed does not, two boots
 //               without ?seed take different seeds from the page's clock, and a tap
 //               during the reveal skips it without choosing an entry
-//   preload     (P3d, ruling D40) with the ambient delayed 4 s the boot outlasts the
+//   preload     (P3d, ruling D40) with the menu theme's text delayed 4 s the boot outlasts the
 //               reveal: a tap after the settle chooses nothing and boots no board,
 //               "crash: boot done" then arrives with the audio step last, and the
 //               tap then chooses STACK
@@ -941,15 +941,15 @@ let iceLock = null;
     let openAt = -1;
     for (let i = consoleLines.length - 1; i >= 0; i--) if (/^crash: audio (open|closed)$/.test(consoleLines[i])) { openAt = i; break; }
     const open = openAt >= 0 ? { m: consoleLines[openAt].match(/^crash: audio (open|closed)$/) } : null;
-    // the ambient loop lands a few seconds after the boot (the page fetches
-    // it late, on purpose) and must be playing under the cue
-    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 20000) : null;
+    // the board's tune lands soon after the boot (the page fetches its text on the game's
+    // line; M1) and must be playing under the cue
+    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: music landed [a-z0-9-]+ (\d+)$/, openAt, 20000) : null;
     // and it starts once the screen is ready (the menu live, or a table up with the boot done): the start line
-    const started = ambient ? await waitLine(/^crash: ambient start$/, ambient.index, 10000) : null;
+    const started = ambient ? await waitLine(/^crash: music start$/, ambient.index, 10000) : null;
     if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
     else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
-    else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
-    else if (!started) detail = "the ambient landed but never started (no \"crash: ambient start\" line within 10 s: the boot is not done, or the start is not wired)";
+    else if (!ambient) detail = "no tune landed (no \"crash: music landed NAME N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
+    else if (!started) detail = "the tune landed but the music never started (no \"crash: music start\" line within 10 s: the boot is not done, or the start is not wired)";
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
@@ -993,10 +993,10 @@ let iceLock = null;
           const kinds = JSON.parse(await evalJS("JSON.stringify(window.__crashAudioTap.nodes)"));
           if (!removed) detail = "the pair did not match after NEXT";
           else if (ambientPeak < 0) detail = "no AudioNode ever connected to a destination (the tap saw nothing)";
-          else if (!(ambientPeak > AUDIO_AMBIENT)) detail = `the ambient landed but its RMS peaked at ${ambientPeak.toFixed(4)}: not playing`;
+          else if (!(ambientPeak > AUDIO_AMBIENT)) detail = `the tune landed but the music's RMS peaked at ${ambientPeak.toFixed(4)}: not playing`;
           else if (!(peak > before + AUDIO_RISE)) detail = `RMS peaked ${peak.toFixed(4)} after the match against ${before.toFixed(4)} with the ambient off: no cue (nodes ${kinds.join(",")})`;
           else if (!kinds.includes("AudioWorkletNode")) detail = `RMS ${peak.toFixed(4)} but the bridge used ${kinds.join(",")}, not the AudioWorkletNode path`;
-          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; ambient ${ambient.m[1]} frames at RMS ${ambientPeak.toFixed(4)}; with it off, RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
+          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; the tune (${ambient.m[1]} bytes of text) at RMS ${ambientPeak.toFixed(4)}; with the music off, RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
         }
       }
     }
@@ -1332,15 +1332,15 @@ let iceLock = null;
         resolve(n);
       }))`);
       if (itemsLit < 200) detail = `the menu's items are not on screen after the boot: ${itemsLit} C-LABEL-LIT pixels in the entry band (every other pixel sampled)`;
-      // the ambient (David, 2026-09-20): silent under the card and the reveal,
+      // the music (David, 2026-09-20): silent under the card and the reveal,
       // started once the menu is ready: its start line follows the boot's done
       // line and never precedes the settle
       else {
-        const start = await waitLine(/^crash: ambient start$/, a.from, 5000);
+        const start = await waitLine(/^crash: music start$/, a.from, 5000);
         const settledAt = consoleLines.findIndex((l, i) => i >= a.from && /^crash: title settled /.test(l));
-        if (!start) detail = "no \"crash: ambient start\" line within 5 s of the boot's done line: the loop never began";
-        else if (start.index < settledAt) detail = "the ambient started before the reveal settled";
-        else if (start.index < bootDone.index) detail = "the ambient started before the boot was done (the items were not in)";
+        if (!start) detail = "no \"crash: music start\" line within 5 s of the boot's done line: the music never began";
+        else if (start.index < settledAt) detail = "the music started before the reveal settled";
+        else if (start.index < bootDone.index) detail = "the music started before the boot was done (the items were not in)";
       }
     }
   }
@@ -1418,13 +1418,13 @@ let iceLock = null;
   delete substitutePaths["/assets/title/backdrop.png"];
   await evalJS(`localStorage.removeItem("scanlines")`);
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the music started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
 }
 
 // ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --
-// The server delays the menu theme (spy.ogg, D50) by BOOT_SLOW ms, so the boot's audio step
+// The server delays the menu theme's text (black-glass-title.cts; M1, D59) by BOOT_SLOW ms, so the boot's audio step
 // outlasts the tap: after the gate's tap the DIALING meter must hold until
-// "crash: boot done" (the ambient landed, the audio step last), a tap during
+// "crash: boot done" (the theme's text landed, the audio step last), a tap during
 // the meter must choose nothing and skip nothing, the card must start only
 // after the boot is done ("crash: title dialed" after "crash: boot done",
 // no card tick before it), and once the reveal settles the menu is live at
@@ -1435,7 +1435,7 @@ let iceLock = null;
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
-  slowPaths["/assets/audio/spy.ogg"] = BOOT_SLOW;
+  slowPaths["/assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
@@ -1450,7 +1450,7 @@ let iceLock = null;
   let tapAt = -1;
   if (!detail) {
     await sleep(300);
-    if (consoleLines.slice(connect.index).some((l) => /^crash: title dialed /.test(l))) detail = `the meter ended within 300 ms of the tap: the ${BOOT_SLOW} ms ambient delay did not hold the boot (a slow asset that does not hold the card is the bug this leg exists for)`;
+    if (consoleLines.slice(connect.index).some((l) => /^crash: title dialed /.test(l))) detail = `the meter ended within 300 ms of the tap: the ${BOOT_SLOW} ms theme delay did not hold the boot (a slow asset that does not hold the card is the bug this leg exists for)`;
     else {
       tapAt = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
@@ -1493,9 +1493,9 @@ let iceLock = null;
       else if (!booted) detail = "after the settle, JACK IN chosen but no board booted (the run's first layer)";
     }
   }
-  delete slowPaths["/assets/audio/spy.ogg"];
+  delete slowPaths["/assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
-  else pass("preload", `ambient held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
+  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
 }
 
 // ---- 9c'. slow-link: a boot on a throttled link loads every texture ----------
@@ -1681,6 +1681,8 @@ async function menuOn(screen, from, ms = 3000) {
 let topAt = 0;
 // a fresh board, then Escape: the pause menu's top screen
 async function pauseMenu(extra = "") {
+  // the store before the boot (a leg that dies at its first frame is read against it)
+  try { consoleLines.push("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
   const from = consoleLines.length;
   await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
@@ -2407,12 +2409,16 @@ const realErrors = consoleErrors.filter((l) => !ABORTED.test(l));
 // the three lines before the first error are the context a reader needs
 const firstErrorAt = consoleLines.findIndex((l) => /^Error: /.test(l));
 if (firstErrorAt > 0) console.log(`  before the first error: ${JSON.stringify(consoleLines.slice(Math.max(0, firstErrorAt - 3), firstErrorAt))}`);
+// the forty lines around the first runtime error, for the reader (a page that dies at its first frame says little else)
+if (firstErrorAt > 0) console.log("  around it:\n" + consoleLines.slice(Math.max(0, firstErrorAt - 30), firstErrorAt + 10).map((l, i) => `    ${Math.max(0, firstErrorAt - 30) + i}: ${l}`).join("\n"));
 if (realErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) aborted by a reload` : ""}`);
 else fail("console", `${realErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(realErrors.concat(runtimeErrors).slice(0, 5))}`);
 
 // ---- screenshot for the record ----------------------------------------------
 const shot = await send("Page.captureScreenshot", { format: "png" });
 fs.writeFileSync(SHOT, Buffer.from(shot.data, "base64"));
+// the whole console beside it: a red leg says where, this says what led there
+fs.writeFileSync(SHOT.replace(/\.png$|$/, "") + ".console.txt", consoleLines.join("\n") + "\n");
 console.log(`screenshot -> ${SHOT}`);
 
 const failed = results.filter((r) => r[1] === "FAIL").length;

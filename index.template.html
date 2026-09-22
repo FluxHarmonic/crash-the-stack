@@ -127,7 +127,7 @@
     // When the page's fetches are safe (ruling D40): the service worker
     // is active (navigator.serviceWorker.ready, plus a 750 ms grace), or there is none, or 2.5
     // s passed. A fetch pending while the worker activates failed under
-    // load (P3), which is what the game's texture delay and the ambient's
+    // load (P3), which is what the game's texture delay and the tune's
     // timer guarded against; this resolves as soon as the real condition
     // holds, so on a revisit the boot's steps start at once. Told to the
     // game as ("sw", "ready").
@@ -141,7 +141,7 @@
       if (!navigator.serviceWorker.controller) { fire(); return; }
       // 750 ms after activation, not at it: a fetch made right at ready still
       // failed under load (2026-09-19, the arm), the P3 finding again; the
-      // page retries a lost ambient fetch and the game a lost texture fetch
+      // page retries a lost tune fetch and the game a lost texture fetch
       navigator.serviceWorker.ready.then(function () { setTimeout(fire, 750); }, fire);
     });
 
@@ -197,7 +197,7 @@
     // Multiple callbacks can share one animation frame (including an audio
     // upload). Aggregate their cost instead of treating each as another frame.
     var pageFrames = { cb: [], gap: [], stamp: null, start: 0, cost: 0, epoch: 0, ignore: null };
-    var audioWork = { upload: [], finish: [], settled: 0, failed: 0, loading: "none" };
+
     var audioOutput = { mode: "unobserved", context: null, block: 0, previous: null, gaps: [] };
     function remember(xs, value) { xs.push(value); if (xs.length > 3600) xs.shift(); }
     // ?ms observes the actual output node, including a failed worklet's
@@ -230,7 +230,7 @@
       pageFrames.ignore = pageFrames.stamp;
       pageFrames.stamp = null; pageFrames.start = 0; pageFrames.cost = 0;
       pageFrames.cb = []; pageFrames.gap = []; pageFrames.epoch++;
-      audioWork.upload = []; audioWork.finish = [];
+      tuneWork.upload = [];
       audioOutput.previous = null; audioOutput.gaps = [];
     }
     (function () {
@@ -269,8 +269,8 @@
       var over = pageFrames.cb.filter(function (c) { return c > 16.7; }).length;
       var ctx = audioOutput.context;
       return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length +
-        "\npage music settled " + audioWork.settled + "/3 failed " + audioWork.failed + " loading " + audioWork.loading +
-        "\n" + line("page audio-upload", audioWork.upload) + "\n" + line("page audio-finish", audioWork.finish) +
+        "\npage tunes fetched " + tuneWork.fetched + " failed " + tuneWork.failed + " loading " + tuneWork.loading +
+        "\n" + line("page tune-upload", tuneWork.upload) +
         "\npage audio node " + audioOutput.mode + " state " + (ctx ? ctx.state : "unknown") +
         " rate " + (ctx ? ctx.sampleRate : 0) + " block " + audioOutput.block +
         " secure " + (window.isSecureContext ? "yes" : "no") + " isolated " + (window.crossOriginIsolated ? "yes" : "no") +
@@ -279,18 +279,37 @@
 
     // The live soundtrack (M1, D59): the game asks for a tune's text with
     // one "crash: tune-fetch NAME" line; the page fetches assets/tunes/NAME.cts
-    // and hands it over in 12 KB base64 chunks then ("tune-done", NAME). A
-    // failure says "crash: tune-unavailable NAME" (a prefix this hook does not
-    // act on) after two retries for network-level failures, none for a 404.
-    function fetchTune(name, attempt) {
-      attempt = attempt || 1;
-      if (!/^[a-z0-9-]+$/.test(name)) { console.log("crash: tune-unavailable " + name + " (not a bundled name)"); return; }
+    // (once the service worker is active: a fetch inside its activation
+    // window failed under load, D40) and hands it over in 12 KB base64
+    // chunks then ("tune-done", NAME). A failure says "crash: tune-unavailable
+    // NAME" (a prefix this hook does not act on) after two retries for
+    // network-level failures, none for a 404, and then ("tune-done", NAME)
+    // with no chunks, so the game knows. The first tune asked for is the menu
+    // theme (the game asks at boot; its boot's audio step waits for it or
+    // 3 s): crashThemeSettled resolves when it landed or was given up, and
+    // an update waiting to apply waits on that (the worker's activation
+    // under a fetch in flight hung twice in four runs, 2026-09-19).
+    var tuneWork = { fetched: 0, failed: 0, loading: "none", upload: [] };
+    var themeSettled = null, themeAsked = false;
+    window.crashThemeSettled = new Promise(function (resolve) { themeSettled = resolve; });
+    function fetchTune(name, attempt, first) {
+      if (!attempt) { attempt = 1; first = !themeAsked; themeAsked = true; }
+      function settled(failed) {
+        tuneWork.fetched++; if (failed) tuneWork.failed++;
+        tuneWork.loading = "none";
+        if (first) themeSettled();
+      }
+      if (!/^[a-z0-9-]+$/.test(name)) { console.log("crash: tune-unavailable " + name + " (not a bundled name)"); settled(true); return; }
+      tuneWork.loading = name;
       withApp(function (app) {
-        fetch("assets/tunes/" + name + ".cts", { cache: "force-cache" }).then(function (r) {
+        swReady.then(function () {
+          return fetch("assets/tunes/" + name + ".cts", { cache: "force-cache" });
+        }).then(function (r) {
           if (!r.ok) throw new Error("tune " + r.status);
           return r.text();
         }).then(function (text) {
           var bytes = new TextEncoder().encode(text), CHUNK = 12 * 1024, i = 0;
+          var t0 = performance.now();
           while (i < bytes.length) {
             var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
             for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
@@ -298,9 +317,13 @@
             i += CHUNK;
           }
           app.dispatch("tune-done", name);
+          remember(tuneWork.upload, performance.now() - t0);
+          settled(false);
         }, function (err) {
-          if (attempt < 3 && !/tune 404/.test(err.message)) { setTimeout(function () { fetchTune(name, attempt + 1); }, 800); return; }
+          if (attempt < 3 && !/tune 404/.test(err.message)) { setTimeout(function () { fetchTune(name, attempt + 1, first); }, 800); return; }
           console.log("crash: tune-unavailable " + name + " " + err.message + " (try " + attempt + ")");
+          app.dispatch("tune-done", name);   // no chunks: given up
+          settled(true);
         });
       });
     }
@@ -406,7 +429,7 @@
       updates.ready(app);
       // The reveal's frames belong to the reveal (David, on the phone:
       // "extremely glitchy at startup ... with the typing beeps"): the
-      // ambient's chunk decodes and the worker's precache of a new version
+      // tune's chunks and the worker's precache of a new version
       // wait until the game says the reveal is over (("title", "running?")
       // answers 1 while it runs; a ?stack boot has none), or 20 s. The
       // promise itself is made at script load (the worker script reads it).
@@ -419,41 +442,14 @@
         if (app.dispatch("title", "live?") === 1) { liveDone(); return; }
         setTimeout(pollLive, 500);
       })();
-      Promise.all([swReady, window.crashRevealOver]).then(function () { fetchAmbient(app); });
+      Promise.all([swReady, window.crashRevealOver]).then(function () { fetchCredits(app); });
     });
 
-    // The music (P4, ruling D50): three OGG Vorbis tunes under
-    // assets/audio/ (mono 22050, ~1 MB each: the 7 MB PCM renders are not
-    // shipped), fetched here because the wasm's bridges have no bytes
-    // fetch, decoded by the browser (decodeAudioData on an offline context
-    // at the tune's rate, so no resampling), and handed to the game as
-    // s16le mono PCM in base64 chunks through the dispatch: ("track",
-    // NAME) opens one, ("audio-size", bytes) reserves its PCM buffer,
-    // ("audio-chunk", b64) fills it, ("audio-done", n)
-    // closes it; ("audio-done", 0) after ("track", NAME) means that tune
-    // was given up. The menu theme (spy) goes first: the boot's audio step
-    // waits for it (D40); the others land while the menu is up. Fetched
-    // once swReady resolves, outside the service worker's activation
-    // window, and never fatal: no tune means sound effects alone. One
-    // 512 KB chunk per animation frame (the game decodes it in C; the
-    // ambient's 16 KB a frame would take a 7.5 MB tune 460 frames, minutes
-    // on a slow box, and the boot waits on the theme). The receiver copies
-    // each chunk into the one buffer audio-size reserved, no final
-    // concatenation.
-    //
-    // BG1 (2026-09-21) measured this against a worker-converted, adaptive
-    // 64..256 KB delivery on the phone viewport (SwiftShader, ?ms, load ~20):
-    // the theme landed 0.5-0.6 s after its decode here against 2.1-3.0 s
-    // there (15 chunks against ~30 that start small), the per-chunk
-    // dispatch 8.3 ms mean / 20-31 max here against 5-6 mean / 8-31 max,
-    // and the frames over 50 ms during the theme 0-1 against 0-16. The
-    // faster start stays.
-    var TRACKS = ["spy", "groove", "breaker"];
-    var ambientSettled = null;
-    window.crashAmbientSettled = new Promise(function (resolve) { ambientSettled = resolve; });
-    function fetchAmbient(app) { fetchTracks(app, 0); }
-    // The credits crawl's text (P4c): fetched after the tunes and handed
-    // over whole as ("credits", text); a failed fetch leaves the crawl empty.
+    // The credits crawl's text (P4c): fetched once the worker is active and
+    // the reveal is over, and handed over whole as ("credits", text); a
+    // failed fetch leaves the crawl empty. (P4's three OGG tracks were
+    // fetched, decoded and delivered here until M1: the music plays live
+    // from the .cts the game asks for, fetchTune above.)
     function fetchCredits(app) {
       fetch("assets/credits.txt", { cache: "force-cache" }).then(function (r) {
         if (!r.ok) throw new Error("credits " + r.status);
@@ -463,58 +459,6 @@
       }).catch(function (err) {
         console.log("crash: credits failed " + err.message);
       });
-    }
-    function fetchTracks(app, index) {
-      if (index >= TRACKS.length) { fetchCredits(app); return; }
-      var name = TRACKS[index];
-      var TRIES = 3, tries = 0;
-      audioWork.loading = name;
-      function settled(failed) {
-        audioWork.settled++; if (failed) audioWork.failed++;
-        audioWork.loading = "none";
-        if (index === 0) ambientSettled();
-        fetchTracks(app, index + 1);
-      }
-      function deliver(pcm) {
-        // float32 mono at the tune's rate -> s16le, then 512 KB a frame
-        var n16 = pcm.length, bytes = new Uint8Array(n16 * 2);
-        for (var i = 0; i < n16; i++) {
-          var v = Math.max(-1, Math.min(1, pcm[i])), s = v < 0 ? v * 32768 : v * 32767;
-          var u = s < 0 ? s + 65536 : s;
-          bytes[2 * i] = u & 255; bytes[2 * i + 1] = (u >> 8) & 255;
-        }
-        var CHUNK = 512 * 1024, i2 = 0, n = 0;
-        app.dispatch("track", name);
-        app.dispatch("audio-size", String(bytes.length));
-        (function next() {
-          if (i2 >= bytes.length) { app.dispatch("audio-done", String(n)); settled(false); return; }
-          var part = bytes.subarray(i2, Math.min(i2 + CHUNK, bytes.length)), s = "";
-          for (var k = 0; k < part.length; k += 8192) s += String.fromCharCode.apply(null, part.subarray(k, Math.min(k + 8192, part.length)));
-          var t0 = performance.now();
-          app.dispatch("audio-chunk", btoa(s));
-          remember(audioWork.upload, performance.now() - t0);
-          i2 += CHUNK; n++;
-          requestAnimationFrame(next);
-        })();
-      }
-      (function attempt() {
-        tries++;
-        fetch("assets/audio/" + name + ".ogg", { cache: "force-cache" }).then(function (r) {
-          if (!r.ok) throw new Error(name + " " + r.status);
-          return r.arrayBuffer();
-        }).then(function (buf) {
-          // decoded at 22050 mono on an offline context: what the file holds
-          var ctx = new OfflineAudioContext(1, 1, 22050);
-          return ctx.decodeAudioData(buf);
-        }).then(function (audio) {
-          console.log("crash: track " + name + " decoded " + audio.length + " frames at " + audio.sampleRate);
-          deliver(audio.getChannelData(0));
-        }).catch(function (err) {
-          console.log("crash: track " + name + " failed " + err.message + " (try " + tries + ")");
-          if (tries < TRIES) setTimeout(attempt, 1500);
-          else { app.dispatch("track", name); app.dispatch("audio-done", "0"); settled(true); }   // D40: the boot's audio step does not wait on a lost fetch
-        });
-      })();
     }
 
     // Every user gesture reaches the game as ("gesture", name), so it can
@@ -914,12 +858,12 @@
       // not while the boot's big fetch is in flight: the waiting worker cannot
       // activate until the active one's fetch events have finished, and an
       // update applied mid-boot did not activate within 20 s twice in four arm
-      // runs once D40 started fetches earlier (2026-09-19); the ambient fetch
+      // runs once D40 started fetches earlier (2026-09-19); the theme's fetch
       // in flight is the likely holder (a hypothesis, the fix costs nothing):
       // the promise resolves once
-      // the ambient landed or was given up, at once when no page asked for it
+      // the theme landed or was given up, at once when no page asked for it
       // and never held forever by a fetch that hangs: 15 s, then apply anyway
-      Promise.race([window.crashAmbientSettled || Promise.resolve(), new Promise(function (r) { setTimeout(r, 15000); })]).then(applyNow);
+      Promise.race([window.crashThemeSettled || Promise.resolve(), new Promise(function (r) { setTimeout(r, 15000); })]).then(applyNow);
     }
     function applyNow() {
       if (!status.reg || !status.reg.waiting || applied) return;

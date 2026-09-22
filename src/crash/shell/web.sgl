@@ -134,7 +134,6 @@
           (crash stats)
           (crash sfx)
           (crash audio)
-          (crash audio transfer)
           (crash shell)
           (crash code)
           (crash run)
@@ -187,7 +186,6 @@
     (define *clock-at* 0.0)  ; now-ms when the clock landed (the epoch second is the clock plus the time since)
     (define *code* #f)       ; ?code=: a share code to deal at boot (P4)
     (define *sw-ready* #f)   ; the page said its service worker is active (or there is none): fetches are safe (P3d, D40)
-    (define *ambient-ready* #f) ; the ambient landed, or the page gave it up: the boot's audio step (D40)
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
@@ -229,7 +227,6 @@
     (define *ms-skip* 1)     ; the first tick has no previous frame to sample
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
-    (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
     (define *device-hint* #f)  ; (cores memory) from the page, or #f
     (define *tune-chunks* '())
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
@@ -255,7 +252,7 @@
     (define *ms-flush* 0.0)
     (define *tick-start* 0.0)
     (define *tick-ms* 0.0)       ; the whole web-tick, wasm side
-    (define *boot-ms* 0.0)       ; initial boot!, boot-tick!, ambient-tick!
+    (define *boot-ms* 0.0)       ; initial boot!, boot-tick!, music-tick!
     (define *count-ms* 0.0)      ; count-frame! (the stats bookkeeping, a gc-stats read)
     (define *pump-ms* 0.0)       ; audio-pump!
     (define *ms-tick* 0.0)
@@ -483,58 +480,29 @@
 
     ;; --- the sound (P3) ----------------------------------------------------------
 
-    ;; The page fetches and decodes each tune under assets/audio/ (there is
-    ;; no bytes fetch in the bridges the wasm has; the page has fetch and
-    ;; decodeAudioData) and hands the PCM over as ("track", name), then
-    ;; ("audio-size", byte-count), ("audio-chunk", base64) dispatches, then
-    ;; ("audio-done", count): see
-    ;; the music below. Decoded here into one s16le bytevector a track.
     ;;   crash: audio open|closed             the context and sink at boot
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
     ;; ("ambient", "off") fades the music out and holds it: the browser
-    ;; arm's way to hear a cue by itself.
-    ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a 7.5 MB
-    ;; tune decoded in Sigil a character at a time cost whole frames per
-    ;; 16 KB chunk (2026-09-20, the ambient's delivery; the tune is six
-    ;; times the ambient). The page now adapts small conversion/delivery
-    ;; batches to a time budget; the receiver copies into one track buffer.
+    ;; arm's way to hear a cue by itself (the name is the P3 loop's; the
+    ;; door outlived it).
+    ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a tune's
+    ;; text arrives in 12 KB chunks (the live soundtrack, M1); the OGG
+    ;; tracks of P4 (D50) and their 7.5 MB deliveries left with M1.
     (define (b64-decode text) (%b64-decode text))
 
-    ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
-    ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
-    ;; ("audio-size", bytes) reserves its buffer, ("audio-chunk", b64) fills
-    ;; it, and ("audio-done", n) publishes the complete buffer to the
-    ;; player. The menu theme (spy) is what the boot's audio step waits for
-    ;; (the ambient's old place, and its lines: the arms read them):
-    ;;   crash: track NAME FRAMES             a track landed (0: given up)
-    ;;   crash: ambient FRAMES                the theme landed (spy; 0: given up)
-    ;;   crash: ambient start                 the music began (the menu live)
-    (define *track-name* 'spy)
+    ;; The boot's audio step waits for the menu theme's text (the page's
+    ;; fetch, asked for at boot: the theme opens the frame the menu is
+    ;; live, with nothing to wait for then) or THEME-WAIT-MS, whichever
+    ;; comes first: a lost fetch never holds the boot (D40).
+    ;;   crash: music landed NAME BYTES        a tune's text landed (the page's fetch)
+    ;;   crash: music unavailable NAME         the page gave the fetch up
+    (define THEME-WAIT-MS 3000)
+    (define *theme-ready* #f)
+    (define *theme-asked-at* #f)
+    (define (theme-ready?)
+      (or *theme-ready*
+          (and *theme-asked-at* (> (- *since-boot* *theme-asked-at*) THEME-WAIT-MS))))
 
-    (define (track! payload)
-      (set! *track-name* (string->symbol payload))
-      (set! *track-transfer* #f)
-      0)
-
-    (define (audio-chunk! payload)
-      (set! *track-transfer*
-            (transfer-append *track-transfer* (b64-decode payload)))
-      0)
-
-    (define (audio-done! payload)
-      (let ((bytes (or (transfer-finish *track-transfer* (string->number payload))
-                       (bytevector)))
-            (name *track-name*))
-        (set! *track-transfer* #f)
-        ;; no chunks: the page gave the track up (a failed fetch); the
-        ;; boot's audio step does not wait on the theme then
-        (when (> (bytevector-length bytes) 0)
-          (audio-add-track! name bytes AMBIENT-RATE))
-        (say "track" name (quotient (bytevector-length bytes) 2))
-        (when (eq? name 'spy)
-          (set! *ambient-ready* #t)
-          (say "ambient" (quotient (bytevector-length bytes) 2)))
-        0))
 
     ;; A user gesture (a pointer down, a key, the page's pointerup and
     ;; touchend and click): resume the context whenever it is not running.
@@ -666,12 +634,12 @@
     ;; so the line is built first (str) and written once; println's newline
     ;; is a second, empty entry, which nothing reads.
     ;; ?diag: the last DIAG-LINES trace lines that say what landed (the
-    ;; textures, the boot steps, the card, the ambient, the audio, the
+    ;; textures, the boot steps, the card, the music, the audio, the
     ;; atlas, the worker), drawn on every frame (render.sgl's
     ;; draw-diag-lines); a phone has no console to read them from.
     (define DIAG-LINES 16)          ; a 116 px band: the title's own diag lines start at y 126
     (define DIAG-KEEP '("crash: texture" "crash: boot" "crash: title card ready" "crash: title card skipped" "crash: title card done"
-                        "crash: title gate" "crash: title settled" "crash: ambient" "crash: audio" "crash: atlas" "crash: sw"
+                        "crash: title gate" "crash: title settled" "crash: music" "crash: audio" "crash: atlas" "crash: sw"
                         "crash: menu chose" "crash: page" "crash: bg " "crash: literal" "crash: update"))
     (define *diag* #f)
     (define *diag-lines* '())   ; newest first
@@ -1093,14 +1061,14 @@
     ;; the order they run: every texture a look or the title names (each
     ;; through the same on-demand fetch, one in flight at a time, so the
     ;; steps run one after another), then the audio (the context opened
-    ;; at boot; the ambient the page fetches, or gives up). Each is a
+    ;; at boot; the menu theme's text the page fetches, or gives up). Each is a
     ;; thunk that answers done; (crash title) runs them one frame at a
     ;; time from the menu tick and the menu is live when the last is done.
     ;;   crash: boot step NAME done
     ;;   crash: boot done N                   all N steps done (or forced by the timeout)
     ;; Is the title's reveal over (or was there none)? The boot's steps
     ;; after the backdrop wait for it: a PNG decode (load-image-from-memory,
-    ;; on this thread), a texture upload, the atlas bake and the ambient's
+    ;; on this thread), a texture upload, the atlas bake and the tune text's
     ;; chunk decodes each cost a frame or more, and inside the reveal they
     ;; read as stutter under the modem beeps (David, on the phone). After
     ;; settle they run under the CONNECTING line, before the menu is live:
@@ -1114,11 +1082,11 @@
           (title-settled? (menu-title *menu*))))
 
     ;; Is the reveal itself running (ungated, not settled)? The page holds
-    ;; the ambient's chunks and the worker's registration while it is.
+    ;; the tune's chunks and the worker's registration while it is.
     (define (reveal-running?)
       (and *booted* *menu* (menu-title *menu*)
            (not (title-gated? (menu-title *menu*)))
-           (not (title-dialing? (menu-title *menu*)))   ; D45: the page delivers the ambient and registers the worker under the meter
+           (not (title-dialing? (menu-title *menu*)))   ; D45: the page delivers the tune and registers the worker under the meter
            (not (title-settled? (menu-title *menu*)))))
 
     (define (boot-steps!)
@@ -1140,8 +1108,8 @@
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
       ;; a frame), after the reveal; the step waits for it
       (boot-add-step! 'atlas (lambda () (and (reveal-over?) (atlas-ready?))))
-      ;; the rest of the cue bank, one cue a frame, then the ambient
-      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) *ambient-ready*)))))
+      ;; the rest of the cue bank, one cue a frame, then the menu theme's text (or THEME-WAIT-MS)
+      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) (theme-ready?))))))
 
     (define BOOT-BUDGET 4.0)   ; ms of boot steps a frame
     (define (boot-tick! dt)
@@ -1308,20 +1276,20 @@
                     (say "menu" "slow-frame" (exact (round (- t3 t0))) "step" (exact (round (- t1 t0))) "draw" (exact (round (- t2 t1))) "end" (exact (round (- t3 t2))))))))
             (tick-screen (make-input-frame '() '() #f) dt))))
 
-    ;; The music (P4, D50; the ambient's start before it, David on 410e39e):
+    ;; The music (M1; P4's tracks and the ambient before them, David on 410e39e):
     ;; silent under the card, the reveal and its beeps; from the frame the
     ;; menu is ready (the slant settled, the boot's steps done) or, on a
     ;; table boot, the frame the boot is done, what plays follows the
     ;; screen and the table's phase ((crash shell) music-frame!).
-    ;;   crash: ambient start                 the music began
-    (define *ambient-started* #f)
-    (define (ambient-tick!)
+    ;;   crash: music start                   the music began
+    (define *music-started* #f)
+    (define (music-tick!)
       (when (and *booted* (boot-done?)
                  (let ((t (and *menu* (menu-title *menu*))))
                    (or (not t) (title-settled? t))))
-        (unless *ambient-started*
-          (set! *ambient-started* #t)
-          (say "ambient" "start"))
+        (unless *music-started*
+          (set! *music-started* #t)
+          (say "music" "start"))
         (case *screen*
           ((menu) (music-frame! 'menu #f))
           ((stack) (when *session* (music-frame! 'stack (trace-phase (session-trace *session*)) (session-seed *session*))))
@@ -1357,7 +1325,7 @@
         (set! *pump-ms* (- (now-ms) t0)))
       (let ((t0 (now-ms)))
         (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
-        (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
+        (music-tick!)   ; the music starts once the menu is ready, not under the reveal
         (set! *boot-ms* (+ *boot-ms* (- (now-ms) t0))))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
@@ -1851,6 +1819,10 @@
       ;; the live soundtrack (M1, D59): a tune's text comes from the page (one
       ;; "crash: tune-fetch NAME" line per name; the text lands as tune-chunk/done)
       (live-music-set-loader! (lambda (name) (println "~a" (string-append "crash: tune-fetch " (symbol->string name))) #f))
+      ;; the menu theme's text asked for now (the fetch runs under the reveal; the
+      ;; boot's audio step waits for it, THEME-WAIT-MS at most)
+      (live-music-prefetch! MENU-THEME)
+      (set! *theme-asked-at* *since-boot*)
       (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
       ;; the music's render rate (M1): the ladder's last choice on this device
       ;; from the store, kept for the next boot when the ladder steps
@@ -1886,6 +1858,17 @@
         (if (null? bad)
             (say "literal-check" "ok")
             (apply say "literal-check" "FAILED" bad)))
+      ;; a boot that throws says why, whichever screen it was opening (the
+      ;; loader prints only the message, and a table that never opened is a
+      ;; struct-ref storm every frame after). The guard is also the workaround
+      ;; for sigil-ecosystem t-409696 ([[topics/sigil-wasm-phantom-vector-ref]]):
+      ;; without it, this function's shape after M1's OGG retirement made the
+      ;; second page load under an active service worker die here with a
+      ;; vector-ref error no code on the path can raise (0.22.3, 2026-09-22).
+      ;;   crash: boot-error MESSAGE IRRITANTS
+      (guard (e (#t (say "boot-error"
+                         (if (error-object? e) (error-object-message e) e)
+                         (if (error-object? e) (error-object-irritants e) '()))))
       (cond ((and *code* (decode *code*))
              (let ((sp (decode *code*)))
                (say "code" "read" (encode sp) (spec-table sp))
@@ -1895,13 +1878,7 @@
             (*code* (say "code" "refused" *code*) (open-menu!))
             (*cards* (open-cards! #t))
             (*stack* (open-stack! #t))
-            ;; a boot that throws says why (the loader prints only the
-            ;; message, and a menu that never opened is a struct-ref
-            ;; storm every frame after)
-            (else (guard (e (#t (say "boot-error"
-                                     (if (error-object? e) (error-object-message e) e)
-                                     (if (error-object? e) (error-object-irritants e) '()))))
-                    (open-menu!))))
+            (else (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
       (when *update* (update! *update*)))
@@ -2017,21 +1994,24 @@
             ((string=? type "code") (param! (lambda () (set! *code* payload))))
             ;; the page polls for a COPY (1 once): it reads the store's "code" key then
             ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
-            ((string=? type "track") (track! payload))
-            ((string=? type "audio-size")
-             (set! *track-transfer* (transfer-new (string->number payload)))
-             0)
-            ((string=? type "audio-chunk") (audio-chunk! payload))
             ;; the live soundtrack (M1, D59): the page fetches a tune's text on
             ;; "crash: tune-fetch NAME" and hands it over in base64 chunks then
             ;; ("tune-done", NAME); (crash music live) opens it on the next frame
             ((string=? type "tune-chunk") (set! *tune-chunks* (cons (b64-decode payload) *tune-chunks*)) 0)
             ((string=? type "tune-done")
-             (let ((text (utf8->string (apply bytevector-append (reverse *tune-chunks*)))))
+             (let ((text (utf8->string (apply bytevector-append (reverse *tune-chunks*))))
+                   (name (string->symbol payload)))
                (set! *tune-chunks* '())
                (when (> (string-length payload) 0)
-                 (live-music-provide! (string->symbol payload) text)
-                 (say "music" "landed" payload (string-length text)))
+                 (cond ((> (string-length text) 0)
+                        (live-music-provide! name text)
+                        (say "music" "landed" payload (string-length text)))
+                       (else
+                        ;; no chunks: the page gave the fetch up (tune-unavailable);
+                        ;; the model stops asking, the boot stops waiting
+                        (live-music-unavailable! name)
+                        (say "music" "unavailable" payload)))
+                 (when (eq? name MENU-THEME) (set! *theme-ready* #t)))
                0))
             ((string=? type "gesture") (gesture! payload))
             ;; the page's own pump timer (M1): the source's sink topped up between
@@ -2039,13 +2019,13 @@
             ;; not run the music dry; a frame in flight cannot be interrupted (one
             ;; thread), so this only lands between frames. Answers the frames pushed.
             ((string=? type "pump") (if *audio-ready* (audio-source-pump!) 0))
-            ;; the ambient off (the browser arm mutes it to hear a cue alone)
+            ;; the music off (the browser arm mutes it to hear a cue alone; the door keeps P3's name)
             ((string=? type "ambient") (when (string=? payload "off") (music-off!)) 0)
             ((string=? type "audio-done") (audio-done! payload))
             ;; the page's service worker is active (or absent): fetches are safe (D40)
             ((string=? type "sw") (param! (lambda () (set! *sw-ready* #t))))
             ;; the page asks whether the reveal is still running (it holds the
-            ;; ambient's chunks and the worker's registration until it is over)
+            ;; tune's chunks and the worker's registration until it is over)
             ((string=? type "title")
              (cond ((string=? payload "running?") (if (or (not *booted*) (reveal-running?)) 1 0))
                    ;; "live?": the menu is ready (settled, boot done) or a table is up: the page

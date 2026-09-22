@@ -49,7 +49,7 @@
 
   (export VW VH MODIFIERS bg-advance bg-choose FIELD-POOL field-pick! field-rule-for-deal! field-rule-at-boot copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
-          AMBIENT-RATE play-cues!
+          play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
           stored-hud
           settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
@@ -460,26 +460,17 @@
 
     ;; --- the music (P4, ruling D50) ---------------------------------------------
 
-    ;; What plays follows the screen and the table's phase ((crash music));
-    ;; the shells call music-frame! every frame the menu or a table is up,
-    ;; and it asks (crash audio) only when the answer changes, so a track
-    ;; resumes or starts over once, not every frame. A new deal says
-    ;; music-fresh! first: its rest track then starts from the top; a
-    ;; continued or returned-to board resumes. music-off! (the arm's
-    ;; ambient-off door) fades everything out and holds it.
-    (define *music-want* 'none)
-    (define *music-fresh* #f)
+    ;; What plays follows the screen and the table's phase: the shells
+    ;; call music-frame! every frame the menu or a table is up with the
+    ;; board's seed, and (crash music live) runs motif's player on the
+    ;; table's pick, moving between the track's sections with the trace's
+    ;; phase (M1, ruling D59). A new deal says music-fresh! first: its pick
+    ;; then starts from its calm mark; a continued or returned-to board
+    ;; resumes. music-off! (the arm's door) fades everything out and holds it.
     (define *music-off* #f)
 
-    (define (music-fresh!) (set! *music-fresh* #t) (live-music-fresh!))
-    (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0) (live-music-off!))
-    ;; The soundtrack live from .cts (M1, ruling D59): (crash music live)
-    ;; runs motif's player on the table's pick and moves between the
-    ;; track's sections with the trace's phase; the OGG model above is the
-    ;; fallback the measurement may choose for the web (stated in the row's
-    ;; note); LIVE? says which runs. The shells hand the board's seed for
-    ;; the pick.
-    (define LIVE? #t)
+    (define (music-fresh!) (live-music-fresh!))
+    (define (music-off!) (set! *music-off* #t) (live-music-off!))
 
     ;; The soundtrack's state as one readout line (?ms / --ms, and the
     ;; stats header): the track, its position, the pull's cost per 1024
@@ -487,13 +478,12 @@
     ;; says here whether the music runs (M1, the spike David heard nothing on).
     ;;   MUSIC NAME P:R PULL 2.1 SINK RUNNING DRY 0/0 RATE 48000/22050 SET ON/8
     ;;   (DRY: the cues' sink, then the music's own; RATE: the device's, then the music's render rate; SET: the MUSIC setting and VOLUME)
-    ;;   MUSIC PENDING NAME | MUSIC OFF | MUSIC OGG
+    ;;   MUSIC PENDING NAME | MUSIC OFF
     (define (upcase s) (list->string (map char-upcase (string->list s))))
     (define (music-readout)
       (string-append
        "MUSIC "
-       (cond ((not LIVE?) "OGG")
-             ((live-music-playing?)
+       (cond ((live-music-playing?)
               (let ((p (live-music-position)))
                 (string-append (upcase (symbol->string (live-music-name)))
                                " " (if p (number->string (car p)) "-") ":" (if p (number->string (cdr p)) "-")
@@ -504,47 +494,16 @@
        " DRY " (number->string (audio-underruns)) "/" (number->string (audio-source-underruns))
        " RATE " (number->string (audio-rate)) "/" (number->string (live-music-rate))
        " SET " (if (eq? (setting 'music) 'on) "ON" "OFF") "/" (number->string (setting 'volume))))
-    ;; The playing track's title (the tune's name:), for NOW PLAYING; #f when nothing plays or the OGG path is in force
-    (define (music-title) (and LIVE? (live-music-title)))
+    ;; The playing track's title (the tune's name:), for NOW PLAYING; #f when nothing plays
+    (define (music-title) (live-music-title))
     (define (music-frame! screen phase . rest)
       (unless *music-off*
-        (if LIVE?
-            (let ((seed (and (pair? rest) (car rest)))
-                  (table (if (eq? screen 'cards) 'cards 'stack)))
-              (set! *music-fresh* #f)
-              (live-music-frame! screen phase table seed))
-            (ogg-music-frame! screen phase))))
-
-
-    ;; A track wanted before it has landed (the web hands the tunes over
-    ;; one after another; only the theme gates the boot) is not committed:
-    ;; the players fade and the want is asked again next frame, so DEFRAG
-    ;; opened before groove arrives gets its track when it does (the
-    ;; review, 2026-09-21) rather than the theme over the table for good.
-    (define (ogg-music-frame! screen phase)
-      (unless *music-off*
-        (let ((want (music-track-for screen phase *music-fresh*)))
-          (unless (equal? want *music-want*)
-            (cond ((not want)
-                   (set! *music-fresh* #f)
-                   (set! *music-want* #f)
-                   (audio-fade-out! 800))
-                  ((audio-track? (car want))
-                   (set! *music-fresh* #f)
-                   (set! *music-want* want)
-                   (audio-play! (car want) (cdr want)))
-                  ((not (eq? *music-want* 'pending))
-                   (set! *music-want* 'pending)
-                   (audio-fade-out! 800)))))))
+        (let ((seed (and (pair? rest) (car rest)))
+              (table (if (eq? screen 'cards) 'cards 'stack)))
+          (live-music-frame! screen phase table seed))))
 
     ;; --- the sound (P3) ---------------------------------------------------------
 
-    ;; The tracks' rate: every tune under assets/audio/ is OGG Vorbis mono
-    ;; at this rate (assets/MANIFEST names each one's provenance; the
-    ;; ambient loop that played before D50 is retired). The native shell
-    ;; decodes each file; the web page decodes and hands the PCM over in
-    ;; chunks. TRACK-FILES in (crash music) names the files.
-    (define AMBIENT-RATE 22050)
 
     (define (play-cues! cues)
       (for-each audio-cue! cues))
