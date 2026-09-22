@@ -62,7 +62,8 @@ The music renders into a sink of its own beside the cues' (two
 AudioWorkletNodes on the web, two streams natively): 32768 frames of
 ring, kept 16384 frames ahead (341 ms at 48 kHz), refilled at most 4096
 frames per pump, its gain the sink's own volume. The cues keep their
-shallow ring (6144 frames ahead, 128 ms at 48 kHz), so a sound effect
+shallow ring (12288 frames ahead, 256 ms at 48 kHz; 6144 until David's https-host
+read of 2026-09-22 showed a tap's frame still running 128 ms dry), so a sound effect
 never waits behind the music and a stalled frame does not run the music
 dry. On the web the page also pumps the music every 12 ms between frames
 (`?pump=off` leaves only the frame's pump, for a comparison).
@@ -74,9 +75,12 @@ device's rate and is upsampled into its sink by a 4-tap cubic
 (`%upsample!`, C). Which rate a device gets is decided by a ladder at
 play: the device's rate first (24000 when the page's hints say four cores
 or fewer, or 2 GB or less; or the rate this device's last ladder chose,
-kept in the store as `music-rate`), and after about a second of pulls at
-a rate whose mean cost per 60 fps frame is over 4 ms, the next lower of
-32000, 24000, 22050; never up. A step reopens the player at the render
+kept in the store as `music-rate`; the store is per origin, so an https
+host and the http one each ladder on their own), and after 60 measured pulls at
+a rate whose MEDIAN cost per 60 fps frame is over 4 ms, the next lower of
+32000, 24000, 22050; never up. A pull within 150 ms of a cue (a tap's
+frame) or of the open, or in the first 30 after an open, is not measured,
+and one pull never decides (a median). A step reopens the player at the render
 head with the section kept (continuing exactly: the head's offset into its
 row is skipped at the new rate). 32000 keeps 11–16 kHz within 3 dB of the
 full rate; 22050 is 8.6 dB down there and gone above 16 kHz.
@@ -94,11 +98,14 @@ play: the cues dull and their ring's milliseconds double).
 `?ms` / `--ms`: the readout's fourth line, also the first line of the
 copied stats:
 
-    MUSIC BLIND-SPOT 1:56 PULL 4.3 SINK RUNNING DRY 7680/0 RATE 48000/32000 SET ON/10
+    MUSIC BLIND-SPOT 1:56 PULL 4.3 SINK RUNNING DRY 7680(6144 IN 1 OPENS)/0 RATE 48000/32000 BY STORED SET ON/10
 
 the track and its order position:row, the synth's cost in ms per 1024
 device frames (smoothed), the audio context's state, the starved frames
-of the cues' sink then the music's, the device's rate then the music's,
+of the cues' sink (and how much of that fell inside tune opens, known
+stalls: the cues are pre-rolled to the ring's capacity before one) then
+the music's, the device's rate then the music's and why (DEVICE, STORED,
+HINT, PIN, or LADDER@12.3S: the ladder stepped 12.3 s after boot),
 the MUSIC setting and VOLUME.
 
 Console lines with `?trace` / `--trace`:

@@ -49,7 +49,7 @@
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
           live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door!
-          live-music-rate live-music-rate-set? live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
+          live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
   (begin
@@ -186,11 +186,14 @@
     ;; upsampled into its sink by (crash native)'s %upsample! (4-tap cubic).
     ;; The rate is chosen per device by a ladder: the music starts at the
     ;; device's rate (or the rate remembered in the store, or 24000 when the
-    ;; page's hints say a weak device), and after LADDER-PULLS pulls at a
-    ;; rate the mean cost per 60 fps frame over MUSIC-BUDGET-MS steps down
+    ;; page's hints say a weak device), and after LADDER-PULLS measured pulls at a
+    ;; rate the MEDIAN cost per 60 fps frame over MUSIC-BUDGET-MS steps down
     ;; to the next of RATES (the player reopens at the audible position, the
     ;; section kept); it never steps up (a step is a reopen, heard as a
-    ;; short gap). MUSIC-FLOOR is David's phone's setting: the floor, not the
+    ;; short gap). A pull within CUE-QUIET-MS of a cue (a tap's frame: its
+    ;; draw and the effect) or of a tune's open is not measured, and one
+    ;; pull never decides (David's phone, 2026-09-22: the first tile tap's
+    ;; frame stepped a mean from 48000 to 32000). MUSIC-FLOOR is David's phone's setting: the floor, not the
     ;; ceiling. ?music-rate=N / --music-rate N pin a rate (no ladder).
     ;;   crash: music rate N per-frame-ms M     the ladder stepped (or the pin, at open)
     (define RATES '(32000 24000 22050))   ; below the device's rate, in order
@@ -204,7 +207,18 @@
     (define *rate* #f)                    ; the music's render rate; #f = the device's
     (define *rate-pinned* #f)
     (define *ladder-pulls* 0)
-    (define *ladder-ms* 0.0)              ; the sum of ms per 1024 device frames over those pulls
+    (define *ladder-samples* (make-vector LADDER-PULLS 0.0))   ; ms per 1024 device frames, the measured pulls
+    (define CUE-QUIET-MS 150)             ; a pull this soon after a cue or an open is a tap's or a landing's frame: not measured
+    (define *opened-ms* 0)                ; when the player last opened
+    ;; why the music is at its rate, for the readout: device | stored | hint | pin | (ladder . seconds-since-boot)
+    (define *rate-reason* 'device)
+    (define *boot-ms* (current-milliseconds))
+    (define (live-music-rate-reason)
+      (cond ((pair? *rate-reason*) (string-append "LADDER@" (number->string (cdr *rate-reason*)) "S"))
+            ((eq? *rate-reason* 'stored) "STORED")
+            ((eq? *rate-reason* 'hint) "HINT")
+            ((eq? *rate-reason* 'pin) "PIN")
+            (else "DEVICE")))
     (define *rs* (make-resampler))       ; the render at *rate* and its read position ((crash music resample))
 
     ;; never above the device's rate: the upsampler only goes up
@@ -215,10 +229,12 @@
     ;; hints: start one step down, the ladder may go lower), or #f (the
     ;; device's rate, the ladder).
     (define (live-music-set-rate! rate . rest)
-      (let ((pin? (and (pair? rest) (car rest) #t)))
+      (let ((pin? (and (pair? rest) (eq? (car rest) #t))))
         (cond ((and *rate-pinned* (not pin?)) #f)
-              ((eq? rate 'weak) (unless *rate* (set! *rate* 24000)))
-              ((and (number? rate) (> rate 0)) (set! *rate* rate) (set! *rate-pinned* pin?))
+              ((eq? rate 'weak) (unless *rate* (set! *rate* 24000) (set! *rate-reason* 'hint)))
+              ((eq? rate 'stored) #f)   ; the shell says a stored rate as (live-music-set-rate! N 'stored)
+              ((and (number? rate) (> rate 0)) (set! *rate* rate) (set! *rate-pinned* pin?)
+               (set! *rate-reason* (cond (pin? 'pin) ((and (pair? rest) (eq? (car rest) 'stored)) 'stored) (else 'device))))
               (else (set! *rate* #f)))))
     (define (rate-below r)
       (let loop ((rs RATES))
@@ -230,26 +246,45 @@
     (define (open-player t start)
       (set! *ladder-skip* LADDER-SKIP)
       (set! *ladder-pulls* 0)
-      (set! *ladder-ms* 0.0)
+      (set! *opened-ms* (current-milliseconds))
       (resampler-reset! *rs*)
       (set! *player-rate* (live-music-rate))
       (open-tune-player t (live-music-rate) start: start loop: #t))
 
-    ;; The ladder, once a frame: after LADDER-PULLS pulls at this rate, the
-    ;; mean cost per 60 fps frame (ms per 1024 device frames x device
-    ;; frames per 60 fps frame / 1024) against the budget.
+    ;; The ladder, once a frame: after LADDER-PULLS measured pulls at this
+    ;; rate, the MEDIAN cost per 60 fps frame (ms per 1024 device frames x
+    ;; device frames per 60 fps frame / 1024) against the budget. A median:
+    ;; one pull (a GC pause inside it, a tap's frame that slipped the quiet
+    ;; rule) never decides.
     (define (ladder!)
       (when (and *player* (>= *ladder-pulls* LADDER-PULLS))
-        (let* ((per-1024 (/ *ladder-ms* *ladder-pulls*))
+        (let* ((per-1024 (median-of *ladder-samples* LADDER-PULLS))
                (per-frame (* per-1024 (/ (audio-rate) 61440.0)))
                (next (rate-below (live-music-rate))))
           (set! *ladder-pulls* 0)
-          (set! *ladder-ms* 0.0)
           (when (and (not *rate-pinned*) (> per-frame *budget*) next)
             (set! *rate* next)
+            (set! *rate-reason* (cons 'ladder (/ (round (/ (- (current-milliseconds) *boot-ms*) 100)) 10.0)))
             (*say* "music" "rate" next "per-frame-ms" (/ (round (* 10 per-frame)) 10.0))
             (when *remember* (*remember* next))
             (reopen!)))))
+    (define (median-of v n)
+      (let ((s (list-sort < (vector->list (vector-copy v 0 n)))))
+        (if (even? n)
+            (/ (+ (list-ref s (- (quotient n 2) 1)) (list-ref s (quotient n 2))) 2.0)
+            (list-ref s (quotient n 2)))))
+    ;; A pull's cost is measured unless it is within CUE-QUIET-MS of a cue
+    ;; (a tap's frame) or of the open (the landing's frame), or in the
+    ;; LADDER-SKIP pulls after an open.
+    (define (measure-pull! per-1024)
+      (let ((now (current-milliseconds))
+            (cue-at (audio-cue-at)))
+        (cond ((> *ladder-skip* 0) (set! *ladder-skip* (- *ladder-skip* 1)))
+              ((and cue-at (< (- now cue-at) CUE-QUIET-MS)) #f)
+              ((< (- now *opened-ms*) CUE-QUIET-MS) #f)
+              (else
+               (vector-set! *ladder-samples* *ladder-pulls* per-1024)
+               (set! *ladder-pulls* (+ *ladder-pulls* 1))))))
     (define *remember* #f)   ; (proc rate): the shell keeps the ladder's choice for the next boot
     (define (live-music-set-remember! proc) (set! *remember* proc))
 
@@ -314,11 +349,7 @@
             (let ((per-1024 (/ (* 1024.0 ms) n)))
               ;; smoothed over the last ~20 pulls (one pull is noise), and summed for the ladder
               (set! *chunk-ms* (+ (* 0.95 *chunk-ms*) (* 0.05 per-1024)))
-              (if (> *ladder-skip* 0)
-                  (set! *ladder-skip* (- *ladder-skip* 1))
-                  (begin
-                    (set! *ladder-pulls* (+ *ladder-pulls* 1))
-                    (set! *ladder-ms* (+ *ladder-ms* per-1024)))))))
+              (measure-pull! per-1024))))
         (if on #t (begin (close-player!) #f))))
 
     ;; The source's render by hand (the tests drive the walker without a sink)
@@ -403,7 +434,8 @@
       (let ((text (text-for name)))
         (if (not text)
             'pending
-            (let* ((t (read-tune-string text))
+            (let* ((stall (audio-stall-begin!))   ; the parse and the open stall the frame: a known stall, the cues pre-rolled and its starvation counted apart
+                   (t (read-tune-string text))
                    (calm (or (tune-mark t 'calm) 0))
                    (left (assq name *positions*))
                    (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
@@ -426,6 +458,7 @@
               (apply-region! p)
               (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
               (fade! 0.0 1.0 FADE-IN-MS #f)
+              (audio-stall-end!)
               'open))))
 
     ;; --- the frame ---------------------------------------------------------------------

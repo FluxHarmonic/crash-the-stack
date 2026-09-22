@@ -26,6 +26,7 @@
 
 (define-library (crash audio)
   (import (sigil math)
+          (sigil time)
           (sigil audio sink)
           (crash synth))
 
@@ -34,7 +35,7 @@
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-volume audio-set-volume! audio-music? audio-set-music! audio-sfx? audio-set-sfx!
           audio-set-depth! audio-depth
-          audio-voices audio-underruns
+          audio-voices audio-underruns audio-preroll! audio-stall-begin! audio-stall-end! audio-known-starved audio-known-stalls audio-cue-at
           mix-cues-into add-voices!
           audio-set-source! audio-source? audio-source-depth audio-source-underruns audio-source-pump!
           SOURCE-DEPTH SOURCE-BUFFER SOURCE-PUSH-MAX
@@ -44,15 +45,19 @@
   (begin
     (define CUE-GAIN 1.0)
     (define PUSH-MAX 4096)         ; frames per pump at most (85 ms at 48 kHz)
-    (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the stall headroom
+    (define BUFFER-FRAMES 16384)   ; the sink's ring: 341 ms at 48 kHz, the stall headroom (8192 before 2026-09-22)
     ;; TARGET-DEPTH is two things at once: the latency a cue lands within,
     ;; and the stall a frame may take before the output runs dry. At 3072
     ;; (64 ms at 48 kHz) any frame past ~64 ms underran; David heard the
     ;; tap hitch on his phone (2026-09-19, 5f26a45). 6144 rides a 100 ms
     ;; hitch on top of a 30 fps frame at 128 ms of cue latency (139 at
     ;; 44.1 kHz), plus the device's own; ?adepth=N on the web and
-    ;; --audio-depth N natively set it for a comparison.
-    (define TARGET-DEPTH 6144)
+    ;; --audio-depth N natively set it for a comparison. 12288 (256 ms at
+    ;; 48 kHz) since 2026-09-22 (David's ruling): with the worklet draining
+    ;; off the main thread, a tap's frame (its draw and the cue) still ran
+    ;; a 128 ms ring dry on his phone in bursts of 1-4k frames; 256 ms of
+    ;; cue latency was judged acceptable, the effects still immediate.
+    (define TARGET-DEPTH 12288)
     (define *target-depth* TARGET-DEPTH)
 
     ;; --- state ---------------------------------------------------------------
@@ -161,6 +166,37 @@
     ;; measure of a stall the pump did not ride out.
     (define (audio-underruns) (if *stream* (audio-stream-underruns *stream*) 0))
 
+    ;; A known stall (a tune's parse and open on the main thread: a tune
+    ;; landing): the caller pre-rolls the cues' sink to the ring's full
+    ;; capacity first (audio-preroll!: the stall headroom beyond the target
+    ;; depth), and brackets the stall so the frames it still starved are
+    ;; counted apart (audio-known-starved, and how many stalls): the readout
+    ;; then says what was a known event and what was the game's frames.
+    (define *known-starved* 0)
+    (define *known-stalls* 0)
+    (define *stall-mark* #f)
+    (define (audio-preroll!)
+      (when *stream*
+        (let loop ((guard 0))
+          (let ((n (min PUSH-MAX (audio-stream-room *stream*))))
+            (when (and (> n 0) (< guard 8))
+              (set! *voices* (mix-cues-into *out* n *voices*))
+              (push-audio-samples *stream* *out* n)
+              (loop (+ guard 1)))))))
+    (define (audio-stall-begin!)
+      (audio-preroll!)
+      (set! *stall-mark* (audio-underruns)))
+    (define (audio-stall-end!)
+      (when *stall-mark*
+        (set! *known-starved* (+ *known-starved* (- (audio-underruns) *stall-mark*)))
+        (set! *known-stalls* (+ *known-stalls* 1))
+        (set! *stall-mark* #f)))
+    (define (audio-known-starved) *known-starved*)
+    (define (audio-known-stalls) *known-stalls*)
+    ;; When the last cue started, ms (the ladder leaves a tap's frame out)
+    (define *cue-at* #f)
+    (define (audio-cue-at) *cue-at*)
+
     ;; Open the context and the stream, render the cues the title needs
     ;; first (FIRST-CUES: the reveal's beeps and the gate's dial, short
     ;; ones); the rest of the bank one cue per call to audio-render-next!
@@ -212,6 +248,7 @@
         (set! *bank* (cons (cons name (render-cue name *rate*)) *bank*)))
       (let ((entry (assq name *bank*)))
         (when (and entry (not *muted*) *sfx-on*)
+          (set! *cue-at* (current-milliseconds))
           (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
 
     ;; The voices over n frames of out (added, clamped), each advanced by
