@@ -233,3 +233,17 @@ Cold Boot II mastering and publication are complete. Closed Loop is the next
 suggested review: preserve its accepted snap-click kit and examine pluck/bell
 call-and-response in the later phrases and final return. Any changes should
 remain separate controlled auditions; no Closed Loop revision is adopted yet.
+
+## Closed Loop: Phrases I
+
+David authorized the next controlled audition. [Phrases I](../alternates/closed-loop-phrases-i/README.md)
+develops the later pluck/bell conversation and recalls the opening cell in the
+quiet ending. The accepted snap-click kit, bass groove, chord performance,
+instrument bank and bus remain fixed. All new melodic attacks remain on the
+original eighth-note grid. The complete arrangement is still 3:16.
+
+Both game and album candidates come from one frozen shared phrase library;
+the fifth tense phrase's deliberate album variant receives the same melodic
+edit as the game loop. Three contextual before/after pairs and both complete
+versions are being rendered. This is a listening candidate: no maintained song
+or public audio is replaced until the musical changes are approved.
