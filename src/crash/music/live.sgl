@@ -48,7 +48,7 @@
           live-music-unavailable! live-music-prefetch! live-music-has-text?
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
-          live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms
+          live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms live-music-clock-rate
           live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
 
@@ -153,19 +153,54 @@
     ;;   half a bar the slack is constant within a bar and steps up by a bar
     ;;              at each bar row, so asking at the half-bar point misses
     ;;              the trace by at most half a bar either way
-    (define (fill-window-ms queue-ms row-ms bar-rows row fill-rows)
+    ;;
+    ;; `rate` converts the answer from the music's clock to the trace's. The
+    ;; four terms are REAL ms (the audio plays at the device's rate whatever
+    ;; the game does), while `remaining` is TRACE ms, and the two run at the
+    ;; same speed only while the game keeps up: (crash tween)'s clock drops
+    ;; the ticks it owes past MAX-STEPS-PER-FRAME, so a frame over 100 ms
+    ;; leaves the trace behind the wall for good. At rate 1 nothing changes;
+    ;; at 0.66 (a box dropping a third of its ticks) the fill takes 10.4 s of
+    ;; real time but only 6.9 s of trace, so the ask must come later or the
+    ;; fill ends before the strike (the arm on a loaded box, 2026-09-22:
+    ;; -5.3 s, two bars early).
+    (define (fill-window-ms queue-ms row-ms bar-rows row fill-rows rate)
       (let ((wait-rows (- bar-rows (modulo row bar-rows))))
-        (+ queue-ms
-           (* wait-rows row-ms)
-           (* fill-rows row-ms)
-           (* 0.5 bar-rows row-ms))))
+        (* rate
+           (+ queue-ms
+              (* wait-rows row-ms)
+              (* fill-rows row-ms)
+              (* 0.5 bar-rows row-ms)))))
 
-    ;; How far ahead of the trace the fill must be asked for, in ms; #f when
-    ;; the tune has no fill (tense is asked at the strike alone).
+    ;; The trace's ms per real ms, smoothed over the frames since the deal:
+    ;; 1.0 while the game keeps up, less when it drops ticks. A frame that
+    ;; moves `remaining` the wrong way or by a jump (a hint's 30 s, a
+    ;; shuffle's 60 s, a new deal) is not a measurement. Kept in [0.2, 1.0]:
+    ;; the trace never runs faster than the wall, and a wholly stalled clock
+    ;; must not make the window unbounded.
+    (define CLOCK-JUMP-MS 2000.0)         ; a step larger than this is a charge, not the clock
+    (define *clock-rate* 1.0)
+    (define *clock-last* #f)              ; (wall-ms . remaining) of the last measured frame
+    (define (clock-rate! remaining)
+      (let ((now (current-milliseconds)))
+        (if (not remaining)
+            (set! *clock-last* #f)
+            (let ((last *clock-last*))
+              (set! *clock-last* (cons now remaining))
+              (when last
+                (let ((wall (- now (car last)))
+                      (fell (- (cdr last) remaining)))
+                  (when (and (> wall 8.0) (> fell 0.0) (< fell CLOCK-JUMP-MS) (< wall CLOCK-JUMP-MS))
+                    (let ((r (max 0.2 (min 1.0 (/ fell wall)))))
+                      (set! *clock-rate* (+ (* 0.95 *clock-rate*) (* 0.05 r)))))))))))
+    (define (live-music-clock-rate) *clock-rate*)
+
+    ;; How far ahead of the trace the fill must be asked for, in TRACE ms;
+    ;; #f when the tune has no fill (tense is asked at the strike alone).
     (define (fill-window)
       (and *timing* *player* (timing-fill-rows) (timing-tense-pos)
            (let ((wp (or (walker-position) (cons 0 0))))
-             (fill-window-ms (queue-ms) (timing-row-ms) (timing-bar-rows) (cdr wp) (timing-fill-rows)))))
+             (fill-window-ms (queue-ms) (timing-row-ms) (timing-bar-rows) (cdr wp) (timing-fill-rows) *clock-rate*))))
 
     ;; The region the walk loops in for the section asked: calm's; the fill
     ;; runs on into tense (fill's start to tense's end) until the walk is in
@@ -528,6 +563,7 @@
         ;; the section follows the trace: the fill in its run-up, tense at
         ;; the strike, each landing on the walker's next bar row
         (when (and *player* (not (eq? screen 'menu)) (eq? want *name*))
+          (clock-rate! remaining)   ; the trace's ms per real ms (the window is real, remaining is trace)
           (let ((section (music-section phase remaining (fill-window) *section*)))
             (unless (eq? section *section*)
               (set! *section* section)
