@@ -801,8 +801,13 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       // the run-up: the threshold less the shuffles and the seconds played so far, plus slack
       const last = consoleLines.map((l) => l.match(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} trace 0$`))).filter(Boolean).pop();
       const runUp = ARM_TRACE_AT - (last ? Number(last[1]) : SHUFFLES * SHUFFLE_COST);
-      // the game's clock falls behind the wall on a loaded box (a 33 s run-up missed a 38 s wait at load 25), so the wait is half again plus slack
-      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, (runUp * 1.5 + 10) * 1000);
+      // The game's clock falls behind the wall clock on a loaded box: (crash
+      // tween) drops the ticks it owes past MAX-STEPS-PER-FRAME, so a run-up of
+      // N trace-seconds can take 2-3N wall-seconds under load (measured: 34 s of
+      // trace in 57 s of wall at loadavg 34). The wait is three times the run-up
+      // plus 20 s: a real failure to complete the trace still reds, a slow box
+      // does not.
+      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, (runUp * 3 + 20) * 1000);
       if (!traced) detail = `${SHUFFLES} shuffles and ${runUp} s of clock did not complete the trace at ${ARM_TRACE_AT} s (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
       else {
         strikeAt = consoleTimes[traced.index];
