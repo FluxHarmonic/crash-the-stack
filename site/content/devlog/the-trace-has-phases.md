@@ -27,4 +27,4 @@ I'm aware of what it means to make a game about destroying a runaway AI in the o
 
 Two modes at the top level came out of this: JACK IN is the real game, with the overworld; FREE PLAY is just the games, in their classic form or the hacker one, outside the world. And a site with an About page and this devlog, so nobody who plays the fullscreen app has to miss a post. That last decision is why the game lives at `/jack-in/` and not at the root: an installed app that opens a link outside its own path opens it in the browser, the way a link should.
 
-Next: what's in 0.1, and what isn't yet.
+Next: what this is right now, and how to play it.

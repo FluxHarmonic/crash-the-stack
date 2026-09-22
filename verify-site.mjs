@@ -347,8 +347,13 @@ else {
       // the game's own worker registers under /jack-in/ once the board's boot is done
       const registered = await waitLine(/^crash: sw registered$/, mark, 120000);
       if (!registered) detail.push("the game at /jack-in/ never said crash: sw registered");
-      await sleep(1500);
-      const state = await evalJS(`navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => new URL(r.scope).pathname)).then((scopes) => caches.keys().then((ks) => ({ scopes, caches: ks })))`);
+      // the registration lands a moment after the line; poll for it
+      let state = null;
+      for (let i = 0; i < 40; i++) {
+        state = await evalJS(`navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => new URL(r.scope).pathname)).then((scopes) => caches.keys().then((ks) => ({ scopes, caches: ks })))`);
+        if (state.scopes.includes("/jack-in/") && !state.scopes.includes("/")) break;
+        await sleep(500);
+      }
       if (state.scopes.includes("/")) detail.push(`the root registration is still there (scopes ${state.scopes.join(" ")})`);
       if (state.caches.some((k) => k.startsWith("crash-the-stack-"))) detail.push(`an old cache survived: ${state.caches.join(" ")}`);
       if (!state.scopes.includes("/jack-in/")) detail.push(`no worker under /jack-in/ (scopes ${state.scopes.join(" ")})`);

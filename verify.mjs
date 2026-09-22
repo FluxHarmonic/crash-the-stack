@@ -229,6 +229,10 @@ function leakedVerifyChromes() {
 const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+  // NEWS opens a post with window.open a frame after the key that chose it;
+  // a real browser's transient activation covers that, headless's popup
+  // blocker does not (2026-09-22): the leg proves the wiring, not the blocker
+  "--disable-popup-blocking",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   // the audio sub-arm: a synthetic tap is not a user gesture, so the
   // context must be allowed to run without one
@@ -2650,13 +2654,14 @@ async function downTo(order, id, at = 0) {
     { id: "https://crashthestack.com/devlog/older/", url: "https://crashthestack.com/devlog/older/", title: "An older post", date_published: "2026-09-22T10:00:00Z" } ] });
   substitutePaths[BASE + "news-fixture.json"] = Buffer.from(fixture);
   await evalJS(`localStorage.removeItem("news-seen")`);
+  const m0 = consoleLines.length;   // the fixture boot's own lines (an earlier boot beside the site may have read its real feed)
   const r = await pauseMenu(`&news=${BASE}news-fixture.json`);
   let opened = null;
   if (r.error) detail = r.error;
   else {
     // the feed is read after the tunes and the credits (15 s on this box):
     // the top screen is rebuilt with the row when it lands
-    const got = await waitLine(/^crash: news (\d+)$/, 0, 40000);
+    const got = await waitLine(/^crash: news (\d+)$/, m0, 40000);
     const topLine = r.top.rows.news ? null : await waitLine(/^crash: menu top .* news/, r.from, 40000);
     const top = r.top.rows.news ? r.top : (topLine ? parseMenuLine(consoleLines[topLine.index]) : await menuOn("top", r.from, 100));
     if (!got || got.m[1] !== "2") detail = `the game did not take the two fixture posts (${got ? got.m[0] : "no crash: news line"})`;

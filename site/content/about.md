@@ -4,9 +4,9 @@ summary: What Crash The Stack is, how it was made, and what you can do with it.
 ---
 # About
 
-Crash The Stack is a collection of cyberpunk takes on the classic solitaire games. You play a hacker; the games are the hacks. STACK is Mahjongg solitaire with a trace running: clear the layout before the counter-hack finds you and severs the connection. DEFRAG is Klondike without the playing cards: PWR, TX, MEM and DSK instead of suits, BOOT to ROOT instead of ace to king, and the same rules underneath. The hub ties the runs together into one game.
+Crash The Stack is a collection of cyberpunk takes on the classic solitaire games, and it's early: a 0.1, built in the open. You play a hacker; the games are the hacks. STACK is Mahjongg solitaire with a trace running: clear the layout before the counter-hack finds you and severs the connection. DEFRAG is Klondike without the playing cards: PWR, TX, MEM and DSK instead of suits, BOOT to ROOT instead of ace to king, and the same rules underneath. The hub ties the runs together into one game.
 
-It is free to play in the browser at [/jack-in/](/jack-in/), and it installs as an app on a phone from the browser's own menu. There is no account and there are no ads. Desktop builds for Linux and Windows come out with every release; they are not for sale yet.
+It is free to play in the browser at [/jack-in/](/jack-in/), and it installs as an app on a phone from the browser's own menu. There is no account and there are no ads. Desktop builds for Linux and Windows come out with every release; they are not for sale yet. The devlog's [first post](/devlog/early-and-in-the-open/) says how to play and what to expect while it grows.
 
 ## The classics are sacred
 
