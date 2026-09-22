@@ -97,3 +97,10 @@ calm bell A/B: sixteen identical bars with the preferred contact/dust kit and
 original pluck, first using the existing bell and then the metallic prototype.
 It checks all compiled ticks, allows only instrument 9 to differ, and writes
 a single OGG comparison plus source snapshots and measurement records.
+
+`relay-bass-context.sgl --motif PATH --output EXTERNAL_DIR` compares current,
+upper-synth-down and gritty-bass-down balances over sixteen identical tense
+bars. It requires Motif's new instrument `gain:` support and explicitly checks
+that the renderer preserves that field. Only the specified output gains may
+differ; all compiled tick tables must match. The preferred kit, original bell
+and original pluck remain constant.

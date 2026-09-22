@@ -106,8 +106,10 @@ Current's closing role are protected listener-approved identities.
 A separate instrument gain is also a useful engine extension: it should scale
 the base voice and layers after note dynamics, default to unity, and leave the
 tracker's existing `volume:` default semantics intact. Explicit note volume
-winning over the default is intentional, not a playback bug. This gain control
-is proposed; it is not present in the current audition renderer.
+winning over the default is intentional, not a playback bug. This control is implemented in Motif commit `b0d135e` and used by Bass
+Balance I. It was not present in the earlier Expression I and Calm Bell I
+renderers. The beat modulation, smooth automation and filtered-delay work
+remains pending; static instrument gain does not implement those features.
 
 ## Delivered review measurements
 
@@ -159,3 +161,17 @@ bell for Relay Ghost. The metallic patch is liked but is a better candidate
 for a different context. Preserve both the patch and comparison. Further Relay
 Ghost auditions should retain the original bell and preferred quieter kit;
 the wire pluck, choir and bass-level questions remain separate.
+
+## Bass balance follow-up
+
+Keep the preferred drums, original bell and original pluck while comparing the
+two potentially distracting tense parts independently. The three-way audition
+uses the same sixteen tense bars: current balance, upper acid instruments
+23–25 reduced by 2 dB, then lower gritty bass instrument 19 reduced by 2 dB.
+No bass choice has been approved yet. Use instrument output gain rather than
+lower note volumes, because the acid patch's velocity also controls its filter.
+
+[Bass Balance I](../alternates/relay-bass-balance-i/README.md) now provides that
+three-way audition: baseline at 0:00, upper synth down at 0:32.727, gritty bass
+down at 1:05.455. The gain implementation and its validation live in the Motif
+feature branch; Crash's runtime and public album are not upgraded by this test.

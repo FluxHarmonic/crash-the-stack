@@ -1,0 +1,160 @@
+#!/usr/bin/env sigil
+;;; Three tense balances, using output gain to preserve synth accents.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/expression-patches.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack expression patches))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                         (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define ATTENUATION 0.7943282347242815) ; -2 dB, linear output gain
+
+(define (attenuate score ids)
+  (replace-child score 'instruments
+    (cons 'instruments
+      (map (lambda (instrument)
+             (if (member (field instrument id:) ids)
+                 (if (member gain: instrument)
+                     (set-field instrument gain: ATTENUATION)
+                     (append instrument (list gain: ATTENUATION)))
+                 instrument))
+           (cdr (child score 'instruments))))))
+
+(cli "relay-bass-context" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (scores (path (root) "docs/music/alternates/relay-bass-balance-i"))
+           (reference "docs/music/album/relay-ghost.cts")
+           (source (read-score (path (root) reference)))
+           ;; Retain the original pluck: only the drums have listener approval.
+           (base (replace-instruments source '(2 3 21)))
+           (upper (attenuate base '(23 24 25)))
+           (lower (attenuate base '(19)))
+           (sections
+             (list (list "Tense phrase 1" (pattern source 8))
+                   (list "Tense phrase 2" (pattern source 9))
+                   (list "Room release" (empty-pattern 2))))
+           (duration (/ (* (+ 256 256 64) 7.5) 132))
+           (stems '("current-balance" "upper-synth-down" "gritty-bass-down"))
+           (commands '())
+           (measurements '())
+           (attacks 0))
+      (check (starts-with? output "/") "Supply an absolute external artifact directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep renders outside the repository")
+      (each stem stems
+        (check (not (file-exists? (path output (str stem ".wav"))))
+               "Use a fresh render directory" output))
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (each stem stems
+        (write-album motif scores stem
+          (str "Relay Ghost - Bass Balance I / " stem)
+          (cond ((equal? stem "current-balance") base)
+                ((equal? stem "upper-synth-down") upper)
+                (else lower))
+          sections (list reference)
+          "Bass Balance I: sixteen tense bars with the preferred contact/dust kit, original bell and original pluck in all three versions."
+          "Output gain only: current balance, upper acid -2 dB, lower grit -2 dB. All notes, dynamics, timing and patch settings retained; two release bars after each version."
+          "2026-09-22")
+        (copy-file (path scores (str stem ".cts"))
+                   (path output (str stem ".cts"))))
+      (let* ((a (path output "current-balance.cts"))
+             (old (read-score a)))
+        (define (without-gain form)
+          (cond
+            ((null? form) '())
+            ((eq? (car form) gain:) (without-gain (cddr form)))
+            (else (cons (car form) (without-gain (cdr form))))))
+        (each stem (cdr stems)
+          (let* ((file (path output (str stem ".cts")))
+                 (new (read-score file))
+                 (ids (if (equal? stem "upper-synth-down") '(23 24 25) '(19))))
+            (each section '(patterns order bus)
+              (check (equal? (child old section) (child new section))
+                     "Non-gain change in comparison" section))
+            (check (equal? (cdr (child old 'instruments))
+                           (map without-gain (cdr (child new 'instruments))))
+                   "Patch settings changed alongside gain")
+            (each instrument (cdr (child new 'instruments))
+              (if (member (field instrument id:) ids)
+                  (check (and (member gain: instrument)
+                              (< (abs (- (field instrument gain:) ATTENUATION)) 0.00000001))
+                         "Renderer must preserve the requested instrument gain")
+                  (check (not (member gain: instrument)) "Unexpected gain edit")))))
+        (each channel CHANNELS
+          (let ((old-ticks (ticks motif a channel)))
+            (each stem (cdr stems)
+              (check (equal? old-ticks (ticks motif (path output (str stem ".cts")) channel))
+                     "Compiled performance differs" channel stem))
+            (set! attacks
+              (+ attacks
+                 (length (filter (lambda (tick) (= (list-ref tick 5) 1)) old-ticks)))))))
+      (each stem stems
+        (let* ((file (path output (str stem ".cts")))
+               (wav (path output (str stem ".wav"))))
+          (run (list motif "tune" "render" file "-r" "44100" "-o" wav))
+          (let ((levels (measure wav (path output (str stem "-levels.txt")))))
+            (check (< (dict-ref levels true_peak_dbtp:) 0) "Native clipping" stem)
+            (set! measurements
+              (append measurements (list (dict stem: stem levels: levels)))))))
+      (ensure-directory (path output "ogg"))
+      (write-text (path output "sequence.txt")
+                  "file 'current-balance.wav'\nfile 'upper-synth-down.wav'\nfile 'gritty-bass-down.wav'\n")
+      (let* ((ogg (path output "ogg/relay-ghost-bass-balance-i-abc.ogg"))
+             (sequence (path output "sequence.txt"))
+             ;; Same gain as Expression I, with no solo boost or extra limiter.
+             (gain -1.1))
+        (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                   "-f" "concat" "-safe" "1" "-i" sequence
+                   "-af" "volume=-1.1dB" "-c:a" "libvorbis" "-q:a" "7"
+                   "-metadata" "title=Relay Ghost - Bass Balance I A/B/C"
+                   "-metadata" "artist=David Wilson"
+                   "-metadata" "album=Crash The Stack - Auditions"
+                   "-metadata" "comment=0:00 current balance; 0:32.727 higher squelchy synth -2 dB; 1:05.455 gritty bass -2 dB. Preferred quieter drums, original bell and original pluck in all three."
+                   ogg))
+        (let* ((levels (measure ogg (path output "ogg-levels.txt")))
+               (probe (json ffprobe -v error -show_format -show_streams -of json ,ogg))
+               (stream (array-ref (dict-ref probe streams:) 0))
+               (actual (string->number (dict-ref (dict-ref probe format:) duration:))))
+          (check (and (= (dict-ref stream channels:) 2)
+                      (equal? (dict-ref stream sample_rate:) "44100")
+                      (< (abs (- actual (* 3 duration))) 0.001))
+                 "Encoded format/duration mismatch")
+          (check (<= (dict-ref levels true_peak_dbtp:) -1) "Encoded peak too high")
+          (write-json-file (path output "checks.json")
+            (dict duration_seconds: actual
+                  upper_down_entry_seconds: duration
+                  grit_down_entry_seconds: (* 2 duration)
+                  compiled_attacks_per_version: attacks
+                  all_ticks_identical: #t
+                  only_requested_output_gains_differ: #t
+                  common_gain_db: gain
+                  native: (list->array measurements)
+                  ogg: levels
+                  renderer_sha256: (out sha256sum ,motif)
+                  accepted_source_sha256: (out sha256sum ,(path (root) reference))
+                  ogg_sha256: (out sha256sum ,ogg)))))
+      (display "Tense bass comparison rendered and verified.\n"))))
