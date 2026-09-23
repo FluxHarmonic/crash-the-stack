@@ -1,0 +1,129 @@
+#!/usr/bin/env sigil
+;;; Style VII: bass phrasing follows the guitar's accents and release spaces.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASELINE "docs/music/alternates/fault-line-bass-focus-vi/fault-line-after.cts")
+;;; Root, third and fifth. Chord roots remain D, B-flat, G and A.
+(define CHORDS
+  '(("D-2" "F-2" "A-1")
+    ("A#1" "D-2" "F-2")
+    ("G-1" "A#1" "D-2")
+    ("A-1" "C-2" "E-2")))
+;;; Row, pitch role, gate length, level. The bass omits the guitar's quick
+;;; decorative strikes, but shares its main accents and releases.
+(define CALL
+  '((0 0 3 34) (10 0 3 32) (16 0 2 35) (28 0 3 32)))
+(define REPLY
+  '((0 0 2 34) (12 0 5 35) (18 1 2 29) (26 0 3 32) (30 0 1 29)))
+(define SPACE-REPLY
+  '((0 0 3 34) (10 0 2 32) (18 0 5 35) (24 2 2 27) (28 0 3 32)))
+(define TURNAROUND
+  '((0 0 3 34) (10 0 3 32) (16 0 6 35) (26 3 1 30) (30 3 1 31)))
+
+(define (clear-bass p)
+  (transform p (lambda (row cell) (and (not (= (car cell) 4)) cell))))
+
+(define (bass-section p heavy?)
+  (let ((result (clear-bass p)))
+    (let loop ((bar 0))
+      (when (< bar (quotient (field p rows:) 32))
+        (let* ((chord (list-ref CHORDS (quotient bar 2)))
+               (specs
+                 (cond ((= bar 7) TURNAROUND)
+                       ((= (modulo bar 4) 3) SPACE-REPLY)
+                       ((odd? bar) REPLY)
+                       (else CALL))))
+          (each spec specs
+            (let ((pitch (if (= (cadr spec) 3)
+                             "D-2"
+                             (list-ref chord (cadr spec)))))
+              (set! result
+                (add-notes result
+                  (list
+                    (list (+ (* bar 32) (car spec))
+                          4 pitch 4
+                          (+ (list-ref spec 3) (if heavy? 1 0))
+                          (caddr spec))))))))
+        (loop (+ bar 1))))
+    result))
+
+(define (transition-bass p)
+  (add-notes (clear-bass p)
+    '((0 4 "A-1" 4 34 3)
+      (10 4 "A-1" 4 32 3)
+      (16 4 "A-1" 4 35 2)
+      (28 4 "A-1" 4 32 3)
+      (32 4 "A-1" 4 35 2)
+      (42 4 "C-2" 4 30 2)
+      (50 4 "E-2" 4 33 2)
+      (58 4 "D-2" 4 32 1)
+      (62 4 "D-2" 4 31 1))))
+
+(define (revise before)
+  (let* ((patterns
+           (map (lambda (p)
+                  (case (field p id:)
+                    ((0 1) (bass-section p #f))
+                    ((2) (transition-bass p))
+                    ((3) (bass-section p #t))
+                    (else p)))
+                (cdr (child before 'patterns))))
+         (after (replace-child before 'patterns (cons 'patterns patterns))))
+    (each p (cdr (child before 'patterns))
+      (check (equal? (clear-bass p) (clear-bass (pattern after (field p id:))))
+             "Non-bass performance changed"
+             (field p id:)))
+    (check (equal? (child before 'instruments) (child after 'instruments))
+           "Instrument bank changed")
+    (check (equal? (child before 'bus) (child after 'bus)) "Bus changed")
+    (replace-child after 'history
+      (append (child after 'history)
+        '(("codex" "2026-09-23"
+           "Style VII: bass shares the guitar's main accents, harmonic replies and gate lengths; sparse fifth responses in longer rests. Style VI patches and all non-bass parts retained."))))))
+
+(define (slice p start rows)
+  (append (list 'pattern id: 0 rows: rows)
+    (map (lambda (row) (append (list 'row (- (cadr row) start)) (cddr row)))
+         (filter (lambda (row) (and (>= (cadr row) start) (< (cadr row) (+ start rows))))
+                 (skip p 5)))))
+
+(define (context score)
+  (list (list "Four pocket bars" (slice (pattern score 1) 128 128))
+        (list "Moving solo entrance" (pattern score 2))
+        (list "First two solo bars" (slice (pattern score 3) 0 64))
+        (list "Released room" (empty-pattern 2))))
+
+(cli "fault-line-bass-lock" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (before (read-score (path (root) BASELINE)))
+           (after (revise before)))
+      (each variant (list (list "before" before) (list "after" after))
+        (write-canonical motif (path output (str "fault-line-" (car variant) ".cts"))
+                         (cadr variant))
+        (write-album
+          motif output (str "fault-line-context-" (car variant)) "Fault Line"
+          (cadr variant) (context (cadr variant))
+          (list BASELINE "docs/music/tools/fault-line-bass-lock.sgl")
+          "Style VII: bass phrasing shares the guitar accents and rests."
+          "Before is Style VI; all patches, guitar groove, moving entrance and bent solo stay fixed."
+          "2026-09-23"))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "fault-line"
+              title: "Fault Line"
+              audition: "style-vii"
+              full_duration_seconds: (/ (* 26 32 7.5) 126)
+              comment: "BEFORE Style VI, then AFTER Style VII: bass and guitar share accents, releases and harmonic replies. All patches and other parts unchanged. Equal gain."
+              clips:
+                (list->array
+                  (map (lambda (variant)
+                         (dict stem: (str "fault-line-context-" variant)
+                               label: variant
+                               duration_seconds: (/ (* 10 32 7.5) 126)))
+                       '("before" "after"))))))))

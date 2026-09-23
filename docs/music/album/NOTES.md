@@ -240,3 +240,12 @@ reduces it to a repeated root-led motif with one fifth answer per pair, raises
 the D anchor to D2, reduces the sine layer and emphasizes picked harmonics.
 The guitar groove, moving entrance, kit and bent solo remain exact. The full
 short demo and matching comparison await listening feedback.
+
+## 2026-09-23 — Fault Line: assess the bass against the riff
+
+The Style VI bass worked alone for David but still felt disconnected from the
+guitar. VII keeps its patch and adjusts the actual phrase: shared main accents
+and release points, replies following the guitar's harmonic movement and its
+fourth/eighth-bar variations, with only sparse fifth answers in longer gaps.
+The lesson is to check bass/guitar phrasing together: fewer notes and a clearer
+patch do not fix conflicting accents. See alternates/fault-line-bass-lock-vii/.
