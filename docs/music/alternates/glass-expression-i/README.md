@@ -72,3 +72,30 @@ Longer written anchor gates preserve each patch's natural percussive decay;
 they do not add sustain to the pluck or lead. Rhythmic placement, note choices,
 accents and the spacing of replies carry the phrasing change. All 27 generated
 files reproduce exactly from the frozen baseline and Sigil composer.
+
+## Delivered checks
+
+Telegram acknowledged the montage as **1167**, complete before as **1168**, and
+complete candidate as **1169**. Listening approval is pending; maintained shared
+sources, game/album scores and public audio remain unchanged.
+
+All ten fresh native files pass format/duration/peak checks. Delivery applies
+one common -0.5 dB gain. The montage measures -17.6 LUFS-I/-4.2 dBTP; complete
+before/after measure -16.5/-16.6 LUFS-I with both at -2.6 dBTP. Each final second
+peaks at -90.3 dBFS. Native full levels both round to -16.1 LUFS-I; the isolated
+bass-in-mix pair measures -16.5/-16.7 LUFS-I. No level normalization disguises
+the shorter envelope's small energy reduction.
+
+The candidate album has 3,779 compiled attacks, zero sample-clock error, its
+four intentional fill 32nds and all final gates released. The game has 3,008
+compiled triggers, zero sample-clock error and the preserved B08 tense loop.
+Every channel's compiled ticks match between the bass comparison halves. All
+fifteen maintained-song regeneration checks pass, and all 27 generated audition
+files reproduce exactly.
+
+External audio: ~/Ops/artifacts/crash-the-stack-album/glass-expression-i-native/
+and glass-expression-i-delivery/. Native jobs use the pinned Motif 0.6.6 renderer,
+SHA-256 f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842.
+The official expression renderer verifies exact source and renderer identity
+before reusing the completed native files. Source hashes, exact commands,
+measurements, audits, worker scripts and delivery receipts are preserved there.

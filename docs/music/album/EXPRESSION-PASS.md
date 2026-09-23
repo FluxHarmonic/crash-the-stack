@@ -421,3 +421,11 @@ Longer written gates leave the original percussive voices room to decay; they
 do not turn those patches into sustained instruments. Sources reproduce across
 all 27 generated files. Four contextual pairs and both full versions are being
 rendered for review; maintained scores and public audio await listening approval.
+
+Glass Current's montage and both complete 3:57.209 versions were delivered as
+Telegram 1167–1169. The montage separates the Reese envelope, quiet reflection,
+later lead answers and calm return. Full before/after OGGs measure -16.5/-16.6
+LUFS-I, both -2.6 dBTP, with one common -0.5 dB gain. Native timing, game B08,
+encoded peaks/durations/endings, all fifteen source checks and all 27 audition
+reproduction checks pass. Listening approval is pending; the maintained songs
+and public album remain unchanged.
