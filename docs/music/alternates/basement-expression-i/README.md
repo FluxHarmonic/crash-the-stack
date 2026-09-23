@@ -96,6 +96,40 @@ The frozen before pool and layout drive later reproductions. Per-feature pools
 are retained, so patch choices can be accepted independently of phrase choices.
 The composer protects backing events, clock, bus, instrument routing and levels.
 Full native clock, game-loop, comparison, encoded-audio and regeneration results
-will accompany the delivered files. Audio and commands belong outside the repo
+accompany the delivered files. Audio and commands belong outside the repo
 under ~/Ops/artifacts/crash-the-stack-album/basement-expression-i/ (initial native
 renders) and basement-expression-i-delivery/ (final comparison and full OGGs).
+
+## Delivered review evidence
+
+Telegram acknowledged the A/B montage as **1161**, full reference as **1162**,
+and full candidate as **1163**. Listening choices remain pending; there is no
+source adoption, mastering or public-site update in this pass.
+
+All 28 generated audition files reproduce byte-for-byte. The native album audit
+reports 2,936 attacks with zero sample error, its four original intentional
+32nd-note fill hits, and every final gate released. The game audit reports
+2,531 triggers, zero sample error and B06. All three patch pairs have identical
+compiled performance; the phrase pair keeps original instruments. All fifteen
+maintained-song regeneration checks pass.
+
+The common delivery gain is -0.5 dB with no added limiter. The exposed pluck
+pair receives the same additional +18 dB monitoring boost on both halves;
+its unboosted native levels are -41.1/-39.5 LUFS-I. The revised longer body adds
+energy naturally despite unchanged note levels and output gain. The contextual
+pluck pair measures -15.6 LUFS-I on both sides before common gain. Neither half
+is independently normalized.
+
+| Encoded file | LUFS-I | True peak |
+|---|---:|---:|
+| Four-pair A/B | -16.6 | -2.7 dBTP |
+| Full reference | -16.7 | -2.9 dBTP |
+| Full candidate | -16.7 | -2.9 dBTP |
+
+All native and encoded duration/format checks pass. Both full OGGs decay to
+-90.3 dBFS in the final second. Renderer identity, source snapshots, commands,
+raw levels, audits, reproduction evidence and delivery receipts are retained
+in the external directories. The final native pass reuses the eight completed
+WAVs only after exact source and renderer checks; the two exposed clips are fresh
+renders. A full-mix difference is measurable for both patches, but that is not
+evidence that either is musically preferable: David's listening decides.

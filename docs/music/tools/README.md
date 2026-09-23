@@ -171,3 +171,15 @@ pattern/channel pairs; chart/order checks apply to the generated arrangements.
 Render with `expression-render.sgl`; audit the complete candidate with
 `album-audit.sgl --track dirty-cache --source CANDIDATE.cts`. Frozen references
 under `alternates/dirty-cache-phrases-i/` make later comparisons reproducible.
+
+### Shared Basement Circuit expression comparisons
+
+`basement-expression.sgl --motif PATH --output SCORE_DIR` freezes the accepted
+shared pool and layout, with separate pluck, acid-envelope and phrase candidates.
+It writes synchronized full game/album alternatives and four A/B pairs: exposed
+pluck, pluck in the calm mix, acid contour, and replies with original patches.
+The exposed pair has an equal monitoring boost; full mixes keep actual levels.
+Use `expression-render.sgl` for native/delivery stages and `album-audit.sgl` with
+`--track basement-circuit --source CANDIDATE.cts`. The composer protects drum,
+sub, chord, swell and auxiliary-percussion events and does not adopt candidates.
+The frozen references support later reproduction after accepted sources evolve.

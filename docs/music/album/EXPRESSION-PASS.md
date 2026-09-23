@@ -349,3 +349,12 @@ one shared pool used by both game and album arrangements.
 Keep the accepted kick/sub, sand/breath hats, box clap, integrated fill snare,
 softened swell, signal percussion and quieter acid note levels. Neither the
 maintained songs nor public album change until listening choices are approved.
+
+Basement Circuit's delivery includes an exposed pluck comparison (+18 dB on
+both halves) because the patch is subtle in the full mix, followed by the
+unboosted contextual pair, acid contour and phrase comparisons. Telegram
+1161–1163 contain the montage and both complete tracks. The full OGGs both
+measure -16.7 LUFS-I/-2.9 dBTP with one common -0.5 dB monitoring gain. Native
+timing, original fill grid, game loop, endings, encoded peaks and all fifteen
+source checks pass. All 28 generated audition files reproduce exactly. No
+maintained song or public release is replaced pending listening choices.
