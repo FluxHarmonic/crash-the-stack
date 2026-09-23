@@ -7,6 +7,10 @@
 #   scripts/wasm-to-r2 DIR --upload   send to R2 and leave no wasm in DIR
 #   scripts/wasm-to-r2 DIR --upload --dry-run
 #
+# CRASH_WEB_DIR=build/remote-web-<sha> scripts/wasm-to-r2 DIR --upload
+#     read the wasm from that built tree instead of build/web: publish exactly
+#     the tree the gate ran
+#
 # Cloudflare Pages refuses a file over 25 MiB. The game's wasm is 41,921,264
 # bytes on master (sigil 0.22.5), so `wrangler pages deploy` will not take the
 # tree at all; the tracker's 16,698,428 still fits but sits at 67% of the cap.
@@ -52,8 +56,18 @@ done
 [ -d "$DIR" ] || { echo "wasm-to-r2: $DIR is not a directory"; exit 2; }
 
 BUCKET="${CRASH_WASM_BUCKET:-crashthestack-wasm}"
-GAME=build/web/crash-the-stack.wasm
-TRACKER=build/web/tracker/crash-tracker.wasm
+# CRASH_WEB_DIR names the built tree to read the wasm from, so a publish can
+# ship EXACTLY THE TREE THE GATE RAN: build-remote fetches its result to
+# build/remote-web-<sha>, and publishing from there rather than from build/web
+# means a fresh checkout's output goes out, with no stale directory to survive
+# in. (build/web is never cleaned between builds: M1's retired OGGs sat in two
+# workers' copies for days, 3.1 MB nobody would have fetched, and only a
+# refusal in stage-web caught them. A runner-built tree cannot have that class
+# of fault at all.) stage-web and publish-web take the same variable.
+WEB="${CRASH_WEB_DIR:-build/web}"
+[ -d "$WEB" ] || { echo "wasm-to-r2: $WEB is not a directory (CRASH_WEB_DIR)"; exit 1; }
+GAME="$WEB/crash-the-stack.wasm"
+TRACKER="$WEB/tracker/crash-tracker.wasm"
 for f in "$GAME" "$TRACKER"; do
   [ -f "$f" ] || { echo "wasm-to-r2: $f missing; build --config web first"; exit 1; }
 done
