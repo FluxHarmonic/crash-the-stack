@@ -1,0 +1,51 @@
+#!/usr/bin/env sigil
+;;; Verify intentional syncopation stays locked, and accepted lead/kit stay intact.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define DIRECTORY "docs/music/alternates/fault-line-groove-iv")
+(define (attacks ts)
+  (filter (lambda (t) (= (list-ref t 5) 1)) ts))
+
+(cli "fault-line-groove-audit" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (before (path (root) DIRECTORY "fault-line-before.cts"))
+           (after (path (root) DIRECTORY "fault-line-after.cts"))
+           (score (read-score after))
+           (output (option-ref options 'output))
+           (bass (attacks (ticks motif after 4)))
+           (left (attacks (ticks motif after 5)))
+           (right (attacks (ticks motif after 6)))
+           (kick (attacks (ticks motif after 1))))
+      (check (equal? (child score 'instruments)
+                    (child (read-score before) 'instruments))
+             "Accepted patches changed")
+      (each channel '(2 3 7 8)
+        (check (equal? (ticks motif before channel) (ticks motif after channel))
+               "Snare, hats, bent lead or tom/crash performance changed"
+               channel))
+      (check (= (length bass) (length left) (length right))
+             "Bass and rhythm guitars have different strike counts")
+      (list-for-each
+        (lambda (b l r)
+          (check (and (= (car b) (car l) (car r))
+                      (< (abs (- (* 2 (list-ref b 2)) (list-ref l 2))) 0.01)
+                      (< (abs (- (list-ref l 2) (list-ref r 2))) 0.01))
+                 "Bass/guitar strike or pitch mismatch"
+                 (car b)))
+        bass left right)
+      (each k kick
+        (check (any (lambda (b) (= (car b) (car k))) bass)
+               "Kick accent does not land with the riff"
+               (car k)))
+      (ensure-directory output)
+      (write-json-file (path output "groove-checks.json")
+        (dict aligned_bass_guitar_strikes: (length bass)
+              aligned_kick_accents: (length kick)
+              instruments_unchanged: #t
+              snare_hat_lead_tom_ticks_unchanged: #t
+              all_kicks_on_riff_attacks: #t))
+      (println "Bass, guitars and kick align; accepted lead and kit ticks are unchanged."))))

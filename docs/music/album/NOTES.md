@@ -214,3 +214,12 @@ tom and a higher pentatonic solo with bends. [Fault Line Style III](../alternate
 preserves the backing composition, thickens guitar layers, lifts the tom 1.5 dB
 and adds an upper D-minor pentatonic solo with verified held whole-tone bends.
 It remains a short audition awaiting listening feedback. After Image is unchanged.
+
+## 2026-09-23 — Fault Line groove development
+
+David liked the heavier guitar/tom/solo pass and requested more modern rhythmic
+composition. [Style IV](../alternates/fault-line-groove-iv/README.md) adds a
+syncopated two-bar guitar/bass call and reply, selected kick accents, deliberate
+stops and phrase-ending variations. It retains the Style III patches and exact
+bent-lead/snare/hat/tom performance. Short A/B and complete revised demo await
+feedback; full song development remains pending the chosen direction.
