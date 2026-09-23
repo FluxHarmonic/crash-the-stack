@@ -77,3 +77,15 @@ Final audio, exact commands, renderer identity, native/encoded measurements and
 receipts live in ~/Ops/artifacts/crash-the-stack-album/fault-line-heavy-iii-final/.
 The earlier fault-line-heavy-iii/ folder contains the undelivered preflight;
 its unchanged before renders were safely reused after source/renderer comparison.
+
+## Delivered review copy
+
+Source commit: **ca3cdf6**. Telegram acknowledged the Style II/III comparison
+as **1181** and the complete revised short demo as **1182**. No failed preflight
+audio was sent. Encoded reference/delivery hashes are preserved in `encoded.sha256`.
+
+The common delivery gain is -1.3 dB. A/B measures -19.0 LUFS-I/-3.8 dBTP;
+the complete revised demo measures -19.8 LUFS-I/-2.0 dBTP, with a last-second
+peak of -91 dBFS. Both format/duration checks pass. The full before reference
+measures -21.3 LUFS-I/-3.2 dBTP at that same gain; the new density and more active
+solo intentionally affect loudness. Listening feedback remains pending.
