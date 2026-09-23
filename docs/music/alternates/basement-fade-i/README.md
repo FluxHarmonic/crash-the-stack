@@ -64,3 +64,7 @@ The selected pool has now been adopted into the maintained shared source. Both
 regenerated arrangements match these candidates exactly; all fifteen source
 checks pass. Release progress is recorded in
 [Basement Circuit II](../../album/BASEMENT-CIRCUIT-II.md).
+
+The complete selected track is now mastered and published as Basement Circuit II,
+with a fresh full synthesis including this fade. Telegram 1166 contains the full
+master; publication and reproduction details are in the release record above.

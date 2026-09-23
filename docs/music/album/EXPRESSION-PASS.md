@@ -398,3 +398,10 @@ Basement Circuit II is adopted from the selected Fade I pool. Both generated
 arrangements match the approved candidates exactly, and all fifteen source
 regeneration checks pass. A fresh full render is in progress for mastering;
 Glass Current is the suggested next review. See [the release record](BASEMENT-CIRCUIT-II.md).
+
+Basement Circuit II is now mastered and published, with the full OGG delivered
+as Telegram 1166. The fresh full render includes the approved fade; MP3 measures
+-16.2 LUFS-I/-2.5 dBTP. Native timing, source regeneration and fresh-browser
+playback checks pass. [The release record](BASEMENT-CIRCUIT-II.md) retains
+commands, exports and deployment handoff. Glass Current is the next suggested
+review, preserving its melodic identity and closing role.
