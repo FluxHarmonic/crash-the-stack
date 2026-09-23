@@ -2032,28 +2032,22 @@
         (if (null? bad)
             (say "literal-check" "ok")
             (apply say "literal-check" "FAILED" bad)))
-      ;; A boot that throws says why, whichever screen it was opening (the
-      ;; loader prints only the message, and a table that never opened is a
-      ;; struct-ref storm every frame after), and each table branch says
-      ;; which it took.
+      ;; A boot that throws on the MENU path says why: the loader prints only
+      ;; the message, and a menu that never opened is a struct-ref storm every
+      ;; frame after, so the first line is worth naming (S8, 2026-09-19). Each
+      ;; table branch says which it took.
       ;;   crash: boot-error MESSAGE IRRITANTS
       ;;
-      ;; The guard is also the workaround named in
-      ;; [[topics/sigil-wasm-phantom-vector-ref]] (t-409696): on M1's branch,
-      ;; widening it made the second page load under an active service worker
-      ;; stop dying here with a vector-ref error no code on the path can
-      ;; raise. It is INSTRUMENTATION, NOT A FIX (D67), and on P5's branch it
-      ;; did not remove the fault: the arm's dying boots say `boot-error car:
-      ;; expected pair` and the phantom vector-ref still follows, uncaught,
-      ;; on the same boot. One corrupted value, touched by whichever
-      ;; operation reaches it first, and only one of the two is a Scheme
-      ;; error a guard can see. Do not read a green arm on this guard as the
-      ;; bug being gone. (The shadow-stack hypothesis was refuted by the
-      ;; phantom row's measurement A on 409f1c8: the failing boot never went
-      ;; past depth 128 against the 1024 cap.)
-      (guard (e (#t (say "boot-error"
-                         (if (error-object? e) (error-object-message e) e)
-                         (if (error-object? e) (error-object-irritants e) '()))))
+      ;; The guard covers that branch and no more. M1 widened it over the whole
+      ;; dispatch as the workaround for the wasm phantom
+      ;; ([[topics/sigil-wasm-phantom-vector-ref]], t-409696); sigil 0.22.5
+      ;; carries the real fix — the tail call's arguments are rooted, so a
+      ;; collection inside a C builtin can no longer free them — and the
+      ;; workaround came back out on 2026-09-23. A widened guard is worse than
+      ;; useless for a gate: it catches a fault on any boot path and lets the
+      ;; game limp on, so an arm reads a game that half-booted instead of one
+      ;; that failed. Every path but the menu's is unguarded now and dies where
+      ;; it breaks.
       (cond ((and *code* (decode *code*))
              (let ((sp (decode *code*)))
                (say "code" "read" (encode sp) (spec-table sp))
@@ -2065,7 +2059,17 @@
             (*stack* (say "boot" "step" "stack") (open-stack! #t))
             ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub-entry!))   ; ?hub=continue: the saved run (P5; the arms)
             ((number? *hub-seed*) (jack-in! *hub-seed* *pace*))   ; ?hub=SEED: JACK IN at boot (&hubat=N lands when the entry screen opens the hub; P5, the arms)
-            (else (open-menu!))))
+            ;; S8's line, and then the error goes on its way: the loader reports
+            ;; it and the page dies where it broke. Saying alone would hide the
+            ;; failure from every arm — `say` prints only under ?trace and at
+            ;; log level, no leg greps `boot-error`, and the console leg counts
+            ;; console.error entries, thrown exceptions and lines matching
+            ;; /^(Error:|Scheme error)/. The re-raise is what makes it loud.
+            (else (guard (e (#t (say "boot-error"
+                                     (if (error-object? e) (error-object-message e) e)
+                                     (if (error-object? e) (error-object-irritants e) '()))
+                                (raise e)))
+                    (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
       (when *update* (update! *update*)))
