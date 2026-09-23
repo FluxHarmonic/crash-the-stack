@@ -335,3 +335,17 @@ sources, all fifteen regeneration checks and fresh-browser album playback pass.
 Telegram message 1160 contains the full master. [The release record](DIRTY-CACHE-II.md)
 retains provenance, exports, publication evidence and the next deployment handoff.
 Basement Circuit is next, with explicit instrument and phrase review.
+
+## Basement Circuit: Expression I
+
+David authorized the next review and explicitly asked about instrument patches.
+[Expression I](../alternates/basement-expression-i/README.md) records a decision
+for every instrument family. The controlled candidates audition a rounder pluck,
+a faster-closing acid contour, and connected pluck/bell replies independently.
+The phrase comparison retains original patches; the patch comparisons retain
+identical notes, gates and effects. The full candidate combines the ideas in
+one shared pool used by both game and album arrangements.
+
+Keep the accepted kick/sub, sand/breath hats, box clap, integrated fill snare,
+softened swell, signal percussion and quieter acid note levels. Neither the
+maintained songs nor public album change until listening choices are approved.
