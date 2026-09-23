@@ -1,0 +1,140 @@
+#!/usr/bin/env sigil
+;;; Master composition III without keeping duplicate native or master WAVs.
+(import (sigil args) (sigil json) (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-metadata.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album metadata))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum git))
+
+(define FILTER
+  "volume=4.3dB,aresample=176400,alimiter=limit=0.841395:attack=5:release=80:level=false:latency=true,aresample=44100:osf=s16:dither_method=triangular")
+
+;; Preserve public identity without inventing a position in the album sequence.
+(define (without-track tags)
+  (cond
+    ((null? tags) '())
+    ((starts-with? (cadr tags) "track=") (without-track (cddr tags)))
+    (else (append (take tags 2) (without-track (cddr tags))))))
+
+(define (last-number text marker)
+  (let ((matches
+          (filter (lambda (line) (contains? line marker))
+                  (split text "\n"))))
+    (check (pair? matches) "Missing audio measurement" marker)
+    (string->number
+      (car (filter (lambda (word) (not (equal? word "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (pcm-hash file)
+  (out ffmpeg -v error -nostdin -i ,file
+       -map "0:a:0" -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "fault-line-master" (script-args)
+  (list (option name: 'input long: "input" value: "COMPOSITION-III-DIR"))
+  (lambda (options)
+    (let* ((input (option-ref options 'input))
+           (output (option-ref options 'output))
+           (source (path (root) "docs/music/album/fault-line.cts"))
+           (stem "fault-line-album-composition-iii")
+           (raw (path input (str stem "-native.wav")))
+           (snapshot (path input (str stem ".cts")))
+           (duration 179.04761904761904)
+           (tags (without-track (music-tags "Fault Line" 1 1)))
+           (commands '())
+           (checks '()))
+      (check (equal? (read-text source) (read-text snapshot))
+             "Approved score differs from the native snapshot")
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output))
+                  (not (starts-with? output (str (root) "/"))))
+             "Use a fresh absolute external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Output resolves inside the repository")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "master-commands.json") (list->array commands))
+        (run-tool argv))
+      (write-text (path output "fault-line.cts") (read-text source))
+      (write-text (path output "input.sha256")
+        (str (out sha256sum ,source ,raw) "\n"))
+      (write-text (path output "source-revision.txt")
+        (str (out git rev-parse HEAD cwd: ,(root)) "\n"))
+      (copy-file (path input (str stem "-renderer.sha256"))
+                 (path output "renderer.sha256"))
+      (with-temp-dir temporary
+        (let* ((wav (path temporary "fault-line-master.wav"))
+               (flac (path output "fault-line-master-i.flac"))
+               (mp3 (path output "fault-line-master-i.mp3"))
+               (ogg (path output "fault-line-master-i.ogg"))
+               (cover (prepare-mp3-cover output)))
+          (run (append
+                 (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" raw
+                       "-af" FILTER "-c:a" "pcm_s16le")
+                 tags (list wav)))
+          (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                     "-map_metadata" "0" "-c:a" "flac" flac))
+          (run (append
+                 (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                       "-i" wav "-i" cover
+                       "-map" "0:a:0" "-map" "1:v:0"
+                       "-c:a" "libmp3lame" "-b:a" "256k" "-c:v" "copy")
+                 tags (mp3-art-tags) (list mp3)))
+          (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                     "-map_metadata" "0" "-c:a" "libvorbis" "-q:a" "7" ogg))
+          (check (equal? (pcm-hash wav) (pcm-hash flac)) "FLAC PCM differs")
+          (each file (list flac mp3 ogg)
+            (let* ((name (basename file))
+                   (probe (json ffprobe -v error -show_format -show_streams -of json ,file))
+                   (streams (array->list (dict-ref probe streams:)))
+                   (audio (car (filter (lambda (s) (equal? (dict-ref s codec_type:) "audio")) streams)))
+                   (format (dict-ref probe format:))
+                   (seconds (string->number (dict-ref format duration:)))
+                   (level-log (path output (str name "-levels.txt")))
+                   (ending (path output (str name "-ending.txt"))))
+              ($ ffmpeg -hide_banner -nostats -i ,file
+                 -map "0:a:0" -af "ebur128=peak=true" -f null - err: ,level-log)
+              ($ ffmpeg -hide_banner -nostats -sseof "-1" -i ,file
+                 -map "0:a:0" -af volumedetect -f null - err: ,ending)
+              (let* ((text (read-text level-log))
+                     (levels
+                       (dict integrated_lufs: (last-number text "    I:")
+                             range_lu: (last-number text "    LRA:")
+                             true_peak_dbtp: (last-number text "    Peak:")))
+                     (tail (last-number (read-text ending) "max_volume:")))
+                (check (and (= (dict-ref audio channels:) 2)
+                            (equal? (dict-ref audio sample_rate:) "44100")
+                            (< (abs (- seconds duration)) 0.1)
+                            (<= (dict-ref levels true_peak_dbtp:) -1)
+                            (<= tail -70))
+                       "Delivery format, duration, peak or tail check failed" name)
+                (when (equal? file mp3)
+                  (let* ((metadata (dict-ref format tags:))
+                         (picture
+                           (car (filter (lambda (s) (equal? (dict-ref s codec_type:) "video")) streams))))
+                    (check (and (equal? (dict-ref metadata title:) "Fault Line")
+                                (equal? (dict-ref metadata artist:) ALBUM-ARTIST)
+                                (equal? (dict-ref metadata album:) ALBUM-TITLE)
+                                (equal? (dict-ref metadata copyright:) "CC BY 4.0; attribution: David Wilson")
+                                (not (dict-ref metadata track: #f))
+                                (= (dict-ref picture width:) 800)
+                                (= (dict-ref picture height:) 800)
+                                (= (dict-ref (dict-ref picture disposition:) attached_pic:) 1))
+                           "MP3 identity or embedded artwork differs")))
+                (set! checks
+                  (append checks
+                    (list (dict file: name
+                                duration_seconds: seconds
+                                levels: levels
+                                final_second_dbfs: tail
+                                sha256: (out sha256sum ,file)))))
+                (write-json-file (path output (str name "-probe.json")) probe))))
+          (write-json-file (path output "master-checks.json")
+            (dict title: "Fault Line"
+                  gain_db: 4.3
+                  filter: FILTER
+                  lossless_pcm_verified: #t
+                  deliveries: (list->array checks)))))
+      (println "Fault Line share master verified: ~a" output))))

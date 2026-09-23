@@ -77,3 +77,6 @@ Both decoded OGGs pass duration, stereo 44.1 kHz, peak and tail checks.
 The album has 2,684 actual attacks and the game preview 2,136; both have zero
 sample-clock error and released final gates. All sixteen shared-song checks
 pass, and the revision composer reproduces both shared source files exactly.
+
+David approved this album composition. A mastered sharing version is documented
+in [share master I](FAULT-LINE-MASTER-I.md).

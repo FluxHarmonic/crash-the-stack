@@ -296,3 +296,12 @@ It uses the approved native mix with `album-batch-render.sgl --stage master
 is the quiet comparison level; preserve it. Export the release with
 `album-listening-site.sgl --track relay-ghost` and the normal artifact/output
 arguments. The new public object gets a fresh immutable R2 prefix.
+
+## Fault Line sharing master
+
+`fault-line-master.sgl --input /absolute/fault-line-composition-iii --output
+/absolute/fresh-master-directory` reuses the verified native render, applies the
+album limiter recipe and exports FLAC, tagged/illustrated 256 kbps MP3 and OGG.
+The intermediate master WAV is temporary; the native input is not duplicated.
+No album sequence number is assigned to this addition yet. See
+[the settings and checks](../album/FAULT-LINE-MASTER-I.md).
