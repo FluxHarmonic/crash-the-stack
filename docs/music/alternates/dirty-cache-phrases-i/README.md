@@ -90,3 +90,39 @@ Use fresh output directories for renders. Audio, renderer hash, exact command
 lists, raw measurements and audit reports remain outside the repository under
 `~/Ops/artifacts/crash-the-stack-album/dirty-cache-phrases-i/`, with delivered
 OGGs in `ogg/`. The renderer is Crash's pinned, published Motif 0.6.6 dependency.
+
+## Source and timing validation
+
+All fifteen maintained song regeneration checks pass. The proposed album has
+3,492 compiled attacks (eight more than the reference), zero sample-clock error,
+correct pluck-grid placement and every final gate released. Its duration remains
+222.5454545 seconds. The game candidate has 2,947 compiled attacks, zero sample
+error, the original final jump to order 9 and a 165.8181818-second traversal.
+
+A fresh `/tmp/dirty-cache-phrases-replay` generation reproduces all 25 generated
+files byte-for-byte. These include the baseline/candidate pools, unchanged
+layout, complete arrangements, eight excerpts, section maps and manifests.
+No maintained shared song, accepted output or public recording was replaced.
+
+## Audio validation and delivery
+
+All ten native renders pass duration, 44.1 kHz stereo and nonclipping checks.
+Both full native versions measure -14.8 LUFS-I and -1.2 dBTP. The short pairs
+match integrated loudness within 0.1 LUFS. Existing mix-bus processing stays in
+place; no additional limiter or individual normalization is applied.
+
+Delivery uses one common -0.8 dB gain. Both complete OGGs measure -15.6 LUFS-I
+and -1.9 dBTP; the 2:54.545 montage measures -15.4 LUFS-I and -2.3 dBTP. All
+encoded duration/peak checks pass, and the last second of both full versions
+peaks at -91.0 dBFS. These are controlled audition levels, not a release master.
+
+Native renderer SHA-256:
+`f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842`.
+The external artifact directory retains exact score snapshots, WAVs, OGGs,
+renderer hash, command lists, raw measurements, timing reports, reproduction
+log, delivery receipts and `README-renders.txt`.
+
+Telegram acknowledged the montage as message **1155**, complete reference as
+**1156**, and complete candidate as **1157**. The source/tool commit is
+`cfa5f85`. Musical review is pending; the maintained shared pool, generated
+accepted game/album scores and public release remain unchanged.

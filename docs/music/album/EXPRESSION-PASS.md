@@ -273,3 +273,10 @@ The game/album candidates share one proposed phrase pool. Four contextual A/B
 pairs separate the ideas; complete before/after versions preserve the full
 3:42.545 arrangement. Maintained shared sources and public audio remain at the
 accepted version pending listening. All fifteen regeneration checks pass.
+
+Dirty Cache's Phrases I montage and both full versions were delivered through
+Telegram (1155–1157). All ten renders and encoded peak/duration/ending checks
+pass. Full before/after OGGs both measure -15.6 LUFS-I/-1.9 dBTP with one common
+monitoring gain. Native timing error is zero for both game and album candidates,
+and all 25 generated audition files reproduce exactly. Listening review remains
+pending; the current public release and accepted shared sources are unchanged.

@@ -159,3 +159,15 @@ frozen reference in `alternates/closed-loop-phrases-i/` drives later reruns,
 including after adoption. Use `expression-render.sgl` for native audio and OGG
 delivery, and `album-audit.sgl --track closed-loop --source CANDIDATE.cts` for
 sample-clock and release checks. This composer never adopts the candidate.
+
+### Shared Dirty Cache phrase comparisons
+
+`dirty-cache-phrases.sgl --motif PATH --output SCORE_DIR` freezes the shared
+baseline and generates synchronized game/album candidates with four contextual
+A/B pairs. It preserves the approved on-beat plucks, corrected harmonic return,
+bass/drum events, patches and mix. The proposed chord gap and reed variations
+remain independent choices. Source guards restrict changes to declared
+pattern/channel pairs; chart/order checks apply to the generated arrangements.
+Render with `expression-render.sgl`; audit the complete candidate with
+`album-audit.sgl --track dirty-cache --source CANDIDATE.cts`. Frozen references
+under `alternates/dirty-cache-phrases-i/` make later comparisons reproducible.
