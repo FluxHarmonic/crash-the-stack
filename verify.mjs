@@ -2708,7 +2708,7 @@ async function dealFrom(free, table, row = "new-board") {
   if (!pick) detail = "no \"crash: music pick NAME seed N\" line in the run";
   else {
     try {
-      const text = await (await fetch(`http://127.0.0.1:${PORT}/assets/tunes/${pick[1]}.cts`)).text();
+      const text = await (await fetch(`http://127.0.0.1:${PORT}${BASE}assets/tunes/${pick[1]}.cts`)).text();
       const meter = text.match(/meter: \((\d+) (\d+)/);
       const marks = text.match(/\(marks ([^)]*)\)/);
       const mark = (k) => { const m = marks && marks[1].match(new RegExp(`${k}: (\\d+)`)); return m ? Number(m[1]) : null; };
@@ -2720,7 +2720,7 @@ async function dealFrom(free, table, row = "new-board") {
       const fillRows = fill !== null && tense !== null ? order.slice(fill, tense).reduce((n, id) => n + (rows[id] || 0), 0) : null;
       tune = { name: (text.match(/name: "([^"]*)"/) || [])[1], barRows: meter ? Number(meter[1]) * Number(meter[2]) : 16, fill, tense, calm: mark("calm"),
                rowMs, barMs: (meter ? Number(meter[1]) * Number(meter[2]) : 16) * rowMs, fillMs: fillRows === null ? null : fillRows * rowMs };
-    } catch (e) { detail = `cannot read assets/tunes/${pick[1]}.cts: ${e.message}`; }
+    } catch (e) { detail = `cannot read ${BASE}assets/tunes/${pick[1]}.cts: ${e.message}`; }
   }
   if (!detail) {
     const playing = consoleLines.find((l) => l.startsWith(`crash: music playing ${pick[1]} `));
