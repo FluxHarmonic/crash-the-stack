@@ -1,0 +1,122 @@
+#!/usr/bin/env sigil
+;;; Clean full-composition auditions, with lossless inputs and codec checks.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((lines (filter (lambda (line) (contains? line marker)) (split text "\n"))))
+    (check (pair? lines) "Missing audio measurement" marker)
+    (string->number
+      (car (filter (lambda (word) (not (equal? word "")))
+                   (split (trim (cadr (split (car (reverse lines)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          range_lu: (last-number text "    LRA:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(cli "fault-line-render" (script-args)
+  (list (option name: 'variant long: "variant" value: "ROLE"
+                choices: '("album" "game") default: "album")
+        (option name: 'stage long: "stage" value: "STAGE"
+                choices: '("native" "delivery") default: "native"))
+  (lambda (options)
+    (let* ((output (option-ref options 'output))
+           (variant (option-ref options 'variant))
+           (stage (option-ref options 'stage))
+           (album? (equal? variant "album"))
+           (stem (str "fault-line-" variant "-composition-i"))
+           (source (path (root)
+                     (if album? "docs/music/album/fault-line.cts"
+                         "docs/music/alternates/fault-line-game.cts")))
+           (snapshot (path output (str stem ".cts")))
+           (raw (path output (str stem "-native.wav")))
+           (wav (path output (str stem ".wav")))
+           (ogg (path output "ogg" (str stem ".ogg")))
+           (score (read-score source))
+           (commands '()))
+      (check (starts-with? output "/") "Use an absolute external render directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Audio belongs outside the repository")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output (str stem "-" stage "-commands.json"))
+                         (list->array commands))
+        (run-tool argv))
+      (unless album?
+        ;; Audition calm/fill/tense once each; retain the real game score separately.
+        (set! score
+          (replace-child score 'patterns
+            (append (list 'patterns)
+              (map (lambda (p) (transform p unchanged)) (cdr (child score 'patterns)))
+              (list (set-field (empty-pattern 2) id: 6)))))
+        (set! score (replace-child score 'order '(order 0 1 2 3 4 5 6))))
+      (let ((duration
+              (/ (* 7.5
+                    (apply + (map (lambda (id) (field (pattern score id) rows:))
+                                  (cdr (child score 'order)))))
+                 (field score tempo:))))
+        (if (equal? stage "native")
+            (let ((motif (require-tool (option-ref options 'motif))))
+              (check (not (file-exists? raw)) "Use a fresh native destination")
+              (write-canonical motif snapshot score)
+              (write-text (path output (str stem "-source.sha256"))
+                          (str (out sha256sum ,source) "\n"))
+              (write-text (path output (str stem "-renderer.sha256"))
+                          (str (out sha256sum ,motif) "\n"))
+              (run (list motif "tune" "render" snapshot "-r" "44100" "-o" raw))
+              (let ((levels (measure raw (path output (str stem "-native-levels.txt")))))
+                (check (< (dict-ref levels true_peak_dbtp:) -0.1)
+                       "Native render needs more headroom")
+                (write-json-file (path output (str stem "-native-levels.json")) levels)))
+            (let* ((motif (require-tool (option-ref options 'motif)))
+                   (levels (json-decode
+                             (read-text (path output (str stem "-native-levels.json")))))
+                   (gain (min 3 (- -2 (dict-ref levels true_peak_dbtp:))))
+                   (tags (list "-metadata" "artist=David Wilson"
+                               "-metadata" "title=Fault Line"
+                               "-metadata" "album=Crash The Stack - Composition Auditions"
+                               "-metadata" (str "comment=" variant " composition I; clean gain, not a release master"))))
+              (with-temp-dir temporary
+                (write-canonical motif (path temporary "current.cts") score)
+                (check (equal? (read-text snapshot) (read-text (path temporary "current.cts")))
+                       "Source changed after native render"))
+              (ensure-directory (path output "ogg"))
+              (run (append
+                     (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" raw
+                           "-af" (str "volume=" (number->string gain)
+                                      "dB,aresample=osf=s16:dither_method=triangular")
+                           "-c:a" "pcm_s16le")
+                     tags (list wav)))
+              (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                         "-map_metadata" "0" "-c:a" "flac" (path output (str stem ".flac"))))
+              (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                         "-map_metadata" "0" "-c:a" "libvorbis" "-q:a" "7" ogg))
+              (let* ((encoded (measure ogg (path output (str stem "-ogg-levels.txt"))))
+                     (probe (json ffprobe -v error -show_format -show_streams -of json ,ogg))
+                     (stream (array-ref (dict-ref probe streams:) 0))
+                     (seconds (string->number (dict-ref (dict-ref probe format:) duration:)))
+                     (ending (path output (str stem "-ending.txt"))))
+                ($ ffmpeg -hide_banner -nostats -sseof "-1" -i ,ogg
+                   -af volumedetect -f null - err: ,ending)
+                (check (and (< (abs (- duration seconds)) 0.001)
+                            (= (dict-ref stream channels:) 2)
+                            (equal? (dict-ref stream sample_rate:) "44100")
+                            (<= (dict-ref encoded true_peak_dbtp:) -1)
+                            (<= (last-number (read-text ending) "max_volume:") -70))
+                       "Delivery duration, format, peak or tail check failed")
+                (write-json-file (path output (str stem "-delivery-checks.json"))
+                  (dict duration_seconds: seconds gain_db: gain levels: encoded
+                        final_second_dbfs: (last-number (read-text ending) "max_volume:")))
+                (write-text (path output (str stem "-encoded.sha256"))
+                            (str (out sha256sum ,ogg) "\n")))))
+        (println "Fault Line ~a ~a complete (~a seconds)." variant stage duration)))))

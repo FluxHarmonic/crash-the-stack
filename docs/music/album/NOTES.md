@@ -249,3 +249,12 @@ and release points, replies following the guitar's harmonic movement and its
 fourth/eighth-bar variations, with only sparse fifth answers in longer gaps.
 The lesson is to check bass/guitar phrasing together: fewer notes and a clearer
 patch do not fix conflicting accents. See alternates/fault-line-bass-lock-vii/.
+
+## 2026-09-23 — Fault Line full composition I
+
+Expand the accepted VII riff with a recurring clean/electric motif, an exposed
+harmonic middle and a delayed bent-solo payoff. The 3:03 album form and a real
+calm/fill/tense draft share parts, bank and bus. The game draft is generated under
+docs/music/alternates/ until accepted for integration; existing assets and game
+code are untouched. Possible role: rhythm challenge or high-pressure sequence.
+See FAULT-LINE-I.md for the timeline, reproduction and review evidence.
