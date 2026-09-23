@@ -1,0 +1,90 @@
+#!/usr/bin/env sigil
+;;; A single continuous eight-bar reed sketch, followed by two release bars.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (reed-line p upper?)
+  (let* ((clean
+           (append (take p 5)
+             (filter (lambda (row) (pair? (cddr row)))
+               (map (lambda (row)
+                      (append (take row 2)
+                        (filter (lambda (cell) (not (= (car cell) 8)))
+                                (cddr row))))
+                    (skip p 5)))))
+         (octave (if upper? 5 4))
+         (notes
+           (if upper?
+               '((0 "D-5" 17 4) (4 "F-5" 16 4) (8 "A-5" 18 6)
+                 (16 "F-5" 16 4) (20 "E-5" 14 8)
+                 (32 "D-5" 17 4) (36 "F-5" 16 4) (40 "A-5" 18 6)
+                 (48 "G-5" 16 4) (52 "E-5" 14 2)
+                 (54 "C-5" 13 2) (56 "D-5" 17 7))
+               '((0 "D-4" 15 4) (4 "F-4" 14 4) (8 "A-4" 16 6)
+                 (16 "C-5" 15 4) (20 "A-4" 14 8)
+                 (32 "D-4" 15 4) (36 "F-4" 14 4) (40 "A-4" 16 6)
+                 (48 "G-4" 14 4) (52 "E-4" 13 2)
+                 (54 "C-4" 12 2) (56 "D-4" 15 7))))
+         (result
+           (add-notes clean
+             (map (lambda (note)
+                    (list (car note)
+                          8
+                          (cadr note)
+                          15
+                          (caddr note)
+                          (list-ref note 3)))
+                  notes))))
+    ;; Gate remains open from F into G, and from G into F. 3xx changes pitch
+    ;; without restarting the reed envelope; 300 continues the slide one row.
+    (each spec '((6 "G-") (38 "G-") (50 "F-"))
+      (let* ((row (car spec))
+             (pitch (str (cadr spec) octave)))
+        (set! result
+          (put-cell result row
+            (list 8 pitch 15 (if upper? 16 14) "306")))
+        (set! result
+          (put-cell result (+ row 1) '(8 "..." 15 0 "300")))))
+    result))
+
+(define (channel-events p channel)
+  (filter (lambda (row) (pair? (cddr row)))
+    (map (lambda (row)
+           (append (take row 2)
+             (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+         (skip p 5))))
+
+(cli "dirty-cache-legato" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference "docs/music/alternates/dirty-cache-phrases-i/dirty-cache-after.cts")
+           (base (read-score (path (root) reference)))
+           (low (reed-line (pattern base 19) #f))
+           (high (reed-line (pattern base 14) #t)))
+      (each pair (list (list (pattern base 19) low)
+                       (list (pattern base 14) high))
+        (check (equal? (take (car pair) 5) (take (cadr pair) 5))
+               "Pattern clock changed")
+        (each channel '(1 2 3 4 5 6 7)
+          (check (equal? (channel-events (car pair) channel)
+                         (channel-events (cadr pair) channel))
+                 "Protected rhythm or pluck changed" channel)))
+      (write-album motif output "dirty-cache-connected-reed" "Dirty Cache" base
+        (list (list "Lower motif: question and resolved answer" low)
+              (list "Upper response: motif recalled with a varied ending" high)
+              (list "Two-bar natural release" (phrase-rows 32 '())))
+        (list reference)
+        "Connected reed sketch: one continuous eight-bar excerpt, not an A/B or an adopted song revision."
+        "Existing groove and patches; only channel 8 changes. Beat-led accents, linked notes, three portamento joins per phrase and deliberate breathing rests."
+        "2026-09-23")
+      (write-json-file (path output "source-checks.json")
+        (dict reference: reference
+              reference_sha256: (out sha256sum ,(path (root) reference))
+              changed_channel: 8
+              protected_channels_identical: #t
+              duration_seconds: (/ (* 160 15.0) 110)
+              adopted: #f)))))

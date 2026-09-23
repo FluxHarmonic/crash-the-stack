@@ -280,3 +280,17 @@ pass. Full before/after OGGs both measure -15.6 LUFS-I/-1.9 dBTP with one common
 monitoring gain. Native timing error is zero for both game and album candidates,
 and all 25 generated audition files reproduce exactly. Listening review remains
 pending; the current public release and accepted shared sources are unchanged.
+
+## Dirty Cache: articulation feedback
+
+David liked the improvements but found the new reed phrases too detached and
+plain, with some notes feeling off-beat. Clock accuracy alone is not a phrasing
+check: nearly uniform short gates and isolated scale steps can still sound like
+filler. [The connected reed sketch](../alternates/dirty-cache-connected-reed/README.md)
+uses a recurring motif, longer anchor tones, beat-led accents, connected slides
+and breaths between ideas. The existing rhythm and instrument patches stay fixed.
+
+One continuous 21.818-second clip was delivered as Telegram message 1158, per
+David's request for a single short example without A/B. Native timing/slide and
+encoded audio checks pass. This direction remains an audition; the other replies
+and synchronized full arrangements await listening feedback before adaptation.
