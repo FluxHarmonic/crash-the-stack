@@ -267,3 +267,13 @@ soft interlude, adds driving and half-time variations plus a contrasting earlier
 solo, and ends with the band. The patches are unchanged. Quiet timbre can remain
 as a countermelody within a heavy section; it need not require a long soft section.
 Shared game tense phrases are updated; see FAULT-LINE-II.md.
+
+## 2026-09-23 — Fault Line: phrase anchors and interlude transitions
+
+An exact sample clock does not make a phrase feel on the beat. David's 0:54
+reference narrowed the issue to the alternate solo: move its delayed accents
+earlier while preserving the accepted melodies elsewhere. Add contextual fills
+into and out of the quiet interlude, and compensate guitar level when increasing
+fuzz. A held 3xx bend requires a target note and continuation on subsequent rows;
+verify compiled pitch events rather than inferring a bend from an effect label.
+See FAULT-LINE-III.md and the archived audit results.

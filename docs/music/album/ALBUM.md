@@ -72,4 +72,4 @@ are unchanged. Previous album renders remain available for comparison.
 
 Fault Line now has a 2:59.048 rock-led full composition and a shared calm/tense game draft.
 It is a candidate addition; the published fifteen-track sequence is unchanged.
-See [Fault Line II](FAULT-LINE-II.md). After Image remains at the style-demo stage.
+See [Fault Line III](FAULT-LINE-III.md). After Image remains at the style-demo stage.

@@ -94,3 +94,5 @@ Both versions use +2.4 dB clean export gain. Decoded album: -19.5 LUFS-I,
 9.8 LU range, -1.5 dBTP, final second -78.3 dBFS. All format, duration,
 peak and tail checks pass. Game preview timing check: 2,135 attacks, zero
 sample-clock error, final gates released and passing voice budgets.
+
+Composition III supersedes this audition; see [the timing/fill/fuzz pass](FAULT-LINE-III.md).
