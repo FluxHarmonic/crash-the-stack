@@ -50,11 +50,15 @@ case "$ARM" in
 esac
 [ -f "$ARM" ] || { say "no arm '$ARM' (paths are relative to $(pwd), as for node)"; exit 125; }
 ARM_BASE=$(basename "$ARM")
-ARM_ABS=$(cd "$(dirname "$ARM")" && pwd)/$ARM_BASE
+# Physical paths (pwd -P): git reports its toplevel physically, so a logical
+# path through a symlink would leave ARM_REL absolute (review M4).
+ARM_ABS=$(cd "$(dirname "$ARM")" && pwd -P)/$ARM_BASE
 
 # The arm's checkout: the git toplevel above it, else its own directory.
 ROOT=$(git -C "$(dirname "$ARM_ABS")" rev-parse --show-toplevel 2>/dev/null || dirname "$ARM_ABS")
+ROOT=$(cd "$ROOT" && pwd -P)
 ARM_REL=${ARM_ABS#"$ROOT"/}
+case "$ARM_REL" in /*) say "cannot place $ARM_ABS inside its checkout $ROOT"; exit 125 ;; esac
 
 REMOTE=${AZOTH_REMOTE:-}
 if [ -z "$REMOTE" ]; then
@@ -86,9 +90,13 @@ while [ $# -gt 0 ]; do
             SHOT=$2; printf '%s\n' --shot ../out/shot.png >> "$ARGS_FILE"; shift 2 ;;
     --old)  [ $# -ge 2 ] || { say "--old needs a directory"; exit 125; }
             OLD=$2; printf '%s\n' --old ../old >> "$ARGS_FILE"; shift 2 ;;
-    --port|--cdp|--seed|--base)
+    --port|--cdp|--seed|--base|--steps|--rate)
             [ $# -ge 2 ] || { say "$1 needs a value"; exit 125; }
             printf '%s\n%s\n' "$1" "$2" >> "$ARGS_FILE"; shift 2 ;;
+    # Options that name a LOCAL output file would write it on the runner and
+    # lose it; refuse rather than run and silently drop the file.
+    --output|--output=*|--shot=*|--old=*)
+            say "$1: not supported through arm-remote (use '--shot PATH' / '--old DIR', space-separated; --output is not carried back)"; exit 125 ;;
     --*)    printf '%s\n' "$1" >> "$ARGS_FILE"; shift ;;
     *)      if [ -z "$TREE_SET" ]; then TREE=$1; TREE_SET=1; else printf '%s\n' "$1" >> "$ARGS_FILE"; fi
             shift ;;
@@ -105,28 +113,45 @@ WASM=""
 for w in crash-the-stack.wasm jack-in/crash-the-stack.wasm; do
   [ -f "$TREE/$w" ] && { WASM=$w; break; }
 done
-LOCAL_SHA=""
-[ -n "$WASM" ] && LOCAL_SHA=$(sha256sum "$TREE/$WASM" | cut -c1-64)
-say "arm $ARM_REL in $ROOT (HEAD=$HEAD dirty=$([ -n "$DIRTY" ] && echo yes || echo no))"
+# No wasm, no identity check: refuse rather than run a check that would be
+# skipped and then reported as passed (review M3).
+[ -n "$WASM" ] || { say "SETUP-FAILED: no crash-the-stack.wasm or jack-in/crash-the-stack.wasm in $TREE; nothing to identify the build by"; exit 125; }
+LOCAL_SHA=$(sha256sum "$TREE/$WASM" | cut -c1-64)
+ARM_STATE=tracked
+git -C "$ROOT" ls-files --error-unmatch "$ARM_REL" >/dev/null 2>&1 || ARM_STATE="UNTRACKED (not in HEAD)"
+say "arm $ARM_REL ($ARM_STATE) in $ROOT (HEAD=$HEAD tracked-changes=$([ -n "$DIRTY" ] && echo yes || echo no))"
 say "tree $TREE stamp=${STAMP:-none} wasm=${WASM:-none} sha256=${LOCAL_SHA:-none}"
 [ "$STAMP" = "$HEAD" ] || say "note: the tree's stamp ($STAMP) is not the arm checkout's HEAD ($HEAD)"
 
-# ---- stage: hard links, so this costs no copy ---------------------------------
+# ---- stage: real copies by tar, exclusions applied WHILE copying ------------
 # The served tree, without the native build's objects and executables or
-# sigil's package cache (none of them is served; ~375 MB together).
-cp -al "$TREE" "$STAGE/web" 2>/dev/null || cp -a "$TREE" "$STAGE/web"
-rm -rf "$STAGE/web/native" "$STAGE/web/bin" "$STAGE/web/.sigil-package-cache" "$STAGE/web/obj"
+# sigil's package cache (none of them is served; ~375 MB together). Copying
+# with tar (never hard links, never an rm on the stage afterwards) means
+# nothing done to the stage can reach the source tree: the previous hard-link
+# staging deleted a source build's native/ when the tree was a symlink, and
+# delivered web/web/ when /tmp was another filesystem (review H2, H3).
+stage_tree() {   # src dst
+  mkdir -p "$2"
+  (cd "$1" && tar --exclude=./native --exclude=./bin --exclude=./.sigil-package-cache --exclude=./obj -cf - .) \
+    | tar -C "$2" -xf -
+}
+stage_tree "$TREE" "$STAGE/web"
+[ -f "$STAGE/web/index.html" ] && [ -f "$STAGE/web/$WASM" ] || { say "SETUP-FAILED: staging $TREE did not produce web/index.html and web/$WASM"; exit 125; }
 # The checkout: tracked files as they are on disk (what a local run reads),
-# plus the arm itself in case it is not tracked yet.
+# plus the arm itself in case it is not tracked yet. A tracked file missing on
+# disk fails loudly (tar), never a partial checkout.
 mkdir -p "$STAGE/repo"
 if git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
-  (cd "$ROOT" && git ls-files -z | xargs -0 -r cp --parents -al -t "$STAGE/repo" 2>/dev/null) \
-    || (cd "$ROOT" && git ls-files -z | xargs -0 -r cp --parents -a -t "$STAGE/repo")
+  (cd "$ROOT" && git ls-files -z | tar --null -T - -cf -) | tar -C "$STAGE/repo" -xf - \
+    || { say "SETUP-FAILED: could not stage the checkout's tracked files (a tracked file missing on disk?)"; exit 125; }
 else
   (cd "$ROOT" && tar --exclude=./build --exclude=./.sigil -cf - .) | tar -C "$STAGE/repo" -xf -
 fi
-mkdir -p "$STAGE/repo/$(dirname "$ARM_REL")"
-cp -f "$ARM_ABS" "$STAGE/repo/$ARM_REL"
+if [ ! -f "$STAGE/repo/$ARM_REL" ]; then
+  mkdir -p "$STAGE/repo/$(dirname "$ARM_REL")"
+  cp "$ARM_ABS" "$STAGE/repo/$ARM_REL"
+fi
+cmp -s "$ARM_ABS" "$STAGE/repo/$ARM_REL" || { say "SETUP-FAILED: the staged arm differs from $ARM_ABS"; exit 125; }
 cat > "$STAGE/run.sh" <<'EOF'
 #!/usr/bin/env bash
 # Runs ON THE RUNNER, in ~/work.
@@ -145,12 +170,10 @@ printf '#!/bin/sh\nexec %s "$@"\n' "$CHROME" > shim/google-chrome
 chmod +x shim/google-chrome
 export PATH="$HOME/work/shim:$PATH"
 command -v node >/dev/null 2>&1 || { echo "SETUP-FAILED: no node on the runner"; exit 125; }
-if [ -n "$WASM" ]; then
-  got=$(sha256sum "web/$WASM" | cut -c1-64)
-  [ "$got" = "$LOCAL_SHA" ] || { echo "SETUP-FAILED: delivered wasm sha256 $got != local $LOCAL_SHA"; exit 125; }
-fi
+got=$(sha256sum "web/$WASM" 2>/dev/null | cut -c1-64)
+[ -n "$got" ] && [ "$got" = "$LOCAL_SHA" ] || { echo "SETUP-FAILED: delivered wasm sha256 '${got:-missing}' != local $LOCAL_SHA"; exit 125; }
 echo "arm-remote(runner): $(ip -4 -br addr show eth0 | awk '{print $3}') nproc=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg) node=$(node --version) chrome=$("$CHROME" --version 2>/dev/null | head -1)"
-echo "arm-remote(runner): wasm sha256=${got:-none} (matches local)"
+echo "arm-remote(runner): wasm sha256=$got (matches local)"
 mapfile -t ARGS < arm-args
 cd repo
 exec node "$ARM_REL" ../web "${ARGS[@]}"
@@ -158,7 +181,7 @@ EOF
 
 PUTS="--put $STAGE/web:web --put $STAGE/repo:repo --put $ARGS_FILE:arm-args --put $STAGE/run.sh:run.sh"
 if [ -n "$OLD" ]; then
-  cp -al "$OLD" "$STAGE/old" 2>/dev/null || cp -a "$OLD" "$STAGE/old"
+  stage_tree "$OLD" "$STAGE/old"
   PUTS="$PUTS --put $STAGE/old:old"
 fi
 GETS=""
