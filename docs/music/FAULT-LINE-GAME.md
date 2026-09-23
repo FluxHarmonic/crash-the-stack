@@ -7,10 +7,10 @@ existing selections. The rhythm-game use remains a future charting task.
 
 ## Try it
 
-Open the browser preview with:
+Open a local browser build with:
 
 ```
-?cards&fresh&seed=7&tune=fault-line&trace-at=20&trace
+?code=380000072B&fresh&tune=fault-line&trace-at=20&trace
 ```
 
 Tap once if the browser needs an audio gesture. The tune override guarantees
@@ -18,13 +18,19 @@ Fault Line, even if the no-repeat rule would otherwise choose a different tune.
 The trace lands after about twenty seconds of active gameplay: the two-bar fill
 leads into the rock section. Without the override, a fresh process at Defrag
 seed 7 selects Fault Line through the ordinary pool. Music begins calmly; the
-full guitars belong to the counter-hack. Escape should return to calm on a bar.
+full guitars belong to the counter-hack. Returning from the counter-hack to
+normal play returns the music to calm on a bar.
+
+The share code is Defrag, hacker rules, seed 7, draw one and Vegas scoring.
+Use this normal launch path: the direct `?cards` shortcut bypasses the code
+that applies the shortened `trace-at` threshold. A modifier-only key such as
+Shift does not unlock Chrome audio; tap or press Enter after boot.
 
 Native equivalent, from a release build:
 
 ```sh
 scripts/dev ./build/release/bin/crash-the-stack \
-  --cards --fresh --seed 7 --music-tune fault-line --trace-at 20
+  --code 380000072B --fresh --music-tune fault-line --trace-at 20
 ```
 
 Use the existing rate ladder by default. For a controlled low-rate comparison,
@@ -53,5 +59,17 @@ The all-song regeneration check passes for all sixteen shared compositions.
 `test/test-fault-line-live.sgl` exercises Defrag's real seed selection, calm
 looping, trace-driven fill, tense arrival, a complete tense loop and escape back
 to calm through the live renderer/resampler. The existing music, gain and asset
-tests cover the surrounding integration. Native and browser results are recorded
-in the follow-up validation entry once complete.
+tests cover the surrounding integration.
+
+At implementation commit `d123cde00288`, all 307 tests passed across
+`test-music`, `test-music-live`, `test-fault-line-live`, `test-music-gain` and
+`test-assets`. The web build completed, including `wasm-opt` for both game and
+tracker. A headless Chrome run of the optimized game observed `music playing
+fault-line`, `music section fill at 2 0`, `music section tense at 3 0`, and
+`cards trace 20 twist counter 0 none`, with no console errors. The browser
+check pinned 22050 Hz and disabled the background for reproducibility; phone
+performance with the default adaptive rate remains a listening check.
+
+Validation logs and the screenshot live outside the repository in
+`~/Ops/artifacts/crash-the-stack-album/fault-line-game-integration/`.
+No VPN preview or public deployment was started.
