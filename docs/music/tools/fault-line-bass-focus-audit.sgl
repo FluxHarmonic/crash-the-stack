@@ -1,0 +1,60 @@
+#!/usr/bin/env sigil
+;;; Verify this is a bass-only change and measure its reduced movement.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define DIRECTORY "docs/music/alternates/fault-line-bass-focus-vi")
+(define (attacks ts)
+  (filter (lambda (t) (= (list-ref t 5) 1)) ts))
+(define (pitch-changes ts)
+  (let loop ((previous #f) (rest ts) (count 0))
+    (if (null? rest)
+        count
+        (let ((pitch (list-ref (car rest) 2)))
+          (loop pitch
+                (cdr rest)
+                (+ count (if (and previous (not (= pitch previous))) 1 0)))))))
+
+(cli "fault-line-bass-focus-audit" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (before (path (root) DIRECTORY "fault-line-before.cts"))
+           (after (path (root) DIRECTORY "fault-line-after.cts"))
+           (old (read-score before))
+           (new (read-score after))
+           (output (option-ref options 'output))
+           (a (attacks (ticks motif before 4)))
+           (b (attacks (ticks motif after 4)))
+           (guitar (attacks (ticks motif after 5)))
+           (independent
+             (filter (lambda (t)
+                       (not (any (lambda (g) (= (car g) (car t))) guitar)))
+                     b)))
+      (each channel '(1 2 3 5 6 7 8)
+        (check (equal? (ticks motif before channel) (ticks motif after channel))
+               "Non-bass compiled performance changed"
+               channel))
+      (each inst (cdr (child old 'instruments))
+        (unless (= (field inst id:) 4)
+          (check
+            (equal? inst
+              (list-find (lambda (i) (= (field i id:) (field inst id:)))
+                         (cdr (child new 'instruments))))
+            "Non-bass patch changed"
+            (field inst id:))))
+      (check (and (< (length b) (length a))
+                  (< (pitch-changes b) (pitch-changes a))
+                  (pair? independent))
+             "Bass is not simpler or has lost all independent rhythm")
+      (ensure-directory output)
+      (write-json-file (path output "bass-focus-checks.json")
+        (dict old_bass_attacks: (length a)
+              new_bass_attacks: (length b)
+              old_bass_pitch_changes: (pitch-changes a)
+              new_bass_pitch_changes: (pitch-changes b)
+              new_attacks_between_guitar_strikes: (length independent)
+              new_lowest_bass_hz: (apply min (map (lambda (t) (list-ref t 2)) b))
+              all_non_bass_ticks_and_instruments_preserved: #t))
+      (println "Simpler bass and unchanged non-bass performance passed."))))

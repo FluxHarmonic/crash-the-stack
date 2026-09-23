@@ -232,3 +232,11 @@ preserves the established guitar writing outside the entrance, replaces the
 long-chord pause with forward motion, and gives the picked bass low D anchors,
 fifth/octave answers, passing notes and a clean fundamental layer. The bent solo
 and accepted kit performances remain exact. Full short demo and A/B await feedback.
+
+## 2026-09-23 — Fault Line bass clarity and restraint
+
+David found Style V's bass too mobile and too sub-heavy to follow. [Style VI](../alternates/fault-line-bass-focus-vi/README.md)
+reduces it to a repeated root-led motif with one fifth answer per pair, raises
+the D anchor to D2, reduces the sine layer and emphasizes picked harmonics.
+The guitar groove, moving entrance, kit and bent solo remain exact. The full
+short demo and matching comparison await listening feedback.
