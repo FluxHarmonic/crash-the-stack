@@ -70,3 +70,15 @@ reduction did not fix it and was reverted. Final bass velocities are those of
 the intended VII arrangement. The two rejected preflights remain in the
 external `fault-line-bass-lock-vii/` and `fault-line-bass-lock-vii-final/`
 folders; only `fault-line-bass-lock-vii-delivery/` is delivered.
+
+## Final delivery
+
+Source commit: bc75f26. Native full-after peak: -0.9 dBTP. The common export
+gain was capped to -1.1 dB from the requested -0.9, in addition to the common
+1 dB native attenuation. Decoded OGG: A/B -19.9 LUFS-I / -3.7 dBTP; before
+full -20.0 / -2.2; revised full -19.9 / -2.0. Duration, decoded peak and final
+release checks pass. No additional limiter or per-version normalization.
+
+Telegram confirmed the comparison as message 1190 and the complete revised
+demo as message 1191. Encoded hashes are in encoded.sha256. The previous full
+reference remains available locally. These are listening copies, not masters.
