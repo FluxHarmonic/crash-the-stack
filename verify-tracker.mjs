@@ -240,7 +240,14 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
   //   comes out 5,769 bytes LARGER. The module is 99.1% code, 5,850 functions, 15.47M IR nodes.
   // So a real reduction is a sigil codegen matter, not a flag we are failing to pass. Raise this
   // number only on David's word, never to clear a red.
-  const BASE = 24465466, SLACK = 16000000, TRACKER_MAX = 20 * 1024 * 1024;
+  //
+  // 19,500,000 since 2026-09-23 (David again), for sigil 0.22.5's phantom fix: rooting a tail
+  // call's arguments costs +3,158,074 raw bytes here, +8.15%, 38,763,190 -> 41,921,264 on the same
+  // tree. It is not a download cost — brotli -q 11 went DOWN 0.69% (1,850,003 -> 1,837,246) because
+  // the rooting code is so repetitive, and gzip -9 rose only 3.08%. What grew is what the phone
+  // decodes and compiles, which is what this ceiling measures. Narrowing the rooting to builtins
+  // that can actually allocate is sigil's t-4364b0; if that lands, this number comes back down.
+  const BASE = 24465466, SLACK = 19500000, TRACKER_MAX = 20 * 1024 * 1024;
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
