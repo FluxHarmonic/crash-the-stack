@@ -393,3 +393,8 @@ version is Expression I plus the original-rhythm acid fade; the musical pass is
 finished. Preserve the rejected turnaround as history. Shared-source adoption,
 a fresh complete render including the fade, mastering and publication are next;
 none of those release steps has yet been performed for Basement Circuit II.
+
+Basement Circuit II is adopted from the selected Fade I pool. Both generated
+arrangements match the approved candidates exactly, and all fifteen source
+regeneration checks pass. A fresh full render is in progress for mastering;
+Glass Current is the suggested next review. See [the release record](BASEMENT-CIRCUIT-II.md).

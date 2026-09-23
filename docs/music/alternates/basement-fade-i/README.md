@@ -59,3 +59,8 @@ finished. Turnaround I remains rejected and archived. The next working step is
 to adopt Fade I's shared pool, regenerate both arrangements, then render and
 master the complete album update. The earlier complete Expression I WAV lacks
 this fade and must not be reused as the selected final render.
+
+The selected pool has now been adopted into the maintained shared source. Both
+regenerated arrangements match these candidates exactly; all fifteen source
+checks pass. Release progress is recorded in
+[Basement Circuit II](../../album/BASEMENT-CIRCUIT-II.md).
