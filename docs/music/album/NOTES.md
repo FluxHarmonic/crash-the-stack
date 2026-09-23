@@ -277,3 +277,39 @@ into and out of the quiet interlude, and compensate guitar level when increasing
 fuzz. A held 3xx bend requires a target note and continuation on subsequent rows;
 verify compiled pitch events rather than inferring a bend from an effect label.
 See FAULT-LINE-III.md and the archived audit results.
+
+## 2026-09-23 — Fault Line game role after album approval
+
+David likes the approved composition III and sharing master and wants a place
+for it in the game. Proposed role: a deliberately more forceful challenge or
+counter-hack encounter, with a later rhythm-mode chart as a second use. The clean
+melody and pads supply anticipation; the fuzzy riff can make the trace landing
+feel like an escalation. Keep the established Black Glass title identity and
+David's curated stealth hub pool. This is a proposed placement, not an approved
+change to the gameplay pools or a new encounter requirement.
+
+The shared-source game draft already provides sixteen calm bars (orders 0–1),
+a two-bar entrance fill (order 2), and seven eight-bar rock variations (orders
+3–9). Loop effects are B00 and B03. The future integration should preserve the
+shared generator and change its game destination to assets/tunes/fault-line.cts,
+adding `(marks calm: 0 fill: 2 tense: 3)` to the game template. Regenerate the
+game/album outputs and receipts together; do not copy the mastered MP3 into the
+runtime or raise the game bus to the standalone mastering level.
+
+Read-only inspection of current crash-the-stack main confirms that music.sgl
+uses live .cts sections and reserves CANDIDATES for tracks not yet heard in
+context. First integrate Fault Line as a candidate, then audition with actual
+SFX and the trace-driven fill/tense transition before assigning a pool. A cards
+counter-hack is an existing context in which to test it; no new game mode is
+needed for that audition. Check calm looping, the fill ending on the ICE strike,
+tense looping, return to calm and headroom under simultaneous cues. The current
+engine returns to calm with a short dip; a composed return fill is future work.
+
+For a future rhythm chart, the finite album form supplies short introduction,
+main groove, alternate solo, quieter interlude and a final return. Chart the
+kick/snare and guitar accents at 126 BPM first, reserving denser solo figures for
+higher difficulties; the chart itself is not authored yet.
+
+Runtime integration belongs with the game coordinator: this album worktree's
+src/ still has the pre-M1 music policy. Its current scope excludes runtime edits.
+No runtime file, game asset, selection pool or published audio was changed here.
