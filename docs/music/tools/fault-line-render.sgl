@@ -24,7 +24,9 @@
           true_peak_dbtp: (last-number text "    Peak:"))))
 
 (cli "fault-line-render" (script-args)
-  (list (option name: 'variant long: "variant" value: "ROLE"
+  (list (option name: 'revision long: "revision" value: "REV"
+                choices: '("i" "ii") default: "i")
+        (option name: 'variant long: "variant" value: "ROLE"
                 choices: '("album" "game") default: "album")
         (option name: 'stage long: "stage" value: "STAGE"
                 choices: '("native" "delivery") default: "native"))
@@ -33,7 +35,8 @@
            (variant (option-ref options 'variant))
            (stage (option-ref options 'stage))
            (album? (equal? variant "album"))
-           (stem (str "fault-line-" variant "-composition-i"))
+           (revision (option-ref options 'revision))
+           (stem (str "fault-line-" variant "-composition-" revision))
            (source (path (root)
                      (if album? "docs/music/album/fault-line.cts"
                          "docs/music/alternates/fault-line-game.cts")))
@@ -54,12 +57,15 @@
         (run-tool argv))
       (unless album?
         ;; Audition calm/fill/tense once each; retain the real game score separately.
-        (set! score
-          (replace-child score 'patterns
-            (append (list 'patterns)
-              (map (lambda (p) (transform p unchanged)) (cdr (child score 'patterns)))
-              (list (set-field (empty-pattern 2) id: 6)))))
-        (set! score (replace-child score 'order '(order 0 1 2 3 4 5 6))))
+        (let ((tail-id (+ 1 (apply max (map (lambda (p) (field p id:))
+                                          (cdr (child score 'patterns)))))))
+          (set! score
+            (replace-child score 'patterns
+              (append (list 'patterns)
+                (map (lambda (p) (transform p unchanged)) (cdr (child score 'patterns)))
+                (list (set-field (empty-pattern 2) id: tail-id)))))
+          (set! score
+            (replace-child score 'order (append (child score 'order) (list tail-id))))))
       (let ((duration
               (/ (* 7.5
                     (apply + (map (lambda (id) (field (pattern score id) rows:))
@@ -85,7 +91,7 @@
                    (tags (list "-metadata" "artist=David Wilson"
                                "-metadata" "title=Fault Line"
                                "-metadata" "album=Crash The Stack - Composition Auditions"
-                               "-metadata" (str "comment=" variant " composition I; clean gain, not a release master"))))
+                               "-metadata" (str "comment=" variant " composition " revision "; clean gain, not a release master"))))
               (with-temp-dir temporary
                 (write-canonical motif (path temporary "current.cts") score)
                 (check (equal? (read-text snapshot) (read-text (path temporary "current.cts")))

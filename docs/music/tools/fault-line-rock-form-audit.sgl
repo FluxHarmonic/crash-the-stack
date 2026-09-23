@@ -1,0 +1,66 @@
+#!/usr/bin/env sigil
+;;; Preserve I's parts while testing II's new rock phrases and arrangement.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (musical row cell)
+  (and (not (equal? (cdr cell) '("..." 0 0 "000"))) cell))
+
+(cli "fault-line-rock-form-audit" (script-args) '()
+  (lambda (options)
+    (let* ((old (read-score
+                  (path (root) "docs/music/alternates/fault-line-composition-i/parts.cts")))
+           (parts (read-score (path (root) "docs/music/songs/fault-line/parts.cts")))
+           (album (read-score (path (root) "docs/music/album/fault-line.cts")))
+           (game (read-score (path (root) "docs/music/alternates/fault-line-game.cts"))))
+      (each section '(instruments bus)
+        (check (equal? (child old section) (child parts section))
+               "Patch or bus changed" section)
+        (check (equal? (child game section) (child album section))
+               "Game/album sound differs" section))
+      (each p (cdr (child old 'patterns))
+        (check (equal? p (pattern parts (field p id:)))
+               "Preserved phrase changed" (field p id:)))
+      ;; New backing variations share bass attacks, root pitches and releases.
+      (each id '(16 17 19 20 21)
+        (let ((p (pattern parts id)))
+          (each row (skip p 5)
+            (let ((b (assoc 4 (cddr row))) (g (assoc 5 (cddr row))))
+              (when (and b (attack? b))
+                (check (and g (attack? g)
+                            (equal? (substring (cadr b) 0 2) (substring (cadr g) 0 2)))
+                       "New bass attack detached from guitar" id (cadr row))
+                (let* ((later (filter (lambda (r) (> (cadr r) (cadr row))) (skip p 5)))
+                       (bend (list-find (lambda (r) (assoc 4 (cddr r))) later))
+                       (gend (list-find (lambda (r) (assoc 5 (cddr r))) later)))
+                  (check (and bend gend (= (cadr bend) (cadr gend)))
+                         "New bass and guitar releases disagree" id (cadr row))))))))
+      (each pair '((2 7) (3 1) (4 2) (5 3) (6 5) (7 8) (8 10) (9 11))
+        (check (equal? (set-field (transform (pattern game (car pair)) musical) id: 0)
+                       (set-field (transform (pattern album (cadr pair)) musical) id: 0))
+               "Shared rock phrase differs" pair))
+      (let ((jumps '()))
+        (each p (cdr (child game 'patterns))
+          (each row (skip p 5)
+            (each cell (cddr row)
+              (when (starts-with? (list-ref cell 4) "B")
+                (set! jumps
+                  (append jumps (list (list (field p id:) (cadr row) (list-ref cell 4)))))))))
+        (check (equal? jumps '((1 255 "B00") (9 255 "B03")))
+               "Game loop boundaries changed unexpectedly"))
+      (check (and (= (field (pattern album 0) rows:) 128)
+                  (= (field (pattern album 6) rows:) 256))
+             "Short intro/interlude length changed")
+      (ensure-directory (option-ref options 'output))
+      (write-json-file (path (option-ref options 'output) "rock-form-checks.json")
+        (dict patches_bus_and_original_phrases_preserved: #t
+              new_bass_guitar_anchors_aligned: #t
+              shared_rock_phrases: 8
+              intro_bars: 4 interlude_bars: 8 album_bars: 94
+              calm_orders: (array 0 1) fill_order: 2
+              tense_orders: (array 3 4 5 6 7 8 9)))
+      (println "Rock-form preservation, shared passages, bass accents and loop checks passed."))))

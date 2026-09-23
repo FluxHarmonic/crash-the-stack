@@ -70,6 +70,6 @@ are unchanged. Previous album renders remain available for comparison.
 
 ## New composition auditions
 
-Fault Line now has a 3:02.857 full composition and a shared calm/tense game draft.
+Fault Line now has a 2:59.048 rock-led full composition and a shared calm/tense game draft.
 It is a candidate addition; the published fifteen-track sequence is unchanged.
-See [Fault Line I](FAULT-LINE-I.md). After Image remains at the style-demo stage.
+See [Fault Line II](FAULT-LINE-II.md). After Image remains at the style-demo stage.

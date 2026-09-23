@@ -258,3 +258,12 @@ calm/fill/tense draft share parts, bank and bus. The game draft is generated und
 docs/music/alternates/ until accepted for integration; existing assets and game
 code are untouched. Possible role: rhythm challenge or high-pressure sequence.
 See FAULT-LINE-I.md for the timeline, reproduction and review evidence.
+
+## 2026-09-23 — Fault Line composition II: let the rock form lead
+
+David wanted the soft opening shortened and the heavy material developed, while
+retaining the softer secondary melody. II brings the band in at 0:08, keeps one
+soft interlude, adds driving and half-time variations plus a contrasting earlier
+solo, and ends with the band. The patches are unchanged. Quiet timbre can remain
+as a countermelody within a heavy section; it need not require a long soft section.
+Shared game tense phrases are updated; see FAULT-LINE-II.md.

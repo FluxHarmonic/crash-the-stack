@@ -100,3 +100,7 @@ these are not equal-loudness comparisons. All duration/format/tail checks pass.
 The game preview has 1,119 attacks, zero sample-clock error and released gates.
 Shared-source propagation, drift detection, tracker-edit protection and
 whole-batch preflight tests pass.
+
+Composition II supersedes this initial form; see [the rock-led revision](FAULT-LINE-II.md).
+The commands and audits above describe the first composition at commit 67d2ae0.
+Its audio and source snapshots remain preserved for comparison.
