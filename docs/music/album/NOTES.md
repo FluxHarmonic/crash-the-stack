@@ -197,3 +197,12 @@ process are preserved in [rock-wave-sketches-i](../alternates/rock-wave-sketches
 The Sigil composer and delivery tool are under docs/music/tools/. Rendered WAVs
 and OGGs live at ~/Ops/artifacts/crash-the-stack-album/rock-wave-sketches-i-final/.
 Full arrangements and synchronized game/album sources await style feedback.
+
+## 2026-09-23 — Rock bite and dark-synthwave revision
+
+Style II preserves Fault Line's liked composition and most of its kit, revising
+only guitars and tom. After Image gains an anchored low sub beneath its octave
+pulse; David clarified **dark synthwave**, so its lead moves down an octave and
+pad/lead brightness softens while preserving chord voicings and the liked snare.
+The short full demos and equal-gain contextual comparisons await feedback.
+See [Style II](../alternates/rock-wave-sketches-ii/README.md) for scope and commands.
