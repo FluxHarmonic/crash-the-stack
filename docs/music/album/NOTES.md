@@ -313,3 +313,11 @@ higher difficulties; the chart itself is not authored yet.
 Runtime integration belongs with the game coordinator: this album worktree's
 src/ still has the pre-M1 music policy. Its current scope excludes runtime edits.
 No runtime file, game asset, selection pool or published audio was changed here.
+
+## 2026-09-23 — Fault Line authorized live integration
+
+David authorized merging master and wiring Fault Line into a mode for a trial.
+This supersedes the earlier candidate-only integration proposal: Defrag now
+includes it, with an existing tune override and short-trace developer option
+for immediate review. See ../FAULT-LINE-GAME.md. Album composition and mastering
+are unchanged; runtime integration is explicitly in scope for this step.

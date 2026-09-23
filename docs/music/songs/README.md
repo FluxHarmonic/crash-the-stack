@@ -1,7 +1,7 @@
 # Shared song sources
 
 The game and soundtrack are arrangements of one maintained composition. All
-fifteen released titles and the Fault Line candidate use this workflow. Black Glass also generates its existing
+fifteen released titles and Fault Line use this workflow. Black Glass also generates its existing
 title-screen arrangement. Both source material and generated scores are checked
 in; the generated `.cts` files remain directly editable in the tracker.
 
@@ -117,12 +117,14 @@ results; current game inputs now contain later approved changes. `songs-migrate.
 the one-time importer and refuses existing source directories. Do not rerun it
 over maintained shared sources.
 
-## Candidate compositions
+## Fault Line integration
 
-Fault Line is the sixteenth shared composition, currently an audition. Its album
-output uses the normal album path; its game output is generated at
-`docs/music/alternates/fault-line-game.cts` until game integration is approved.
-The shared builder permits this explicit alternate destination and applies the
-same hash/overwrite protection. The default all-song check includes it; the
-published soundtrack still has fifteen tracks. Do not add it to runtime tune
-selection merely because the shared source exists.
+Fault Line is the sixteenth shared composition. David approved its album and
+a Defrag live trial. Its game output now uses assets/tunes/fault-line.cts, with
+marks calm: 0, fill: 2 and tense: 3 in the shared game template. The former
+docs/music/alternates/fault-line-game.cts remains a frozen pre-integration draft.
+The all-song check includes the shipped game and album outputs; the published
+fifteen-track listening page is unchanged. See [the live trial](../FAULT-LINE-GAME.md).
+
+Live section marks and their provenance for every existing game/title tune are
+now retained in the corresponding shared templates, following the master merge.
