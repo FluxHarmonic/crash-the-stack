@@ -61,3 +61,9 @@ are unchanged.
 Validation completed: all seven generated source/map/manifest files reproduce
 exactly; all fifteen maintained songs regenerate. The finite audit reports 719
 attacks, zero sample-clock error and all final gates released.
+
+Native preflight found one full-mix accent at 0.0 dBTP. Bass attack levels in
+the revised sections were reduced by two tracker units before final delivery.
+Patch gains and all other channels remain unchanged. The rejected render is
+retained separately; final renders use the `fault-line-bass-lock-vii-final/`
+artifact directory.
