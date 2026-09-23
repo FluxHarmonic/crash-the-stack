@@ -86,3 +86,11 @@ These checks supplement the listening review; they cannot judge the phrasing.
 Native sources, renders, commands and measurements:
 `~/Ops/artifacts/crash-the-stack-album/fault-line-composition-ii/`.
 This remains a clean-gain composition audition, not a release master.
+
+## Render checks
+
+Both versions use +2.4 dB clean export gain. Decoded album: -19.5 LUFS-I,
+13.9 LU range, -2.0 dBTP, final second -84.3 dBFS. Game: -20.0 LUFS-I,
+9.8 LU range, -1.5 dBTP, final second -78.3 dBFS. All format, duration,
+peak and tail checks pass. Game preview timing check: 2,135 attacks, zero
+sample-clock error, final gates released and passing voice budgets.
