@@ -257,6 +257,56 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   if (detail.length) fail("manifest", detail.join("; ")); else pass("manifest", `scope ${scope}, start_url ${start}, id ${m.id}`);
 }
 
+// ---- wasm: the page and the wasm it names belong to each other ----------------
+// The wasm is not a file in the deploy any more. Pages refuses a file over
+// 25 MiB and the game's is 41,921,264 bytes (sigil 0.22.5), so it lives in R2
+// and a Pages Function serves it same-origin at a content-addressed path
+// (/jack-in/w/<sha16>/crash-the-stack.wasm; web/r2-wasm.js says why same-origin
+// is not optional). Locally there is no Function: scripts/wasm-to-r2 --local
+// puts the same bytes at the same paths so this leg reads the same on a static
+// server and on the deployed site.
+//
+// The assertion that matters is the last one: the bytes served under a hash
+// must hash to it. That is what makes a page and a wasm from different builds
+// impossible to pair, which is the whole reason for content addressing. The
+// header checks are the isolation: a wasm without CORP is refused by the
+// cross-origin-isolated page and the game does not boot.
+{
+  const detail = [], sizes = [];
+  for (const [page, name] of [["jack-in", "crash-the-stack"], ["tracker", "crash-tracker"]]) {
+    const pageRes = await fetch(`${origin}/${page}/`);
+    if (!pageRes.ok) { detail.push(`/${page}/ answered ${pageRes.status}`); continue; }
+    const html = await pageRes.text();
+    // a server that answers a missing path with another page would otherwise be
+    // read as the game's own, and its data-wasm believed
+    if (!html.includes("sigil-web-app.js")) { detail.push(`/${page}/ is not the game's page (no loader script)`); continue; }
+    const m = html.match(/data-wasm="([^"]+)"/);
+    if (!m) { detail.push(`/${page}/ has no data-wasm`); continue; }
+    const named = m[1];
+    if (!/^w\/[0-9a-f]{16}\/[a-z0-9-]+$/.test(named)) {
+      detail.push(`/${page}/ names ${named}, which is not w/<sha16>/<name> (was wasm-to-r2 run?)`);
+      continue;
+    }
+    if (!named.endsWith(`/${name}`)) { detail.push(`/${page}/ names ${named}, not ${name}`); continue; }
+    const url = `${origin}/${page}/${named}.wasm`;
+    const res = await fetch(url);
+    if (res.status !== 200) { detail.push(`${url} answered ${res.status}`); continue; }
+    const type = res.headers.get("content-type") || "";
+    if (!type.startsWith("application/wasm")) detail.push(`${url} is ${type || "untyped"}`);
+    // The immutable cache-control and the CORP header come from the Function,
+    // which no local server runs, so they are asserted against the deployed
+    // site by scripts/verify-wasm-live rather than guessed at here.
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+      .map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+    const want = named.split("/")[1];
+    if (digest !== want) detail.push(`${url} serves bytes that hash to ${digest}, not ${want}`);
+    else sizes.push(`/${page}/ ${name} ${bytes.length} bytes at ${want}`);
+  }
+  if (detail.length) fail("wasm", detail.join("; "));
+  else pass("wasm", sizes.join("; "));
+}
+
 // ---- the redirects ----------------------------------------------------------------
 {
   const mark = consoleLines.length;

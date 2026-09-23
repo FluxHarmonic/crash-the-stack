@@ -1,0 +1,120 @@
+#!/bin/sh
+# Put the two wasm files where the deploy expects them, and point the pages at
+# them by content hash (P4b + P5, 2026-09-23).
+#
+#   scripts/wasm-to-r2 DIR            --local: copy into DIR (the default)
+#   scripts/wasm-to-r2 DIR --local
+#   scripts/wasm-to-r2 DIR --upload   send to R2 and leave no wasm in DIR
+#   scripts/wasm-to-r2 DIR --upload --dry-run
+#
+# Cloudflare Pages refuses a file over 25 MiB. The game's wasm is 41,921,264
+# bytes on master (sigil 0.22.5), so `wrangler pages deploy` will not take the
+# tree at all; the tracker's 16,698,428 still fits but sits at 67% of the cap.
+# Both therefore live in an R2 bucket and are served by a Pages Function at the
+# SAME ORIGIN (functions/jack-in/w, functions/tracker/w; the reason for
+# same-origin is in web/r2-wasm.js: the page is cross-origin isolated and an
+# r2.dev URL would break the AudioWorklet path).
+#
+# The paths carry the hash of the bytes:
+#   /jack-in/w/<sha256[0:16]>/crash-the-stack.wasm
+#   /tracker/w/<sha256[0:16]>/crash-tracker.wasm
+# so a page can only ever fetch the wasm it was built against, and every object
+# is immutable.
+#
+# TWO MODES, ONE SET OF PATHS. Nothing local runs a Pages Function: host-site
+# serves the staged tree with `sigil serve --dir` and verify-site.mjs with its
+# own Node server. So --local copies the files into the tree at exactly the
+# paths production serves, and --upload sends them to R2 and then refuses if
+# any .wasm is left in the tree. The page is byte-identical either way: the
+# local tree proves the rewrite, the upload proves the bucket.
+#
+# It rewrites three things in DIR, which is why it must run AFTER the tree is
+# otherwise staged:
+#   jack-in/index.html   data-wasm="crash-the-stack" -> the hashed path
+#   jack-in/sw.js        the "crash-the-stack.wasm" precache entry -> the same
+#   tracker/index.html   data-wasm="crash-tracker"   -> the hashed path
+# The loader needs no change: sigil-web-app.js fetches assetUrl(data-wasm +
+# ".wasm") and data-wasm takes a path.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+
+DIR=""; MODE=local; DRY=0
+for a in "$@"; do
+  case "$a" in
+    --local) MODE=local ;;
+    --upload) MODE=upload ;;
+    --dry-run) DRY=1 ;;
+    -*) echo "wasm-to-r2: unknown flag $a"; exit 2 ;;
+    *) [ -z "$DIR" ] || { echo "wasm-to-r2: one directory, not two"; exit 2; }; DIR="$a" ;;
+  esac
+done
+[ -n "$DIR" ] || { echo "wasm-to-r2: give the staged directory"; exit 2; }
+[ -d "$DIR" ] || { echo "wasm-to-r2: $DIR is not a directory"; exit 2; }
+
+BUCKET="${CRASH_WASM_BUCKET:-crashthestack-wasm}"
+GAME=build/web/crash-the-stack.wasm
+TRACKER=build/web/tracker/crash-tracker.wasm
+for f in "$GAME" "$TRACKER"; do
+  [ -f "$f" ] || { echo "wasm-to-r2: $f missing; build --config web first"; exit 1; }
+done
+for f in "$DIR/jack-in/index.html" "$DIR/jack-in/sw.js" "$DIR/tracker/index.html"; do
+  [ -f "$f" ] || { echo "wasm-to-r2: $f missing; stage the tree before this runs (it rewrites the pages)"; exit 1; }
+done
+
+hash16() { sha256sum "$1" | cut -c1-16; }
+GSHA="$(hash16 "$GAME")"
+TSHA="$(hash16 "$TRACKER")"
+GKEY="jack-in/w/$GSHA/crash-the-stack.wasm"
+TKEY="tracker/w/$TSHA/crash-tracker.wasm"
+
+# The rewrites, the same in both modes. A page that still says the bare name
+# after this is a page that will 404, so each one is checked rather than hoped.
+rewrite() {   # file, what to find, what to put there
+  if ! grep -q "$2" "$1"; then
+    if grep -q 'w/[0-9a-f]\{16\}/crash-' "$1"; then
+      echo "wasm-to-r2: $1 is already rewritten; this runs once on a freshly staged tree (stage it again)"
+    else
+      echo "wasm-to-r2: $1 does not contain $2; the page or the worker changed shape"
+    fi
+    exit 1
+  fi
+  sed -i "s|$2|$3|g" "$1"
+  grep -q "$3" "$1" || { echo "wasm-to-r2: rewrote $1 but $3 is not in it"; exit 1; }
+}
+rewrite "$DIR/jack-in/index.html" 'data-wasm="crash-the-stack"' "data-wasm=\"w/$GSHA/crash-the-stack\""
+rewrite "$DIR/jack-in/sw.js" '"crash-the-stack.wasm"' "\"w/$GSHA/crash-the-stack.wasm\""
+rewrite "$DIR/tracker/index.html" 'data-wasm="crash-tracker"' "data-wasm=\"w/$TSHA/crash-tracker\""
+
+if [ "$MODE" = local ]; then
+  mkdir -p "$DIR/jack-in/w/$GSHA" "$DIR/tracker/w/$TSHA"
+  cp "$GAME" "$DIR/jack-in/w/$GSHA/crash-the-stack.wasm"
+  cp "$TRACKER" "$DIR/tracker/w/$TSHA/crash-tracker.wasm"
+  # exactly the two, and nothing else: a third wasm in the tree means something
+  # is staging a file this script does not know about
+  LEFT="$(find "$DIR" -name '*.wasm' | sort)"
+  WANT="$(printf '%s\n%s\n' "$DIR/tracker/w/$TSHA/crash-tracker.wasm" "$DIR/jack-in/w/$GSHA/crash-the-stack.wasm" | sort)"
+  [ "$LEFT" = "$WANT" ] || { echo "wasm-to-r2: the staged tree's wasm files are not the two expected:"; echo "$LEFT" | sed 's/^/  /'; exit 1; }
+  echo "wasm-to-r2: local. /jack-in/w/$GSHA/crash-the-stack.wasm ($(stat -c%s "$GAME") bytes), /tracker/w/$TSHA/crash-tracker.wasm ($(stat -c%s "$TRACKER") bytes)"
+  exit 0
+fi
+
+# --upload from here: the tree must carry no wasm at all, because that is what
+# the 25 MiB cap refuses.
+LEFT="$(find "$DIR" -name '*.wasm' | sort)"
+[ -z "$LEFT" ] || { echo "wasm-to-r2: .wasm files left in the tree; Pages caps a file at 25 MiB and will refuse the deploy:"; echo "$LEFT" | sed 's/^/  /'; exit 1; }
+
+put() {   # local file, bucket key
+  if [ "$DRY" = 1 ]; then echo "wasm-to-r2: would put $2 ($(stat -c%s "$1") bytes) in $BUCKET"; return 0; fi
+  # content-addressed: a key that is there already holds these very bytes
+  if wrangler r2 object get "$BUCKET/$2" --file /dev/null > /dev/null 2>&1; then
+    echo "wasm-to-r2: $2 is already in $BUCKET"
+    return 0
+  fi
+  wrangler r2 object put "$BUCKET/$2" --file "$1" --content-type application/wasm > /dev/null
+  echo "wasm-to-r2: put $2 ($(stat -c%s "$1") bytes)"
+}
+[ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "wasm-to-r2: wrangler not on PATH"; exit 1; }
+[ "$DRY" = 1 ] || [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "wasm-to-r2: CLOUDFLARE_API_TOKEN not set (. ~/Ops/.env-cloudflare)"; exit 1; }
+put "$GAME" "$GKEY"
+put "$TRACKER" "$TKEY"
+echo "wasm-to-r2: upload. /jack-in/w/$GSHA/crash-the-stack.wasm, /tracker/w/$TSHA/crash-tracker.wasm, bucket $BUCKET"
