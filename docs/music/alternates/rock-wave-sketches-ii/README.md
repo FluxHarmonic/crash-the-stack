@@ -89,3 +89,24 @@ The final choice remains a listening decision.
 
 Audio, exact commands, native measurements, spectral-check script/logs and
 renderer identity are under ~/Ops/artifacts/crash-the-stack-album/rock-wave-sketches-ii/.
+
+## Delivery record
+
+Source commit **139258b**. Telegram acknowledged Fault Line A/B as **1177**,
+its complete revised demo as **1178**, After Image A/B as **1179**, and its
+complete revised demo as **1180**. The original full demos were retained locally.
+All six encoded reference/delivery files have hashes in `encoded.sha256`.
+
+| Export | LUFS-I | dBTP | Common gain |
+|---|---:|---:|---:|
+| Fault Line A/B | -19.2 | -3.3 | 0 dB |
+| Fault Line revised demo | -20.0 | -2.0 | 0 dB |
+| After Image A/B | -18.9 | -1.9 | +1.7 dB |
+| After Image revised demo | -19.3 | -2.8 | +1.7 dB |
+
+Each full ending peaks at -91 dBFS over the last second. Both revised full
+scores retain zero compiled clock error (585 and 468 attacks respectively),
+released final gates and passing voice budgets. Delivery duration/format checks
+pass. Full before/after native loudness is -19.7/-20.1 LUFS for Fault Line and
+-21.1/-21.0 for After Image; the A/B gain is identical within each track.
+Listening approval remains pending.
