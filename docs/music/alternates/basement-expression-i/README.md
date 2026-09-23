@@ -59,16 +59,19 @@ retains its B06 loop; the album retains its 3:40.645 finite arrangement and tail
 ## Listening sequence
 
 Each pair plays BEFORE then AFTER, from fresh renderer state with two release
-bars. The first two pairs keep identical performance; the third keeps original
-patches. No per-half normalization or new limiting masks the differences.
+bars. The exposed and contextual patch pairs keep identical performance; the final
+phrase pair keeps original patches. No per-half normalization or new limiting masks the differences.
 
 | Pair | Before | After | Context |
 |---|---|---|---|
-| Pluck patch | 0:00.000 | 0:19.355 | Eight calm bars |
-| Acid contour | 0:38.710 | 0:58.065 | Eight tense bars |
-| Melodic replies | 1:17.419 | 1:44.516 | Four-bar bridge and eight-bar calm return |
+| Exposed pluck | 0:00.000 | 0:11.613 | Four bars, +18 dB monitoring on both halves |
+| Pluck in the mix | 0:23.226 | 0:42.581 | Eight calm bars at actual relative levels |
+| Acid contour | 1:01.935 | 1:21.290 | Eight tense bars |
+| Melodic replies | 1:40.645 | 2:07.742 | Four-bar bridge and eight-bar calm return |
 
-The montage lasts 2:11.613. The complete candidate combines all three proposed
+The montage lasts 2:34.839. The pluck is deliberately distant, so its full-mix
+change is subtle: the exposed pair helps judge its timbre without increasing its
+level in the song. The complete candidate combines all three proposed
 ideas; the complete reference preserves the accepted composition and patches.
 New phrases appear near 1:01.935 (bridge), 1:17.419 (late calm development) and
 3:13.548 (descending reprise). These are auditions, not release masters.
@@ -94,4 +97,5 @@ are retained, so patch choices can be accepted independently of phrase choices.
 The composer protects backing events, clock, bus, instrument routing and levels.
 Full native clock, game-loop, comparison, encoded-audio and regeneration results
 will accompany the delivered files. Audio and commands belong outside the repo
-under ~/Ops/artifacts/crash-the-stack-album/basement-expression-i/.
+under ~/Ops/artifacts/crash-the-stack-album/basement-expression-i/ (initial native
+renders) and basement-expression-i-delivery/ (final comparison and full OGGs).
