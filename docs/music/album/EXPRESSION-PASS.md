@@ -387,3 +387,9 @@ gates, timing and backing intact. The velocity-sensitive filter softens with
 the notes; this is not independent post-filter gain automation. Telegram 1165
 contains only the requested 15.484-second clip. Compiled performance, all-song
 regeneration, reproduction and audio checks pass; listening approval is pending.
+
+David preferred Fade I as the better ending. The selected Basement Circuit
+version is Expression I plus the original-rhythm acid fade; the musical pass is
+finished. Preserve the rejected turnaround as history. Shared-source adoption,
+a fresh complete render including the fade, mastering and publication are next;
+none of those release steps has yet been performed for Basement Circuit II.

@@ -41,12 +41,21 @@ The maintained game/album scores and public release remain unchanged.
 ## Checks and delivery
 
 Telegram acknowledged the single clip as **message 1165**. No A/B or additional
-full tracks were sent. Listening feedback is pending. The clip measures
+full tracks were sent. David subsequently preferred this ending. The clip measures
 -16.4 LUFS-I/-4.6 dBTP, with a -90.3 dBFS final second; duration and stereo
 44.1 kHz format checks pass.
 
 Compiled comparisons confirm identical acid pitches, gates, slides and trigger
 times, every backing-channel tick unchanged, no acid-volume increase, and a
 final acid level of 1/64. All nine generated files reproduce byte-for-byte.
-All fifteen maintained-song regeneration checks pass. This remains a proposed
-shared-source change until listening approval.
+All fifteen maintained-song regeneration checks pass. The musical choice is
+approved; source adoption and release work remain pending.
+
+## Selected ending
+
+David judged this a better ending. Keep Expression I's patch and phrase
+improvements with Fade I's original-rhythm acid fade; the musical pass is
+finished. Turnaround I remains rejected and archived. The next working step is
+to adopt Fade I's shared pool, regenerate both arrangements, then render and
+master the complete album update. The earlier complete Expression I WAV lacks
+this fade and must not be reused as the selected final render.

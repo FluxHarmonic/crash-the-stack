@@ -133,3 +133,10 @@ in the external directories. The final native pass reuses the eight completed
 WAVs only after exact source and renderer checks; the two exposed clips are fresh
 renders. A full-mix difference is measurable for both patches, but that is not
 evidence that either is musically preferable: David's listening decides.
+
+## Selected follow-up
+
+David liked this complete candidate and selected
+[Fade I](../basement-fade-i/README.md) as its better ending after rejecting
+Turnaround I. Keep these patches and melodic replies with that acid-volume
+fade. Source adoption and the complete release render remain pending.
