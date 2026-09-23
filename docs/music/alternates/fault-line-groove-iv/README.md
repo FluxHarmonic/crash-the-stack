@@ -74,3 +74,11 @@ The comparison OGG measures -19.4 LUFS-I/-3.8 dBTP; the full revised demo is
 -19.7 LUFS-I/-3.8 dBTP. The complete before reference is retained locally.
 This remains a style audition. The official game/album tracks and public site
 are unchanged, and After Image remains at its dark-synthwave revision.
+
+## Delivered review copy
+
+Source commit: **2e930a2**. Telegram acknowledged the Style III/IV comparison
+as **1183** and the complete revised short demo as **1184**. `encoded.sha256`
+records all retained reference and delivered OGG files. Both full endings peak
+at -91 dBFS over the last second. Duration, stereo 44.1 kHz, encoded peak and
+release checks pass. Listening feedback remains pending.
