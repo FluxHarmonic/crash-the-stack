@@ -52,8 +52,16 @@ const CDP = parseInt(opt("--cdp", "9236"), 10);
 const SITE_URL = "https://crashthestack.com";
 const CODE = "380000010V";   // verify.mjs's cards seed 1 share code
 
-for (const f of ["index.html", "jack-in/index.html", "jack-in/sw.js", "jack-in/crash-the-stack.wasm", "tracker/index.html", "sw.js", "_headers", "_redirects", "devlog/feed.xml", "devlog/feed.json"]) {
+for (const f of ["index.html", "jack-in/index.html", "jack-in/sw.js", "tracker/index.html", "sw.js", "_headers", "_redirects", "devlog/feed.xml", "devlog/feed.json"]) {
   if (!fs.existsSync(path.join(STAGED, f))) { console.log(`SETUP-FAILED: ${STAGED}/${f} missing (scripts/stage-web builds the tree)`); process.exit(2); }
+}
+// the wasm is not a staged file any more: stage-web's --local run puts it at
+// jack-in/w/<sha16>/crash-the-stack.wasm, the path the deploy's Function
+// serves, and the wasm leg checks the page against it
+{
+  const hashed = fs.existsSync(path.join(STAGED, "jack-in", "w")) && fs.readdirSync(path.join(STAGED, "jack-in", "w"));
+  const ok = hashed && hashed.some((h) => fs.existsSync(path.join(STAGED, "jack-in", "w", h, "crash-the-stack.wasm")));
+  if (!ok) { console.log(`SETUP-FAILED: ${STAGED}/jack-in/w/<sha16>/crash-the-stack.wasm missing (scripts/stage-web calls scripts/wasm-to-r2 --local)`); process.exit(2); }
 }
 if (OLD) for (const f of ["index.html", "sw.js", "crash-the-stack.wasm"]) {
   if (!fs.existsSync(path.join(OLD, f))) { console.log(`SETUP-FAILED: --old ${OLD}/${f} missing (the previous publish's game tree)`); process.exit(2); }
@@ -214,6 +222,8 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   if (!/Motif Tracker/.test(tracker)) detail.push("/docs/tracker/ is not the tracker manual");
   const trackerPage = text("tracker/index.html");
   if (!/crash-tracker/.test(trackerPage)) detail.push("/tracker/ is not the tracker page");
+  // the pre-move deploy served the game from the root; none of its files may be there now
+  // (the wasm lives under jack-in/w/<sha16>/ since the R2 move, never at the root)
   for (const f of ["crash-the-stack.wasm", "styles.css", "sigil-wasm-bridges.js"]) if (fs.existsSync(path.join(STAGED, f))) detail.push(`the old game's ${f} is at the root`);
   const headers = text("_headers");
   if (!/^\/jack-in\/\*/m.test(headers) || /^\/\*$/m.test(headers)) detail.push("_headers does not scope the isolation headers to /jack-in/*");
