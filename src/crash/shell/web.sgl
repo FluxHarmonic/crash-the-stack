@@ -1313,7 +1313,12 @@
           ;; with no pool, so the driver fades the theme out; the hub asks for
           ;; its own pool with the RUN's seed, so one JACK IN is one tune all
           ;; the way down, and its alert reads as the tense section
-          ((entry) (music-frame! 'entry #f))
+          ;; the entry screen wants silence, and the model already has a word
+          ;; for it: a phase the driver reads as "fade what is playing". Asking
+          ;; instead for a table with no pool reached music-pick, which answers
+          ;; #f, and the driver's own trace line then called symbol->string on
+          ;; it and threw — the fade never ran (the gate, 2026-09-23).
+          ((entry) (music-frame! 'entry 'cleared))
           ((hub) (music-frame! 'hub (hub-music-phase) (hub-music-seed)))
           ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
           (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
@@ -1775,11 +1780,16 @@
              (hs (hub-screen-tick hs0 (* 1000.0 dt) f)))
         (hub-run-set! hs)
         (when (hub-screen-buzz hs) (set! *vibrate-asked* #t))   ; the touch overlay's press: the page vibrates
-        (when (and *trace* (> (hub-screen-beats hs) (hub-screen-beats hs0)))
+        ;; one line per BEAT stepped, not per frame: a slow frame steps
+        ;; several, and a line a frame made two honest beats look like one
+        ;; beat moving the runner two cells (the gate, 2026-09-23)
+        (when *trace*
           (let ((w (hub-screen-world hs)))
-            (say "hub" "beat" (world-beat w) "trace" (world-trace w) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (runner-cell (world-runner w))
-                 "daemons" (fold-left (lambda (acc d) (if (string=? acc "") (number->string (daemon-cell d)) (string-append acc "," (number->string (daemon-cell d)))))
-                                      "" (world-daemons w)))))
+            (for-each (lambda (b)
+                        (say "hub" "beat" (car b) "trace" (caddr b) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (cadr b)
+                             "daemons" (fold-left (lambda (acc d) (if (string=? acc "") (number->string (daemon-cell d)) (string-append acc "," (number->string (daemon-cell d)))))
+                                                  "" (world-daemons w))))
+                      (hub-screen-stepped hs))))
         (case (hub-screen-request hs)
           ((launch)
            (let ((l (hub-run-launch! (setting 'draw) (setting 'scoring))))

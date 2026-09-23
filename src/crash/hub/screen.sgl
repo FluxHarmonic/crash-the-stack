@@ -44,6 +44,7 @@
           hub-screen-world hub-screen-prev hub-screen-tween hub-screen-clock hub-screen-beat-ms
           hub-screen-queued hub-screen-held? hub-screen-request hub-screen-toasts hub-screen-panel
           hub-screen-panel-row hub-screen-bpm-pin hub-screen-beats hub-screen-last hub-screen-touch? hub-screen-walk hub-screen-buzz
+          hub-screen-stepped
           hub-screen-with-touch hub-screen-teleport hub-panel-rect hub-panel-hit hub-touch-buttons hub-touch-hit PANEL-W PANEL-H PANEL-ROW-Y PANEL-ROW-H BOARD-H PAD VIEW-PX-W
           hub-screen-tick hub-screen-hold hub-screen-take-request hub-screen-return hub-screen-launch hub-screen-hold-board
           hub-screen-with-bpm hub-screen-shop hub-screen-camera hub-screen-daemon-at beat-ease
@@ -98,6 +99,12 @@
       (walk default: #f)                ; the d-pad's walk: a direction taken every beat until WAIT or a bump
       (buzz default: #f)                ; a touch-overlay button was pressed this frame (the page vibrates)
       (beats default: 0)
+      ;; the beats stepped in THIS frame, oldest first, as (beat cell trace):
+      ;; a slow frame steps several, and a shell that traces once a frame
+      ;; would report one beat having moved the runner two cells (the gate
+      ;; read exactly that on a loaded runner, 2026-09-23). Cleared at the
+      ;; top of every tick; at most MAX-CATCH-UP entries.
+      (stepped default: '())
       (last default: 'wait))            ; the last beat's action; 'idle when nobody asked for it (the late window's)
 
     (define (bpm-of hs)
@@ -426,7 +433,7 @@
 
     ;; One frame: dt in ms and the input frame. Answers the next screen.
     (define (hub-screen-tick hs dt f)
-      (let* ((hs (hub-screen hs toasts: (tick-toasts (hub-screen-toasts hs) dt) buzz: #f))
+      (let* ((hs (hub-screen hs toasts: (tick-toasts (hub-screen-toasts hs) dt) buzz: #f stepped: '()))
              (hs (hub-screen hs tween: (min 1.0 (+ (hub-screen-tween hs) (/ dt (hub-screen-beat-ms hs)))))))
         (cond ((hub-screen-panel hs) (panel-tick hs f))
               ((hub-screen-request hs) hs)                ; waiting on the shell
@@ -485,7 +492,12 @@
              (hs (if idle? (hub-screen hs last: 'idle) hs))
              (hs (if (any (lambda (e) (and (pair? e) (eq? (car e) 'bump))) (world-events (hub-screen-world hs)))
                      (hub-screen hs walk: #f)
-                     hs)))
+                     hs))
+             (w (hub-screen-world hs))
+             (hs (hub-screen hs stepped: (append (hub-screen-stepped hs)
+                                                 (list (list (world-beat w)
+                                                             (runner-cell (world-runner w))
+                                                             (world-trace w)))))))
         (hub-screen hs beat-ms: (beat-ms-of hs))))
 
     ;; DISCONNECT on the board: held at its node (with its heat), the runner back in the world.

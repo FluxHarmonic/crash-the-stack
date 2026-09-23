@@ -331,3 +331,32 @@
 
 (define (layer->text* hs)
   (world->text (hub-screen-world hs)))
+
+(test-group "hub screen: a frame that steps several beats reports each one"
+  (test "one slow frame steps four beats and records four, each with its own cell and trace (the gate read a two-cell beat when the shell traced once a frame)"
+    (let* ((hs (hub-screen-with-touch (screen-of "#########\n#@......#\n#########") #f))
+           (one (hub-screen-tick hs 500.0 (frame 'right))))
+      ;; a normal frame: one beat, one entry
+      (assert-equal 1 (length (hub-screen-stepped one)))
+      (assert-equal (list (world-beat (hub-screen-world one))
+                          (runner-cell (world-runner (hub-screen-world one)))
+                          (world-trace (hub-screen-world one)))
+                    (car (hub-screen-stepped one)))
+      ;; a frame long enough for the catch-up, with the key HELD: four beats,
+      ;; four entries, and each entry one cell on from the last
+      (let* ((held (make-input-frame '() (list 'right) #f))
+             (slow (hub-screen-tick one 2000.0 held))
+             (cells (map cadr (hub-screen-stepped slow))))
+        (assert-equal MAX-CATCH-UP (length (hub-screen-stepped slow)))
+        (assert-equal MAX-CATCH-UP (length cells))
+        (let loop ((cs cells) (prev (runner-cell (world-runner (hub-screen-world one)))))
+          (unless (null? cs)
+            (assert-equal 1 (- (car cs) prev))
+            (loop (cdr cs) (car cs))))
+        ;; the beats themselves run on without a gap
+        (let ((beats (map car (hub-screen-stepped slow))))
+          (assert-equal (+ 1 (world-beat (hub-screen-world one))) (car beats))
+          (assert-equal (world-beat (hub-screen-world slow)) (car (reverse beats)))))
+      ;; every tick starts a fresh record
+      (assert-equal '() (hub-screen-stepped (hub-screen-tick one 10.0 IDLE)))))
+)
