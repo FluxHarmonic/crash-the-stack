@@ -105,3 +105,8 @@ f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842.
 The official expression renderer verifies exact source and renderer identity
 before reusing each completed native job. External directories retain argv,
 source and audio hashes, measurements, audit scripts, receipts and commands.
+
+David approved the complete candidate and authorized release. The shared pool
+and both maintained arrangements now match this audition exactly; all fifteen
+regeneration checks pass. See [Sector Drift II](../../album/SECTOR-DRIFT-II.md)
+for mastering and publication details.

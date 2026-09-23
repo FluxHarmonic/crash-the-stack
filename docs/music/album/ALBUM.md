@@ -21,7 +21,7 @@ process.
 | 5 | Shadow Protocol | Composition liked; detail review open | 3:50 actual |
 | 6 | Blind Spot | Air pair I ready for listening | 3:15 actual |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
-| 8 | Sector Drift | Air pair I ready for listening | 3:36 actual |
+| 8 | Sector Drift | Album II approved and synchronized; release in progress | 3:36 actual |
 | 9 | Dirty Cache | Album II phrasing approved, synchronized and published | 3:43 actual |
 | 10 | Basement Circuit | Album II approved, synchronized and published | 3:41 actual |
 | 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
