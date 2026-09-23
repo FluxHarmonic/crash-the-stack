@@ -39,11 +39,14 @@ set -eu
 cd "$(dirname "$0")/.." || exit 1
 DIR="${1:-}"
 [ -n "$DIR" ] || { echo "stage-web: give the directory to stage into"; exit 1; }
+# the game's tree: this box's build by default, a runner's fresh checkout
+# (build/remote-web-<sha>) when the release path sets CRASH_WEB_DIR
+WEB="${CRASH_WEB_DIR:-build/web}"
 [ -f site/public/index.html ] || { echo "stage-web: site/public/index.html missing; cd site && sigil run -- build first"; exit 1; }
-[ -f build/web/index.html ] || { echo "stage-web: build/web/index.html missing; build --config web first"; exit 1; }
+[ -f "$WEB/index.html" ] || { echo "stage-web: $WEB/index.html missing; build --config web first (or set CRASH_WEB_DIR)"; exit 1; }
 # the two wasm stay in build/web: wasm-to-r2 hashes them from there
-[ -f build/web/crash-the-stack.wasm ] || { echo "stage-web: build/web/crash-the-stack.wasm missing"; exit 1; }
-[ -f build/web/tracker/crash-tracker.wasm ] || { echo "stage-web: build/web/tracker/crash-tracker.wasm missing"; exit 1; }
+[ -f "$WEB/crash-the-stack.wasm" ] || { echo "stage-web: $WEB/crash-the-stack.wasm missing"; exit 1; }
+[ -f "$WEB/tracker/crash-tracker.wasm" ] || { echo "stage-web: $WEB/tracker/crash-tracker.wasm missing"; exit 1; }
 [ -x scripts/wasm-to-r2 ] || { echo "stage-web: scripts/wasm-to-r2 missing; it places the two wasm and points the pages at them"; exit 1; }
 for f in web/_headers web/_redirects web/sw-tombstone.js; do [ -f "$f" ] || { echo "stage-web: $f missing"; exit 1; }; done
 SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-}"
@@ -66,25 +69,25 @@ cp -r site/public/. "$DIR/"
 # the game
 mkdir -p "$DIR/jack-in"
 for f in index.html styles.css sw.js sigil-wasm-bridges.js sigil-wasm-bridges.json; do
-  [ -f "build/web/$f" ] || { echo "stage-web: build/web/$f missing"; exit 1; }
-  cp "build/web/$f" "$DIR/jack-in/"
+  [ -f "$WEB/$f" ] || { echo "stage-web: $WEB/$f missing"; exit 1; }
+  cp "$WEB/$f" "$DIR/jack-in/"
 done
-cp -r build/web/assets "$DIR/jack-in/assets"
+cp -r "$WEB/assets" "$DIR/jack-in/assets"
 # the build task already drops assets/refs (generator provenance, never
 # shipped); refuse rather than stage it if a build ever leaves it in
-if [ -n "$(find "$DIR/jack-in/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "stage-web: build/web/assets/refs has files; the build task should have dropped it"; exit 1; fi
+if [ -n "$(find "$DIR/jack-in/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "stage-web: $WEB/assets/refs has files; the build task should have dropped it"; exit 1; fi
 rm -rf "$DIR/jack-in/assets/refs"
 # M1 retired the OGG tracks: a build directory that still carries them (a build never
 # cleans assets/) would publish 3 MB nothing fetches; refuse rather than stage it
-if [ -d "$DIR/jack-in/assets/audio" ]; then echo "stage-web: build/web/assets/audio exists; M1 retired the OGGs, remove the directory (rm -rf build/web/assets/audio) and rerun"; exit 1; fi
+if [ -d "$DIR/jack-in/assets/audio" ]; then echo "stage-web: $WEB/assets/audio exists; M1 retired the OGGs, remove the directory (rm -rf $WEB/assets/audio) and rerun"; exit 1; fi
 # the tracker, behind /tracker/: exactly the files its page loads
 mkdir -p "$DIR/tracker/assets"
 for f in index.html sigil-wasm-bridges.js sigil-wasm-bridges.json styles.css \
          assets/sigil-web-app.js assets/sigil-wasm-gles3.js assets/sigil-wasm-audio.js assets/sigil-browser.js; do
-  [ -f "build/web/tracker/$f" ] || { echo "stage-web: build/web/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
-  cp "build/web/tracker/$f" "$DIR/tracker/$f"
+  [ -f "$WEB/tracker/$f" ] || { echo "stage-web: $WEB/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
+  cp "$WEB/tracker/$f" "$DIR/tracker/$f"
 done
-grep -q "crash-tracker" "$DIR/tracker/index.html" || { echo "stage-web: build/web/tracker/index.html is not the tracker page"; exit 1; }
+grep -q "crash-tracker" "$DIR/tracker/index.html" || { echo "stage-web: $WEB/tracker/index.html is not the tracker page"; exit 1; }
 # the album's listening page: from the tree, or wholly from the override
 mkdir -p "$DIR/soundtrack"
 if [ -n "$SOUNDTRACK" ]; then
@@ -106,8 +109,8 @@ cp web/sw-tombstone.js "$DIR/sw.js"
 grep -q '"scope": "\.\./"' "$DIR/jack-in/assets/manifest.webmanifest" || { echo "stage-web: the manifest's scope is not ../ (= /jack-in/)"; exit 1; }
 # the two wasm, last: it rewrites the pages it points at, so the tree must
 # be otherwise complete. --local unless the caller asked for the upload.
-scripts/wasm-to-r2 "$DIR" ${WASM_MODE:---local}
+CRASH_WEB_DIR="$WEB" scripts/wasm-to-r2 "$DIR" ${WASM_MODE:---local}
 echo "stage-web: staged $(find "$DIR" -type f | wc -l) files ($(du -sh "$DIR" | cut -f1)) in $DIR:"
 (cd "$DIR" && find . -type f | sort | sed 's|^\./|  |')
-echo "stage-web: game wasm $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/jack-in/index.html" | head -1 | cut -d'"' -f2), tracker wasm $(sha256sum build/web/tracker/crash-tracker.wasm | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/tracker/index.html" | head -1 | cut -d'"' -f2)"
-echo "stage-web: game page $(sha256sum build/web/index.html | cut -c1-16), landing $(sha256sum site/public/index.html | cut -c1-16)"
+echo "stage-web: game wasm $(sha256sum "$WEB/crash-the-stack.wasm" | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/jack-in/index.html" | head -1 | cut -d'"' -f2), tracker wasm $(sha256sum "$WEB/tracker/crash-tracker.wasm" | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/tracker/index.html" | head -1 | cut -d'"' -f2)"
+echo "stage-web: game page $(sha256sum "$WEB/index.html" | cut -c1-16), landing $(sha256sum site/public/index.html | cut -c1-16)"

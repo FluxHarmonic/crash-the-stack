@@ -27,11 +27,30 @@ MESSAGE="${1:-}"
 [ -n "$MESSAGE" ] || [ "$DRY" = 1 ] || { echo "publish-web: give the deploy a message: publish-web \"<row>: <one line>\""; exit 1; }
 [ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "publish-web: wrangler not on PATH"; exit 1; }
 
+# The game's tree. build/web is this box's own build; the release path sets
+# CRASH_WEB_DIR to a runner's fresh checkout (build/remote-web-<sha>), so the
+# published bytes are the gated bytes and nothing stale can survive in a
+# directory a build never cleans. A named tree must say which commit it was
+# built at, and that commit must be HEAD: the log then proves what shipped.
+WEB="${CRASH_WEB_DIR:-build/web}"
+[ -f "$WEB/index.html" ] || { echo "publish-web: $WEB/index.html missing; build --config web (or point CRASH_WEB_DIR at a built tree)"; exit 1; }
+STAMP="$(grep -o 'version: "[^"]*"' "$WEB/index.html" | head -1 | cut -d'"' -f2)"
+HEAD_SHA="$(git rev-parse --short=12 HEAD)"
+if [ -n "${CRASH_WEB_DIR:-}" ]; then
+  case "$STAMP" in
+    *-dirty-*) echo "publish-web: $WEB was built from a dirty tree (stamp $STAMP); publish a tree built from a commit"; exit 1 ;;
+  esac
+  [ "$STAMP" = "$HEAD_SHA" ] || { echo "publish-web: $WEB was built at $STAMP, HEAD is $HEAD_SHA; build the commit you are publishing"; exit 1; }
+  echo "publish-web: source tree $WEB, built at $STAMP (= HEAD)"
+else
+  echo "publish-web: source tree $WEB, built at $STAMP (HEAD $HEAD_SHA)"
+fi
+
 STAGE="$(mktemp -d /tmp/crash-publish-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
 # the upload mode: the two wasm go to R2 and no wasm may be left in the tree
 # (Cloudflare Pages refuses a file over 25 MiB, and the game's is past it)
-WASM_MODE=--upload scripts/stage-web "$STAGE"
+CRASH_WEB_DIR="$WEB" WASM_MODE=--upload scripts/stage-web "$STAGE"
 
 if [ "$DRY" = 1 ]; then echo "publish-web: dry run, nothing deployed"; exit 0; fi
 SHA="$(git rev-parse HEAD)"
