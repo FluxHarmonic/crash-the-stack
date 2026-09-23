@@ -16,12 +16,16 @@
 //
 // Fetch: same-origin GET requests are served from this version's cache
 // first and the network second (the response is cached for next time);
-// navigations (any query string) are the cached page, the tracker's for a
-// path ending in /tracker/ (P3b) and the game's otherwise. Anything else goes
-// to the network untouched.
+// navigations (any query string) are the cached game page. Anything else
+// goes to the network untouched. The worker's scope is the game's own
+// directory (/jack-in/ on crashthestack.com since P4b; the site and the
+// tracker sit outside it).
 
 var VERSION = "__VERSION__";
-var CACHE = "crash-the-stack-" + VERSION;
+// P4b: the game's caches are "crash-jack-in-<version>"; the old root-scoped
+// worker's were "crash-the-stack-<version>", which the root tombstone
+// (web/sw-tombstone.js) deletes by that prefix without touching these.
+var CACHE = "crash-jack-in-" + VERSION;
 var SHELL = [
   "./",
   "styles.css",
@@ -59,9 +63,11 @@ var SHELL = [
   "assets/manifest.webmanifest",
   "assets/icon-192.png",
   "assets/icon-512.png",
-  // the tracker's page (P3b): its wasm is not precached; the first visit to
-  // /tracker/ fetches it and the runtime branch below caches it
-  "tracker/"
+  "assets/icon-maskable-192.png",
+  "assets/icon-maskable-512.png"
+  // P4b (the URL move): the game is /jack-in/ and this worker's scope is
+  // that directory; the tracker at /tracker/ is outside it, its own page,
+  // and no longer precached or routed here.
 ];
 
 self.addEventListener("install", function (event) {
@@ -80,7 +86,7 @@ self.addEventListener("activate", function (event) {
   event.waitUntil(
     caches.keys().then(function (names) {
       return Promise.all(names.map(function (name) {
-        if (name !== CACHE && name.indexOf("crash-the-stack-") === 0) return caches.delete(name);
+        if (name !== CACHE && (name.indexOf("crash-jack-in-") === 0 || name.indexOf("crash-the-stack-") === 0)) return caches.delete(name);
         return null;
       }));
     }).then(function () { return self.clients.claim(); })
@@ -127,9 +133,9 @@ self.addEventListener("fetch", function (event) {
   if (req.mode === "navigate") {
     event.respondWith(
       caches.open(CACHE).then(function (cache) {
-        // /tracker/ is the tracker's own page and wasm (P3b, David 2026-09-21)
-        var page = /\/tracker\/?$/.test(url.pathname) ? "./tracker/" : "./";
-        return cache.match(page).then(function (hit) {
+        // every navigation in scope is the game's page (P4b: the scope is
+        // /jack-in/; the tracker at /tracker/ is outside it)
+        return cache.match("./").then(function (hit) {
           return hit || fetch(req);
         });
       }).then(isolated)

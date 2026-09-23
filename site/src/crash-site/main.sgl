@@ -1,0 +1,67 @@
+;;; (crash-site main) - crashthestack.com, built with Press (ruling D20).
+;;;
+;;; The pages: the landing (content/index.sxml, a complete document), About
+;;; (content/about.md), the devlog (content/devlog/*.md, dated posts; the
+;;; index at /devlog/ and the feeds at /devlog/feed.xml and feed.json), and
+;;; the tracker's manual from the repo's own docs/tracker.md at
+;;; /docs/tracker/. The game is not built here: scripts/publish-web stages
+;;; build/web under /jack-in/ and the tracker under /tracker/ beside this
+;;; output, and the same staged tree is what the wg0 host serves.
+
+(define-library (crash-site main)
+  (import (sigil core)
+          (sigil list)
+          (press)
+          (press generate)
+          (press feeds)
+          (crash-site theme))
+  (export main)
+
+  (begin
+    (define SITE-URL "https://crashthestack.com")
+
+    ;; The newest devlog post in the state, or #f.
+    (define (newest-post state)
+      (let ((posts (feed-items state (matches-path? "/devlog/") 1)))
+        (and (pair? posts) (car posts))))
+
+    (define (main)
+      (run-publish
+        (site title: "Crash The Stack"
+              base-url: SITE-URL
+              output-dir: "public"
+              theme: crash-theme
+              ;; the pipeline spelled out: the collection page must come before
+              ;; attach-content-producers (that is what gives it a producer)
+              pipeline: (list
+                          (scan-files "content/**/*.md")
+                          ;; the tracker's manual from the repo's docs, under /docs/
+                          (scan-files "../docs/tracker.md" output-prefix: "/docs/")
+                          (scan-assets "assets/**/*")
+                          filter-drafts
+                          build-navigation
+                          build-ref-index
+                          build-path-index
+                          ;; the devlog's index, newest first
+                          (collection-page match: (matches-path? "/devlog/")
+                                           title: "Devlog"
+                                           output: "/devlog/index.html"
+                                           sort-by: date:
+                                           sort-order: 'descending
+                                           template: devlog-listing)
+                          ;; the landing: a complete document with the newest post's title
+                          (sxml-page path: "/index.html"
+                                     title: "Crash The Stack"
+                                     content: (lambda (config state)
+                                                (list (landing-page (newest-post state)))))
+                          ;; its feeds
+                          (with-feeds match: (matches-path? "/devlog/")
+                                      title: "Crash The Stack devlog"
+                                      description: "The story of the build, one post at a time."
+                                      base-url: SITE-URL
+                                      rss: "/devlog/feed.xml"
+                                      json: "/devlog/feed.json"
+                                      author: "David Wilson")
+                          attach-content-producers
+                          attach-asset-producers)
+              watch-patterns: (list "content/**/*.md" "assets/**/*" "../docs/tracker.md"))))))

@@ -317,13 +317,17 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     m0 = consoleLines.length;
     await menuKey("ArrowDown"); await menuKey("Enter");
     const freeK = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
+    // D66: DEFRAG opens the game's screen; its first row, NEW BOARD, deals
     await menuKey("ArrowDown"); await menuKey("Enter");
+    const gameK = await waitLine(/^crash: menu free-cards (.+)$/, m0, 3000);
+    if (gameK) await menuKey("Enter");
     const choseK = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
     const bootedK = choseK && await waitLine(/^crash: cards seed /, m0, 5000);
     await sleep(600);
     const errorsAfterKeys = consoleErrors.length + consoleLines.slice(m0).filter((l) => /^Error:/.test(l)).length;
     if (!freeK) fail("menu", "ArrowDown, Enter did not open FREE PLAY (no \"crash: menu free\" line)");
-    else if (!choseK) fail("menu", "no \"crash: menu chose\" line after ArrowDown, Enter on FREE PLAY");
+    else if (!gameK) fail("menu", "ArrowDown, Enter on FREE PLAY did not open DEFRAG's screen (no \"crash: menu free-cards\" line)");
+    else if (!choseK) fail("menu", "no \"crash: menu chose\" line after Enter on NEW BOARD");
     else if (choseK.m[1] !== "cards") fail("menu", `keys: expected chose cards, got ${choseK.m[0]}`);
     else if (!bootedK) fail("menu", "keys chose cards but no card-table boot line followed");
     else if (errorsAfterKeys > 0) fail("menu", `keys booted the table with ${errorsAfterKeys} error line(s) in the console`);
@@ -355,7 +359,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         else {
           free2 = parseMenu(freeLine.m[1]).entries;
           const rows = Object.keys(free2).map((k) => k.split("=")[0]);
-          if (rows.join(" ") !== "stack cards daily-stack daily-cards code scores tracker version back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;   // TRACKER: P3b, a link the page follows
+          if (rows.join(" ") !== "stack cards code scores back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;   // D66: the games, ENTER CODE, HIGH SCORES
           else {
             // 32 px per row: the row under BACK is empty (above the band)
             await sleep(300);
@@ -371,7 +375,11 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       if (lookDetail) fail("menu", lookDetail);
       else if (!free2.cards) fail("menu", "no DEFRAG row on FREE PLAY");
       else {
+        // D66: the tap on DEFRAG opens its screen; the tap on NEW BOARD deals
         await tap(free2.cards[0], free2.cards[1]);
+        const gameLine = await waitLine(/^crash: menu (free-cards .+)$/, m0, 3000);
+        const game = gameLine ? parseMenu(gameLine.m[1]).entries : {};
+        if (game["new-board"]) await tap(game["new-board"][0], game["new-board"][1]);
         const chose = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
         const booted = chose && await waitLine(/^crash: cards seed /, m0, 5000);
         if (!chose) fail("menu", "no \"crash: menu chose\" line after a tap on DEFRAG");

@@ -187,6 +187,44 @@ static Value native_fatal(SigilVM *vm, int argc, Value *args)
     return SIGIL_FALSE;
 }
 
+/*
+ * (%open-url url) -> #t or #f
+ *   The platform's own "open this": ShellExecute on Windows, xdg-open on
+ *   Linux and the BSDs, open on macOS; the NEWS menu's way of showing a
+ *   devlog post outside the game (P4b, ruling D20). Native only: on the
+ *   web the page opens the post itself (window.open) on the game's
+ *   "crash: open URL" line, and this native answers #f. Only http(s) URLs
+ *   are handed to the platform.
+ */
+static Value native_open_url(SigilVM *vm, int argc, Value *args)
+{
+#ifdef __wasm__
+    (void)vm; (void)argc; (void)args;
+    return SIGIL_FALSE;
+#else
+    if (argc < 1 || !sigil_is_string(args[0])) {
+        sigil__vm_set_error(vm, SIGIL_ERR_TYPE, "%open-url: expected a URL string");
+        return SIGIL_FALSE;
+    }
+    SigilString *url = (SigilString *)sigil_as_ptr(args[0]);
+    const char *u = url->data;
+    if (strncmp(u, "http://", 7) != 0 && strncmp(u, "https://", 8) != 0) return SIGIL_FALSE;
+    for (const char *c = u; *c; c++) if (*c == '"' || *c == '\'' || *c == ' ' || *c < 0x20) return SIGIL_FALSE;
+#ifdef _WIN32
+    return ((intptr_t)ShellExecuteA(NULL, "open", u, NULL, NULL, SW_SHOWNORMAL) > 32) ? SIGIL_TRUE : SIGIL_FALSE;
+#else
+    char cmd[2048];
+#ifdef __APPLE__
+    int n = snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", u);
+#else
+    int n = snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", u);
+#endif
+    if (n <= 0 || (size_t)n >= sizeof cmd) return SIGIL_FALSE;
+    return system(cmd) == 0 ? SIGIL_TRUE : SIGIL_FALSE;
+#endif
+#endif
+}
+
 void sigil__init_crash_native_module(SigilVM *vm)
 {
 #ifdef _WIN32
@@ -199,7 +237,10 @@ void sigil__init_crash_native_module(SigilVM *vm)
     sigil_module_register_native(vm, "%fatal!", native_fatal, SIGIL_ARITY_EXACT(0),
                                  "The page guard's trap door: a FATAL line on stderr, then abort()");
     sigil_module_export(vm, "%b64-decode");
+    sigil_module_register_native(vm, "%open-url", native_open_url, SIGIL_ARITY_EXACT(1),
+                                 "Open an http(s) URL with the platform's own opener (native); #f on the web");
     sigil_module_export(vm, "%fatal!");
+    sigil_module_export(vm, "%open-url");
     sigil_module_register_native(vm, "%upsample!", native_upsample, SIGIL_ARITY_EXACT(7),
                                  "Write n stereo f32 frames at the device rate from a lower-rate stereo f32 source, 4-tap cubic");
     sigil_module_export(vm, "%upsample!");

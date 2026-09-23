@@ -1,19 +1,21 @@
 #!/bin/sh
-# Publish build/web to Cloudflare Pages (project crashthestack), the HTTPS
-# home of the free web build: https://crashthestack.pages.dev/.
+# Publish crashthestack.com to Cloudflare Pages (project crashthestack; the
+# Pages URL is https://crashthestack.pages.dev/): the site and the game.
 #
-#   scripts/publish-web "<row>: <one line>"     deploy the current build/web
+#   scripts/publish-web "<row>: <one line>"     deploy the current site/public + build/web
 #   scripts/publish-web --dry-run                stage and list only; nothing leaves the box
 #
-# Only the files a browser needs are sent: the page, the stylesheet, the
-# wasm, the bridge loader and its manifest, and assets/ (the test tile,
-# the PWA manifest and icons, the asset licence and manifest). bin/ and
-# native/ are build intermediates and stay home. The tracker (P3b) is its
-# own page and wasm under tracker/: its index.html, crash-tracker.wasm, the
-# bridges, its stylesheet copy and the loader scripts under tracker/assets/,
-# nothing else, and a deploy refuses when any of them is missing (a FREE
-# PLAY row pointing at a 404 is the failure this guards). The deploy is tagged
-# with the current commit so the site says which tree it is.
+# What leaves the box is the tree scripts/stage-web builds (P4b, D20): the
+# Press site at the root (site/public), the game under /jack-in/ (the
+# page, the stylesheet, the wasm, the bridge loader and its manifest,
+# assets/; bin/ and native/ are build intermediates and stay home), the
+# tracker under /tracker/, and the root's _headers, _redirects and the
+# worker tombstone, and the album's listening page under /soundtrack/
+# (built from the tree by stage-web, never from what is already live).
+# stage-web refuses when any part is missing or stale (a link pointing at
+# a 404, or a page reverted to an older style, are the failures this
+# guards). The deploy is tagged with the current commit so the site says
+# which tree it is.
 #
 # wrangler must be on PATH and logged in (it is, on this box). This script
 # never touches DNS or the project's settings.
@@ -23,46 +25,34 @@ cd "$(dirname "$0")/.." || exit 1
 DRY=0; if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
 MESSAGE="${1:-}"
 [ -n "$MESSAGE" ] || [ "$DRY" = 1 ] || { echo "publish-web: give the deploy a message: publish-web \"<row>: <one line>\""; exit 1; }
-[ -f build/web/index.html ] || { echo "publish-web: build/web/index.html missing; build --config web first"; exit 1; }
-[ -f build/web/crash-the-stack.wasm ] || { echo "publish-web: build/web/crash-the-stack.wasm missing"; exit 1; }
 [ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "publish-web: wrangler not on PATH"; exit 1; }
 
-# Require the external soundtrack bundle so later publishes preserve the album.
-SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-build/web/soundtrack}"
-for f in index.html style.css player.js album.json; do
-  [ -f "$SOUNDTRACK/$f" ] || { echo "publish-web: soundtrack missing; set CRASH_SOUNDTRACK_DIR to the generated soundtrack/ directory"; exit 1; }
-done
-# A Pages fallback can return the game HTML with HTTP 200 for a missing album.
-grep -q 'id="audio"' "$SOUNDTRACK/index.html" || { echo "publish-web: soundtrack index is not the album player"; exit 1; }
-grep -Fq 'if (/^\/soundtrack(?:\/|$)/.test(url.pathname)) return;' build/web/sw.js || { echo "publish-web: rebuild the worker with the soundtrack route bypass before publishing"; exit 1; }
+# The game's tree. build/web is this box's own build; the release path sets
+# CRASH_WEB_DIR to a runner's fresh checkout (build/remote-web-<sha>), so the
+# published bytes are the gated bytes and nothing stale can survive in a
+# directory a build never cleans. A named tree must say which commit it was
+# built at, and that commit must be HEAD: the log then proves what shipped.
+WEB="${CRASH_WEB_DIR:-build/web}"
+[ -f "$WEB/index.html" ] || { echo "publish-web: $WEB/index.html missing; build --config web (or point CRASH_WEB_DIR at a built tree)"; exit 1; }
+STAMP="$(grep -o 'version: "[^"]*"' "$WEB/index.html" | head -1 | cut -d'"' -f2)"
+HEAD_SHA="$(git rev-parse --short=12 HEAD)"
+if [ -n "${CRASH_WEB_DIR:-}" ]; then
+  case "$STAMP" in
+    *-dirty-*) echo "publish-web: $WEB was built from a dirty tree (stamp $STAMP); publish a tree built from a commit"; exit 1 ;;
+  esac
+  [ "$STAMP" = "$HEAD_SHA" ] || { echo "publish-web: $WEB was built at $STAMP, HEAD is $HEAD_SHA; build the commit you are publishing"; exit 1; }
+  echo "publish-web: source tree $WEB, built at $STAMP (= HEAD)"
+else
+  echo "publish-web: source tree $WEB, built at $STAMP (HEAD $HEAD_SHA)"
+fi
 
 STAGE="$(mktemp -d /tmp/crash-publish-XXXXXX)"
 trap 'rm -rf "$STAGE"' EXIT
-for f in index.html styles.css sw.js _headers crash-the-stack.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json; do
-  [ -f "build/web/$f" ] || { echo "publish-web: build/web/$f missing"; exit 1; }
-  cp "build/web/$f" "$STAGE/"
-done
-cp -r build/web/assets "$STAGE/assets"
-# the build task already drops assets/refs (generator provenance, never
-# shipped); refuse rather than publish it if a build ever leaves it in
-if [ -n "$(find "$STAGE/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "publish-web: build/web/assets/refs has files; the build task should have dropped it"; exit 1; fi
-rm -rf "$STAGE/assets/refs"
-# M1 retired the OGG tracks: a build directory that still carries them (a build never
-# cleans assets/) would publish 3 MB nothing fetches; refuse rather than ship it
-if [ -d "$STAGE/assets/audio" ]; then echo "publish-web: build/web/assets/audio exists; M1 retired the OGGs, remove the directory (rm -rf build/web/assets/audio) and rerun"; exit 1; fi
-# the tracker, behind /tracker/: exactly the files its page loads
-mkdir -p "$STAGE/tracker/assets"
-for f in index.html crash-tracker.wasm sigil-wasm-bridges.js sigil-wasm-bridges.json styles.css \
-         assets/sigil-web-app.js assets/sigil-wasm-gles3.js assets/sigil-wasm-audio.js assets/sigil-browser.js; do
-  [ -f "build/web/tracker/$f" ] || { echo "publish-web: build/web/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
-  cp "build/web/tracker/$f" "$STAGE/tracker/$f"
-done
-grep -q "crash-tracker" "$STAGE/tracker/index.html" || { echo "publish-web: build/web/tracker/index.html is not the tracker page"; exit 1; }
-cp -r "$SOUNDTRACK" "$STAGE/soundtrack"
-# The published set, for the record; a deploy that grew or shrank is visible here.
-echo "publish-web: publishing $(find "$STAGE" -type f | wc -l) files from build/web ($(du -sh "$STAGE" | cut -f1)):"
-(cd "$STAGE" && find . -type f | sort | sed 's|^\./|  |')
-echo "publish-web: wasm sha256 $(sha256sum build/web/crash-the-stack.wasm | cut -c1-16), page $(sha256sum build/web/index.html | cut -c1-16), tracker wasm $(sha256sum build/web/tracker/crash-tracker.wasm | cut -c1-16)"
+# the upload mode: the two wasm go to R2 and no wasm may be left in the tree
+# (Cloudflare Pages refuses a file over 25 MiB, and the game's is past it)
+WASM_MODE=--upload
+[ "$DRY" = 0 ] || WASM_MODE=--local
+CRASH_WEB_DIR="$WEB" WASM_MODE="$WASM_MODE" scripts/stage-web "$STAGE"
 
 if [ "$DRY" = 1 ]; then echo "publish-web: dry run, nothing deployed"; exit 0; fi
 SHA="$(git rev-parse HEAD)"

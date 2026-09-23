@@ -333,3 +333,22 @@ as `CRASH_SOUNDTRACK_DIR` for later game publication. The current complete local
 MP3 collection is `tagged-preview-vii/soundtrack/audio/` under the same artifact
 root. Older bundles remain available; preserve all later accepted track URLs
 when assembling a new game deployment.
+
+## Release integration with feat/p4b
+
+The P4b publisher now stages the site, game and soundtrack together. Its
+default soundtrack comes from the repository, so an external
+`CRASH_SOUNDTRACK_DIR` is optional. `scripts/album-manifest` reads the approved
+per-track MP3 URLs in `docs/music/album/listen/releases.tsv`, preserving all
+fifteen selections from the Sector Drift II publication, including nine later
+revisions and their cache queries. The older uniform preview prefix would
+have silently reverted those mixes. Update the URL list when publishing an
+approved new render; composing or regenerating a score does not publish audio.
+
+Fault Line is integrated into the game's Defrag pool; its mastered audition
+has not been added to the fifteen-track public album. The new staged player
+retains the CC BY credit and native download-control hint.
+
+`scripts/publish-web --dry-run` now passes `--local` to WASM staging. It must
+never upload to R2; the normal publish path retains `--upload`. The game worker
+is scoped to `/jack-in/`, leaving the soundtrack outside its navigation scope.

@@ -1,0 +1,54 @@
+#!/bin/sh
+# Write the album's listening manifest (album.json) from the repo.
+#
+#   scripts/album-manifest > soundtrack/album.json
+#
+# The page at /soundtrack/ reads this: the album's title, the preview's
+# name, the total running time and, per track, its title, its length and
+# the MP3's URL. Every fact comes from the tree: the order and the slugs
+# from TRACKS below (the same order as docs/music/tools/album-listening-site.sgl),
+# the title and the length from docs/music/album/<slug>-map.json (the
+# render's own map, committed beside the tune), the approved URLs from
+# docs/music/album/listen/releases.tsv.
+#
+# The URL list identifies published renders, including individual track
+# revisions and their cache-busting queries. Update it only after an approved
+# upload, in the same commit that records the release. A uniform prefix would
+# silently restore the older mixes when deploying the current game.
+#
+# The album's generator (album-listening-site.sgl) writes an album.json
+# of its own beside the MP3s it packages; this script is what the deploy
+# uses, so a staged page never depends on an artifact tree or on what is
+# already live.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+
+RELEASES="docs/music/album/listen/releases.tsv"
+[ -f "$RELEASES" ] || { echo "album-manifest: $RELEASES missing" >&2; exit 1; }
+VERSION="Preview I - tagged"
+TITLE="Crash The Stack - Original Soundtrack"
+TRACKS="black-glass cold-boot relay-ghost closed-loop shadow-protocol blind-spot quiet-array sector-drift dirty-cache basement-circuit dead-sector obsidian-index breach-vector clock-edge glass-current"
+
+# A field of the map's leading object: album-render writes one line of JSON.
+field() {   # field FILE KEY
+  sed -n "s/.*\"$2\":\(\"\([^\"]*\)\"\|\([0-9.]*\)\).*/\2\3/p" "$1" | head -1
+}
+
+items=""
+total=0
+for slug in $TRACKS; do
+  map="docs/music/album/$slug-map.json"
+  [ -f "$map" ] || { echo "album-manifest: $map missing" >&2; exit 1; }
+  title="$(field "$map" title)"
+  secs="$(field "$map" duration_seconds)"
+  case "$title" in "") echo "album-manifest: no title in $map" >&2; exit 1;; esac
+  case "$secs" in ""|*[!0-9.]*) echo "album-manifest: no duration in $map (read '$secs')" >&2; exit 1;; esac
+  url="$(awk -F '	' -v slug="$slug" '$1 == slug { print $2 }' "$RELEASES")"
+  case "$url" in https://assets.crashthestack.com/soundtrack/*.mp3*) ;; *) echo "album-manifest: missing or invalid published URL for $slug" >&2; exit 1;; esac
+  total="$(awk -v a="$total" -v b="$secs" 'BEGIN { printf "%.10g", a + b }')"
+  [ -z "$items" ] || items="$items,"
+  items="$items{\"title\":\"$title\",\"duration_seconds\":$secs,\"mp3\":\"$url\"}"
+done
+
+printf '{"title":"%s","version":"%s","duration_seconds":%s,"tracks":[%s]}\n' \
+  "$TITLE" "$VERSION" "$total" "$items"

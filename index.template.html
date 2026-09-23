@@ -383,8 +383,10 @@
       console.log = function () {
         var first = arguments[0];
         if (typeof first === "string" && first.indexOf("crash: stats reset ") === 0) resetPageStats();
-        // FREE PLAY > TRACKER: the tracker is its own page (P3b, David 2026-09-21)
-        if (first === "crash: open tracker") location.assign("tracker/");
+        // NEWS (P4b, D20): a devlog post chosen in the menu opens outside the
+        // game, in a new browsing context (the installed app shows it in
+        // browser UI; the game's page is untouched)
+        if (typeof first === "string" && first.indexOf("crash: open http") === 0) window.open(first.slice("crash: open ".length), "_blank", "noopener");
         if (typeof first === "string" && first.indexOf("crash: tune-fetch ") === 0) fetchTune(first.slice("crash: tune-fetch ".length).trim());   // the live soundtrack (M1)
         if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
           var text = first.slice("crash: clipboard ".length).split("~").join("\n") + "\n" + pageStats();
@@ -536,6 +538,36 @@
         app.dispatch("credits", text);
       }).catch(function (err) {
         console.log("crash: credits failed " + err.message);
+      }).then(function () { fetchNews(app); });
+    }
+    // NEWS (P4b, D20): the site's JSON Feed (../devlog/feed.json beside the
+    // game on crashthestack.com; ?news=URL points elsewhere, the arm's
+    // fixture), read once after the credits, handed over as one line per
+    // post, DATE<tab>TITLE<tab>URL, newest first. A failed fetch (a dev
+    // host with no site, the network) leaves the menu without its NEWS row.
+    function fetchNews(app) {
+      var params = new URLSearchParams(location.search);
+      // the site's feed sits beside the game only on crashthestack.com's
+      // layout (the game under /jack-in/); a dev host serving build/web at
+      // the root has none, and a fetch there would only log a 404
+      var beside = /\/jack-in\/$/.test(location.pathname.replace(/index\.html$/, ""));
+      var url = params.get("news") || (beside ? "../devlog/feed.json" : null);
+      if (!url) { console.log("crash: news none"); return; }
+      fetch(url, { cache: "no-cache" }).then(function (r) {
+        if (!r.ok) throw new Error("news " + r.status);
+        return r.json();
+      }).then(function (feed) {
+        var items = (feed && feed.items) || [];
+        var lines = [];
+        for (var i = 0; i < items.length && i < 8; i++) {
+          var it = items[i];
+          if (!it || !it.url || !it.title || !it.date_published) continue;
+          lines.push(String(it.date_published).slice(0, 10) + "\t" + String(it.title).replace(/[\t\n]/g, " ").toUpperCase() + "\t" + it.url);
+        }
+        if (lines.length) app.dispatch("news", lines.join("\n"));
+        else console.log("crash: news empty");
+      }).catch(function (err) {
+        console.log("crash: news failed " + err.message);
       });
     }
 

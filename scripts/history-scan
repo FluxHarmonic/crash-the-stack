@@ -1,0 +1,63 @@
+#!/bin/sh
+# The history scan before the repo goes public (P4b, ruling D58): every
+# blob in every ref and every commit's diff against a list of signatures
+# for secrets and for private surfaces, plus the file names that must
+# never be committed. Every hit is printed with where it is; the exit
+# code is 1 on any hit, so the report is read, not assumed.
+#
+#   scripts/history-scan            the whole history, every ref
+#   scripts/history-scan --tree     the checked-out tree only (the fast pre-push check)
+#
+# The signatures: secrets (GitHub, GitLab, AWS, OpenAI-style, Slack, private
+# keys, Telegram bot tokens, bearer tokens, key=value assignments of
+# secret-named variables, Cloudflare and Forgejo tokens, wrangler account
+# ids), private surfaces (home paths, VPN addresses and interface, the
+# private git host, the Ops tree, the estate's tool names), and file
+# names (.env, .netrc, keys, wrangler state). A hit on a private surface
+# is not a secret: it is reported for a ruling (the VPN's addresses in dev
+# scripts were ruled not worth a rewrite, 2026-09-22).
+set -u
+cd "$(dirname "$0")/.." || exit 1
+MODE="${1:-all}"
+
+SECRETS='ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20}|AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}|-----BEGIN [A-Z ]*PRIVATE KEY|[0-9]{8,10}:[A-Za-z0-9_-]{35}|Bearer [A-Za-z0-9._~+/-]{20,}=*|(api[_-]?key|secret|passw(or)?d|token)[[:space:]]*[=:][[:space:]]*["'"'"'][^"'"'"'[:space:]]{12,}["'"'"']|CLOUDFLARE_API_TOKEN=[^[:space:]]|FORGEJO_TOKEN=[^[:space:]]|TELEGRAM_(BOT_TOKEN|CHAT_ID)=[^[:space:]$]|account_id[[:space:]]*[=:][[:space:]]*["'"'"']?[0-9a-f]{32}'
+PRIVATE='/home/daviwil|daviwil@|10\.11\.0\.[0-9]+|\bwg0\b|azoth\.works|~/Ops|/Ops/|\bcourier\b|\bfolio\b|\bKiln\b'
+FILES='(^|/)\.env([.-].*)?$|(^|/)\.netrc$|\.pem$|(^|/)id_(rsa|ed25519|ecdsa)(\.pub)?$|(^|/)\.wrangler/|(^|/)wrangler\.toml$'
+# a secret-shaped line that is a test's own fixture (docs/music/tools/check-telegram.sgl
+# writes "123:dummy" to a scratch env file) is reported as ALLOWED, not counted
+ALLOWED='dummy|placeholder|example\.com|invalid'
+
+HITS="$(mktemp /tmp/crash-history-scan-XXXXXX)"
+trap 'rm -f "$HITS"' EXIT
+report() { printf '%s\n' "$1"; printf '%s\n' "$1" >> "$HITS"; }
+
+echo "history-scan: file names ($MODE)"
+if [ "$MODE" = "--tree" ]; then names="$(git ls-files)"; else names="$(git log --all --diff-filter=A --name-only --format= | sort -u)"; fi
+printf '%s\n' "$names" | grep -E "$FILES" | while IFS= read -r f; do report "  FILE  $f"; done
+
+echo "history-scan: secrets"
+if [ "$MODE" = "--tree" ]; then
+  git grep -nE "$SECRETS" -- . ':!scripts/history-scan' | while IFS= read -r l; do if printf '%s' "$l" | grep -qE "$ALLOWED"; then report "  ALLOWED  $l"; else report "  SECRET  $l"; fi; done
+else
+  # every blob in every ref, once, named by the first path that carries it
+  git rev-list --all --objects | awk 'NF > 1' | sort -u -k1,1 | while read -r sha path; do
+    if git cat-file -p "$sha" 2>/dev/null | grep -aqE "$SECRETS"; then
+      case "$path" in scripts/history-scan) continue ;; esac
+      git cat-file -p "$sha" | grep -anE "$SECRETS" | head -3 | while IFS= read -r l; do if printf '%s' "$l" | grep -qE "$ALLOWED"; then report "  ALLOWED  $path ($sha): $l"; else report "  SECRET  $path ($sha): $l"; fi; done
+    fi
+  done
+fi
+
+echo "history-scan: private surfaces (for a ruling, not secrets)"
+if [ "$MODE" = "--tree" ]; then
+  git grep -nE "$PRIVATE" -- . ':!scripts/history-scan' | cut -c1-160 | while IFS= read -r l; do report "  PRIVATE  $l"; done
+else
+  git rev-list --all --objects | awk 'NF > 1' | sort -u -k1,1 | while read -r sha path; do
+    case "$path" in scripts/history-scan) continue ;; esac
+    n=$(git cat-file -p "$sha" 2>/dev/null | grep -acE "$PRIVATE")
+    [ "${n:-0}" -gt 0 ] && report "  PRIVATE  $path ($sha): $n line(s): $(git cat-file -p "$sha" | grep -aoE "$PRIVATE" | sort | uniq -c | sort -rn | head -4 | tr '\n' ' ')"
+  done
+fi
+
+echo "history-scan: $(grep -c '^  SECRET' "$HITS") secret line(s), $(grep -c '^  ALLOWED' "$HITS") allowed fixture line(s), $(grep -c '^  FILE' "$HITS") file name(s), $(grep -c '^  PRIVATE' "$HITS") hit(s) on a private surface"
+[ "$(grep -c '^  SECRET\|^  FILE' "$HITS")" -eq 0 ]

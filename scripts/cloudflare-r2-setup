@@ -1,0 +1,46 @@
+#!/bin/sh
+# The one-time Cloudflare account change the wasm move needs: an R2 bucket for
+# the game's and the tracker's wasm objects. DAVID RUNS THIS; a worker cannot
+# (the permission classifier refuses account writes, which is the correct
+# answer for a shared account).
+#
+#   . ~/Ops/.env-cloudflare
+#   scripts/cloudflare-r2-setup            say what it would do
+#   scripts/cloudflare-r2-setup --create   create the bucket
+#
+# It creates ONE bucket, crashthestack-wasm, in the account the token belongs
+# to, and nothing else: no DNS, no Pages settings, no public bucket access. The
+# bucket stays private — the only way in is the Pages Function, which reads it
+# through the R2 binding declared in wrangler.jsonc. That binding is applied by
+# `wrangler pages deploy`, so there is no dashboard step after this.
+#
+# Objects are written by scripts/wasm-to-r2 --upload during a publish, keyed by
+# content hash (jack-in/w/<sha16>/crash-the-stack.wasm and the tracker's). Old
+# keys are never deleted by any script: a stale cached page must keep finding
+# the wasm it was built against. Pruning, if it is ever wanted, is a deliberate
+# act with a list of the hashes still referenced by live deployments.
+set -eu
+BUCKET="${CRASH_WASM_BUCKET:-crashthestack-wasm}"
+CREATE=0; [ "${1:-}" = "--create" ] && CREATE=1
+
+command -v wrangler > /dev/null || { echo "cloudflare-r2-setup: wrangler not on PATH"; exit 1; }
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "cloudflare-r2-setup: CLOUDFLARE_API_TOKEN not set; . ~/Ops/.env-cloudflare first"; exit 1; }
+
+echo "cloudflare-r2-setup: account:"
+wrangler whoami 2>&1 | grep -E '│' | sed 's/^/  /' || true
+
+if wrangler r2 bucket list 2>/dev/null | grep -q "^name: *$BUCKET$"; then
+  echo "cloudflare-r2-setup: bucket $BUCKET already exists; nothing to do"
+  exit 0
+fi
+
+if [ "$CREATE" = 0 ]; then
+  echo "cloudflare-r2-setup: would create R2 bucket $BUCKET (rerun with --create)"
+  echo "cloudflare-r2-setup: nothing else changes; the binding comes from wrangler.jsonc on the next deploy"
+  exit 0
+fi
+
+wrangler r2 bucket create "$BUCKET"
+echo "cloudflare-r2-setup: created $BUCKET"
+echo "cloudflare-r2-setup: next, a publish uploads the objects (scripts/wasm-to-r2 --upload) and"
+echo "cloudflare-r2-setup: the deploy applies the WASM binding from wrangler.jsonc"

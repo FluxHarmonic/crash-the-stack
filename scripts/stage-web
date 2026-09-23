@@ -1,0 +1,116 @@
+#!/bin/sh
+# Stage the deploy tree of crashthestack.com (P4b, ruling D20): the Press
+# site at the root, the game under /jack-in/, the tracker under /tracker/,
+# and the root files the move needs. publish-web deploys what this stages;
+# host-site serves it on wg0 for a look.
+#
+#   scripts/stage-web DIR      DIR is emptied and filled; the file list is printed
+#
+# The parts, and where each comes from:
+#   /                 site/public (cd site && sigil run -- build)
+#   /jack-in/         build/web: the page, the stylesheet, the worker, the
+#                     bridge loader and its manifest, assets/ (never bin/,
+#                     native/ or assets/refs)
+#   /tracker/         build/web/tracker: exactly the files its page loads
+#   the two wasm      NOT copied here: scripts/wasm-to-r2 puts them at
+#                     /jack-in/w/<sha16>/ and /tracker/w/<sha16>/ and points
+#                     the pages at those paths, because Cloudflare Pages
+#                     refuses a file over 25 MiB and the game's wasm is past
+#                     it. This script calls that one last, in --local mode
+#                     (the files copied into the tree, so a static host and
+#                     the arms serve what production serves); publish-web
+#                     calls it with --upload, which sends them to R2 and
+#                     then refuses a tree with any wasm left in it.
+#   /soundtrack/      the album's listening page, built from the tree: the
+#                     page from docs/music/album/listen (index.html,
+#                     style.css, player.js) and album.json from
+#                     scripts/album-manifest; the MP3s stay on
+#                     assets.crashthestack.com. CRASH_SOUNDTRACK_DIR
+#                     overrides the whole bundle with a directory holding
+#                     those four files, for a render being tried out; it
+#                     is never a fallback (a bundle the tree cannot build
+#                     is a refusal, not a copy of whatever is live)
+#   /_headers         web/_headers (COOP/COEP for /jack-in/* and /tracker/*)
+#   /_redirects       web/_redirects (the old manifest path)
+#   /sw.js            web/sw-tombstone.js: the worker that retires the old
+#                     root-scoped one on the next visit (its comment says how)
+# A missing part is a refusal, not a partial tree.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+DIR="${1:-}"
+[ -n "$DIR" ] || { echo "stage-web: give the directory to stage into"; exit 1; }
+# the game's tree: this box's build by default, a runner's fresh checkout
+# (build/remote-web-<sha>) when the release path sets CRASH_WEB_DIR
+WEB="${CRASH_WEB_DIR:-build/web}"
+[ -f site/public/index.html ] || { echo "stage-web: site/public/index.html missing; cd site && sigil run -- build first"; exit 1; }
+[ -f "$WEB/index.html" ] || { echo "stage-web: $WEB/index.html missing; build --config web first (or set CRASH_WEB_DIR)"; exit 1; }
+# the two wasm stay in build/web: wasm-to-r2 hashes them from there
+[ -f "$WEB/crash-the-stack.wasm" ] || { echo "stage-web: $WEB/crash-the-stack.wasm missing"; exit 1; }
+[ -f "$WEB/tracker/crash-tracker.wasm" ] || { echo "stage-web: $WEB/tracker/crash-tracker.wasm missing"; exit 1; }
+[ -x scripts/wasm-to-r2 ] || { echo "stage-web: scripts/wasm-to-r2 missing; it places the two wasm and points the pages at them"; exit 1; }
+for f in web/_headers web/_redirects web/sw-tombstone.js; do [ -f "$f" ] || { echo "stage-web: $f missing"; exit 1; }; done
+SOUNDTRACK="${CRASH_SOUNDTRACK_DIR:-}"
+if [ -n "$SOUNDTRACK" ]; then
+  for f in index.html style.css player.js album.json; do
+    [ -f "$SOUNDTRACK/$f" ] || { echo "stage-web: $SOUNDTRACK/$f missing; CRASH_SOUNDTRACK_DIR must hold the whole bundle"; exit 1; }
+  done
+else
+  for f in index.html style.css player.js; do
+    [ -f "docs/music/album/listen/$f" ] || { echo "stage-web: docs/music/album/listen/$f missing; the album's listening page is a required part"; exit 1; }
+  done
+  [ -x scripts/album-manifest ] || { echo "stage-web: scripts/album-manifest missing; it writes the album's manifest from the tree"; exit 1; }
+fi
+for d in jack-in tracker soundtrack w; do [ -e "site/public/$d" ] && { echo "stage-web: site/public/$d exists; the site must not claim the game's, the tracker's, the album's or the wasm's path"; exit 1; }; done
+[ -e site/public/sw.js ] && { echo "stage-web: site/public/sw.js exists; the root worker is web/sw-tombstone.js"; exit 1; }
+
+rm -rf "$DIR"
+mkdir -p "$DIR"
+cp -r site/public/. "$DIR/"
+# the game
+mkdir -p "$DIR/jack-in"
+for f in index.html styles.css sw.js sigil-wasm-bridges.js sigil-wasm-bridges.json; do
+  [ -f "$WEB/$f" ] || { echo "stage-web: $WEB/$f missing"; exit 1; }
+  cp "$WEB/$f" "$DIR/jack-in/"
+done
+cp -r "$WEB/assets" "$DIR/jack-in/assets"
+# the build task already drops assets/refs (generator provenance, never
+# shipped); refuse rather than stage it if a build ever leaves it in
+if [ -n "$(find "$DIR/jack-in/assets/refs" -type f 2>/dev/null | head -1)" ]; then echo "stage-web: $WEB/assets/refs has files; the build task should have dropped it"; exit 1; fi
+rm -rf "$DIR/jack-in/assets/refs"
+# M1 retired the OGG tracks: a build directory that still carries them (a build never
+# cleans assets/) would publish 3 MB nothing fetches; refuse rather than stage it
+if [ -d "$DIR/jack-in/assets/audio" ]; then echo "stage-web: $WEB/assets/audio exists; M1 retired the OGGs, remove the directory (rm -rf $WEB/assets/audio) and rerun"; exit 1; fi
+# the tracker, behind /tracker/: exactly the files its page loads
+mkdir -p "$DIR/tracker/assets"
+for f in index.html sigil-wasm-bridges.js sigil-wasm-bridges.json styles.css \
+         assets/sigil-web-app.js assets/sigil-wasm-gles3.js assets/sigil-wasm-audio.js assets/sigil-browser.js; do
+  [ -f "$WEB/tracker/$f" ] || { echo "stage-web: $WEB/tracker/$f missing; the web build links the tracker too (tracker-page in package.sgl)"; exit 1; }
+  cp "$WEB/tracker/$f" "$DIR/tracker/$f"
+done
+grep -q "crash-tracker" "$DIR/tracker/index.html" || { echo "stage-web: $WEB/tracker/index.html is not the tracker page"; exit 1; }
+# the album's listening page: from the tree, or wholly from the override
+mkdir -p "$DIR/soundtrack"
+if [ -n "$SOUNDTRACK" ]; then
+  cp "$SOUNDTRACK"/index.html "$SOUNDTRACK"/style.css "$SOUNDTRACK"/player.js "$SOUNDTRACK"/album.json "$DIR/soundtrack/"
+else
+  cp docs/music/album/listen/index.html docs/music/album/listen/style.css docs/music/album/listen/player.js "$DIR/soundtrack/"
+  scripts/album-manifest > "$DIR/soundtrack/album.json" || { echo "stage-web: scripts/album-manifest failed; the album's manifest is a required part"; exit 1; }
+fi
+# the page is the site's, not an older style: the palette's ground and the site's face
+grep -q -- "--bg: #0d0a1a" "$DIR/soundtrack/style.css" || { echo "stage-web: the staged /soundtrack/ stylesheet is not the site's (no --bg: #0d0a1a); it is an older bundle"; exit 1; }
+grep -q "JetBrainsMono-Regular.woff2" "$DIR/soundtrack/style.css" || { echo "stage-web: the staged /soundtrack/ stylesheet does not use the site's face"; exit 1; }
+grep -q 'class="nav"' "$DIR/soundtrack/index.html" || { echo "stage-web: the staged /soundtrack/ page does not carry the site's nav"; exit 1; }
+grep -q '"tracks"' "$DIR/soundtrack/album.json" || { echo "stage-web: the staged /soundtrack/album.json has no tracks"; exit 1; }
+# the root files
+cp web/_headers "$DIR/_headers"
+cp web/_redirects "$DIR/_redirects"
+cp web/sw-tombstone.js "$DIR/sw.js"
+# the manifest served under /jack-in/ must scope the app there
+grep -q '"scope": "\.\./"' "$DIR/jack-in/assets/manifest.webmanifest" || { echo "stage-web: the manifest's scope is not ../ (= /jack-in/)"; exit 1; }
+# the two wasm, last: it rewrites the pages it points at, so the tree must
+# be otherwise complete. --local unless the caller asked for the upload.
+CRASH_WEB_DIR="$WEB" scripts/wasm-to-r2 "$DIR" ${WASM_MODE:---local}
+echo "stage-web: staged $(find "$DIR" -type f | wc -l) files ($(du -sh "$DIR" | cut -f1)) in $DIR:"
+(cd "$DIR" && find . -type f | sort | sed 's|^\./|  |')
+echo "stage-web: game wasm $(sha256sum "$WEB/crash-the-stack.wasm" | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/jack-in/index.html" | head -1 | cut -d'"' -f2), tracker wasm $(sha256sum "$WEB/tracker/crash-tracker.wasm" | cut -c1-16) -> $(grep -o 'data-wasm="[^"]*"' "$DIR/tracker/index.html" | head -1 | cut -d'"' -f2)"
+echo "stage-web: game page $(sha256sum "$WEB/index.html" | cut -c1-16), landing $(sha256sum site/public/index.html | cut -c1-16)"

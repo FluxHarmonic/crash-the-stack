@@ -1,0 +1,184 @@
+;;; (crash-site theme) - The HTML shell every page of crashthestack.com
+;;; gets: the logo, the nav (PLAY, ABOUT, DEVLOG, DOCS, SOURCE), the
+;;; article, the footer with the licences line and the feed links. The
+;;; landing page (landing-page, a complete document built in main.sgl
+;;; with the newest post's title) skips the theme; everything else (About,
+;;; the devlog posts and their index, the tracker doc) comes through here.
+;;;
+;;; The look is the game's: the palette's ground and text roles
+;;; (assets/palette.sgl), a monospace face, no web fonts and no scripts
+;;; (one exception: the landing's redirect for the game's old URLs).
+
+(define-library (crash-site theme)
+  (import (sigil core)
+          (sigil list)
+          (sigil string)
+          (press scan))
+  (export crash-theme
+          landing-page
+          devlog-listing
+          page-description)
+
+  (begin
+    (define SITE-URL "https://crashthestack.com")
+    (define GITHUB-URL "https://github.com/FluxHarmonic/crash-the-stack")
+
+    ;; The <meta name="description"> for a page: its front matter's
+    ;; summary:, else the site's one line.
+    (define (page-description item)
+      (let ((summary (dict-ref (item-metadata item) summary: #f)))
+        (if summary
+            (format "~a" summary)
+            "Cyberpunk takes on the classic casual games, free to play in the browser.")))
+
+    ;; A post's date: the front matter's date:, shown as its day (the time
+    ;; part orders same-day posts in the feeds and the index).
+    (define (item-date item)
+      (let ((date (dict-ref (item-metadata item) date: #f)))
+        (and date (let ((text (format "~a" date)))
+                    (if (> (string-length text) 10) (substring text 0 10) text)))))
+
+    (define (nav)
+      `(nav (@ (class "nav"))
+         (a (@ (href "/jack-in/") (class "play")) "PLAY")
+         (a (@ (href "/about/")) "ABOUT")
+         (a (@ (href "/devlog/")) "DEVLOG")
+         (a (@ (href "/soundtrack/")) "SOUNDTRACK")   ; the album's listening page (its own bundle, staged beside the site)
+         (a (@ (href "/docs/")) "DOCS")   ; the docs landing: How to Play, the tracker manual
+         (a (@ (href ,GITHUB-URL)) "SOURCE")))
+
+    (define (header)
+      `(header (@ (class "top"))
+         (a (@ (href "/") (class "logo-link"))
+            (img (@ (src "/logo.png") (alt "Crash The Stack") (width "640") (height "112") (class "logo"))))
+         ,(nav)))
+
+    (define (footer)
+      `(footer (@ (class "foot"))
+         (p "Code GPL-3.0-or-later. Art, audio and content CC-BY-4.0, credit David Wilson / Flux Harmonic. The name, the logo and the title art are reserved.")
+         (p (a (@ (href "/devlog/feed.xml")) "RSS")
+            " / "
+            (a (@ (href "/devlog/feed.json")) "JSON Feed")
+            " / "
+            (a (@ (href ,GITHUB-URL)) "Source on GitHub")
+            " / "
+            (a (@ (href "https://fluxharmonic.com")) "Flux Harmonic"))
+         (p "(C) 2026 David Wilson")))
+
+    ;; The theme: (config state item body) -> a page.
+    (define (crash-theme config state item body)
+      (let* ((title (item-title item))
+             (site-title (dict-ref config title: "Crash The Stack"))
+             (date (item-date item))
+             (path (item-output-path item))
+             (canonical (string-append SITE-URL (output-path->url path)))
+             (post? (string-contains? path "/devlog/"))
+             (description (page-description item)))
+        `(html (@ (lang "en"))
+           (head
+             (meta (@ (charset "utf-8")))
+             (meta (@ (name "viewport") (content "width=device-width, initial-scale=1")))
+             (title ,(string-append title " / " site-title))
+             (meta (@ (name "description") (content ,description)))
+             (meta (@ (property "og:title") (content ,title)))
+             (meta (@ (property "og:description") (content ,description)))
+             (meta (@ (property "og:url") (content ,canonical)))
+             (meta (@ (property "og:image") (content ,(string-append SITE-URL "/icon-512.png"))))
+             (link (@ (rel "canonical") (href ,canonical)))
+             (link (@ (rel "icon") (href "/favicon-32.png") (sizes "32x32") (type "image/png")))
+             (link (@ (rel "icon") (href "/icon-192.png") (sizes "192x192") (type "image/png")))
+             (link (@ (rel "apple-touch-icon") (href "/icon-192.png")))
+             (link (@ (rel "alternate") (type "application/rss+xml") (title "Crash The Stack devlog") (href "/devlog/feed.xml")))
+             (link (@ (rel "alternate") (type "application/feed+json") (title "Crash The Stack devlog") (href "/devlog/feed.json")))
+             (link (@ (rel "stylesheet") (href "/style.css"))))
+           (body
+             ,(header)
+             (main (@ (class "wrap"))
+               (article (@ (class ,(if post? "post" "page")))
+                 (h1 ,title)
+                 ,@(if (and post? date)
+                       `((p (@ (class "date")) (time (@ (datetime ,date)) ,date)))
+                       '())
+                 ,@(strip-leading-h1 body)))
+             ,(footer)))))
+
+    ;; A Markdown page's first heading is its title, which the theme
+    ;; already set; keep the body from repeating it.
+    (define (strip-leading-h1 body)
+      (if (and (pair? body) (pair? (car body)) (eq? (caar body) 'h1))
+          (cdr body)
+          body))
+
+    (define (output-path->url path)
+      (if (string-ends-with? path "/index.html")
+          (substring path 0 (- (string-length path) 10))
+          path))
+
+    ;; The landing: a complete document (Press emits it as is). Its head
+    ;; script is the URL move's redirect (P4b): the game lived at the root
+    ;; until 0.1, so a root URL with a query is a game link (a share code,
+    ;; ?stack, ?daily, a dev door) and goes to /jack-in/ with the query
+    ;; intact, and the old installed PWA (start_url "/", fullscreen) lands
+    ;; on the game too. Cloudflare Pages' _redirects cannot match a query,
+    ;; so the page does it, before anything paints.
+    (define REDIRECT-SCRIPT
+      (string-append
+        "(function () {\n"
+        "  var q = location.search, h = location.hash;\n"
+        "  var app = matchMedia('(display-mode: fullscreen)').matches || matchMedia('(display-mode: standalone)').matches;\n"
+        "  if (q.length > 1 || app) location.replace('/jack-in/' + q + h);\n"
+        "})();"))
+
+    (define (landing-page newest)
+      (let ((description "Cyberpunk takes on the classic solitaire games. Free to play in the browser, by David Wilson / Flux Harmonic."))
+        `(html (@ (lang "en"))
+           (head
+             (meta (@ (charset "utf-8")))
+             (meta (@ (name "viewport") (content "width=device-width, initial-scale=1")))
+             (title "Crash The Stack")
+             (meta (@ (name "description") (content ,description)))
+             (meta (@ (property "og:title") (content "Crash The Stack")))
+             (meta (@ (property "og:description") (content ,description)))
+             (meta (@ (property "og:url") (content ,(string-append SITE-URL "/"))))
+             (meta (@ (property "og:image") (content ,(string-append SITE-URL "/icon-512.png"))))
+             (link (@ (rel "canonical") (href ,(string-append SITE-URL "/"))))
+             (link (@ (rel "icon") (href "/favicon-32.png") (sizes "32x32") (type "image/png")))
+             (link (@ (rel "icon") (href "/icon-192.png") (sizes "192x192") (type "image/png")))
+             (link (@ (rel "apple-touch-icon") (href "/icon-192.png")))
+             (link (@ (rel "alternate") (type "application/rss+xml") (title "Crash The Stack devlog") (href "/devlog/feed.xml")))
+             (link (@ (rel "alternate") (type "application/feed+json") (title "Crash The Stack devlog") (href "/devlog/feed.json")))
+             (script ,REDIRECT-SCRIPT)
+             (link (@ (rel "stylesheet") (href "/style.css"))))
+           (body
+             (header (@ (class "hero"))
+               (img (@ (src "/logo.png") (alt "Crash The Stack") (width "640") (height "112") (class "logo")))
+               (p (@ (class "tag")) "Cyberpunk takes on the classic casual games. Mahjongg solitaire, Klondike, and the stack that ties them together.")
+               (p (a (@ (href "/jack-in/") (class "cta")) "JACK IN"))
+               (p (@ (class "hint")) "Free to play in the browser. Installs as an app on your phone."))
+             ,(nav)
+             (main (@ (class "wrap"))
+               (section (@ (class "blurb"))
+                 (p "You're Crash, a hacker on a mission to bring down Gibson, an AI that has grown past anyone's control. Every system you break into is guarded by a game, and you beat it to get through. STACK is Mahjongg solitaire under a trace: clear the tiles before the counter-hack severs your connection. DEFRAG is Klondike without the playing cards: sort the memory before the daemons find you. The overworld hub ties the runs together.")
+                 (p "Learn how the game was made on the " (a (@ (href "/about/")) "About page") "; the " (a (@ (href "https://github.com/FluxHarmonic/crash-the-stack")) "source is public") "."))
+               ,@(if newest
+                     `((section (@ (class "latest"))
+                         (h2 "Latest from the devlog")
+                         (p (time (@ (datetime ,(or (item-date newest) ""))) ,(or (item-date newest) ""))
+                            " "
+                            (a (@ (href ,(output-path->url (item-output-path newest)))) ,(item-title newest)))
+                         (p (a (@ (href "/devlog/")) "All posts") " / " (a (@ (href "/devlog/feed.xml")) "RSS") " / " (a (@ (href "/devlog/feed.json")) "JSON Feed"))))
+                     '()))
+             ,(footer)))))
+
+    ;; The devlog index's listing: (title items) -> sxml, for collection-page.
+    (define (devlog-listing title items)
+      `((p (@ (class "lede")) "The story of how Crash The Stack was built. Follow along via the feeds: "
+           (a (@ (href "/devlog/feed.xml")) "RSS") " and " (a (@ (href "/devlog/feed.json")) "JSON Feed") ".")
+        (ul (@ (class "posts"))
+          ,@(map (lambda (item)
+                   `(li
+                      (time (@ (datetime ,(or (item-date item) ""))) ,(or (item-date item) ""))
+                      (a (@ (href ,(output-path->url (item-output-path item)))) ,(item-title item))
+                      ,@(let ((summary (dict-ref (item-metadata item) summary: #f)))
+                          (if summary `((p (@ (class "summary")) ,(format "~a" summary))) '()))))
+                 items))))))

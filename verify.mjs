@@ -104,12 +104,20 @@ import zlib from "node:zlib";
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--shot", "--port", "--cdp"];
+const VALUED = ["--shot", "--port", "--cdp", "--base"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
+// The served root, and where the game sits under it: build/web at "/" by
+// default; the staged deploy tree (scripts/stage-web) with --base /jack-in/
+// (P4b: the site at the root, the game under /jack-in/). Every page URL
+// and every path the server special-cases carries BASE.
 const ROOT = path.resolve(positional[0] || "build/web");
+const BASE = opt("--base", "/");
+if (!BASE.startsWith("/") || !BASE.endsWith("/")) { console.log(`SETUP-FAILED: --base must start and end with /, got ${BASE}`); process.exit(2); }
+const GAME = path.join(ROOT, BASE);
 const EXPECT_NO_SELECTION = flag("--expect-no-selection");
 const SHOT = opt("--shot", "/tmp/crash-the-stack-verify.png");
 const PORT = parseInt(opt("--port", "8095"), 10);
+const PAGE = `http://127.0.0.1:${PORT}${BASE}index.html`;
 const CDP = parseInt(opt("--cdp", "9235"), 10);
 const PHONE = flag("--phone");
 
@@ -125,7 +133,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "news", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -133,7 +141,7 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 
 // ---- 1. imports, from the file on disk (no browser needed) -----------------
 {
-  const wasmPath = path.join(ROOT, "crash-the-stack.wasm");
+  const wasmPath = path.join(GAME, "crash-the-stack.wasm");
   if (!fs.existsSync(wasmPath)) { console.log(`SETUP-FAILED imports: ${wasmPath} missing`); process.exit(2); }
   const mod = new WebAssembly.Module(fs.readFileSync(wasmPath));
   const byModule = {};
@@ -171,7 +179,7 @@ const server = http.createServer((req, res) => {
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   const serve = (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
-    if (urlPath === "/sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
+    if (urlPath === BASE + "sw.js" && swVersionOverride) buf = Buffer.from(buf.toString().replace(/var VERSION = "[^"]*"/, `var VERSION = "${swVersionOverride}"`));
     const delay = slowPaths[urlPath] || 0;
     setTimeout(() => {
     res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
@@ -221,6 +229,10 @@ function leakedVerifyChromes() {
 const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+  // NEWS opens a post with window.open a frame after the key that chose it;
+  // a real browser's transient activation covers that, headless's popup
+  // blocker does not (2026-09-22): the leg proves the wiring, not the blocker
+  "--disable-popup-blocking",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   // the audio sub-arm: a synthetic tap is not a user gesture, so the
   // context must be allowed to run without one
@@ -440,7 +452,7 @@ function timedOut(name) {
 // is ~15 s: quiet-array's 10.4 s fill, a 2.6 s bar, the queue); a real
 // deal's 180 s is the same machine (the traced and music legs).
 const ARM_TRACE_AT = 190;
-await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&trace-at=${ARM_TRACE_AT}`);
+await navigate(`${PAGE}?trace&stack&trace-at=${ARM_TRACE_AT}`);
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -764,7 +776,7 @@ let barRects = null;
 // ---- 6c. assets: everything the page fetched answered (P3 leg 2, web) -----
 {
   try {
-    const entries = await evalJS(`JSON.stringify(performance.getEntriesByType("resource").map((e) => [e.name.replace(location.origin + "/", ""), e.responseStatus]))`);
+    const entries = await evalJS(`JSON.stringify(performance.getEntriesByType("resource").map((e) => [e.name.replace(location.origin + ${JSON.stringify(BASE)}, ""), e.responseStatus]))`);
     const list = JSON.parse(entries);
     // every entry is same-origin (the page loads nothing else), so a status
     // other than 200 is a failure, 0 included (blocked, or never answered)
@@ -953,7 +965,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   else {
     const inPlay = consoleLines.slice().reverse().map((l) => l.match(/^crash: (?:seed \d+|removed(?: \d+)+|undo|restored) tiles (\d+)/)).find(Boolean);
     mark = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+    await navigate(`${PAGE}?trace&stack`);
     const restored = await waitLine(/^crash: restored tiles (\d+) trace (\d+) phase (\w+) ice (\d+) locked ?((?:\d+ ?)*)$/, mark, 20000);
     if (!inPlay) fail("reload", "no \"tiles N\" line before the reload to hold the restore to");
     else if (inPlay[1] !== "142") fail("reload", `the legs before this one left ${inPlay[1]} tiles in play, not 142 (the sequence, not the restore, is off: ${inPlay[0]})`);
@@ -1053,8 +1065,8 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
 
 // ---- 9. update: a new service-worker version waits, never interrupts -------
 {
-  const builtVersion = (fs.readFileSync(path.join(ROOT, "index.html"), "utf8").match(/version: "([^"]+)"/) || [])[1];
-  const swExists = fs.existsSync(path.join(ROOT, "sw.js"));
+  const builtVersion = (fs.readFileSync(path.join(GAME, "index.html"), "utf8").match(/version: "([^"]+)"/) || [])[1];
+  const swExists = fs.existsSync(path.join(GAME, "sw.js"));
   if (EXPECT_NO_SELECTION) skip("update", "not part of the positive-control run");
   else if (!swExists || !builtVersion) fail("update", `build has no sw.js or no stamped version (sw.js ${swExists}, version ${builtVersion})`);
   else {
@@ -1096,7 +1108,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
     if (!detail) {
       // the next launch: the prompt, then a tap on the game's APPLY box
       mark = consoleLines.length;
-      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+      await navigate(`${PAGE}?trace&stack`);
       const boot2 = await waitLine(BOOT_ANY, mark, 20000);
       const prompt = boot2 ? await waitLine(/^crash: update prompt$/, mark, 20000) : null;   // the worker registers once the board's boot is done (the ambient in ~18 frames)
       const applyCtl = boot2 ? await waitLine(/^crash: control apply (-?[\d.]+) (-?[\d.]+)$/, mark, 3000) : null;
@@ -1259,7 +1271,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   };
   const bootTitle = async (seed, listen) => {
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${seed}&baud=${TITLE_BAUD}`);
+    await navigate(`${PAGE}?trace&seed=${seed}&baud=${TITLE_BAUD}`);
     const opened = await openGate(from, listen, listen ? "read" : "skip");   // the first boot reads the card, the others tap it away
     if (opened.error) return opened;
     const head = await waitLine(/^crash: title seed (\d+) baud (\d+) glitch (\d+) settle (\d+) cells (\d+)$/, from, 20000);
@@ -1275,7 +1287,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   // a flat C-BG backdrop stands in for the real one on this leg: the boot needs
   // the texture to land (D45: the card waits for it; a boot fetch is never given
   // up), and the dots with no bg must show a ground that is never a logo color
-  substitutePaths["/assets/title/backdrop.png"] = solidPng(640, 400, hexes["C-BG"] || [0, 0, 0]);
+  substitutePaths[BASE + "assets/title/backdrop.png"] = solidPng(640, 400, hexes["C-BG"] || [0, 0, 0]);
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   let a = null;
   if (!detail) {
@@ -1435,7 +1447,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
     const seedsSeen = [];
     for (let i = 0; i < 2 && !detail; i++) {
       const from = consoleLines.length;
-      await navigate(`http://127.0.0.1:${PORT}/index.html?trace&baud=${TITLE_BAUD}`);
+      await navigate(`${PAGE}?trace&baud=${TITLE_BAUD}`);
       const gated = await openGate(from, false); if (gated.error) { detail = gated.error; break; }
       const head = await waitLine(/^crash: title seed (\d+) baud /, from, 20000);
       if (!head) detail = "no title line on a boot without ?seed";
@@ -1448,7 +1460,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   // a tap during the reveal skips it and picks nothing
   if (!detail) {
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=600`);
+    await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=600`);
     const gated2 = await openGate(from, false);
     const head = gated2.error ? null : await waitLine(/^crash: title seed /, from, 20000);
     if (!head) detail = "no title line on the slow boot";
@@ -1466,7 +1478,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       else if (chose) detail = `the skipping tap also chose: ${chose.m[0]}`;
     }
   }
-  delete substitutePaths["/assets/title/backdrop.png"];
+  delete substitutePaths[BASE + "assets/title/backdrop.png"];
   await evalJS(`localStorage.removeItem("scanlines")`);
   if (detail) fail("title", detail);
   else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the music started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
@@ -1486,10 +1498,10 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
-  slowPaths["/assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
+  slowPaths[BASE + "assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
+  await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
   const menuLine = await waitLine(/^crash: menu top .*\bjack-in (-?[\d.]+) (-?[\d.]+)/, from, 20000);
   const gateP = await waitLine(/^crash: title gate /, from, 20000);
   let connect = null;
@@ -1546,7 +1558,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
       else if (!booted) detail = "after the settle, NORMAL chosen but the hub did not open";
     }
   }
-  delete slowPaths["/assets/tunes/black-glass-title.cts"];
+  delete slowPaths[BASE + "assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
   else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap on JACK IN then NORMAL opened the hub`);
 }
@@ -1571,7 +1583,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   let detail = "";
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
+  await navigate(`${PAGE}?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
   // the NEW page's first line ("crash: page dpr", the trace header), not any
   // "crash: page ..." line: the page being left prints "crash: page hidden"
   // as it unloads (the web-soak guard), and throttling on that line starved
@@ -1629,7 +1641,7 @@ let strikeAt = null;   // when the trace completed (consoleTimes), for the music
   const MENU_FRAME_FACTOR = 2.5;
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&ms&seed=1&fresh`);
+  await navigate(`${PAGE}?trace&stack&ms&seed=1&fresh`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   let boardMs = null, menuMs = null;
@@ -1737,7 +1749,7 @@ async function pauseMenu(extra = "") {
   // the store before the boot (a leg that dies at its first frame is read against it)
   try { pushLine("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) return { error: "no boot line" };
   if (!(await waitLine(/^crash: boot done /, from, 20000))) return { error: "no \"crash: boot done\" within 20 s" };
@@ -1754,6 +1766,19 @@ async function downTo(order, id, at = 0) {
   const n = order.length, i = order.indexOf(id);
   for (let k = 0; k < (i - at + n) % n; k++) await press("ArrowDown");
 }
+// a board from FREE PLAY (D66): the game's row opens the game's screen
+// (free-stack, free-cards), whose NEW BOARD or DAILY BOARD deals; false
+// when the game's screen did not open
+async function dealFrom(free, table, row = "new-board") {
+  const m0 = consoleLines.length;
+  await downTo(free.order, table);
+  await press("Enter");
+  const g = await menuOn(`free-${table}`, m0);
+  if (!g) return false;
+  await downTo(g.order, row);
+  await press("Enter");
+  return true;
+}
 
 
 // screens: every entry of every screen reachable by keyboard and by tap
@@ -1763,12 +1788,22 @@ async function downTo(order, id, at = 0) {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards daily-stack daily-cards code scores tracker version back",   // TRACKER: P3b, a link the page follows
+    const want = { free: "stack cards code scores back",   // D66: the games first; TRACKER sits on the top screen now (David, 2026-09-22)
+                   "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
+                   "free-cards": "new-board daily-board version back",
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
-    // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; SCORES and CODE from FREE PLAY
-    const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null], ["free-play", "free", "scores"], ["free-play", "free", "code"]];
+    // the sub-screens' first row sits where the main menu's does (David, 2026-09-22), pulled up only when the rows would cross the band
+    const rowsFrom = (s) => s.rows[s.order[0]].y - 14;   // the row's center less half its height
+    const rowsWant = (s) => Math.max(124, Math.min(168, 380 - s.order.length * 32));
+    // by keyboard: FREE PLAY, SETTINGS, CREDITS from the top; the games' screens,
+    // SCORES and CODE from FREE PLAY (a sub is [row, screen]; a game's screen
+    // closes to FREE PLAY, the others to the top)
+    const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null],
+                  ["free-play", "free", ["stack", "free-stack"]], ["free-play", "free", ["cards", "free-cards"]],
+                  ["free-play", "free", ["scores", "scores"]], ["free-play", "free", ["code", "code"]]];
+    const rowsOf = (s) => s.order.map((id) => s.rows[id].value ? `${id}=${s.rows[id].value}` : id).join(" ");
     for (const [id, screen, sub] of walk) {
       if (detail) break;
       let m0 = consoleLines.length;
@@ -1778,20 +1813,31 @@ async function downTo(order, id, at = 0) {
       const s = await menuOn(screen, m0);
       if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
       if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
+      if (s.order.length && Math.abs(rowsFrom(s) - rowsWant(s)) > 1) { detail = `the ${screen} screen's first row starts at ${rowsFrom(s)}, not ${rowsWant(s)}`; break; }
       if (sub) {
+        const [row, sc] = sub;
         m0 = consoleLines.length;
-        await downTo(s.order, sub);
+        await downTo(s.order, row);
         await press("Enter");
-        const s2 = await menuOn(sub, m0);
-        if (!s2) { detail = `Enter on ${sub} did not open the ${sub} screen (keyboard)`; break; }
-        if (sub === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
-        if (sub === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
-        seen.push(`${sub} (keys)`);
+        const s2 = await menuOn(sc, m0);
+        if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
+        if (s2.order.join(" ") !== want[sc]) { detail = `the ${sc} screen's rows are ${s2.order.join(" ")}, not ${want[sc]}`; break; }
+        if (sc.startsWith("free-") && Math.abs(rowsFrom(s2) - rowsWant(s2)) > 1) { detail = `the ${sc} screen's first row starts at ${rowsFrom(s2)}, not ${rowsWant(s2)}`; break; }
+        if (sc.startsWith("free-") && s2.rows.version.value !== "HACKER") { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
+        if (sc === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
+        if (sc === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
+        seen.push(`${sc} (keys)`);
+        if (sc.startsWith("free-")) {   // Escape on a game's screen: FREE PLAY, the game's row highlighted
+          m0 = consoleLines.length;
+          await press("Escape");
+          const back = await menuOn("free", m0);
+          if (!back) { detail = `Escape on ${sc} did not return to FREE PLAY`; break; }
+        }
       }
       seen.push(`${screen} (keys)`);
       m0 = consoleLines.length;
       await press("Escape");
-      if (!(await menuOn("top", m0))) { detail = `Escape on ${sub || screen} did not return to the top screen`; break; }
+      if (!(await menuOn("top", m0))) { detail = `Escape on ${sub ? sub[1] : screen} did not return to the top screen`; break; }
     }
     // by tap: the same screens from the row centers; the sub-screens' BACK row by tap
     if (!detail && !EXPECT_NO_SELECTION) {
@@ -1803,17 +1849,24 @@ async function downTo(order, id, at = 0) {
         if (!s) { detail = `a tap on ${id} did not open the ${screen} screen`; break; }
         let backRow = s.rows.back || { x: 320, y: 200 };   // the crawl: any tap leaves
         if (sub) {
+          const [row, sc] = sub;
           m0 = consoleLines.length;
-          await tap(s.rows[sub].x, s.rows[sub].y);
-          const s2 = await menuOn(sub, m0);
-          if (!s2) { detail = `a tap on ${sub} did not open the ${sub} screen`; break; }
-          seen.push(`${sub} (tap)`);
-          backRow = s2.rows.back;
+          await tap(s.rows[row].x, s.rows[row].y);
+          const s2 = await menuOn(sc, m0);
+          if (!s2) { detail = `a tap on ${row} did not open the ${sc} screen`; break; }
+          seen.push(`${sc} (tap)`);
+          if (sc.startsWith("free-")) {   // a tap on the game screen's BACK: FREE PLAY again
+            m0 = consoleLines.length;
+            await tap(s2.rows.back.x, s2.rows.back.y);
+            const back = await menuOn("free", m0);
+            if (!back) { detail = `a tap on BACK did not leave the ${sc} screen for FREE PLAY`; break; }
+            backRow = back.rows.back;
+          } else backRow = s2.rows.back;
         }
         seen.push(`${screen} (tap)`);
         m0 = consoleLines.length;
         await tap(backRow.x, backRow.y);
-        if (!(await menuOn("top", m0))) { detail = `a tap on BACK did not leave the ${sub || screen} screen`; break; }
+        if (!(await menuOn("top", m0))) { detail = `a tap on BACK did not leave the ${sub ? sub[1] : screen} screen`; break; }
       }
     }
     // Escape on the pause menu is CONTINUE (D14): the board comes back
@@ -1826,7 +1879,7 @@ async function downTo(order, id, at = 0) {
     }
   }
   if (detail) fail("screens", detail);
-  else pass("screens", `top continue jack-in free-play settings credits; ${seen.join(", ")}; Escape continues`);
+  else pass("screens", `top continue jack-in free-play settings credits; the sub-screens' rows from 168 (156 for SETTINGS' seven); ${seen.join(", ")}; Escape continues`);
 }
 
 // settings (D51): the main menu's SETTINGS is the general five; DEFRAG's
@@ -1873,11 +1926,11 @@ async function downTo(order, id, at = 0) {
       if (!free) detail = "FREE PLAY did not open";
       else {
         m0 = consoleLines.length;
-        await downTo(free.order, "stack");
-        await press("Enter");
-        const field = await waitLine(/^crash: field (\w+) (\d+)$/, m0, 5000);
+        const opened = await dealFrom(free, "stack");
+        const field = opened && await waitLine(/^crash: field (\w+) (\d+)$/, m0, 5000);
         const spec = field && await waitLine(/^crash: spec stack \w+ (\d+) /, m0, 5000);
-        if (!field) detail = "FREE PLAY -> STACK said no field line";
+        if (!opened) detail = "FREE PLAY -> STACK did not open the game's screen";
+        else if (!field) detail = "STACK -> NEW BOARD said no field line";
         else if (field.m[1] !== "still") detail = `the deal's field is ${field.m[1]}, not still`;
         else if (!spec || spec.m[1] !== field.m[2]) detail = `the still field's seed ${field.m[2]} is not the board's ${spec ? spec.m[1] : "?"}`;
         else {
@@ -1922,10 +1975,9 @@ async function downTo(order, id, at = 0) {
     const free = await menuOn("free", m0);
     if (!free) return { error: "FREE PLAY did not open" };
     m0 = consoleLines.length;
-    await downTo(free.order, "cards");
-    await press("Enter");
+    if (!(await dealFrom(free, "cards"))) return { error: "FREE PLAY -> DEFRAG did not open the game's screen" };
     const dealt = await waitLine(/^crash: cards seed (\d+) moves \d+ draw (\d) scoring (\w+)$/, m0, 5000);
-    if (!dealt) return { error: "FREE PLAY -> DEFRAG dealt no seed line" };
+    if (!dealt) return { error: "DEFRAG -> NEW BOARD dealt no seed line" };
     await sleep(300);
     return { dealt };
   };
@@ -1976,8 +2028,78 @@ async function downTo(order, id, at = 0) {
       }
     }
   }
+  // D66: a game's VERSION is remembered per game. CLASSIC stepped on STACK's
+  // screen is stored (version-stack), DEFRAG's row still reads HACKER after
+  // a reload, STACK's reads CLASSIC and its NEW BOARD deals original; then
+  // HACKER back.
+  let versionNote = "";
+  if (!detail) {
+    const gameScreen = async (table) => {
+      const r = await pauseMenu();
+      if (r.error) return { error: r.error };
+      let m0 = consoleLines.length;
+      await downTo(r.top.order, "free-play", topAt); topAt = r.top.order.indexOf("free-play");
+      await press("Enter");
+      const free = await menuOn("free", m0);
+      if (!free) return { error: "FREE PLAY did not open" };
+      m0 = consoleLines.length;
+      await downTo(free.order, table);
+      await press("Enter");
+      const g = await menuOn(`free-${table}`, m0);
+      return g ? { g, free } : { error: `${table}'s screen did not open` };
+    };
+    let g = await gameScreen("stack");
+    if (g.error) detail = g.error;
+    else {
+      await downTo(g.g.order, "version");
+      let m0 = consoleLines.length;
+      await press("ArrowRight");
+      const stepped = await menuOn("free-stack", m0);
+      const stored = await evalJS(`[localStorage.getItem("version-stack"), localStorage.getItem("version-cards")]`);
+      if (!stepped || stepped.rows.version.value !== "CLASSIC") detail = `STACK's VERSION stepped reads ${stepped ? stepped.rows.version.value : "no re-said menu"}, not CLASSIC`;
+      else if (stored[0] !== "original" || stored[1] !== null) detail = `after the step the store holds version-stack=${stored[0]} version-cards=${stored[1]}`;
+      else {
+        g = await gameScreen("cards");   // a reload
+        if (g.error) detail = g.error;
+        else if (g.g.rows.version.value !== "HACKER") detail = `after the reload DEFRAG's VERSION reads ${g.g.rows.version.value}, not HACKER`;
+        else {
+          m0 = consoleLines.length;
+          await press("Escape");
+          const free = await menuOn("free", m0);
+          if (!free) detail = "Escape on DEFRAG's screen did not return to FREE PLAY";
+          else {
+            m0 = consoleLines.length;
+            await downTo(free.order, "stack", free.order.indexOf("cards"));
+            await press("Enter");
+            const gs = await menuOn("free-stack", m0);
+            if (!gs) detail = "STACK's screen did not open after DEFRAG's";
+            else if (gs.rows.version.value !== "CLASSIC") detail = `after the reload STACK's VERSION reads ${gs.rows.version.value}, not CLASSIC`;
+            else {
+              m0 = consoleLines.length;
+              await downTo(gs.order, "new-board");
+              await press("Enter");
+              const spec = await waitLine(/^crash: spec stack (\w+) /, m0, 5000);
+              if (!spec) detail = "STACK -> NEW BOARD under CLASSIC said no spec line";
+              else if (spec.m[1] !== "original") detail = `STACK's NEW BOARD under CLASSIC dealt ${spec.m[1]}, not original`;
+              else versionNote = "; STACK's VERSION stepped to CLASSIC is stored (version-stack=original), reads back after a reload while DEFRAG's stays HACKER, and NEW BOARD dealt original";
+            }
+          }
+        }
+      }
+      // HACKER back
+      const back = await gameScreen("stack");
+      if (!back.error) {
+        await downTo(back.g.order, "version");
+        m0 = consoleLines.length;
+        await press("ArrowRight");
+        const reset = await menuOn("free-stack", m0);
+        const held = await evalJS(`localStorage.getItem("version-stack")`);
+        if (!detail && (!reset || reset.rows.version.value !== "HACKER" || held !== "hacker")) detail = `VERSION back to HACKER reads ${reset ? reset.rows.version.value : "no re-said menu"} with version-stack=${held}`;
+      } else if (!detail) detail = back.error;
+    }
+  }
   if (detail) fail("settings", detail);
-  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil background (defaults on/on/10/on/on/live); BACKGROUND STILL dealt a still field seeded by the board with no step; DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored");
+  else pass("settings", "the main menu's SETTINGS is music sfx volume scanlines veil background (defaults on/on/10/on/on/live); BACKGROUND STILL dealt a still field seeded by the board with no step; DEFRAG's overlay GAME SETTINGS stepped PULL 3 and AUDIT, re-said, stored (draw=3 scoring=standard), the same after a reload and honoured by the deal; defaults restored" + versionNote);
 }
 
 // pause (D51): Escape on the board opens the table's own overlay over the
@@ -1989,7 +2111,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -2063,7 +2185,7 @@ async function downTo(order, id, at = 0) {
 {
   let detail = "";
   const from = consoleLines.length;
-  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  await navigate(`${PAGE}?trace&stack&fresh&seed=1`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
@@ -2340,10 +2462,10 @@ async function downTo(order, id, at = 0) {
     if (!free) detail = "FREE PLAY did not open";
     else {
       m0 = consoleLines.length;
-      await downTo(free.order, "cards");
-      await press("Enter");
-      const spec = await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-      if (!spec) detail = "FREE PLAY -> DEFRAG said no spec line";
+      const opened = await dealFrom(free, "cards");
+      const spec = opened && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
+      if (!opened) detail = "FREE PLAY -> DEFRAG did not open the game's screen";
+      else if (!spec) detail = "DEFRAG -> NEW BOARD said no spec line";
       else { table = spec.m[1]; seed = spec.m[3]; code = spec.m[4]; }
     }
   }
@@ -2380,7 +2502,7 @@ async function downTo(order, id, at = 0) {
   if (!detail) {
     // ?code= deals the same
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${code}`);
+    await navigate(`${PAGE}?trace&code=${code}`);
     const read = await waitLine(/^crash: code read ([0-9A-Z]{10}) (\w+)$/, from, 20000);
     const spec = read && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, from, 10000);
     const dealt = spec && await waitLine(/^crash: cards seed (\d+) /, from, 10000);
@@ -2397,7 +2519,7 @@ async function downTo(order, id, at = 0) {
     const other = alphabet[(alphabet.indexOf(code[i]) + 1) % 32];
     flipped = code.slice(0, i) + other + code.slice(i + 1);
     const from = consoleLines.length;
-    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&code=${flipped}`);
+    await navigate(`${PAGE}?trace&code=${flipped}`);
     const refused = await waitLine(/^crash: code refused ([0-9A-Z]+)$/, from, 20000);
     await sleep(1500);
     const after = consoleLines.slice(from);
@@ -2469,8 +2591,7 @@ async function downTo(order, id, at = 0) {
     const free = await menuOn("free", m0);
     if (!free) return { error: "FREE PLAY did not open" };
     m0 = consoleLines.length;
-    await downTo(free.order, which);
-    await press("Enter");
+    if (!(await dealFrom(free, which === "daily-stack" ? "stack" : "cards", "daily-board"))) return { error: `${which}: the game's screen did not open` };
     const day = await waitLine(/^crash: daily (\d+) (\d+-\d+-\d+)$/, m0, 3000);
     const spec = day && await waitLine(/^crash: spec (\w+) (\w+) (\d+) ([0-9A-Z]{10})$/, m0, 5000);
     if (!day) return { error: `${which} said no daily line` };
@@ -2623,6 +2744,91 @@ async function downTo(order, id, at = 0) {
     else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; title line "${np[1]}"; menu theme opened`);
   }
   if (detail) fail("music", detail);
+}
+
+// ---- 9f. news: NEWS in the main menu reads the site's JSON Feed (P4b, D20) ------
+// A fixture feed (two posts, the newest dated 2099) served by this arm at
+// BASE + "news-fixture.json" and pointed at by ?news=. A fresh origin has
+// seen nothing: the top screen's NEWS row carries the value NEW; opening
+// it lists the two posts newest first (post-0, post-1) and BACK; Enter on
+// the first post prints "crash: open URL" and the page opens the post in
+// a NEW browsing context (the game's own page is unchanged: same URL,
+// still the NEWS screen); after a reload the row has no NEW (the seen
+// date is stored). Then the feed is taken away: a boot without ?news=
+// (the arm serves no ../devlog/feed.json) has no NEWS row at all.
+{
+  let detail = "";
+  const fixture = JSON.stringify({ version: "https://jsonfeed.org/version/1.1", title: "fixture", items: [
+    { id: "https://crashthestack.com/devlog/newest/", url: "https://crashthestack.com/devlog/newest/", title: "The newest post", date_published: "2099-01-02T00:00:00Z" },
+    { id: "https://crashthestack.com/devlog/older/", url: "https://crashthestack.com/devlog/older/", title: "An older post", date_published: "2026-09-22T10:00:00Z" } ] });
+  substitutePaths[BASE + "news-fixture.json"] = Buffer.from(fixture);
+  await evalJS(`localStorage.removeItem("news-seen")`);
+  const m0 = consoleLines.length;   // the fixture boot's own lines (an earlier boot beside the site may have read its real feed)
+  const r = await pauseMenu(`&news=${BASE}news-fixture.json`);
+  let opened = null;
+  if (r.error) detail = r.error;
+  else {
+    // the feed is read after the tunes and the credits (15 s on this box):
+    // the top screen is rebuilt with the row when it lands
+    const got = await waitLine(/^crash: news (\d+)$/, m0, 40000);
+    const topLine = r.top.rows.news ? null : await waitLine(/^crash: menu top .* news/, r.from, 40000);
+    const top = r.top.rows.news ? r.top : (topLine ? parseMenuLine(consoleLines[topLine.index]) : await menuOn("top", r.from, 100));
+    if (!got || got.m[1] !== "2") detail = `the game did not take the two fixture posts (${got ? got.m[0] : "no crash: news line"})`;
+    else if (!top || !top.rows.news) detail = `no NEWS row on the top screen (${top ? top.order.join(" ") : "no line"})`;
+    else if (top.rows.news.value !== "NEW") detail = `the NEWS row reads ${JSON.stringify(top.rows.news.value)} on a fresh origin, want NEW`;
+    else {
+      const m1 = consoleLines.length;
+      await downTo(top.order, "news", topAt);
+      await press("Enter");
+      const screen = await menuOn("news", m1, 3000);
+      if (!screen) detail = "Enter on NEWS opened no NEWS screen";
+      else if (screen.order.join(" ") !== "post-0 post-1 back") detail = `the NEWS screen lists ${screen.order.join(" ")}`;
+      else if (screen.rows["post-0"].value !== "2099-01-02") detail = `the first post's date reads ${screen.rows["post-0"].value}`;
+      else {
+        const before = (await send("Target.getTargets")).targetInfos.filter((t) => t.type === "page").length;
+        const here = await evalJS("location.href");
+        const m2 = consoleLines.length;
+        await press("Enter");
+        const said = await waitLine(/^crash: open (\S+)$/, m2, 3000);
+        await sleep(1500);
+        const targets = (await send("Target.getTargets")).targetInfos.filter((t) => t.type === "page");
+        opened = targets.find((t) => t.url === "https://crashthestack.com/devlog/newest/");
+        const still = await evalJS("location.href");
+        if (!said) detail = "Enter on the first post printed no crash: open line";
+        else if (said.m[1] !== "https://crashthestack.com/devlog/newest/") detail = `opened ${said.m[1]}`;
+        else if (targets.length !== before + 1 || !opened) detail = `no new browsing context at the post's URL (targets ${targets.map((t) => t.url).join(" ")})`;
+        else if (still !== here) detail = `the game's page moved to ${still}`;
+        else if (!(await menuOn("news", m1, 100))) detail = "the NEWS screen is gone";
+        if (opened) await send("Target.closeTarget", { targetId: opened.targetId }).catch(() => {});
+      }
+    }
+  }
+  if (!detail) {
+    // seen: the reload's row has no NEW
+    const r2 = await pauseMenu(`&news=${BASE}news-fixture.json`);
+    const topLine2 = r2.error || r2.top.rows.news ? null : await waitLine(/^crash: menu top .* news/, r2.from, 40000);
+    const top2 = r2.error ? null : (r2.top.rows.news ? r2.top : (topLine2 ? parseMenuLine(consoleLines[topLine2.index]) : null));
+    if (r2.error) detail = r2.error;
+    else if (!top2 || !top2.rows.news) detail = "no NEWS row after the reload";
+    else if (top2.rows.news.value) detail = `the NEWS row still reads ${top2.rows.news.value} after the posts were seen`;
+  }
+  // no feed: no row (build/web alone; the staged deploy tree beside a site
+  // has the real ../devlog/feed.json, and then the row is the site's posts)
+  const siteFeed = fs.existsSync(path.join(GAME, "..", "devlog", "feed.json"));
+  if (!detail && !siteFeed) {
+    const r3 = await pauseMenu();
+    if (r3.error) detail = r3.error;
+    else {
+      const failedLine = await waitLine(/^crash: news (failed|empty|none)/, r3.from - 200 > 0 ? r3.from - 200 : 0, 40000);
+      const top3 = await menuOn("top", r3.from, 1000) || r3.top;
+      if (!failedLine) detail = "no crash: news failed line without a feed";
+      else if (top3.rows.news) detail = "a NEWS row with no feed to read";
+    }
+  }
+  delete substitutePaths[BASE + "news-fixture.json"];
+  await evalJS(`localStorage.removeItem("news-seen")`);
+  if (detail) fail("news", detail);
+  else pass("news", `two fixture posts: NEW on the top screen's NEWS row, the screen lists post-0 (2099-01-02) post-1 back, Enter opened the post in a new browsing context with the game's page unchanged, no NEW after the reload${siteFeed ? " (the site's own feed sits beside this tree: the no-feed case not run)" : ", no row without a feed"}`);
 }
 
 // ---- 10. manifest: the PWA is installable from this origin ------------------

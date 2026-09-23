@@ -1,0 +1,45 @@
+#!/bin/sh
+# Host the whole crashthestack.com tree (the site at /, the game at
+# /jack-in/, the tracker at /tracker/) for a look over the VPN: the tree
+# scripts/stage-web builds, served by serve-web from a snapshot no build
+# touches.
+#
+#   scripts/host-site            stage -> build/hosted-site, (re)start serve-web on it (PORT 8774)
+#   PORT=8775 scripts/host-site  another port
+#
+# The same rules as host-web: the tree must be clean and build/web must be
+# HEAD's (the page's stamp says which commit it was built at), or the
+# snapshot would not match a commit. The site's own output carries no
+# stamp; it is what site/public holds at the moment of staging.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+PORT="${PORT:-8774}"
+DST="build/hosted-site"
+dirty="$(git status --porcelain --untracked-files=no)"
+if [ -n "$dirty" ]; then
+  echo "host-site: the tree is dirty; the snapshot would not match a commit. Commit first."
+  exit 1
+fi
+head="$(git rev-parse --short=12 HEAD)"
+stamp="$(grep -o 'version: "[^"]*"' build/web/index.html | head -1 | cut -d'"' -f2)"
+if [ "$stamp" != "$head" ]; then
+  # a commit that touched only the site (its copy, its theme, its assets)
+  # leaves the game's build inputs as the stamp's commit had them: the web
+  # build is still that commit's, and the site is rebuilt from the tree
+  case "$stamp" in *-dirty-*) stamp_ok="";; *) stamp_ok="$(git rev-parse --verify --quiet "$stamp^{commit}" || true)";; esac
+  if [ -n "$stamp_ok" ] && git diff --quiet "$stamp" HEAD -- src web index.template.html tracker.template.html assets package.sgl sigil.lock styles.css; then
+    echo "host-site: build/web is $stamp's; HEAD $head changed only the site since (the game's inputs are the same)"
+  else
+    echo "host-site: build/web was built at '$stamp', HEAD is $head, and the game's inputs differ. Build --config web at HEAD first."
+    exit 1
+  fi
+fi
+if [ -f "build/web-serve-$PORT.pid" ]; then
+  PORT="$PORT" scripts/serve-web --stop || true
+fi
+scripts/stage-web "$DST" | tail -1
+DIR="$DST" PORT="$PORT" scripts/serve-web
+# the wasm's path is its hash since the R2 move: printing both makes a page
+# pointing at one build with a wasm from another visible in this line
+game_wasm="$(grep -o 'data-wasm="[^"]*"' "$DST/jack-in/index.html" | head -1 | cut -d'"' -f2)"
+echo "host-site: serving $DST (web version $stamp) on port $PORT: the site at /, the game at /jack-in/ (wasm $game_wasm), the tracker at /tracker/"
