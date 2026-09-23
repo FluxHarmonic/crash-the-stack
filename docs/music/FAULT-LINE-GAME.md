@@ -73,3 +73,21 @@ performance with the default adaptive rate remains a listening check.
 Validation logs and the screenshot live outside the repository in
 `~/Ops/artifacts/crash-the-stack-album/fault-line-game-integration/`.
 No VPN preview or public deployment was started.
+
+## Tonight's release merge
+
+`feat/p4b` at `360541d` is merged into `feat/codex-album` at `e300967`.
+The conflict in `scripts/publish-web` is resolved in favor of the new site
+staging flow, with the approved per-track album URLs preserved and dry-run
+uploads disabled. Motif remains 0.6.6 and the live runtime remains 0.22.5.
+
+After the merge, 359 tests passed across `test-music`,
+`test-fault-line-live`, `test-assets`, `test-menu` and `test-imports`.
+The R2 handler's 17 checks passed. The generated album manifest matches all
+fifteen published track titles, durations and exact URLs in the approved
+Sector Drift II publication. An isolated publisher fixture confirms that
+`--dry-run` selects local staging without invoking Wrangler.
+
+Build the release from the merged commit. The optimized browser audition
+recorded above predates the P4b merge; it is evidence for the music integration,
+not a release artifact for the merged site. No public deployment was made.
