@@ -310,3 +310,21 @@ game-loop and encoded audio checks pass; all fifteen maintained songs regenerate
 cleanly. It uses the same -0.8 dB monitoring gain as the approved sketch and
 measures -15.6 LUFS-I/-1.5 dBTP. Full-track approval is pending before shared
 source adoption, mastering or publication.
+
+## Patch review coverage
+
+David asked that the continuing review explicitly include instrument design.
+Review every track's patches in calm, tense and fill context: tone, envelope
+length, articulation, balance, and consistency between the main kit and fill.
+Record retained patches as deliberate choices after review; do not infer a full
+patch review from a successful arrangement or timing pass. Relay Ghost, Breach
+Vector and Cold Boot have explicit patch comparisons; Dirty Cache's latest
+pass primarily reviews phrasing with its existing approved instrument bank.
+Promising instrument changes should receive contextual A/B clips before adoption.
+
+David approved Dirty Cache's connected full arrangement and authorized finishing
+adoption, mastering and publication. Shared source adoption now reproduces both
+approved candidates exactly, including the three reconciled reed entry gates.
+Basement Circuit is the suggested next review: consider its acid phrasing and
+patch articulation while preserving the restrained drums, softened transition
+swell and reduced late bass balance.

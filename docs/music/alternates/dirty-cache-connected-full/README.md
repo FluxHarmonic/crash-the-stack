@@ -68,3 +68,9 @@ receipt are retained. The native renderer is the pinned Motif 0.6.6 binary.
 The full OGG uses the sketch's -0.8 dB monitoring gain, without added mastering
 or limiting. It measures **-15.6 LUFS-I, -1.5 dBTP**, with a -91 dBFS final second.
 Duration (222.545465 seconds), 44.1 kHz stereo and encoded peak checks pass.
+
+## Full-track approval
+
+David approved this version and requested adoption, mastering and publication.
+Both maintained arrangements now match the candidate exactly. See
+[Dirty Cache album II](../../album/DIRTY-CACHE-II.md) for the release record.

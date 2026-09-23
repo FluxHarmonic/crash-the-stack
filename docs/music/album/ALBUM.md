@@ -22,7 +22,7 @@ process.
 | 6 | Blind Spot | Air pair I ready for listening | 3:15 actual |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
 | 8 | Sector Drift | Air pair I ready for listening | 3:36 actual |
-| 9 | Dirty Cache | Pocket pair I ready for listening | 3:43 actual |
+| 9 | Dirty Cache | Album II phrasing approved and synchronized; mastered for publication | 3:43 actual |
 | 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
 | 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
