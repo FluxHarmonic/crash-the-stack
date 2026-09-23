@@ -30,7 +30,12 @@
 #
 # Exit: 0 build and every arm green; 1 an arm failed (the build succeeded);
 # 2 the build failed; 125 refused or SETUP-FAILED; 126/127 from azoth-remote
-# (results incomplete / runner not released).
+# (results incomplete / runner not released); 124/255 timeout / connection lost.
+# Each arm's own rc is on its "=== ARM-RESULT rc=" line (an arm's 1 and 2 both
+# count as a failed arm in the exit status). A fetched tree is filed in
+# build/remote-web-<sha>/ ONLY when the cycle ended 0 or 1, the runner wrote
+# its completion marker after a checked copy, and the wasm is present; any
+# other outcome keeps only the logs.
 #
 # Environment: AZOTH_REMOTE (path to azoth.works bin/azoth-remote), BUILD_TIMEOUT
 # (seconds, default 10800), OPTIMIZE (default 1, as the gate builds).
@@ -76,7 +81,8 @@ if [ "$FETCH" = 1 ] && [ -e "$DEST" ]; then
   say "REFUSED: $DEST already exists; remove it to rebuild this sha"
   exit 125
 fi
-SIGIL_V=$(sigil --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '{print $2}')
+command -v sigil >/dev/null 2>&1 || { say "no sigil on PATH; the runner uses this box's sigil version, so it must be readable"; exit 125; }
+SIGIL_V=$(sigil --version 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' | awk '{print $2}') || SIGIL_V=""
 case "$SIGIL_V" in [0-9]*.[0-9]*.[0-9]*) ;; *) say "cannot read this box's sigil version ('$SIGIL_V')"; exit 125 ;; esac
 say "HEAD $SHA ($FULL), sigil $SIGIL_V, OPTIMIZE=${OPTIMIZE:-1}, arms: ${ARMS[*]:-none}"
 
@@ -134,14 +140,21 @@ if [ -s ../arms ]; then
   done < ../arms
 fi
 # served tree only, for the fetch
-tar -C build/web --exclude=./native --exclude=./bin --exclude=./.sigil-package-cache -cf - . | (mkdir -p ../out/web && tar -C ../out/web -xf -)
+mkdir -p ../out/web
+# The completion marker is written ONLY after a checked copy; the local side
+# files a tree as a build only when it is present (review M2).
+if tar -C build/web --exclude=./native --exclude=./bin --exclude=./.sigil-package-cache -cf - . | tar -C ../out/web -xf -; then
+  printf '%s\n' "$FULL" > ../out/web.complete
+else
+  echo "STAGING-FAILED: could not copy build/web to out/web"; ARC=2
+fi
 echo "remote: total $(( $(t) - T0 ))s"
 exit $ARC
 EOF
 
-GETS=()
-[ "$FETCH" = 1 ] && GETS=(--get "out:$STAGE/fetched")
-[ "$FETCH" = 1 ] || GETS=(--get "out/build.log:$STAGE/build.log")
+# Always fetch out/: the logs are wanted with --no-fetch too, and out/ always
+# exists, so a failure before the build step cannot turn into a 126.
+GETS=(--get "out:$STAGE/fetched")
 T0=$(date +%s)
 set +e
 "$REMOTE" --label "build $SHA" --timeout "${BUILD_TIMEOUT:-10800}" --detach \
@@ -151,7 +164,10 @@ rc=$?
 set -e
 say "remote cycle rc=$rc in $(( $(date +%s) - T0 ))s"
 
-if [ "$FETCH" = 1 ] && [ -f "$STAGE/fetched/web/index.html" ]; then
+if [ "$FETCH" = 1 ] && [ -f "$STAGE/fetched/web/index.html" ] \
+   && ! { { [ "$rc" = 0 ] || [ "$rc" = 1 ]; } && [ "$(cat "$STAGE/fetched/web.complete" 2>/dev/null)" = "$FULL" ] && [ -f "$STAGE/fetched/web/crash-the-stack.wasm" ]; }; then
+  say "NOT filing the fetched tree as a build of $SHA: cycle rc=$rc, completion marker '$(cat "$STAGE/fetched/web.complete" 2>/dev/null)', wasm $([ -f "$STAGE/fetched/web/crash-the-stack.wasm" ] && echo present || echo missing)"
+elif [ "$FETCH" = 1 ] && [ -f "$STAGE/fetched/web/index.html" ]; then
   STAMP=$(grep -o 'version: "[^"]*"' "$STAGE/fetched/web/index.html" | head -1 | cut -d'"' -f2)
   if [ "$STAMP" != "$SHA" ]; then
     say "REFUSED: the fetched page is stamped '$STAMP', not $SHA; deleting it"
