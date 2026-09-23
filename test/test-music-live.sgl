@@ -310,3 +310,43 @@
       (assert-equal 1 (length tense-landings))
       (assert-true (and final (>= (car final) (tense-pos tm)))))))
 (live-music-off!)
+
+;; --- a tune that will not read (David's phone, 2026-09-23) ---------------------
+;;
+;; A theme whose text refuses to parse must not take the game with it. Before
+;; this, the driver retried the parse every frame, and since it runs ahead of
+;; the screen's own step, the menu stopped answering taps: the game looked
+;; hung with the menu drawn. The open is guarded now, the failure is said
+;; once, and the tune is refused for the session.
+
+(test-group "music live: a tune that will not read is refused once, and the frames go on"
+  (test "a broken text says `music refused NAME chars N` once, never opens, and every later frame is quiet and cheap"
+    (let ((real-loader tune-text)
+          (broken "(tune name: \"broken\" (nonsense 1 2 3))"))
+      ;; the theme's text is replaced by one motif that will refuse. provide!
+      ;; overwrites what earlier groups left cached, which the loader alone
+      ;; would not: text-for answers from the cache first.
+      (live-music-set-loader! (lambda (name) broken))
+      (live-music-provide! MENU-THEME broken)
+      (set! *lines* '())
+      (live-music-stop!)
+      ;; twelve frames of the menu, which wants the theme
+      (let loop ((i 0))
+        (when (< i 12)
+          (set! *frame* (+ *frame* 1))
+          (live-music-frame! 'menu #f #f 'stack SEED)
+          (live-music-pull! out 0 FRAME)
+          (loop (+ i 1))))
+      (let ((refusals (lines-matching '("refused")))
+            (opens (lines-matching '("open"))))
+        ;; said exactly once, with the name and the length of what would not read
+        (assert-equal 1 (length refusals))
+        (let ((words (cddr (car refusals))))
+          (assert-equal "black-glass-title" (cadr words))
+          (assert-equal "chars" (caddr words))
+          (assert-equal (string-length broken) (cadddr words)))
+        ;; and nothing ever opened
+        (assert-equal 0 (length opens))
+        (assert-false (live-music-playing?)))
+      ;; the frames kept running: the game is silent, not stopped
+      (live-music-set-loader! real-loader))))

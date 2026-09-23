@@ -70,6 +70,7 @@
     (define *fresh* #f)           ; a new deal was dealt: the next pick is fresh and starts from the top
     (define *restart* #f)         ; the wanted track is the playing one but a fresh deal wants it from the top
     (define *texts* '())          ; ((name . text) ...): tune texts that landed
+    (define *refused* '())        ; names whose text would not read: never opened again this session
     (define *loader* #f)          ; (proc name) -> text | #f; #f asks the page (a fetch line)
     (define *asked* '())          ; names asked of the page
     (define *gain* 1.0)           ; MUSIC x VOLUME, a factor on LIVE-GAIN
@@ -490,16 +491,31 @@
               (else #f))))
 
     ;; --- opening a track -------------------------------------------------------------
+    ;; A tune whose text will not read must not take the game with it. The
+    ;; open is guarded: the failure is said ONCE with the tune's name and the
+    ;; length of the text that would not read, the name is refused for the
+    ;; rest of the session, and the caller is told 'failed so it can fall to
+    ;; the next tune or to silence. Without this the driver retried the parse
+    ;; every frame, and since it runs before the screen's own step, the menu
+    ;; stopped answering taps: David's phone, 2026-09-23, on a 62,428-byte
+    ;; theme that reads perfectly on the desktop build.
+    ;;   crash: music refused NAME chars N MESSAGE
+    (define (refused? name) (and (memq name *refused*) #t))
+    (define (refuse! name text e)
+      (set! *refused* (cons name *refused*))
+      (*say* "music" "refused" (symbol->string name) "chars" (if (string? text) (string-length text) 0)
+             (if (error-object? e) (error-object-message e) "unreadable")))
+
     (define (open! name fresh?)
       (let ((text (text-for name)))
-        (if (not text)
-            'pending
+        (if (or (not text) (refused? name))
+            (if (refused? name) 'failed 'pending)
             ;; The parse and the open stall the frame: a known stall, the cues
             ;; pre-rolled and its starvation counted apart. A tune that fails
             ;; to read or validate must still close the bracket, or every
             ;; starved frame after it is folded into the known count (the
             ;; reviewer's LOW 4, 2026-09-22).
-            (guard (e (#t (audio-stall-end!) (raise e)))
+            (guard (e (#t (audio-stall-end!) (refuse! name text e) 'failed))
             (let* ((stall (audio-stall-begin!))
                    (t (read-tune-string text))
                    (calm (or (tune-mark t 'calm) 0))
@@ -545,15 +561,20 @@
            (set! *want* #f)
            (*say* "music" "fade" "out" (symbol->string *name*))
            (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
-          ;; another track, or the same one from the top: fade out, then open
-          ((and want (or (not (eq? want *name*)) *restart*))
+          ;; another track, or the same one from the top: fade out, then open.
+          ;; A tune that refuses to read leaves the game silent rather than
+          ;; retrying: `want` is dropped, so the next frame asks for nothing
+          ;; and the screen keeps its own step (see refuse!).
+          ((and want (not (refused? want)) (or (not (eq? want *name*)) *restart*))
            (cond ((and *player* (not (fading-out?)))
                   (*say* "music" "fade" "out" (symbol->string *name*))
                   (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
                  ((not *player*)
                   (let ((r (open! want *restart*)))
                     (set! *restart* #f)
-                    (set! *want* (if (eq? r 'pending) 'pending want)))))))
+                    (set! *want* (cond ((eq? r 'pending) 'pending)
+                                       ((eq? r 'failed) #f)
+                                       (else want))))))))
         ;; the first pull past the open position: the track is heard (once per open)
         (when (and *player* *opened-at*)
           (let ((p (live-music-position)))
