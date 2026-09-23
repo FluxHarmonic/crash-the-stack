@@ -227,11 +227,20 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
     if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
     else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
   } catch (e) { fail("imports", "compile: " + e.message); }
-  // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21. SLACK: since M1
-  // the game plays its soundtrack on motif's player, so the game wasm carries motif again:
-  // David's budget for that is +10 MB over the P4c publish (D59; 32.9 MB measured 2026-09-22,
-  // the OGGs still aboard), and this leg holds the game to it.
-  const BASE = 24465466, SLACK = 10 * 1024 * 1024, TRACKER_MAX = 20 * 1024 * 1024;
+  // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21. SLACK: M1 brought
+  // motif's player back into the game wasm on a +10 MB budget (D59), and P5's hub then spent the
+  // rest of it. David raised the budget to 16,000,000 bytes on 2026-09-23, so the ceiling is
+  // 40,465,466 and the gated build sits 1,702,276 under it. The measurements he decided on,
+  // e46d110 (M1's tip) against 758d521 (the P5 gate), both OPTIMIZE=1:
+  //   M1 33,394,983 -> P5 38,763,190: the hub is +5,368,207, +16.1%, and 5,269 lines of new
+  //   Sigil became 5.37 MB of wasm (~1,019 bytes a line);
+  //   the DOWNLOAD is 1,850,003 brotli -q 11 / 4,251,799 gzip -9 — this ceiling measures what the
+  //   phone decodes and compiles, not what it fetches;
+  //   no Binaryen level shrinks it: wasm-opt -Oz saves 5,059 bytes (and gzips 3,823 WORSE), -O2
+  //   comes out 5,769 bytes LARGER. The module is 99.1% code, 5,850 functions, 15.47M IR nodes.
+  // So a real reduction is a sigil codegen matter, not a flag we are failing to pass. Raise this
+  // number only on David's word, never to clear a red.
+  const BASE = 24465466, SLACK = 16000000, TRACKER_MAX = 20 * 1024 * 1024;
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
