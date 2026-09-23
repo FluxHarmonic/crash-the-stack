@@ -60,6 +60,12 @@ provenance text, not an executable dependency.
 
 ## Telegram
 
+David provided standing authorization on 2026-09-23: "You have my permission
+to send every audition file to telegram, don't ask again". Send soundtrack
+auditions to his existing configured Telegram destination without requesting
+per-file or per-revision confirmation. This covers auditions, not public
+publication or unrelated files. Record confirmed delivery receipts.
+
 Only send explicitly selected full auditions. Choose either environment
 variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or --env-file FILE.
 An explicit dotenv file may also use the existing COURIER_TELEGRAM_TOKEN and

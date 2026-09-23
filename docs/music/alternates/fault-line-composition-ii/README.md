@@ -7,7 +7,7 @@ render records are external; delivery measurements and receipts are archived her
 ## Delivery status
 
 Source/arrangement commit: 796dbb5. WAV, FLAC and OGG exports are complete.
-**Not sent to Telegram.** Automatic approval review rejected the upload before
-execution, treating the previous confirmation as limited to Composition I.
-Await fresh user confirmation for II; no API call or delivery receipt exists.
-Encoded hashes are preserved in encoded.sha256.
+**Sent to Telegram.** After David explicitly authorized every audition file,
+the API acknowledged album message 1194 and game message 1195. The earlier
+automatic-review rejection occurred before execution; no duplicate upload was
+made. Encoded hashes are preserved in encoded.sha256.
