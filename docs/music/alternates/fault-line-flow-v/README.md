@@ -78,3 +78,11 @@ Audio, exact commands, score snapshots, renderer identity, measurements and
 receipts live at ~/Ops/artifacts/crash-the-stack-album/fault-line-flow-v/.
 Keep Style IV as the accepted groove reference while awaiting listening feedback
 on this bass and entrance revision. After Image and public audio remain unchanged.
+
+## Delivered review copy
+
+Source commit **80f22ae**. Telegram acknowledged the Style IV/V comparison as
+**1185** and the complete revised short demo as **1186**. All reference and
+delivered OGG hashes are preserved in `encoded.sha256`; commands, measurements
+and acknowledgments remain in the external render folder. Listening feedback
+on the independent bass and moving entrance is pending.
