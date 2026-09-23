@@ -75,7 +75,7 @@ A/B is -19.4 LUFS-I/-3.0 dBTP. Both full endings peak at -91 dBFS in the last
 second. Duration, stereo 44.1 kHz and encoded-peak checks pass.
 
 Audio, exact commands, score snapshots, renderer identity, measurements and
-receipts live at ~/Ops/artifacts/crash-the-stack-album/fault-line-flow-v/.
+receipts live at ~/artifacts/crash-the-stack-album/fault-line-flow-v/.
 Keep Style IV as the accepted groove reference while awaiting listening feedback
 on this bass and entrance revision. After Image and public audio remain unchanged.
 

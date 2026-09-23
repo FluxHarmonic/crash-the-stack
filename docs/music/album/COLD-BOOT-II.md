@@ -46,7 +46,7 @@ Source adoption synchronizes game and album scores. This page-only publication
 preserves the currently deployed game/tracker score assets; those receive the
 updated Cold Boot score through the next normal game deployment.
 
-External collateral beneath `~/Ops/artifacts/crash-the-stack-album/`:
+External collateral beneath `~/artifacts/crash-the-stack-album/`:
 
 - `cold-boot-ii-release/`: native provenance, WAV/FLAC/OGG, commands and checks.
 - `cold-boot-ii-mp3/`: tagged MP3, cover, export report and decoded measurements.

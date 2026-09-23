@@ -20,7 +20,7 @@ finite playback, exact compiled attack clocks, eighth-grid melodies, voices,
 paired pad harmony/releases and final gates.
 
 New audio and raw evidence live under
-~/Ops/artifacts/crash-the-stack-album/obsidian-ii/.
+~/artifacts/crash-the-stack-album/obsidian-ii/.
 Use album-batch-render.sgl with --track obsidian-index --revision ii and the
 same +5 dB mastering gain as album I. The renderer now uses the shared David
 Wilson metadata and accepts revision labels without replacing prior renders.

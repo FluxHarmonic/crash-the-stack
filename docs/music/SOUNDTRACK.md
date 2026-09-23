@@ -164,7 +164,7 @@ Each has its song title in the Vorbis `TITLE` tag, `Crash The Stack` as `ALBUM`,
 and `After Dark II audition` as the version comment. These are stream-copied
 from the checked full exports, with decoded PCM verified identical. The
 original genre/version filenames remain alongside them. The copies live in
-`~/Ops/artifacts/crash-the-stack-codex-content/ogg/`.
+`~/artifacts/crash-the-stack-codex-content/ogg/`.
 
 Blind Spot, Cold Boot and Black Glass / Grit received positive listening
 feedback. David also liked Glass Current / After Dark II, describing it as

@@ -66,7 +66,7 @@ equal the game references exactly. Regenerating both scores and maps into a
 temporary directory reproduces them byte-for-byte. No game backport is proposed.
 
 All audio and raw reports belong in
-~/Ops/artifacts/crash-the-stack-album/air-pair-i/. Retain the native sources,
+~/artifacts/crash-the-stack-album/air-pair-i/. Retain the native sources,
 canonical snapshots, exact command manifests and hashes. Native source precision
 remains 16-bit; these are provisional album-level auditions, not release masters.
 

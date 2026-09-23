@@ -12,7 +12,7 @@ reused losslessly after exact score, renderer and completed WAV hash checks.
 Retain the previous 0 dB mastering gain and oversampled safety limiter.
 
 Audio and release evidence live under glass-ii-release/ and glass-ii-mp3/ in
-~/Ops/artifacts/crash-the-stack-album/. The complete
+~/artifacts/crash-the-stack-album/. The complete
 master was delivered through Telegram as message 1170.
 
 ## Validation and exports
@@ -55,7 +55,7 @@ synchronized game score ships through the next normal game build/deployment.
 Future publishes must use publication-glass-ii/site/soundtrack/ as
 CRASH_SOUNDTRACK_DIR, or an equivalent newer production bundle.
 
-External collateral under ~/Ops/artifacts/crash-the-stack-album/:
+External collateral under ~/artifacts/crash-the-stack-album/:
 
 - glass-ii-release/: verified native reuse, source audits, WAV/FLAC/OGG, commands and delivery receipt.
 - glass-ii-mp3/: tagged MP3, attached cover, export report and decoded measurements.

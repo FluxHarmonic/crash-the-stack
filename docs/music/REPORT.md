@@ -127,7 +127,7 @@ sigil docs/music/tools/render.sgl --motif "$MOTIF_BIN" \
   --tracks liquid acid-house electro --format both
 ```
 
-The default output is `~/Ops/artifacts/crash-the-stack-codex-content/`.
+The default output is `~/artifacts/crash-the-stack-codex-content/`.
 `--output PATH` selects another directory. `--prepare-only` validates canonical
 source files and writes six independent section tunes plus commands without
 rendering. The Sigil port requires Sigil and a compatible Motif CLI; see tools/README.md.
@@ -191,7 +191,7 @@ an ambiguous upload. Example, after explicitly choosing to send the files:
 
 ```sh
 sigil docs/music/tools/send-telegram.sgl \
-  ~/Ops/artifacts/crash-the-stack-codex-content/ogg/*.ogg
+  ~/artifacts/crash-the-stack-codex-content/ogg/*.ogg
 ```
 
 The Sigil port uses the shell interface and curl; see tools/README.md. It does not change Courier's

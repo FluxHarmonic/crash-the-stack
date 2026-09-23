@@ -70,7 +70,7 @@ sigil docs/music/tools/expression-render.sgl --stage delivery \
 ```
 
 External audio and exact rendering commands live under
-~/Ops/artifacts/crash-the-stack-album/sector-expression-i-native/ and
+~/artifacts/crash-the-stack-album/sector-expression-i-native/ and
 sector-expression-i-delivery/. Timing, codec and reproduction checks and
 receipts will be recorded after rendering. Numerical checks do not establish
 subjective listening quality.

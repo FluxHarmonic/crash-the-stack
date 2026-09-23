@@ -13,7 +13,7 @@ score, pinned renderer and completed WAV hash checks; retain the previous +3.5 d
 mastering gain and oversampled safety limiter.
 
 Release audio and evidence live outside the repository under sector-ii-release/
-and sector-ii-mp3/ in ~/Ops/artifacts/crash-the-stack-album/. The complete master
+and sector-ii-mp3/ in ~/artifacts/crash-the-stack-album/. The complete master
 was delivered through Telegram as message 1174.
 
 David has another assignment to introduce alongside the ongoing soundtrack polish.
@@ -61,7 +61,7 @@ game score ships through the next normal game build/deployment. Future publishes
 must use publication-sector-ii/site/soundtrack/ as CRASH_SOUNDTRACK_DIR,
 or an equivalent newer production bundle.
 
-External collateral under ~/Ops/artifacts/crash-the-stack-album/:
+External collateral under ~/artifacts/crash-the-stack-album/:
 
 - sector-ii-release/: verified native reuse, source audits, WAV/FLAC/OGG, commands and delivery receipt.
 - sector-ii-mp3/: tagged MP3, cover, export report and decoded measurements.

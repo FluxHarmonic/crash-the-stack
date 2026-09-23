@@ -36,7 +36,7 @@ The measurements supplement listening; no new subjective listening verdict is
 claimed for this master.
 
 Files and complete evidence:
-`~/Ops/artifacts/crash-the-stack-album/fault-line-master-i/`.
+`~/artifacts/crash-the-stack-album/fault-line-master-i/`.
 This is a sharing master; final album sequencing and inter-track mastering remain
 open. Website publication and the existing fifteen-track selection are unchanged.
 

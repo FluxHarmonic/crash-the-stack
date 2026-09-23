@@ -14,7 +14,7 @@ the selected fade and is not reused.
 
 Retain the existing 0 dB mastering gain and oversampled safety limiter. Release
 artifacts live outside the repository under basement-ii-release/ and
-basement-ii-mp3/ in ~/Ops/artifacts/crash-the-stack-album/. The complete
+basement-ii-mp3/ in ~/artifacts/crash-the-stack-album/. The complete
 master was delivered through Telegram as message 1166.
 
 ## Validation and exports
@@ -55,7 +55,7 @@ game score ships through the next normal game deployment. Future deployments
 must use publication-basement-ii/site/soundtrack/ as CRASH_SOUNDTRACK_DIR,
 or an equivalent newer production bundle.
 
-External collateral under ~/Ops/artifacts/crash-the-stack-album/:
+External collateral under ~/artifacts/crash-the-stack-album/:
 
 - basement-ii-release/: fresh native provenance, score audits, WAV/FLAC/OGG, commands and delivery receipt.
 - basement-ii-mp3/: tagged MP3, cover, export report and decoded measurement.

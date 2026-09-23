@@ -54,7 +54,7 @@ within 0.2 LU of the prepared candidate. Existing trial evidence is protected
 from accidental overwrite; use a new output directory for a new version.
 
 Audio and full evidence live in
-`~/Ops/artifacts/crash-the-stack-album/master-trial-i/`, with OGGs in `ogg/`.
+`~/artifacts/crash-the-stack-album/master-trial-i/`, with OGGs in `ogg/`.
 `README-renders.txt` records reproduction instructions; `export-commands.json`
 contains exact command arrays, `input-audio.sha256` identifies the inputs, and
 `trial-check.json` contains the measured results. The original pilot auditions

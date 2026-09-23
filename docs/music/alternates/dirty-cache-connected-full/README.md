@@ -60,7 +60,7 @@ These checks establish timing and source integrity; the full musical result
 still needs David's listening review.
 
 Audio and commands live outside the repository under
-~/Ops/artifacts/crash-the-stack-album/dirty-cache-connected-full/.
+~/artifacts/crash-the-stack-album/dirty-cache-connected-full/.
 README-renders.txt, render.sgl and game-audit.sgl document reproduction. Native
 WAV, source snapshot, renderer hash, raw levels, encoded OGG, audits and delivery
 receipt are retained. The native renderer is the pinned Motif 0.6.6 binary.

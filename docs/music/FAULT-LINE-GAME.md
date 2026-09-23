@@ -71,7 +71,7 @@ check pinned 22050 Hz and disabled the background for reproducibility; phone
 performance with the default adaptive rate remains a listening check.
 
 Validation logs and the screenshot live outside the repository in
-`~/Ops/artifacts/crash-the-stack-album/fault-line-game-integration/`.
+`~/artifacts/crash-the-stack-album/fault-line-game-integration/`.
 No VPN preview or public deployment was started.
 
 ## Tonight's release merge

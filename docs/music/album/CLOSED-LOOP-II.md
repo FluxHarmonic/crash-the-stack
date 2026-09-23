@@ -49,7 +49,7 @@ Game and album sources are synchronized. This page-only deployment preserves
 the currently deployed game/tracker assets; their updated Closed Loop score
 ships through the next normal game deployment.
 
-External collateral under `~/Ops/artifacts/crash-the-stack-album/`:
+External collateral under `~/artifacts/crash-the-stack-album/`:
 
 - `closed-loop-ii-release/`: lossless provenance, WAV/FLAC/OGG, checks and commands.
 - `closed-loop-ii-mp3/`: tagged MP3, cover, export report and decoded measurement.

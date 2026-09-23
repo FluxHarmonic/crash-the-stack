@@ -32,7 +32,7 @@ sigil docs/music/tools/basement-fade.sgl \
 ```
 
 Audio and reproduction commands live under
-~/Ops/artifacts/crash-the-stack-album/basement-fade-i/. Its render.sgl accepts
+~/artifacts/crash-the-stack-album/basement-fade-i/. Its render.sgl accepts
 repository and fresh output paths, uses the pinned Motif native renderer, and
 encodes OGG with the same -0.5 dB monitoring gain as Expression I. Source and
 renderer hashes, measurements, audit and delivery evidence are retained there.

@@ -76,7 +76,7 @@ missing release, short gap, wrong root and wrong voicing; valid entry/release
 passes. This guards the harmonic clarity requested during the original rework.
 
 Audio and raw evidence live in
-~/Ops/artifacts/crash-the-stack-album/stone-pair-i/, including native sources,
+~/artifacts/crash-the-stack-album/stone-pair-i/, including native sources,
 canonical snapshots, exact command manifests and hashes. Native WAV precision
 remains 16-bit. These are provisional album auditions, not release masters.
 

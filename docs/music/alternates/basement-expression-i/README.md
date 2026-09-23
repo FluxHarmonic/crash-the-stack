@@ -97,7 +97,7 @@ are retained, so patch choices can be accepted independently of phrase choices.
 The composer protects backing events, clock, bus, instrument routing and levels.
 Full native clock, game-loop, comparison, encoded-audio and regeneration results
 accompany the delivered files. Audio and commands belong outside the repo
-under ~/Ops/artifacts/crash-the-stack-album/basement-expression-i/ (initial native
+under ~/artifacts/crash-the-stack-album/basement-expression-i/ (initial native
 renders) and basement-expression-i-delivery/ (final comparison and full OGGs).
 
 ## Delivered review evidence

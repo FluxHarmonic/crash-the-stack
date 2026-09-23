@@ -71,7 +71,7 @@ MOTIF_BIN="$MOTIF_BIN" sigil docs/music/tools/songs.sgl --stage check
 ```
 
 Audio and measurements live under
-`~/Ops/artifacts/crash-the-stack-album/cold-boot-motion-i/`, with delivered OGGs
+`~/artifacts/crash-the-stack-album/cold-boot-motion-i/`, with delivered OGGs
 in `ogg/`. The accepted song pool, generated game/album arrangements and public
 master remain intact while this proposal is reviewed.
 

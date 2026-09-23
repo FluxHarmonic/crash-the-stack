@@ -55,7 +55,7 @@ sigil docs/music/tools/rock-wave-sketches.sgl \
 The four generated files are checked in beside this document. Section maps
 record exact bar boundaries. The canonical writer refuses to overwrite a
 differing score. Audio and the commands that produced it live outside the repo
-at ~/Ops/artifacts/crash-the-stack-album/rock-wave-sketches-i-final/.
+at ~/artifacts/crash-the-stack-album/rock-wave-sketches-i-final/.
 The earlier rock-wave-sketches-i/ artifacts are undelivered preflight renders;
 the final folder includes the B-flat harmony correction.
 

@@ -85,7 +85,7 @@ pattern 7. Pluck timing in Dirty Cache and bell timing in Basement are checked
 on the eighth grid. Acid slides retain their native non-retriggering behavior.
 
 Audio, snapshots, command manifests, hashes and raw measurements belong in
-~/Ops/artifacts/crash-the-stack-album/pocket-pair-i/. Native WAV export remains
+~/artifacts/crash-the-stack-album/pocket-pair-i/. Native WAV export remains
 16-bit; these are provisional album-level auditions, not release masters.
 
 ## Provisional mastering and full render results

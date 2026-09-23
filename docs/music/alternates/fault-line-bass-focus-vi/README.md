@@ -68,7 +68,7 @@ is the decision point.
 
 Audio and exact native/delivery commands, snapshots, renderer identity, audit
 records and supporting tone-measurement script/logs live at
-~/Ops/artifacts/crash-the-stack-album/fault-line-bass-focus-vi/.
+~/artifacts/crash-the-stack-album/fault-line-bass-focus-vi/.
 No maintained game/album song or public audio changes in this pass.
 
 ## Delivery measurements
@@ -94,7 +94,7 @@ solely to make the solo part audible. No maintained song is changed.
 
 Decoded OGG: -24.6 LUFS-I, -7.0 dBTP, stereo 44.1 kHz. All fifteen maintained
 song regeneration checks pass. Telegram acknowledged message 1189.
-External audio, generated score, commands and checks: `~/Ops/artifacts/
+External audio, generated score, commands and checks: `~/artifacts/
 crash-the-stack-album/fault-line-bass-solo-vi/`.
 
 OGG SHA256: `deca674ee80ff1e8149b6086c3c762335e1ce4a17f0111b1625b3e0b8e6349e7`.

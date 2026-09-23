@@ -51,7 +51,7 @@ placement and all final gates released; the connected 3xx notes correctly avoid
 retriggering. All fifteen maintained song regeneration checks pass.
 
 Audio and reproduction material live under
-`~/Ops/artifacts/crash-the-stack-album/dirty-cache-connected-reed/`:
+`~/artifacts/crash-the-stack-album/dirty-cache-connected-reed/`:
 `render.sgl` records synthesis/encoding and accepts repository/output paths as
 arguments. Run it into a fresh external directory. Native WAV, source snapshot,
 renderer SHA-256, OGG, raw levels, audit and delivery reports are retained.

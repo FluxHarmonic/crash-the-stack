@@ -54,7 +54,7 @@ attacks, their octave relationship and matching note-offs in the changed
 sections. The finite-score audit checks the playback clock and released gates.
 
 Renders, source snapshots, command arrays, renderer identity and measurements:
-`~/Ops/artifacts/crash-the-stack-album/fault-line-bass-lock-vii-delivery/`.
+`~/artifacts/crash-the-stack-album/fault-line-bass-lock-vii-delivery/`.
 This is still an audition; maintained game/album arrangements and public files
 are unchanged.
 

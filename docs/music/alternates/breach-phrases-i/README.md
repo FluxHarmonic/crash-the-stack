@@ -54,7 +54,7 @@ clock remain identical. The established full-score audit passes on both:
 speed-4 subdivisions/slides retained, and all final gates released.
 
 Audio and evidence are external at
-`~/Ops/artifacts/crash-the-stack-album/breach-phrases-i/`.
+`~/artifacts/crash-the-stack-album/breach-phrases-i/`.
 Run from the album worktree, using the same Motif renderer for both halves:
 
 ```sh

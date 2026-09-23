@@ -65,7 +65,7 @@ Patch definitions: `../tools/lib/expression-patches.sgl`.
 Composer: `../tools/relay-expression.sgl`.
 Renderer: `../tools/expression-render.sgl`.
 Audit: `../tools/expression-audit.sgl`.
-External audio: `~/Ops/artifacts/crash-the-stack-album/relay-expression-i-delivery/`.
+External audio: `~/artifacts/crash-the-stack-album/relay-expression-i-delivery/`.
 Earlier measurement attempts remain in `relay-expression-i/` and
 `relay-expression-i-review/`; they are not listening releases.
 

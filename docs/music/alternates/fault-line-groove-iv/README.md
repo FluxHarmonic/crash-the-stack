@@ -69,7 +69,7 @@ All seven generated files reproduce; all fifteen maintained-song checks pass.
 Audio measurements do not establish subjective musical quality.
 
 External audio and exact native/delivery commands live at
-~/Ops/artifacts/crash-the-stack-album/fault-line-groove-iv/.
+~/artifacts/crash-the-stack-album/fault-line-groove-iv/.
 The comparison OGG measures -19.4 LUFS-I/-3.8 dBTP; the full revised demo is
 -19.7 LUFS-I/-3.8 dBTP. The complete before reference is retained locally.
 This remains a style audition. The official game/album tracks and public site

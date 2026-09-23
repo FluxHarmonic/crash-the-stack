@@ -49,7 +49,7 @@ for the final return to matter, then unwind into a composed F-minor ending.
 
 One canonical .cts file per title here. Git preserves arrangement revisions.
 All WAV/OGG/FLAC files, source snapshots, render logs and measurements belong in
-~/Ops/artifacts/crash-the-stack-album/, with exact commands in README-renders.txt.
+~/artifacts/crash-the-stack-album/, with exact commands in README-renders.txt.
 No game assets or runtime code are changed. Possible game improvements go in
 [NOTES.md](NOTES.md).
 

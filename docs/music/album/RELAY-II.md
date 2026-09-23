@@ -39,7 +39,7 @@ released, use the feature renderer to reproduce this album revision.
 
 ## Renders
 
-External directory: `~/Ops/artifacts/crash-the-stack-album/relay-ii/`.
+External directory: `~/artifacts/crash-the-stack-album/relay-ii/`.
 Full listening file: `ogg/relay-ghost-album-ii.ogg`; WAV and FLAC are retained.
 The delivery gain stays at -1.1 dB, as in the comparisons. The established
 oversampled peak-ceiling recipe remains in the album renderer, with no boost

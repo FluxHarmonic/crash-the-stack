@@ -80,7 +80,7 @@ scaled by 0.63, matching the title balance David preferred. The title's native
 - Game assets, src/ and package.sgl remain unchanged. No audio/build output is
   committed. No game-phrase backport is proposed at this point.
 
-All raw evidence and audio: ~/Ops/artifacts/crash-the-stack-album/pilot-i/.
+All raw evidence and audio: ~/artifacts/crash-the-stack-album/pilot-i/.
 The directory includes native WAVs, clean WAV/FLAC, full OGGs in ogg/, controlled
 and matched comparisons, source snapshots and hashes, command manifests, score
 and render audit JSON, loudness/peak logs, probes, and Telegram receipts.

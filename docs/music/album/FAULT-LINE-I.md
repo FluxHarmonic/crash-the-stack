@@ -79,7 +79,7 @@ sigil docs/music/tools/fault-line-render.sgl --stage delivery --variant album \
 Use `--variant game` for the complete calm/fill/tense audition. Native WAV,
 listening WAV, FLAC and OGG, source snapshots, commands, renderer identity and
 measurements live outside the repo in
-`~/Ops/artifacts/crash-the-stack-album/fault-line-composition-i/`.
+`~/artifacts/crash-the-stack-album/fault-line-composition-i/`.
 
 Validation checks the original twelve patches and exact accepted riff,
 transition and solo; six shared game/album phrases; game loop boundaries;

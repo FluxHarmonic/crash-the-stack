@@ -36,7 +36,7 @@ sigil docs/music/tools/relay-bell-context.sgl \
 
 The script retains canonical scores/maps here and writes source snapshots,
 WAVs, OGG, exact command arguments, hashes and checks outside the repository.
-Delivered artifacts: `~/Ops/artifacts/crash-the-stack-album/relay-bell-calm-i/`.
+Delivered artifacts: `~/artifacts/crash-the-stack-album/relay-bell-calm-i/`.
 
 David also asked whether the squeaky bass line over the top is too loud.
 A roughly 2 dB reduction is worth comparing with the preferred drums. Clarify

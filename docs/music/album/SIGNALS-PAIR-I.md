@@ -69,7 +69,7 @@ clock/map extension also reproduces the prior Cold Boot and Relay Ghost scores
 and maps byte-for-byte.
 
 Audio, snapshots, hashes, exact command manifests and raw measurements belong in
-~/Ops/artifacts/crash-the-stack-album/signals-pair-i/. The renderer preserves
+~/artifacts/crash-the-stack-album/signals-pair-i/. The renderer preserves
 native WAVs and exports full provisional WAV/FLAC/OGG files. The existing native
 export remains 16-bit; these are not high-resolution release masters.
 

@@ -58,7 +58,7 @@ sigil docs/music/tools/relay-bass-context.sgl \
 
 The script writes canonical .cts and section maps here, and keeps snapshots,
 WAVs, OGG, hashes, exact commands and measurements outside the repository.
-Artifacts: `~/Ops/artifacts/crash-the-stack-album/relay-bass-balance-i/`.
+Artifacts: `~/artifacts/crash-the-stack-album/relay-bass-balance-i/`.
 
 Telegram acknowledged the A/B/C comparison as message 1139 on 2026-09-22.
 The source/tool commit is `b94579e`; listening preference is pending.

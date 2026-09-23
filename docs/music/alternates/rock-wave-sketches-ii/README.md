@@ -88,7 +88,7 @@ include the whole mix and cannot establish subjective guitar bite or bass feel.
 The final choice remains a listening decision.
 
 Audio, exact commands, native measurements, spectral-check script/logs and
-renderer identity are under ~/Ops/artifacts/crash-the-stack-album/rock-wave-sketches-ii/.
+renderer identity are under ~/artifacts/crash-the-stack-album/rock-wave-sketches-ii/.
 
 ## Delivery record
 

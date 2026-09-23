@@ -87,7 +87,7 @@ and decay below -70 dBFS in the last second. Native WAV precision is still
 16-bit; this does not claim high-resolution release mastering.
 
 All audio, source snapshots, exact command manifests and raw measurements live
-outside the repository at ~/Ops/artifacts/crash-the-stack-album/opening-pair-i/.
+outside the repository at ~/artifacts/crash-the-stack-album/opening-pair-i/.
 Only the two full album-level OGGs are intended for this listening batch; prior
 pilots and matched comparisons remain preserved alongside this directory.
 

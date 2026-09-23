@@ -61,6 +61,6 @@ No normalization or limiter was added. This verifies signal integrity and
 headroom; David's listening determines whether the contrast succeeds.
 
 The full delivery file is
-~/Ops/artifacts/crash-the-stack-codex-content/obsidian-tension-v/ogg/obsidian-index-tension-v-full.ogg.
+~/artifacts/crash-the-stack-codex-content/obsidian-tension-v/ogg/obsidian-index-tension-v-full.ogg.
 The reference WAV, revised WAV, source snapshots, full/tense loudness logs,
 render-checks.json, exact commands and hashes live in the parent directory.

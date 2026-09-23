@@ -52,7 +52,7 @@ and encode commands, common gain, duration, format, peak and ending measurements
 It renders only the two excerpts, keeping the requested deliverable short.
 
 External audio and checks live under
-~/Ops/artifacts/crash-the-stack-album/basement-turnaround-i/.
+~/artifacts/crash-the-stack-album/basement-turnaround-i/.
 
 ## Validation and delivery
 

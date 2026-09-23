@@ -63,7 +63,7 @@ and channel voice budgets. These checks support the timestamp-based listening
 review; they cannot establish whether a phrase feels musical.
 
 Render commands, measurements and files live outside the repository at
-`~/Ops/artifacts/crash-the-stack-album/fault-line-composition-iii/`.
+`~/artifacts/crash-the-stack-album/fault-line-composition-iii/`.
 The preflight-missing-bend subfolder preserves the superseded preliminary album
 render; only the corrected top-level album render is for delivery.
 

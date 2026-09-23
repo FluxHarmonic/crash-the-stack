@@ -64,16 +64,16 @@ sigil docs/music/tools/closed-loop-phrases.sgl \
 sigil docs/music/tools/expression-render.sgl \
   --motif "$PWD/build/dev/bin/motif" \
   --input "$PWD/docs/music/alternates/closed-loop-phrases-i" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/closed-loop-phrases-i" \
+  --output "$HOME/artifacts/crash-the-stack-album/closed-loop-phrases-i" \
   --stage native
 sigil docs/music/tools/expression-render.sgl \
   --input "$PWD/docs/music/alternates/closed-loop-phrases-i" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/closed-loop-phrases-i" \
+  --output "$HOME/artifacts/crash-the-stack-album/closed-loop-phrases-i" \
   --stage delivery
 sigil docs/music/tools/album-audit.sgl \
   --motif "$PWD/build/dev/bin/motif" --track closed-loop \
   --source "$PWD/docs/music/alternates/closed-loop-phrases-i/closed-loop-after.cts" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/closed-loop-phrases-i/audit"
+  --output "$HOME/artifacts/crash-the-stack-album/closed-loop-phrases-i/audit"
 ```
 
 Use a fresh artifact directory for rendering. Audio, renderer hash, commands,
@@ -108,7 +108,7 @@ both 3:16 full OGGs measure -20.5 LUFS-I. All three encoded true peaks are
 limiter or per-half normalization is involved. These are comparison levels,
 not an album-release master.
 
-Audio lives in `~/Ops/artifacts/crash-the-stack-album/closed-loop-phrases-i/`,
+Audio lives in `~/artifacts/crash-the-stack-album/closed-loop-phrases-i/`,
 with delivered files in `ogg/`. That directory retains native WAVs, exact
 score snapshots, renderer hash, command lists, raw measurements, audit reports,
 reproduction log and `README-renders.txt`. Native renderer SHA-256:

@@ -74,7 +74,7 @@ and tail. The after score contains 599 attacks, zero sample clock error and no
 maintained-song checks pass. These checks cannot establish subjective sound quality.
 
 Final audio, exact commands, renderer identity, native/encoded measurements and
-receipts live in ~/Ops/artifacts/crash-the-stack-album/fault-line-heavy-iii-final/.
+receipts live in ~/artifacts/crash-the-stack-album/fault-line-heavy-iii-final/.
 The earlier fault-line-heavy-iii/ folder contains the undelivered preflight;
 its unchanged before renders were safely reused after source/renderer comparison.
 

@@ -74,21 +74,21 @@ sigil docs/music/tools/dirty-cache-phrases.sgl \
 sigil docs/music/tools/expression-render.sgl \
   --motif "$PWD/build/dev/bin/motif" \
   --input "$PWD/docs/music/alternates/dirty-cache-phrases-i" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/dirty-cache-phrases-i" \
+  --output "$HOME/artifacts/crash-the-stack-album/dirty-cache-phrases-i" \
   --stage native
 sigil docs/music/tools/expression-render.sgl \
   --input "$PWD/docs/music/alternates/dirty-cache-phrases-i" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/dirty-cache-phrases-i" \
+  --output "$HOME/artifacts/crash-the-stack-album/dirty-cache-phrases-i" \
   --stage delivery
 sigil docs/music/tools/album-audit.sgl \
   --motif "$PWD/build/dev/bin/motif" --track dirty-cache \
   --source "$PWD/docs/music/alternates/dirty-cache-phrases-i/dirty-cache-after.cts" \
-  --output "$HOME/Ops/artifacts/crash-the-stack-album/dirty-cache-phrases-i/audit"
+  --output "$HOME/artifacts/crash-the-stack-album/dirty-cache-phrases-i/audit"
 ```
 
 Use fresh output directories for renders. Audio, renderer hash, exact command
 lists, raw measurements and audit reports remain outside the repository under
-`~/Ops/artifacts/crash-the-stack-album/dirty-cache-phrases-i/`, with delivered
+`~/artifacts/crash-the-stack-album/dirty-cache-phrases-i/`, with delivered
 OGGs in `ogg/`. The renderer is Crash's pinned, published Motif 0.6.6 dependency.
 
 ## Source and timing validation

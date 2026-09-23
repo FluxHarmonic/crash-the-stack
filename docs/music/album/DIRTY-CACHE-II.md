@@ -28,7 +28,7 @@ cover. The MP3 measures -16.3 LUFS-I, -2.6 dBTP and 3.4 LU LRA. The finished ful
 OGG was delivered through Telegram as message 1160.
 
 Artifacts remain outside the repository under
-~/Ops/artifacts/crash-the-stack-album/dirty-cache-ii-release/ and
+~/artifacts/crash-the-stack-album/dirty-cache-ii-release/ and
 dirty-cache-ii-mp3/. Previous masters and all audition collateral are retained.
 
 ## Publication
@@ -52,7 +52,7 @@ was paused after verification; this functional check is not a listening review.
 The page deployment preserves current game/tracker assets. The synchronized
 Dirty Cache game source ships through the next normal game deployment.
 
-External collateral under ~/Ops/artifacts/crash-the-stack-album/:
+External collateral under ~/artifacts/crash-the-stack-album/:
 
 - dirty-cache-ii-release/: native provenance, adoption, WAV/FLAC/OGG and checks.
 - dirty-cache-ii-mp3/: tagged MP3, cover, export report and decoded measurements.

@@ -43,7 +43,7 @@ MOTIF_BIN="$PWD/build/dev/bin/motif" sigil docs/music/tools/songs.sgl --stage ch
 ```
 
 External logs, browser checks, hashes and commands live under
-`~/Ops/artifacts/crash-the-stack-album/integration-motif-066/`. No build output,
+`~/artifacts/crash-the-stack-album/integration-motif-066/`. No build output,
 package cache or rendered audio belongs in Git.
 
 ## Runtime scope
@@ -76,9 +76,9 @@ are `23b16a76357a`; changes after the runtime commit are tests and documentation
 The previous production was `cfb7d2bb`, checked immediately before publishing.
 
 ```sh
-CRASH_SOUNDTRACK_DIR="$HOME/Ops/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
+CRASH_SOUNDTRACK_DIR="$HOME/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
   scripts/publish-web --dry-run
-CRASH_SOUNDTRACK_DIR="$HOME/Ops/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
+CRASH_SOUNDTRACK_DIR="$HOME/artifacts/crash-the-stack-album/publication-breach-ii/site/soundtrack" \
   scripts/publish-web "Integrate Motif 0.6.6 and synchronized soundtrack scores"
 ```
 

@@ -93,7 +93,7 @@ Every channel's compiled ticks match between the bass comparison halves. All
 fifteen maintained-song regeneration checks pass, and all 27 generated audition
 files reproduce exactly.
 
-External audio: ~/Ops/artifacts/crash-the-stack-album/glass-expression-i-native/
+External audio: ~/artifacts/crash-the-stack-album/glass-expression-i-native/
 and glass-expression-i-delivery/. Native jobs use the pinned Motif 0.6.6 renderer,
 SHA-256 f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842.
 The official expression renderer verifies exact source and renderer identity

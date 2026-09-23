@@ -86,7 +86,7 @@ Clock Edge uses speed 3 and thirty-two-row bars, with no thirty-second attacks;
 its answering bell stays on eighths, while finer lead subdivisions remain.
 
 Audio, source snapshots, command manifests, hashes and raw reports live in
-~/Ops/artifacts/crash-the-stack-album/edge-pair-i/. Native export is 16-bit;
+~/artifacts/crash-the-stack-album/edge-pair-i/. Native export is 16-bit;
 these are full provisional album auditions, not high-resolution release masters.
 
 ## Provisional mastering and full render results

@@ -15,7 +15,7 @@ The WAV and OGG measure -16.9 LUFS-I, with 4.2 LU loudness range and true peaks
 of -1.9 and -1.8 dBTP respectively. Duration remains 210.285714 seconds;
 WAV/FLAC decode identically, and the final second peaks at -90.3 dBFS.
 
-External artifacts under `~/Ops/artifacts/crash-the-stack-album/`:
+External artifacts under `~/artifacts/crash-the-stack-album/`:
 
 - `breach-ii-release/`: WAV, FLAC, OGG, source snapshot, native hashes and checks.
 - `breach-ii-mp3/`: tagged 256 kbps MP3, compact embedded cover and metadata checks.

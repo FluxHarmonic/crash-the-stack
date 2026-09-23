@@ -30,7 +30,7 @@ The selected album master WAV/FLAC files and all original render logs remain
 outside the public tree and outside Git. Source precision remains 16-bit.
 
 Initial two-format bundle, retained as history:
-~/Ops/artifacts/crash-the-stack-album/listen-preview-i/.
+~/artifacts/crash-the-stack-album/listen-preview-i/.
 The OGG total is 78,640,277 bytes (75.00 MiB); MP3 is 105,931,365 bytes
 (101.02 MiB). Largest asset: Black Glass MP3, 8,450,500 bytes (8.06 MiB).
 Cloudflare Pages permits 25 MiB per file and 20,000 files on the Free plan:
@@ -308,7 +308,7 @@ Use `publication-breach-ii/site/soundtrack/` for subsequent game publication.
 Cold Boot's approved cleaner mix is mastered and live in deployment `014fbd1d`
 (source `560f743`). The MP3 selector uses `cold-boot-ii-release` / `-album-ii`.
 The preserved current page bundle is
-`~/Ops/artifacts/crash-the-stack-album/publication-cold-boot-ii/site/soundtrack/`;
+`~/artifacts/crash-the-stack-album/publication-cold-boot-ii/site/soundtrack/`;
 use it as `CRASH_SOUNDTRACK_DIR` for later game publishes. The complete local
 MP3 collection is `tagged-preview-vi/soundtrack/audio/` under the album artifact
 root. The other fourteen files are retained from revision V.
@@ -328,7 +328,7 @@ Only its MP3 URL changes from production `014fbd1d`. The master selector uses
 `closed-loop-ii-release` / `-album-ii`; the exact public bytes, range/CORS/MIME,
 manifest and fresh browser playback checks pass. See [Closed Loop II](CLOSED-LOOP-II.md).
 
-Use `~/Ops/artifacts/crash-the-stack-album/publication-closed-loop-ii/site/soundtrack/`
+Use `~/artifacts/crash-the-stack-album/publication-closed-loop-ii/site/soundtrack/`
 as `CRASH_SOUNDTRACK_DIR` for later game publication. The current complete local
 MP3 collection is `tagged-preview-vii/soundtrack/audio/` under the same artifact
 root. Older bundles remain available; preserve all later accepted track URLs

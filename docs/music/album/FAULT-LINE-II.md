@@ -84,7 +84,7 @@ gates and passing voice budgets. All sixteen shared compositions regenerate.
 These checks supplement the listening review; they cannot judge the phrasing.
 
 Native sources, renders, commands and measurements:
-`~/Ops/artifacts/crash-the-stack-album/fault-line-composition-ii/`.
+`~/artifacts/crash-the-stack-album/fault-line-composition-ii/`.
 This remains a clean-gain composition audition, not a release master.
 
 ## Render checks

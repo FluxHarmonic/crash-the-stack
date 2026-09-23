@@ -67,7 +67,7 @@ peak and full ending decay. These measurements do not establish subjective
 musical approval.
 
 External audio and exact commands:
-`~/Ops/artifacts/crash-the-stack-album/breach-percussion-i/`, with OGGs under
+`~/artifacts/crash-the-stack-album/breach-percussion-i/`, with OGGs under
 `ogg/`. All earlier versions remain preserved.
 
 ## Score and native checks
