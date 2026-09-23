@@ -1,47 +1,103 @@
-;;; (crash music) - Which track plays where (P4, ruling D50).
+;;; (crash music) - Which tune plays where (P4's ruling D50, live since M1's D59).
 ;;;
-;;; Three tunes from P3b (motif, the tracker): SPY is the menu theme and
-;;; the stack's rest track, GROOVE is DEFRAG's rest track, BREAKER is the
-;;; energy track under the ICE (the counter-hack phase) on both tables.
-;;; Later tunes join per-table pools picked at deal, never the same as
-;;; the last (P3b's live playback); today each pool is one tune.
+;;; The soundtrack is the .cts tunes under assets/tunes/, played live on
+;;; motif's player by (crash music live); this module is the data and
+;;; the one function that couples the trace to the music, pure, so the
+;;; tests can hold the table. Rules family: no platform.
 ;;;
 ;;; The transitions, as ruled: menu -> board a ~1 s cross-fade; board ->
 ;;; MENU the board's track fades in ~0.5 s and the theme resumes from
 ;;; where it left off; CONTINUE resumes the board's track; a new deal
-;;; starts it from the top; traced, a cross-fade to BREAKER and back to
-;;; the rest track on escape; STACK CRASHED / a won deal fades the track
-;;; under the cascade; a severed link fades it too. (crash audio) plays;
-;;; this module only names the track and the mode for a state, pure, so
-;;; the tests can hold the table. Rules family: no platform.
+;;; starts it from the top; the fill runs up to the trace landing (it
+;;; starts a fill-length early, on a bar, to end as the ICE strikes) and
+;;; tense begins at the strike; STACK
+;;; CRASHED / a won deal fades the track under the cascade; a severed
+;;; link fades it too. (P4's three OGG tracks and their table left with
+;;; M1: nothing decoded ships.)
 
 (define-library (crash music)
-  (export TRACKS TRACK-FILES music-rest-track music-track-for music-file)
+  (import (sigil list))
+  (export POOLS CANDIDATES MENU-THEME music-pool music-pick music-section music-tune-path)
 
   (begin
-    ;; name -> the file under assets/audio/ (OGG Vorbis, mono 22050, q4)
-    (define TRACK-FILES
-      (list (cons 'spy "assets/audio/spy.ogg")
-            (cons 'groove "assets/audio/groove.ogg")
-            (cons 'breaker "assets/audio/breaker.ogg")))
 
-    (define TRACKS (map car TRACK-FILES))
+    ;; --- the live soundtrack (M1, ruling D59) -------------------------------------
+    ;;
+    ;; The .cts tunes under assets/tunes/ play live on motif's player ((crash
+    ;; music live) runs it; this is the data). Each table has a POOL, one
+    ;; obvious place David re-sorts by ear; a deal picks from its table's
+    ;; pool by the board seed, never the last one played when the pool
+    ;; allows; the daily's seed makes its pick fixed. The menu has its theme.
+    ;; A track's sections are its marks (calm, fill, tense): CALM while the
+    ;; trace runs, the FILL in the run-up to the trace landing, TENSE
+    ;; (looping) from the ICE's strike, back to CALM when it falls (a return
+    ;; with a short dip: no track has a composed return fill yet).
+    (define POOLS
+      (list (list 'stack 'blind-spot 'quiet-array 'obsidian-index 'cold-boot 'relay-ghost 'breach-vector)
+            (list 'cards 'sector-drift 'dirty-cache 'basement-circuit 'glass-current 'closed-loop 'black-glass 'breach-vector)
+            ;; the hub (P5 phase 2): David's cut, 2026-09-22 — "Shadow Protocol,
+            ;; Dead Sector and Blind Spot are the ones I have in mind for hub".
+            ;; Exactly those three, and test-music holds them so a later edit
+            ;; cannot drift the pool silently. Calm is sneaking, tense is an
+            ;; alerted layer; shadow-protocol was the original sneaking track.
+            (list 'hub 'shadow-protocol 'dead-sector 'blind-spot)))
+    ;; tunes David has not heard in context yet: in no pool until he does
+    (define CANDIDATES '(clock-edge))
 
-    (define (music-file name)
-      (let ((e (assq name TRACK-FILES))) (and e (cdr e))))
+    (define MENU-THEME 'black-glass-title)
 
-    ;; The rest track of a table (the menu's is the stack's).
-    (define (music-rest-track table)
-      (if (eq? table 'cards) 'groove 'spy))
+    (define (music-pool table)
+      (let ((e (assq table POOLS))) (if e (cdr e) '())))
 
-    ;; What should play on a screen: (name . mode) or #f for silence
-    ;; (the cascade after a clear, the severed screen). screen: menu |
-    ;; stack | cards; phase: the trace's phase on a table (trace |
-    ;; counter | severed | cleared), #f on the menu; fresh?: the board
-    ;; was just dealt (its rest track from the top) rather than
-    ;; continued or returned to (resumed).
-    (define (music-track-for screen phase fresh?)
-      (cond ((eq? screen 'menu) (cons 'spy 'resume))
-            ((memq phase '(cleared severed)) #f)
-            ((eq? phase 'counter) (cons 'breaker 'top))
-            (else (cons (music-rest-track screen) (if fresh? 'top 'resume)))))))
+    (define (music-tune-path name)
+      (string-append "assets/tunes/" (symbol->string name) ".cts"))
+
+    ;; The pick for a deal: the seed's hash over the pool; if that is the
+    ;; last one played and the pool has more, the next one along.
+    (define (music-pick table seed last)
+      (let* ((pool (music-pool table))
+             (n (length pool)))
+        (cond ((= n 0) #f)
+              (else
+               (let* ((i (modulo (* (or seed 0) 2654435761) n))
+                      (name (list-ref pool i)))
+                 (if (and (eq? name last) (> n 1))
+                     (list-ref pool (modulo (+ i 1) n))
+                     name))))))
+
+    ;; The section the trace asks for (David's ruling, 2026-09-22): the
+    ;; counter-hack (the trace landed; the ICE's strike) is TENSE from that
+    ;; moment; the FILL runs up to it: it starts one fill-length before the
+    ;; trace lands so it ends as the ICE strikes; CALM otherwise. `remaining`
+    ;; is the ms until the trace lands (#f when it never will: clean mode,
+    ;; the counter phase, the cascade); `window` is how far ahead the fill
+    ;; must be asked for it to end on the trace (its length plus the wait
+    ;; for the bar row it lands on and the sink's latency; (crash music
+    ;; live) computes it from the tune, #f when the tune has no fill);
+    ;; `current` is the section playing now. The cascade and the severed
+    ;; screen are silence ((crash music live) fades out).
+    ;;
+    ;; The window is a TRIGGER, not a predicate: once the fill is running it
+    ;; runs to the strike. It has to be, because one of the window's terms
+    ;; (the sink's queue) moves on its own — a ladder step or an underrun
+    ;; shrinks it, and a predicate would then answer CALM in the middle of
+    ;; the run-up and jump the music out of the fill a few seconds before
+    ;; the ICE (the reviewer's MEDIUM 1, 2026-09-22).
+    ;;
+    ;; `remaining` at or below zero is the trace already past its threshold
+    ;; with the phase not yet flipped (a shuffle or a hint adds its seconds
+    ;; a frame before trace-advance sees them): no run-up is left, so no
+    ;; fill starts; the next frame is the strike.
+    (define (music-section phase remaining window current)
+      (cond ((eq? phase 'counter) 'tense)
+            ((not (eq? phase 'trace)) 'calm)
+            ;; latched: the fill runs to the strike. `remaining` guards the
+            ;; latch itself, not its distance: a landing that disappears
+            ;; while the phase stays `trace` (a twist -> clean flip, which
+            ;; the trace allows during the run-up) must release it, or the
+            ;; fill runs on into a tense that loops for a game with no ICE.
+            ((and (eq? current 'fill) remaining) 'fill)
+            ((and remaining window (> remaining 0) (<= remaining window)) 'fill)
+            (else 'calm)))
+
+    ))

@@ -1556,6 +1556,7 @@
       (row 249 (5 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B06"))))
   (order 0 1 2 3 4 5 6 7 8 9 10)
+  (marks calm: 0 fill: 5 tense: 6)
   (history
     ("codex" "2026-09-21" "Cold Boot; original dark hypnotic techno; C minor with chromatic tension.")
     ("codex" "2026-09-21" "calm: order 0-4; fill: 5; tense: 6-10; B06 loops tense.")
@@ -1563,4 +1564,5 @@
     ("codex" "2026-09-21" "Minor pedal harmony, sparse low-register phrases, drum drops and negative space; written after the darker-game listening feedback.")
     ("codex" "2026-09-21" "Existing synth bank: envelope-shaped pressure bass and cutoff variants; no free-running wobble or automation lane. Full audition includes fill.")
     ("codex" "2026-09-21" "Percussion identity pass: retain the accepted kick, bass, melodies, bus, all note placements and accents. Main clap becomes a C4 mechanical knock; fill/ghost snare becomes a short pressure rattle; hats become grainier. Existing C/G relay hits become short clearer blips one octave higher, with less reverb. No new notes; calm/fill/tense structure and original retained.")
-    ("codex" "2026-09-21" "Integrate the fill with the accepted machine kit: tune all 41 fill and ghost notes to C4, matching the main knock body, filter and crush. Keep a slightly larger, shorter noise component for the roll and match the main knock reverb send. Retain all rhythms, accents, main drum voices, other instruments and sections. Previous machine kit retained.")))
+    ("codex" "2026-09-21" "Integrate the fill with the accepted machine kit: tune all 41 fill and ghost notes to C4, matching the main knock body, filter and crush. Keep a slightly larger, shorter noise component for the roll and match the main knock reverb send. Retain all rhythms, accents, main drum voices, other instruments and sections. Previous machine kit retained.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 5 tense: 6")))

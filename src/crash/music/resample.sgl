@@ -1,0 +1,64 @@
+;;; (crash music resample) - The live soundtrack rendered below the device
+;;; rate, upsampled into its sink (M1, D59).
+;;;
+;;; A resampler holds a stereo f32 buffer of the render at the music's rate
+;;; and a fractional read position in it. Each pull asks the render for the
+;;; frames the output needs (one frame of history before the position and
+;;; two past the last read stay valid for the 4-tap cubic), then
+;;; (crash native)'s %upsample! writes n device-rate frames. The ratio
+;;; (music rate / device rate) is at most 1: the upsampler only goes up.
+;;;
+;;;   (make-resampler)                        a fresh one (one silent frame of history)
+;;;   (resampler-reset! rs)                   back to the start (a new open)
+;;;   (resampler-pull! rs render out off n ratio)   #t, or #f when render answered #f
+;;;       render: (lambda (buf byte-offset frames) -> #t | #f), the player's pull
+;;;   (resampler-unread rs)                   frames rendered but not yet read (the clock)
+
+(define-library (crash music resample)
+  (import (sigil struct)
+          (sigil math)
+          (only (crash native) %upsample!)
+          (only (crash audio) SOURCE-PUSH-MAX))
+
+  (export make-resampler resampler-reset! resampler-pull! resampler-unread RS-FRAMES)
+
+  (begin
+    (define RS-FRAMES (+ SOURCE-PUSH-MAX 16))   ; a pull of SOURCE-PUSH-MAX device frames at ratio <= 1, plus the window
+
+    (define-struct resampler
+      (buf)                 ; stereo f32, RS-FRAMES frames
+      (have mutable: #t)    ; frames valid in buf
+      (pos mutable: #t))    ; the read position, fractional frames
+
+    (define (make-resampler)
+      (let ((rs (resampler buf: (make-bytevector (* 8 RS-FRAMES) 0) have: 1 pos: 1.0)))
+        rs))
+
+    (define (resampler-reset! rs)
+      (let ((buf (resampler-buf rs)))
+        (let loop ((i 0)) (when (< i 8) (bytevector-u8-set! buf i 0) (loop (+ i 1))))
+        (set-resampler-have! rs 1)
+        (set-resampler-pos! rs 1.0)))
+
+    (define (resampler-unread rs)
+      (- (resampler-have rs) (resampler-pos rs)))
+
+    (define (resampler-pull! rs render out byte-offset n ratio)
+      (let* ((buf (resampler-buf rs))
+             (have (resampler-have rs))
+             (pos (resampler-pos rs))
+             (keep-from (max 0 (- (exact (floor pos)) 1))))
+        ;; the window moves to the front
+        (when (> keep-from 0)
+          (bytevector-copy! buf 0 buf (* 8 keep-from) (* 8 have))
+          (set! have (- have keep-from))
+          (set! pos (- pos keep-from)))
+        (let* ((want (+ (exact (ceiling (+ pos (* n ratio)))) 3))
+               (need (min (- want have) (- RS-FRAMES have))))
+          (if (and (> need 0) (not (render buf (* 8 have) need)))
+              #f
+              (begin
+                (when (> need 0) (set! have (+ have need)))
+                (set-resampler-have! rs have)
+                (set-resampler-pos! rs (%upsample! out byte-offset n buf have pos ratio))
+                #t)))))))

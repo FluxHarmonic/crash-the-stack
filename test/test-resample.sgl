@@ -1,0 +1,135 @@
+;;; The live soundtrack below the device rate (M1, D59): (crash music
+;;; resample) over (crash native)'s %upsample!. A tone keeps its period
+;;; through the resampler at every ratio the ladder uses; motif's player
+;;; renders a held note at its pitch at every rate (zero crossings a second),
+;;; and its lower-rate render upsampled to the device rate keeps it:
+;;; the "deeper at each step" David heard on 2026-09-21 (sigil-dsp's global
+;;; context kept the first rate for the fm4 voices) and the reopen replaying
+;;; the sink's queue are both pinned down here and in (crash music live).
+
+(import (sigil test)
+        (sigil math)
+        (sigil io)
+        (sigil fs)
+        (crash music resample)
+        (crash native)
+        (motif tune)
+        (motif tune player))
+
+(define DEVICE 48000)
+
+;; zero crossings of the left channel over n frames of a stereo f32 buffer from byte off
+(define (zero-crossings bv off n)
+  (let loop ((i 1) (z 0))
+    (if (>= i n) z
+        (let ((a (bytevector-ieee-single-ref bv (+ off (* 8 (- i 1))) 'little))
+              (b (bytevector-ieee-single-ref bv (+ off (* 8 i)) 'little)))
+          (loop (+ i 1) (if (< (* a b) 0.0) (+ z 1) z))))))
+
+(define (within? a b tolerance) (<= (abs (- a b)) (* tolerance (max 1 b))))
+
+;; A tone of `period` source frames, rendered on demand: the render proc
+;; the resampler expects, stereo, continuing across calls.
+(define (make-tone period)
+  (let ((k 0))
+    (lambda (buf off frames)
+      (let loop ((i 0))
+        (when (< i frames)
+          (let ((v (sin (/ (* 2.0 3.141592653589793 k) period))))
+            (bytevector-ieee-single-set! buf (+ off (* 8 i)) v 'little)
+            (bytevector-ieee-single-set! buf (+ off (* 8 i) 4) v 'little))
+          (set! k (+ k 1))
+          (loop (+ i 1))))
+      #t)))
+
+(test-group "resample: a tone keeps its period at every ratio"
+  (for-each
+   (lambda (rate)
+     (let* ((ratio (/ (* 1.0 rate) DEVICE))
+            (period 20)                          ; source frames per cycle
+            (rs (make-resampler))
+            (tone (make-tone period))
+            (n DEVICE)                           ; one second at the device rate
+            (out (make-bytevector (* 8 n) 0)))
+       ;; pulled in the sizes the sink asks for
+       (let loop ((done 0))
+         (when (< done n)
+           (let ((chunk (min 1024 (- n done))))
+             (assert-true (resampler-pull! rs tone out (* 8 done) chunk ratio))
+             (loop (+ done chunk)))))
+       ;; cycles per second = rate / period, two zero crossings each
+       (let ((want (* 2 (/ rate period)))
+             (got (zero-crossings out 0 n)))
+         (test (string-append "ratio " (number->string rate) "/48000: " (number->string got) " crossings against " (number->string (exact (round want))))
+           (assert-true (within? got want 0.01))))
+       ;; the samples stay in [-1, 1] (the cubic overshoots a little between taps, never past the rails here)
+       (let loop ((i 0) (ok #t))
+         (if (>= i n)
+             (test "within the rails" (assert-true ok))
+             (loop (+ i 1) (and ok (<= (abs (bytevector-ieee-single-ref out (* 8 i) 'little)) 1.0)))))))
+   '(32000 24000 22050)))
+
+(test-group "resample: the render answering #f ends the pull"
+  (let ((rs (make-resampler))
+        (out (make-bytevector (* 8 64) 0)))
+    (assert-false (resampler-pull! rs (lambda (buf off frames) #f) out 0 64 0.5))))
+
+;; One note held for the whole pattern on one instrument: the pitch is the
+;; note's at every rate. C-4 is 261.63 Hz: a triangle crosses zero twice a
+;; cycle (523 a second); the fm4 pad at index 0 is a stack of pure sines
+;; (its carriers at their ratios: its own count, held across the rates).
+;; Two kinds because they take the rate by different
+;; roads: the soundpipe oscillators read it at every sample from the
+;; stream's own context, the fm4 voice caches it when the graph is built
+;; (sigil-dsp's global context: with the rate set only by the FIRST
+;; (dsp-init sr) of a process, every later player at another rate rendered
+;; the fm4 voices at the first rate's increments: David's "deeper at each
+;; step", 2026-09-21; sigil-dsp 0.3.3 lets a later dsp-init set it).
+(define (one-note-tune patch)
+  (string-append
+   "(tune version: 1 name: \"one\" tempo: 125 speed: 6 channels: 1\n"
+   "  (instruments (instrument id: 1 name: \"t\" patch: " patch " volume: 48))\n"
+   "  (patterns (pattern id: 0 rows: 64 (row 0 (1 \"C-4\" 1 0 \"000\"))))\n"
+   "  (order 0))\n"))
+(define C4-CROSSINGS (* 2 261.63))
+
+(define (second-of-player t rate)
+  (let* ((p (open-tune-player t rate start: (cons 0 0) loop: #t))
+         (bv (make-bytevector (* 8 rate) 0)))
+    (player-pull! p bv 0 rate)   ; the first second: the attack
+    (player-pull! p bv 0 rate)   ; the second second: held
+    (player-close! p)
+    bv))
+
+(test-group "resample: motif's player renders the note's pitch at every rate"
+  (for-each
+   (lambda (patch)
+     (define want #f)   ; the count at the device rate; the triangle must also be C-4's 523
+     (let ((t (read-tune-string (one-note-tune patch))))
+       ;; the device rate first: the process's first dsp-init is at 48000, as in the game
+       (for-each
+        (lambda (rate)
+          (let* ((bv (second-of-player t rate))
+                 (z (zero-crossings bv 0 rate)))
+            (unless want (set! want z))
+            (test (string-append patch " at " (number->string rate) ": " (number->string z) " crossings a second (" (number->string (exact (round want))) " at the device rate)")
+              (assert-true (within? z want 0.03))
+              (when (string=? patch "(chip-tri)") (assert-true (within? z C4-CROSSINGS 0.03))))))
+        '(48000 32000 24000 22050))
+       ;; the lower-rate render through the resampler, at the device rate
+       (let* ((rate 24000)
+              (p (open-tune-player t rate start: (cons 0 0) loop: #t))
+              (rs (make-resampler))
+              (render (lambda (buf off frames) (player-pull! p buf off frames)))
+              (n DEVICE)
+              (out (make-bytevector (* 8 n) 0)))
+         (let loop ((done 0))                        ; two seconds, the second one read
+           (when (< done (* 2 n))
+             (let ((chunk (min 1024 (- (* 2 n) done))))
+               (resampler-pull! rs render out (* 8 (modulo done n)) chunk 0.5)
+               (loop (+ done chunk)))))
+         (player-close! p)
+         (let ((z (zero-crossings out 0 n)))
+           (test (string-append patch " at 24000 upsampled to 48000: " (number->string z) " crossings a second")
+             (assert-true (within? z want 0.03)))))))
+   '("(chip-tri)" "(fm4-pad index: 0.0)")))

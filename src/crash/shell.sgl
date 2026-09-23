@@ -26,10 +26,14 @@
           (crash bg)
           (crash sfx)
           (crash audio)
+          (crash music live)
           (crash menu)
           (crash settings)
           (crash scores)
-          (crash run)
+          (crash hub world)      ; P5: the hub run replaces the fixed sequence
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub run)
           (crash code)
           (crash daily)
           (crash music)
@@ -48,14 +52,14 @@
 
   (export VW VH MODIFIERS bg-advance bg-choose FIELD-POOL field-pick! field-rule-for-deal! field-rule-at-boot copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
-          AMBIENT-RATE play-cues!
+          play-cues!
           BOARD-KEY BEST-KEY CARDS-KEY ACTIVE-KEY
           stored-hud
           settings-in-force settings-load settings-save! setting set-setting! apply-audio-settings!
           scores-in-force record-clear! news-line mode->version
           run-in-force set-run! run-spec run-code take-layer-cleared! credits-text!
           set-clock-source! now-second today
-          music-frame! music-fresh! music-off!
+          music-frame! music-fresh! music-off! music-readout music-title set-trace-at-door!
           free-spec daily-spec session-from-spec deal-from-spec session-spec deal-spec
           daily-session? daily-deal?
           boot-session save-after-frame! run-after-frame! deal-run-after-frame!
@@ -212,7 +216,9 @@
     (define (apply-audio-settings!)
       (audio-set-music! (eq? (setting 'music) 'on))
       (audio-set-sfx! (eq? (setting 'sfx) 'on))
-      (audio-set-volume! (/ (setting 'volume) (* 1.0 VOLUME-MAX))))
+      (audio-set-volume! (/ (setting 'volume) (* 1.0 VOLUME-MAX)))
+      ;; the live soundtrack (M1): MUSIC x VOLUME on its source gain
+      (live-music-set-gain! (if (eq? (setting 'music) 'on) (/ (setting 'volume) (* 1.0 VOLUME-MAX)) 0.0)))
 
     ;; The bar's layout: A, zones, the one layout (B and its setting left
     ;; on 2026-09-21, D51); the tables still carry the name.
@@ -245,15 +251,12 @@
             ((memq 'moves news) "NEW FEWEST MOVES.")
             (else #f)))
 
-    ;; The run in force (JACK IN), loaded on first use: #f when none.
-    (define *run* 'unread)
-    (define (run-in-force)
-      (when (eq? *run* 'unread) (set! *run* (run-load)))
-      *run*)
+    ;; The run in force (JACK IN): the live hub screen, or #f (P5; the run
+    ;; persists in step 5).
+    (define (run-in-force) (hub-run-in-force))
 
     (define (set-run! r)
-      (set! *run* r)
-      (if r (run-save! r) (run-clear!)))
+      (if r (hub-run-set! r) (hub-run-end!)))
 
     ;; --- the clock -----------------------------------------------------------------
 
@@ -281,23 +284,47 @@
         (free-spec table 'hacker (if (eq? table 'cards) (daily-cards-seed day) (daily-stack-seed day)))))
 
     ;; The run's current layer as a spec (hacker), or #f when the run is done.
+    ;; The spec of the board the hub launched (a launch is pending), or #f.
     (define (run-spec r)
-      (and (not (run-done? r))
-           (free-spec (run-layer-table r) 'hacker (run-layer-seed r))))
+      (hub-run-spec))
 
     ;; A session or deal from a spec, the settings' HUD on it.
     (define (session-from-spec sp lay)
-      (let* ((s (session-new lay (spec-seed sp)))
+      (let* ((s (door-session (session-new lay (spec-seed sp))))
              (s (session-with-trace-mode s (if (eq? (spec-version sp) 'original) 'clean 'twist)))
-             (s (session-with-best s (datum->best (store-read-datum BEST-KEY)))))
+             (s (session-with-best s (datum->best (store-read-datum BEST-KEY))))
+             (s (with-launch-thresholds s (lambda (s tr) (session s trace: tr)) session-trace))
+             ;; the node's objective (D64): the launch's marked pairs from the deal's own line
+             (s (let ((l (hub-run-launch-pending)))
+                  (if (and l (> (launch-marks l) 0))
+                      (session-with-marks s (mark-slots (session-board s) (launch-marks l)))
+                      s))))
         (session-with-hud s (stored-hud))))
 
+    ;; A board dealt for the hub's node takes the depth's thresholds (P5).
+    (define (with-launch-thresholds b set get)
+      (let ((l (hub-run-launch-pending)))
+        (if l
+            (set b (trace-with-thresholds (get b) (launch-trace-at l) (launch-sever-at l)))
+            b)))
+
     (define (deal-from-spec sp)
-      (deal-with-hud (deal-new (spec-seed sp)
-                               (spec-draw sp)
-                               (spec-scoring sp)
-                               (if (eq? (spec-version sp) 'original) 'clean 'twist))
-                     (stored-hud)))
+      ;; M1's ?trace-at door over the deal's own thresholds, then P5's launch
+      ;; thresholds when a hub node dealt this board (a node names the depth's
+      ;; seconds, so the launch wins), then the node's objective (D64): the
+      ;; launch's marked cards, buried in the middle piles
+      (let ((d (with-launch-thresholds
+                (deal-with-hud (door-deal (deal-new (spec-seed sp)
+                                                    (spec-draw sp)
+                                                    (spec-scoring sp)
+                                                    (if (eq? (spec-version sp) 'original) 'clean 'twist)))
+                               (stored-hud))
+                (lambda (d tr) (deal d trace: tr))
+                deal-trace))
+            (l (hub-run-launch-pending)))
+        (if (and l (> (launch-marks l) 0))
+            (deal-with-marks d (mark-cards (deal-game d) (launch-marks l)))
+            d)))
 
     ;; The spec a live board is (for its share code).
     (define (session-spec s)
@@ -321,7 +348,7 @@
     ;; (a run replays from its seed; the player's own settings apply on
     ;; the receiving side, so the sender's are not carried).
     (define (run-code r)
-      (encode (spec-new 'run 'hacker 1 'vegas 'turtle (run-seed r))))
+      (hub-run-code))
 
 
     ;; (cons session restored?): the saved session if there is one and
@@ -332,7 +359,7 @@
       (let* ((saved (and (not fresh?)
                          (datum->session (store-read-datum BOARD-KEY))))
              (best (datum->best (store-read-datum BEST-KEY)))
-             (s (session-with-best (or saved (session-new lay (or seed 1))) best)))
+             (s (session-with-best (or saved (door-session (session-new lay (or seed 1)))) best)))
         (cons (session-with-hud s (stored-hud))
               (and saved #t))))
 
@@ -343,7 +370,12 @@
     (define (save-after-frame! before after)
       (let* ((b0 (session-board before))
              (b1 (session-board after))
-             (just-cleared? (and (board-cleared? b1) (not (board-cleared? b0))))
+             (just-cleared? (and (board-cleared? b1) (not (board-cleared? b0)) (not (session-extracted? after))))
+             ;; an extraction (D64) is the run's clear, not the scoreboard's or the best's
+             (after (if (and (board-cleared? b1) (not (board-cleared? b0)) (session-extracted? after))
+                        (let ((line (run-clear-line! 'stack (session-trace after) (session-moves after))))
+                          (if line (session after message: line note: line) after))
+                        after))
              (value (trace-value (session-trace after)))
              (best (session-best after))
              (after (if (and just-cleared? (or (not best) (< value best)))
@@ -354,7 +386,7 @@
              (after (if just-cleared?
                         (let ((line (clear-line! 'stack
                                                  (mode->version (trace-mode (session-trace after)))
-                                                 (trace-ticks (session-trace after))
+                                                 (session-trace after)
                                                  (session-moves after)
                                                  (daily-session? after))))
                           (if line (session after message: line note: line) after))
@@ -364,25 +396,20 @@
         after))
 
     ;; A clear: the scoreboard, the run, and the line to show for it (or #f).
-    (define (clear-line! table version ticks moves daily?)
-      (let ((news (record-clear! table version ticks moves (and daily? (today)))))
-        (or (run-clear-line! table ticks moves)
+    (define (clear-line! table version tr moves daily?)
+      (let ((news (record-clear! table version (trace-ticks tr) moves (and daily? (today)))))
+        (or (run-clear-line! table tr moves)
             (news-line news))))
 
-    ;; The run's part of a clear: the layer done, the next one named (or the
-    ;; ledger), or #f when no run is on this table. Also what a demo clear
-    ;; (the arm's door, which keeps the scoreboard clean) advances.
-    (define (run-clear-line! table ticks moves)
-      (let ((r (run-in-force)))
-        (and r (not (run-done? r)) (eq? (run-layer-table r) table)
-             (let ((r (run-cleared r ticks moves)))
-               (set-run! r)
-               (set! *layer-cleared* table)
-               (if (run-done? r)
-                   "STACK CRASHED. RUN COMPLETE."
-                   (string-append "LAYER " (number->string (run-layer r))   ; the layer just cleared, 1-based, is the next's index
-                                  "/" (number->string (run-layer-count))
-                                  " CRASHED."))))))
+    ;; The run's part of a clear (P5): the node opens in the world, its
+    ;; outcome carried in (beats from the ticks, the moves, how hot the board
+    ;; finished); the line names the return. #f when no launch of this
+    ;; table is pending. Also what a demo clear (the arm's door, which keeps
+    ;; the scoreboard clean) advances.
+    (define (run-clear-line! table tr moves)
+      (let ((line (hub-run-cleared! table tr moves)))
+        (when line (set! *layer-cleared* table))
+        line))
 
     ;; The table whose layer was just cleared (David, 2026-09-21: after the
     ;; cascade the shells show the run's ledger with NEXT LAYER, and pull
@@ -399,13 +426,13 @@
       (let ((b0 (session-board before))
             (b1 (session-board after)))
         (if (and (board-cleared? b1) (not (board-cleared? b0)))
-            (let ((line (run-clear-line! 'stack (trace-ticks (session-trace after)) (session-moves after))))
+            (let ((line (run-clear-line! 'stack (session-trace after) (session-moves after))))
               (if line (session after message: line note: line) after))
             after)))
 
     (define (deal-run-after-frame! before after)
       (if (and (deal-won? after) (not (deal-won? before)))
-          (let ((line (run-clear-line! 'cards (trace-ticks (deal-trace after)) (game-moves (deal-game after)))))
+          (let ((line (run-clear-line! 'cards (deal-trace after) (game-moves (deal-game after)))))
             (if line (deal after message: line note: line) after))
           after))
     ;; (cons deal restored?): the saved deal if there is one and fresh? is
@@ -443,63 +470,96 @@
     ;; changed; a deal just won goes on the scoreboard and, JACKed IN, the
     ;; run (P4), with the clear's line as the deal's message.
     (define (save-deal-after-frame! before after)
-      (let ((after (if (and (deal-won? after) (not (deal-won? before)))
-                       (let ((line (clear-line! 'cards
-                                                (mode->version (trace-mode (deal-trace after)))
-                                                (trace-ticks (deal-trace after))
-                                                (game-moves (deal-game after))
-                                                (daily-deal? after))))
-                         (if line (deal after message: line note: line) after))
-                       after)))
+      (let ((after (cond ((not (and (deal-won? after) (not (deal-won? before)))) after)
+                         ;; an extraction (D64) is the run's clear, not the scoreboard's
+                         ((not (game-won? (deal-game after)))
+                          (let ((line (run-clear-line! 'cards (deal-trace after) (game-moves (deal-game after)))))
+                            (if line (deal after message: line note: line) after)))
+                         (else
+                          (let ((line (clear-line! 'cards
+                                                   (mode->version (trace-mode (deal-trace after)))
+                                                   (deal-trace after)
+                                                   (game-moves (deal-game after))
+                                                   (daily-deal? after))))
+                            (if line (deal after message: line note: line) after))))))
         (when (deal-save-due? before after)
           (store-write-datum! CARDS-KEY (deal->datum after)))
         after))
 
     ;; --- the music (P4, ruling D50) ---------------------------------------------
 
-    ;; What plays follows the screen and the table's phase ((crash music));
-    ;; the shells call music-frame! every frame the menu or a table is up,
-    ;; and it asks (crash audio) only when the answer changes, so a track
-    ;; resumes or starts over once, not every frame. A new deal says
-    ;; music-fresh! first: its rest track then starts from the top; a
-    ;; continued or returned-to board resumes. music-off! (the arm's
-    ;; ambient-off door) fades everything out and holds it.
-    (define *music-want* 'none)
-    (define *music-fresh* #f)
+    ;; What plays follows the screen and the table's phase: the shells
+    ;; call music-frame! every frame the menu or a table is up with the
+    ;; board's seed, and (crash music live) runs motif's player on the
+    ;; table's pick, moving between the track's sections with the trace's
+    ;; phase (M1, ruling D59). A new deal says music-fresh! first: its pick
+    ;; then starts from its calm mark; a continued or returned-to board
+    ;; resumes. music-off! (the arm's door) fades everything out and holds it.
     (define *music-off* #f)
 
-    (define (music-fresh!) (set! *music-fresh* #t))
-    (define (music-off!) (set! *music-off* #t) (audio-fade-out! 0))
+    (define (music-fresh!) (live-music-fresh!))
+    (define (music-off!) (set! *music-off* #t) (live-music-off!))
 
-    ;; A track wanted before it has landed (the web hands the tunes over
-    ;; one after another; only the theme gates the boot) is not committed:
-    ;; the players fade and the want is asked again next frame, so DEFRAG
-    ;; opened before groove arrives gets its track when it does (the
-    ;; review, 2026-09-21) rather than the theme over the table for good.
-    (define (music-frame! screen phase)
+    ;; The soundtrack's state as one readout line (?ms / --ms, and the
+    ;; stats header): the track, its position, the pull's cost per 1024
+    ;; frames, the sink's state and starved frames. A phone with no console
+    ;; says here whether the music runs (M1, the spike David heard nothing on).
+    ;;   MUSIC NAME P:R PULL 2.1 SINK RUNNING DRY 0/0 RATE 48000/22050 BY STORED SET ON/8
+    ;;   (DRY: the cues' sink (and, in parentheses, how much of it fell inside tune opens, known stalls), then the music's own;
+    ;;    RATE: the device's, then the music's render rate, and why: DEVICE | STORED | HINT | PIN | LADDER@12.3S (the ladder stepped, seconds after boot);
+    ;;    SET: the MUSIC setting and VOLUME)
+    ;;   MUSIC PENDING NAME | MUSIC OFF
+    (define (upcase s) (list->string (map char-upcase (string->list s))))
+    (define (music-readout)
+      (string-append
+       "MUSIC "
+       (cond ((live-music-playing?)
+              (let ((p (live-music-position)))
+                (string-append (upcase (symbol->string (live-music-name)))
+                               " " (if p (number->string (car p)) "-") ":" (if p (number->string (cdr p)) "-")
+                               " PULL " (number->string (/ (round (* 10 (live-music-chunk-ms))) 10.0)))))
+             ((live-music-pending?) "PENDING")
+             (else "OFF"))
+       " SINK " (upcase (symbol->string (or (audio-state) 'none)))
+       " DRY " (number->string (audio-underruns))
+       (if (> (audio-known-stalls) 0) (string-append "(" (number->string (audio-known-starved)) " IN " (number->string (audio-known-stalls)) " OPENS)") "")
+       "/" (number->string (audio-source-underruns))
+       " RATE " (number->string (audio-rate)) "/" (number->string (live-music-rate)) " BY " (live-music-rate-reason)
+       " SET " (if (eq? (setting 'music) 'on) "ON" "OFF") "/" (number->string (setting 'volume))))
+    ;; The playing track's title (the tune's name:), for the pause panel's title line (a note glyph then the title); #f when nothing plays
+    (define (music-title) (live-music-title))
+    ;; tr: the table's trace (#f on the menu). The music gets its phase and
+    ;; the ms until it lands (the fill's run-up; #f when it never will: clean
+    ;; mode, or landed already).
+    ;; P5: the hub is a table of its own in the pools (its tunes are
+    ;; David's sneaking cut), and the entry screen between the menu and the
+    ;; hub is a table with NO pool, which is how it asks for silence — the
+    ;; driver fades whatever plays and the hub's tune opens after it. The
+    ;; hub has no trace struct, so it hands its phase straight in ('counter
+    ;; while the layer is alert or hunted, which is the tense section); a
+    ;; symbol here is that phase, a struct is a table's trace as before.
+    (define (music-frame! screen tr . rest)
       (unless *music-off*
-        (let ((want (music-track-for screen phase *music-fresh*)))
-          (unless (equal? want *music-want*)
-            (cond ((not want)
-                   (set! *music-fresh* #f)
-                   (set! *music-want* #f)
-                   (audio-fade-out! 800))
-                  ((audio-track? (car want))
-                   (set! *music-fresh* #f)
-                   (set! *music-want* want)
-                   (audio-play! (car want) (cdr want)))
-                  ((not (eq? *music-want* 'pending))
-                   (set! *music-want* 'pending)
-                   (audio-fade-out! 800)))))))
+        (let* ((seed (and (pair? rest) (car rest)))
+               (table (case screen ((cards) 'cards) ((hub) 'hub) ((entry) 'entry) (else 'stack)))
+               (phase (cond ((not tr) #f) ((symbol? tr) tr) (else (trace-phase tr))))
+               (remaining (and tr (not (symbol? tr)) (trace-remaining-ms tr))))
+          (live-music-frame! screen phase remaining table seed))))
+
+    ;; ?trace-at=N / --trace-at N: the trace lands at N seconds on the next
+    ;; deal of either table (the arm's door to the fill's run-up: a real
+    ;; deal takes TRACE-AT minus the shuffles' 60 s each to get there).
+    (define *trace-at-door* #f)
+    (define (set-trace-at-door! n) (set! *trace-at-door* n))
+    (define (door-thresholds tr)
+      (if *trace-at-door*
+          (trace-with-thresholds tr *trace-at-door* (trace-sever-at tr))
+          tr))
+    (define (door-session s) (session s trace: (door-thresholds (session-trace s))))
+    (define (door-deal d) (deal-with-trace d (door-thresholds (deal-trace d))))
 
     ;; --- the sound (P3) ---------------------------------------------------------
 
-    ;; The tracks' rate: every tune under assets/audio/ is OGG Vorbis mono
-    ;; at this rate (assets/MANIFEST names each one's provenance; the
-    ;; ambient loop that played before D50 is retired). The native shell
-    ;; decodes each file; the web page decodes and hands the PCM over in
-    ;; chunks. TRACK-FILES in (crash music) names the files.
-    (define AMBIENT-RATE 22050)
 
     (define (play-cues! cues)
       (for-each audio-cue! cues))

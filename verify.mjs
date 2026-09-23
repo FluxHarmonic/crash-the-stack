@@ -62,10 +62,14 @@
 //               the same tick digests and another seed does not, two boots
 //               without ?seed take different seeds from the page's clock, and a tap
 //               during the reveal skips it without choosing an entry
-//   preload     (P3d, ruling D40) with the ambient delayed 4 s the boot outlasts the
+//   preload     (P3d, ruling D40) with the menu theme's text delayed 4 s the boot outlasts the
 //               reveal: a tap after the settle chooses nothing and boots no board,
 //               "crash: boot done" then arrives with the audio step last, and the
 //               tap then chooses STACK
+//   music       the soundtrack live from .cts (M1): a seeded pick repeated on the
+//               reload leg's second boot, the track heard, the ICE crossing landing
+//               on a bar row at or past the fill mark (read from the served .cts),
+//               the title line ("♪ NAME") = the tune's name:, the menu theme opened
 //   manifest    Page.getAppManifest parses assets/manifest.webmanifest with no
 //               errors, it names the icons, and Page.getInstallabilityErrors
 //               is empty on this (loopback, so secure) origin
@@ -121,7 +125,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "code", "daily", "scores", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -270,6 +274,8 @@ if (!pageWs) { console.log("SETUP-FAILED: no chrome page target after 20 s; did 
 const ws = new WebSocket(pageWs);
 let msgId = 0; const pending = new Map();
 const consoleLines = [];   // every console.log/warn text, in order
+const consoleTimes = [];   // when each arrived (Date.now()), for the music leg's timing
+function pushLine(text) { consoleLines.push(text); consoleTimes.push(Date.now()); }
 const consoleErrors = [];  // error-level entries and exceptions
 function send(method, params = {}) {
   return new Promise((res, rej) => { const id = ++msgId; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
@@ -279,7 +285,7 @@ ws.addEventListener("message", (ev) => {
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
   if (msg.method === "Runtime.consoleAPICalled") {
     const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
-    consoleLines.push(text);
+    pushLine(text);
     if (msg.params.type === "error") consoleErrors.push("console.error: " + text);
   }
   if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") consoleErrors.push("log: " + msg.params.entry.text);
@@ -287,6 +293,33 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");
+// t-409696 (the phantom vector-ref, [[topics/sigil-wasm-phantom-vector-ref]]):
+// the sigil wasm runtime PRINTS its type errors with console.log rather than
+// throwing, so nothing carries a stack. Wrap console before any page script
+// runs and emit the JS/wasm stack depth beside each one; the sigil row needs
+// the depth to tell a shadow-stack overflow from a rooting fault. Costs
+// nothing when no error fires.
+await send("Page.addScriptToEvaluateOnNewDocument", { source: `
+  (function () {
+    var re = /type-error|expected non-negative|expected struct|call stack|Scheme error/;
+    ["log", "error", "warn"].forEach(function (k) {
+      var orig = console[k].bind(console);
+      console[k] = function () {
+        try {
+          var text = Array.prototype.map.call(arguments, String).join(" ");
+          if (re.test(text)) {
+            var stack = "";
+            try { throw new Error("depth"); } catch (e) { stack = String(e.stack || ""); }
+            var frames = stack.split("\\n").slice(2);
+            orig("crash: depth " + frames.length + " | " + text.slice(0, 120) + " | " +
+                 frames.slice(0, 8).map(function (f) { return f.trim().slice(0, 90); }).join(" | "));
+          }
+        } catch (e) { /* never break the page */ }
+        return orig.apply(null, arguments);
+      };
+    });
+  })();
+` });
 // The audio tap (P3 gate leg 3, the web half): before any page script,
 // every AudioNode.connect to a context's destination also feeds an
 // AnalyserNode, and the connecting node's kind is remembered, so the arm
@@ -333,7 +366,7 @@ if (PHONE) {
 // a second apart, and the abort noted.
 async function navigate(url) {
   let r = null;
-  consoleLines.push(`arm: navigate ${url.replace(/^.*index\.html/, "index.html")}`);   // the log says which boot is whose
+  pushLine(`arm: navigate ${url.replace(/^.*index\.html/, "index.html")}`);   // the log says which boot is whose
   for (let i = 0; i < 3; i++) {
     r = await send("Page.navigate", { url });
     if (!r.errorText) return r;
@@ -401,7 +434,13 @@ function timedOut(name) {
 
 // ---- 2. boot ----------------------------------------------------------------
 // ?trace switches on the game's console lines; a player's page prints nothing.
-await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack`);
+// The first deal's trace lands at ARM_TRACE_AT s (the ?trace-at door): the
+// tools leg's hint (30 s) and two shuffles (60 s each) then leave a run-up
+// of 25-35 s of clock for the fill to start in (the longest fill's window
+// is ~15 s: quiet-array's 10.4 s fill, a 2.6 s bar, the queue); a real
+// deal's 180 s is the same machine (the traced and music legs).
+const ARM_TRACE_AT = 190;
+await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&trace-at=${ARM_TRACE_AT}`);
 const BOOT_RE = /^crash: seed (\d+) tiles (\d+) pair (\d+) (-?[\d.]+) (-?[\d.]+) (\d+) (-?[\d.]+) (-?[\d.]+)$/;
 // any boot line, a restored board's "pair none" included
 const BOOT_ANY = /^crash: seed \d+ tiles \d+ pair /;
@@ -760,15 +799,17 @@ let barRects = null;
 }
 
 // ---- 7. traced: the trace completes and the ICE fires, through SHUF --------
-// Each shuffle costs SHUFFLE_COST on the trace, so SHUFFLES taps take the
-// value past TRACE_AT and the next tick completes the trace ("crash: trace
-// V H SHUFFLES counter 0"); the first
-// counter-hack fires ICE-FIRST (10 s) later: "crash: trace ... counter 1"
-// with either "crash: lock A B" or one more "crash: shuffle". With
-// forwarding off the control cannot be tapped, so the positive-control run
-// skips this.
-const TRACE_AT = 180, SHUFFLE_COST = 60, SHUFFLES = Math.ceil(TRACE_AT / SHUFFLE_COST);
+// Each shuffle costs SHUFFLE_COST on the trace; SHUFFLES taps take the
+// value (with the tools leg's hint) to within a run-up of the deal's threshold (ARM_TRACE_AT through
+// the ?trace-at door), the clock does the rest, and the tick that reaches
+// it completes the trace ("crash: trace V H SHUFFLES counter 0"); the music
+// leg reads the fill's run-up over that wait. The first counter-hack fires
+// ICE-FIRST (10 s) later: "crash: trace ... counter 1" with either
+// "crash: lock A B" or one more "crash: shuffle". With forwarding off the
+// control cannot be tapped, so the positive-control run skips this.
+const SHUFFLE_COST = 60, SHUFFLES = 2;
 let iceLock = null;
+let strikeAt = null;   // when the trace completed (consoleTimes), for the music leg
 {
   if (EXPECT_NO_SELECTION) skip("traced", "controls are not tappable with forwarding off");
   else {
@@ -784,9 +825,19 @@ let iceLock = null;
       await sleep(150);
     }
     if (!detail) {
-      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, 3000);
-      if (!traced) detail = `${SHUFFLES} shuffles did not complete the trace (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
+      // the run-up: the threshold less the shuffles and the seconds played so far, plus slack
+      const last = consoleLines.map((l) => l.match(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} trace 0$`))).filter(Boolean).pop();
+      const runUp = ARM_TRACE_AT - (last ? Number(last[1]) : SHUFFLES * SHUFFLE_COST);
+      // The game's clock falls behind the wall clock on a loaded box: (crash
+      // tween) drops the ticks it owes past MAX-STEPS-PER-FRAME, so a run-up of
+      // N trace-seconds can take 2-3N wall-seconds under load (measured: 34 s of
+      // trace in 57 s of wall at loadavg 34). The wait is three times the run-up
+      // plus 20 s: a real failure to complete the trace still reds, a slow box
+      // does not.
+      const traced = await waitLine(new RegExp(`^crash: trace (\\d+) (\\d+) ${SHUFFLES} counter 0$`), 0, (runUp * 3 + 20) * 1000);
+      if (!traced) detail = `${SHUFFLES} shuffles and ${runUp} s of clock did not complete the trace at ${ARM_TRACE_AT} s (no "crash: trace V H ${SHUFFLES} counter 0" line)`;
       else {
+        strikeAt = consoleTimes[traced.index];
         mark = traced.index + 1;
         const ice = await waitLine(/^crash: trace (\d+) (\d+) (\d+) counter 1$/, mark, 16000);
         if (!ice) detail = "no counter-hack within 16 s of the trace completing";
@@ -920,6 +971,8 @@ let iceLock = null;
 }
 
 // ---- 8b. audio: the match cue reaches the output (gate leg 3, web) ---------
+// RMS is the loudest of the tapped sinks: since M1 the music has a sink of
+// its own beside the cues' (two AudioWorkletNodes on the destination).
 // After the reload the page is controlled by the service worker, which adds
 // COOP/COEP, so this navigation is cross-origin isolated and the bridge takes
 // its AudioWorklet path; the arm asserts both, taps a fresh pair (a match
@@ -935,15 +988,15 @@ let iceLock = null;
     let openAt = -1;
     for (let i = consoleLines.length - 1; i >= 0; i--) if (/^crash: audio (open|closed)$/.test(consoleLines[i])) { openAt = i; break; }
     const open = openAt >= 0 ? { m: consoleLines[openAt].match(/^crash: audio (open|closed)$/) } : null;
-    // the ambient loop lands a few seconds after the boot (the page fetches
-    // it late, on purpose) and must be playing under the cue
-    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: ambient (\d+)$/, openAt, 20000) : null;
+    // the board's tune lands soon after the boot (the page fetches its text on the game's
+    // line; M1) and must be playing under the cue
+    const ambient = open && open.m[1] === "open" ? await waitLine(/^crash: music landed [a-z0-9-]+ (\d+)$/, openAt, 20000) : null;
     // and it starts once the screen is ready (the menu live, or a table up with the boot done): the start line
-    const started = ambient ? await waitLine(/^crash: ambient start$/, ambient.index, 10000) : null;
+    const started = ambient ? await waitLine(/^crash: music start$/, ambient.index, 10000) : null;
     if (!isolated) detail = "the page is not crossOriginIsolated after the reload (sw.js should add COOP/COEP)";
     else if (!open || open.m[1] !== "open") detail = `the game did not open its audio context (${open ? open.m[0] : "no line"})`;
-    else if (!ambient) detail = "the ambient loop never landed (no \"crash: ambient N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
-    else if (!started) detail = "the ambient landed but never started (no \"crash: ambient start\" line within 10 s: the boot is not done, or the start is not wired)";
+    else if (!ambient) detail = "no tune landed (no \"crash: music landed NAME N\" line within 20 s of the boot (the page retries a failed fetch, D40))";
+    else if (!started) detail = "the tune landed but the music never started (no \"crash: music start\" line within 10 s: the boot is not done, or the start is not wired)";
     else {
       // a fresh pair to match: NEW deals the next seed; its boot line gives a pair
       mark = consoleLines.length;
@@ -960,7 +1013,7 @@ let iceLock = null;
           // the 0.02 floor on the first run with the tunes, D50); then the
           // music is dropped so the cue is measured by itself (over the
           // ambient a muted cue hid inside the music's own swings)
-          const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+          const rms = `(() => { const t = window.__crashAudioTap; if (!t.analysers.length) return -1; let best = 0; for (const a of t.analysers) { const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; best = Math.max(best, Math.sqrt(s / d.length)); } return best; })()`;
           let ambientPeak = -1;
           for (let i = 0; i < 20; i++) {
             const r = await evalJS(rms);
@@ -987,10 +1040,10 @@ let iceLock = null;
           const kinds = JSON.parse(await evalJS("JSON.stringify(window.__crashAudioTap.nodes)"));
           if (!removed) detail = "the pair did not match after NEXT";
           else if (ambientPeak < 0) detail = "no AudioNode ever connected to a destination (the tap saw nothing)";
-          else if (!(ambientPeak > AUDIO_AMBIENT)) detail = `the ambient landed but its RMS peaked at ${ambientPeak.toFixed(4)}: not playing`;
+          else if (!(ambientPeak > AUDIO_AMBIENT)) detail = `the tune landed but the music's RMS peaked at ${ambientPeak.toFixed(4)}: not playing`;
           else if (!(peak > before + AUDIO_RISE)) detail = `RMS peaked ${peak.toFixed(4)} after the match against ${before.toFixed(4)} with the ambient off: no cue (nodes ${kinds.join(",")})`;
           else if (!kinds.includes("AudioWorkletNode")) detail = `RMS ${peak.toFixed(4)} but the bridge used ${kinds.join(",")}, not the AudioWorkletNode path`;
-          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; ambient ${ambient.m[1]} frames at RMS ${ambientPeak.toFixed(4)}; with it off, RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
+          else pass("audio", `crossOriginIsolated, ${kinds.join(",")}; the tune (${ambient.m[1]} bytes of text) at RMS ${ambientPeak.toFixed(4)}; with the music off, RMS ${before.toFixed(4)} before the match, peak ${peak.toFixed(4)} after`);
         }
       }
     }
@@ -1054,7 +1107,11 @@ let iceLock = null;
         mark = consoleLines.length;
         await tap(applyCtl.m[1], applyCtl.m[2]);
         const chose = await waitLine(/^crash: update apply$/, mark, 3000);
-        const boot3 = chose ? await waitLine(BOOT_ANY, chose.index + 1, 20000) : null;
+        // 60 s: APPLY reloads the page, and the reload is a full boot of the
+        // 33 MB wasm plus the worker's handover, which on a loaded box takes
+        // longer than the 20 s this waited for (M1 also made the precache
+        // twenty tunes). A genuinely stuck apply still reds.
+        const boot3 = chose ? await waitLine(BOOT_ANY, chose.index + 1, 60000) : null;
         const version = boot3 ? await evalJS(`window.crashUpdate.activeVersion()`) : null;
         if (!chose) detail = "tapping APPLY did not answer \"crash: update apply\"";
         else if (!boot3) detail = `applying the update did not reload the page (page state ${await evalJS("JSON.stringify({state: window.crashUpdate.state, told: window.crashUpdate.told, waiting: !!(window.crashUpdate.reg && window.crashUpdate.reg.waiting)})")})`;
@@ -1130,7 +1187,7 @@ let iceLock = null;
   // the gate (ruling D42): a menu boot opens on the boot screen and the
   // reveal waits for a tap; the first boot also checks that nothing sounds
   // before the tap and that the dial and the first beep sound after it
-  const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; const a = t.analysers[t.analysers.length - 1]; const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; return Math.sqrt(s / d.length); })()`;
+  const rms = `(() => { const t = window.__crashAudioTap; if (!t || !t.analysers.length) return -1; let best = 0; for (const a of t.analysers) { const d = new Float32Array(a.fftSize); a.getFloatTimeDomainData(d); let s = 0; for (const v of d) s += v * v; best = Math.max(best, Math.sqrt(s / d.length)); } return best; })()`;
   // the publisher card (ruling D43) between the gate and the reveal: on a
   // "read" the arm waits for the card's first resolved tick, reads the
   // canvas at CARD-SAMPLES (src/crash/title/card.sgl: the resolved frame's
@@ -1326,15 +1383,15 @@ let iceLock = null;
         resolve(n);
       }))`);
       if (itemsLit < 200) detail = `the menu's items are not on screen after the boot: ${itemsLit} C-LABEL-LIT pixels in the entry band (every other pixel sampled)`;
-      // the ambient (David, 2026-09-20): silent under the card and the reveal,
+      // the music (David, 2026-09-20): silent under the card and the reveal,
       // started once the menu is ready: its start line follows the boot's done
       // line and never precedes the settle
       else {
-        const start = await waitLine(/^crash: ambient start$/, a.from, 5000);
+        const start = await waitLine(/^crash: music start$/, a.from, 5000);
         const settledAt = consoleLines.findIndex((l, i) => i >= a.from && /^crash: title settled /.test(l));
-        if (!start) detail = "no \"crash: ambient start\" line within 5 s of the boot's done line: the loop never began";
-        else if (start.index < settledAt) detail = "the ambient started before the reveal settled";
-        else if (start.index < bootDone.index) detail = "the ambient started before the boot was done (the items were not in)";
+        if (!start) detail = "no \"crash: music start\" line within 5 s of the boot's done line: the music never began";
+        else if (start.index < settledAt) detail = "the music started before the reveal settled";
+        else if (start.index < bootDone.index) detail = "the music started before the boot was done (the items were not in)";
       }
     }
   }
@@ -1412,13 +1469,13 @@ let iceLock = null;
   delete substitutePaths["/assets/title/backdrop.png"];
   await evalJS(`localStorage.removeItem("scanlines")`);
   if (detail) fail("title", detail);
-  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the ambient started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
+  else pass("title", `seed ${TITLE_SEED}: grid ${a.rows.length} rows = module, ${pix.dots} dots read on the settled canvas all as drawn (buffer ${pix.w}x${pix.h}), ${a.ticks.length} ticks reproduced, seed ${OTHER_SEED} differs, unseeded boots differ, a tap skips, ${itemsLit} item pixels after the boot, the music started after; card ${a.card.n - a.card.wrong}/${a.card.n} samples = module (ran ${a.cardDone} ticks; a tap ended the next at ${b.cardSkippedAt}); reveal ${reveal.m[1]} frames mean ${reveal.m[6]} max ${reveal.m[2]} ms, ${reveal.m[3]} over 33, ${reveal.m[4]} underruns (${reveal.m[5]} under the meter)`);
 }
 
 // ---- 9c. preload: the card waits for the boot (ruling D45), nothing pops in later --
-// The server delays the menu theme (spy.ogg, D50) by BOOT_SLOW ms, so the boot's audio step
+// The server delays the menu theme's text (black-glass-title.cts; M1, D59) by BOOT_SLOW ms, so the boot's audio step
 // outlasts the tap: after the gate's tap the DIALING meter must hold until
-// "crash: boot done" (the ambient landed, the audio step last), a tap during
+// "crash: boot done" (the theme's text landed, the audio step last), a tap during
 // the meter must choose nothing and skip nothing, the card must start only
 // after the boot is done ("crash: title dialed" after "crash: boot done",
 // no card tick before it), and once the reveal settles the menu is live at
@@ -1429,7 +1486,7 @@ let iceLock = null;
 {
   const BOOT_SLOW = 4000, TITLE_SEED = 7, TITLE_BAUD = 9600;
   let detail = "";
-  slowPaths["/assets/audio/spy.ogg"] = BOOT_SLOW;
+  slowPaths["/assets/tunes/black-glass-title.cts"] = BOOT_SLOW;
   await send("Storage.clearDataForOrigin", { origin: `http://127.0.0.1:${PORT}`, storageTypes: "service_workers,cache_storage" });
   const from = consoleLines.length;
   await navigate(`http://127.0.0.1:${PORT}/index.html?trace&seed=${TITLE_SEED}&baud=${TITLE_BAUD}&fresh`);
@@ -1444,7 +1501,7 @@ let iceLock = null;
   let tapAt = -1;
   if (!detail) {
     await sleep(300);
-    if (consoleLines.slice(connect.index).some((l) => /^crash: title dialed /.test(l))) detail = `the meter ended within 300 ms of the tap: the ${BOOT_SLOW} ms ambient delay did not hold the boot (a slow asset that does not hold the card is the bug this leg exists for)`;
+    if (consoleLines.slice(connect.index).some((l) => /^crash: title dialed /.test(l))) detail = `the meter ended within 300 ms of the tap: the ${BOOT_SLOW} ms theme delay did not hold the boot (a slow asset that does not hold the card is the bug this leg exists for)`;
     else {
       tapAt = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
@@ -1481,15 +1538,17 @@ let iceLock = null;
       await sleep(300);
       const m0 = consoleLines.length;
       await tap(parseFloat(menuLine.m[1]), parseFloat(menuLine.m[2]));
-      const chose = await waitLine(/^crash: menu chose jack-in$/, m0, 3000);
-      const booted = chose && await waitLine(BOOT_ANY, m0, 5000);
-      if (!chose) detail = "after the settle, a tap on JACK IN chose nothing (the menu was not live at once)";
-      else if (!booted) detail = "after the settle, JACK IN chosen but no board booted (the run's first layer)";
+      const pick = await menuOn("jack-in", m0);   // D65: JACK IN opens the difficulty pick
+      const chose = pick && (await tap(pick.rows["normal"].x, pick.rows["normal"].y), await waitLine(/^crash: menu chose normal$/, m0, 3000));
+      const booted = chose && await waitLine(/^crash: hub open 1 0 /, m0, 5000);   // P5: the pick opens the hub
+      if (!pick) detail = "after the settle, a tap on JACK IN opened no pick (the menu was not live at once)";
+      else if (!chose) detail = "after the settle, NORMAL on the pick chose nothing";
+      else if (!booted) detail = "after the settle, NORMAL chosen but the hub did not open";
     }
   }
-  delete slowPaths["/assets/audio/spy.ogg"];
+  delete slowPaths["/assets/tunes/black-glass-title.cts"];
   if (detail) fail("preload", detail);
-  else pass("preload", `ambient held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap chose STACK and booted a board`);
+  else pass("preload", `theme held ${BOOT_SLOW} ms: the meter held, a tap under it chose and skipped nothing, boot done after ${done.m[1]} steps (audio last), then the meter ended at ${dialed.m[1]}/${dialed.m[2]}, the card ran, the reveal settled and a tap on JACK IN then NORMAL opened the hub`);
 }
 
 // ---- 9c'. slow-link: a boot on a throttled link loads every texture ----------
@@ -1675,6 +1734,8 @@ async function menuOn(screen, from, ms = 3000) {
 let topAt = 0;
 // a fresh board, then Escape: the pause menu's top screen
 async function pauseMenu(extra = "") {
+  // the store before the boot (a leg that dies at its first frame is read against it)
+  try { pushLine("arm: store " + await evalJS("JSON.stringify(Object.assign({}, localStorage))")); } catch { /* no page */ }
   const from = consoleLines.length;
   await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1${extra}`);
   const booted = await waitLine(BOOT_ANY, from, 20000);
@@ -1989,10 +2050,16 @@ async function downTo(order, id, at = 0) {
   else pass("pause", `Escape opened the stack's overlay (resume settings back-to-menu); the clock held at ${on.m[1]} ticks over 2 s and ran on after RESUME (${on2.m[1]} at the button's second open); BACK TO MENU landed on CONTINUE, which booted the same board`);
 }
 
-// run (D51, David 2026-09-21): a JACK IN layer's overlay carries DISCONNECT,
-// which lands on the main menu with CONTINUE resuming the layer; a cleared
-// layer (the demo door) shows the ledger with NEXT LAYER once the cascade
-// is over, and pulls the next layer by itself after the hold.
+// run (P5, phase 2): JACK IN is a hub run. The main menu's JACK IN opens
+// the hub (`crash: hub open 1 0 keys 0 cleared 0`); Escape on the hub
+// opens the pause overlay (resume settings disconnect) whose DISCONNECT
+// lands on the main menu with CONTINUE, which resumes the hub (RUN HELD).
+// Then the plan's gate leg 2 through the arm's doors: ?hub=1&hubat=0 sets
+// the runner on key node 0; Enter launches: `crash: hub launch 0 CODE`
+// and the board deals from that very spec (`crash: spec stack hacker SEED
+// CODE`, the same CODE); the demo door clears it with one match and the
+// hub comes back with the node cleared and its key held (`crash: hub open
+// 1 N keys 1 cleared 1`).
 {
   let detail = "";
   const from = consoleLines.length;
@@ -2000,10 +2067,8 @@ async function downTo(order, id, at = 0) {
   const booted = await waitLine(BOOT_ANY, from, 20000);
   if (!booted) detail = "no boot line";
   else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
-  let layer = null;
+  let opened = null, hubTune = null;
   if (!detail) {
-    // to the main menu, then the demo door armed for the next spec'd board,
-    // then JACK IN: the run's first layer clears with one match
     let m0 = consoleLines.length;
     await press("Escape");
     const p = await menuOn("pause", m0);
@@ -2014,23 +2079,56 @@ async function downTo(order, id, at = 0) {
       const top = await menuOn("top", m0);
       if (!top) detail = "BACK TO MENU did not open the main menu";
       else {
+        // The fade asserted below is only a fact if something was playing to
+        // fade. Leaving the board fades the BOARD's tune, and the driver opens
+        // the next track only once that fade has finished, so on a fast machine
+        // the theme is still closed when the tap lands and "no fade" says
+        // nothing about the entry screen (the remote gate read exactly that,
+        // 2026-09-23). This leg waits for the theme and then holds the entry
+        // screen to silencing it; the other order — a tap that beats the theme
+        // open — is its own leg, jack-in-early.
+        const themeOn = await waitLine(/^crash: music open black-glass-title /, m0, 12000);
         m0 = consoleLines.length;
         await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
-        const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10})$/, m0, 5000);
-        layer = start && await waitLine(/^crash: spec stack hacker (\d+) /, m0, 5000);
-        if (!start) detail = "JACK IN started no run";
-        else if (!layer) detail = "the run dealt no stack layer";
+        // D65: JACK IN opens the difficulty pick (EASY NORMAL ELITE BACK), NORMAL preselected
+        const pick = await menuOn("jack-in", m0);
+        if (!pick) detail = "JACK IN opened no difficulty pick";
+        else if (pick.order.join(" ") !== "easy normal elite back") detail = `the pick's rows are ${pick.order.join(" ")}`;
+        else {
+          m0 = consoleLines.length;
+          await tap(pick.rows["normal"].x, pick.rows["normal"].y);
+          const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10}) normal$/, m0, 5000);
+          opened = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, m0, 5000);
+          // The hub's music, proven rather than eyeballed (P5 on M1's live
+          // model): the entry screen's table has NO pool, so the driver fades
+          // the menu theme out; then the hub picks from its own pool with the
+          // RUN's seed, which is what makes one JACK IN one tune all the way
+          // down. The pool is David's three (shadow-protocol, dead-sector,
+          // blind-spot); the seed must be the run's, not the board's.
+          const HUB_POOL = ["shadow-protocol", "dead-sector", "blind-spot"];
+          const faded = opened && await waitLine(/^crash: music fade out (\S+)$/, m0, 8000);
+          const picked = opened && await waitLine(/^crash: music pick (\S+) seed (\d+) for hub$/, m0, 12000);
+          if (!start) detail = "NORMAL on the pick started no run at normal";
+          else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+          else if (!themeOn) detail = "the main menu never opened its theme, so the entry screen had nothing to fade (this leg needs it playing; the other order is jack-in-early)";
+          else if (!faded) detail = "the entry screen did not fade the menu theme out (no \"crash: music fade out\")";
+          else if (!picked) detail = "the hub picked no tune (no \"crash: music pick ... for hub\")";
+          else if (!HUB_POOL.includes(picked.m[1])) detail = `the hub picked ${picked.m[1]}, which is not one of ${HUB_POOL.join(", ")}`;
+          else if (picked.m[2] !== start.m[1]) detail = `the hub's tune was picked from seed ${picked.m[2]}, not the run's ${start.m[1]} (one tune a run depends on it)`;
+          else hubTune = picked.m[1];
+        }
       }
     }
   }
   if (!detail) {
-    // DISCONNECT: the main menu with CONTINUE; CONTINUE resumes the layer
     await sleep(500);
     let m0 = consoleLines.length;
     await press("Escape");
-    const p = await menuOn("pause", m0);
-    if (!p) detail = "no overlay on the run's layer";
-    else if (p.order.join(" ") !== "resume settings disconnect") detail = `the run layer's overlay rows are ${p.order.join(" ")}`;
+    const on = await waitLine(/^crash: pause on (\d+)$/, m0, 3000);
+    const p = on && await menuOn("pause", m0);
+    if (!on) detail = "no \"crash: pause on\" from Escape on the hub";
+    else if (!p) detail = "no overlay rows on the hub";
+    else if (p.order.join(" ") !== "resume settings disconnect") detail = `the hub's overlay rows are ${p.order.join(" ")}`;
     else {
       m0 = consoleLines.length;
       await downTo(p.order, "disconnect");
@@ -2042,42 +2140,184 @@ async function downTo(order, id, at = 0) {
       else {
         m0 = consoleLines.length;
         await press("Enter");
-        const back = await waitLine(BOOT_ANY, m0, 5000);
-        if (!back) detail = "CONTINUE did not resume the layer";
-        else if (back.m[0].split(" ")[2] !== layer.m[1]) detail = `CONTINUE booted seed ${back.m[0].split(" ")[2]}, not the layer's ${layer.m[1]}`;
+        const back = await waitLine(/^crash: hub open 1 (\d+) keys 0 cleared 0$/, m0, 5000);
+        if (!back) detail = "CONTINUE did not resume the hub";
+        else if (parseInt(back.m[1], 10) < parseInt(on.m[1], 10)) detail = `CONTINUE resumed at beat ${back.m[1]}, before the pause's ${on.m[1]}`;
       }
     }
   }
-  let done = null, next = null;
+  let launch = null, spec = null, back = null;
   if (!detail) {
-    // a second run with the demo door armed: its first layer clears at once
-    // (the door's own match), the cascade runs, the ledger opens, the pull
-    let m0 = consoleLines.length;
-    const t = await toMenu("Escape");
-    const top = t && parseMenuLine(consoleLines[t.index]);
-    if (!top) detail = toMenuDetail;
+    const m0 = consoleLines.length;
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=0`);
+    const at = await waitLine(/^crash: hub at 0 (\d+)$/, m0, 20000);
+    if (!at) detail = "?hub=1&hubat=0 did not set the runner on key node 0";
+    else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the hub boot";
     else {
       await evalJS("window.__crashUpdates.app.dispatch('demo', 'cleared')");
-      m0 = consoleLines.length;
-      await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
-      const demo = await waitLine(/^crash: demo cleared stack$/, m0, 5000);
-      const removed = demo && await waitLine(/^crash: removed /, m0, 5000);
-      done = removed && await waitLine(/^crash: run layer-done stack$/, m0, 20000);
-      const rows = done && await menuOn("run-layer", done.index, 3000);
-      if (!demo) detail = "the demo door did not arm the new run's layer";
-      else if (!removed) detail = "the demo's match did not fire";
-      else if (!done) detail = "no \"crash: run layer-done\" after the clear's cascade";
-      else if (!rows || rows.order.join(" ") !== "next-layer") detail = `the ledger screen's rows are ${rows ? rows.order.join(" ") : "missing"}`;
+      const m1 = consoleLines.length;
+      await press("Enter");
+      launch = await waitLine(/^crash: hub launch 0 ([0-9A-Z]{10})$/, m1, 5000);
+      spec = launch && await waitLine(/^crash: spec stack hacker (\d+) ([0-9A-Z]{10})$/, m1, 5000);
+      if (!launch) detail = "Enter on the node asked for no launch";
+      else if (!spec) detail = "the launch dealt no stack board";
+      else if (spec.m[2] !== launch.m[1]) detail = `the board's code ${spec.m[2]} is not the node's launch ${launch.m[1]} (gate leg 2)`;
       else {
-        next = await waitLine(/^crash: run layer (\d+)$/, done.index, 8000);
-        if (!next) detail = "the next layer was not pulled by itself within 8 s";
-        else if (next.m[1] !== "2") detail = `the pull went to layer ${next.m[1]}, not 2`;
-        else if (!(await waitLine(/^crash: spec cards hacker /, done.index, 5000))) detail = "layer 2 (DEFRAG) was not dealt";
+        const demo = await waitLine(/^crash: demo cleared stack$/, m1, 5000);
+        const removed = demo && await waitLine(/^crash: removed /, m1, 5000);
+        back = removed && await waitLine(/^crash: hub open 1 (\d+) keys 1 cleared 1$/, m1, 30000);
+        if (!demo) detail = "the demo door did not arm the node's board";
+        else if (!removed) detail = "the demo's match did not fire";
+        else if (!back) detail = "the cleared board did not bring the hub back with the node cleared and its key held";
       }
+    }
+  }
+  // and the seeds are the nodes' own: key node 1 launches a different code
+  // (a constant launch seed, sabotage S1, would give every node the same)
+  let launch1 = null;
+  if (!detail) {
+    const m0 = consoleLines.length;
+    await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=1`);
+    const at = await waitLine(/^crash: hub at 1 (\d+)$/, m0, 20000);
+    if (!at) detail = "?hub=1&hubat=1 did not set the runner on key node 1";
+    else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the second hub boot";
+    else {
+      const m1 = consoleLines.length;
+      await press("Enter");
+      launch1 = await waitLine(/^crash: hub launch 1 ([0-9A-Z]{10})$/, m1, 5000);
+      if (!launch1) detail = "Enter on key node 1 asked for no launch";
+      else if (launch1.m[1] === launch.m[1]) detail = `key node 1 launched node 0's code ${launch.m[1]}: the launch seed is not the node's`;
     }
   }
   if (detail) fail("run", detail);
-  else pass("run", `JACK IN layer ${layer.m[1]}: DISCONNECT landed on CONTINUE, which resumed it; a second run's demo clear ended in the ledger (next-layer) and layer 2 was pulled by itself`);
+  else pass("run", `JACK IN opened the hub on ${hubTune} (picked from the run's seed, the menu theme faded first); DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
+}
+
+// jack-in-early (2026-09-23): a player taps JACK IN before the menu theme
+// has opened. Leaving the board fades the board's tune, and the driver opens
+// nothing while a fade is running, so on a fast machine the menu theme is
+// still WANTED but not open when the tap lands — the remote gate hit this
+// order by itself. What must then happen is that the want dies with the
+// screen: the hub gets its own tune and the menu theme never opens on top of
+// it. The driver recomputes `want` from the current screen every frame and
+// keeps no queue, so nothing can arrive late; this leg holds it to that.
+// If the theme did open before the tap, the case was not exercised (a slower
+// machine) and the leg says so rather than passing on the easy path — the
+// `run` leg above covers that order.
+{
+  let detail = "", note = "";
+  const from = consoleLines.length;
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) detail = "no boot line";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  let hubOpen = null, picked = null, hubHeard = null, late = [];
+  if (!detail) {
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const p = await menuOn("pause", m0);
+    if (!p) detail = "no overlay on the board";
+    else {
+      m0 = consoleLines.length;
+      await tap(p.rows["back-to-menu"].x, p.rows["back-to-menu"].y);
+      const top = await menuOn("top", m0);
+      if (!top) detail = "BACK TO MENU did not open the main menu";
+      else {
+        // no wait here: the point of the leg is to beat the theme open
+        const before = consoleLines.length;
+        await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
+        const pick = await menuOn("jack-in", before);
+        if (!pick) detail = "JACK IN opened no difficulty pick";
+        else {
+          await tap(pick.rows["normal"].x, pick.rows["normal"].y);
+          const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10}) normal$/, before, 5000);
+          hubOpen = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, before, 5000);
+          const themeFirst = hubOpen && consoleLines.slice(before, hubOpen.index)
+            .some((l) => /^crash: music open black-glass-title /.test(l));
+          picked = hubOpen && await waitLine(/^crash: music pick (\S+) seed (\d+) for hub$/, before, 12000);
+          hubHeard = picked && await waitLine(new RegExp(`^crash: music open ${picked.m[1]} `), picked.index, 12000);
+          // the theme's want is dead: give it longer than any fade or fetch
+          // would need and read what opened in that time
+          await sleep(6000);
+          late = hubOpen ? consoleLines.slice(hubOpen.index).filter((l) => /^crash: music open black-glass-title /.test(l)) : [];
+          if (!start) detail = "NORMAL on the pick started no run at normal";
+          else if (!hubOpen) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+          else if (themeFirst) note = "the menu theme opened before the tap landed, so the pending case was not exercised on this machine (the `run` leg covers that order)";
+          else if (!picked) detail = "the hub picked no tune (no \"crash: music pick ... for hub\")";
+          else if (!hubHeard) detail = `the hub picked ${picked.m[1]} but never opened it`;
+          else if (late.length) detail = `the menu theme opened inside the hub after the entry screen dropped it: ${late[0]}`;
+        }
+      }
+    }
+  }
+  if (detail) fail("jack-in-early", detail);
+  else if (note) skip("jack-in-early", note);
+  else pass("jack-in-early", `JACK IN beat the menu theme open: the theme never opened, the hub opened on ${picked.m[1]} from the run's seed, and 6 s later no "crash: music open black-glass-title" had arrived (the pending open died with the screen)`);
+}
+
+// hub (P5, D60, D65): the world moves on the beat and takes one action per
+// beat. ?hub=1&bpm=120&pace=normal (500 ms a beat): the beat lines come at
+// the clock's pace, not the frame's; two ArrowRight presses 700 ms apart
+// move the runner one cell each, on the next beat, and a third press
+// within the same beat as the second changes nothing extra; and at NORMAL
+// the daemons move on every other beat only (D65: PACE beats between
+// their moves), so no daemon changes cell on a beat line whose beat is
+// even (the line's beat counts the step just taken; the daemons step when
+// the count before it is a multiple of the pace).
+{
+  let detail = "";
+  const PACE = 2;   // NORMAL's, (crash hub world) daemon-pace
+  const from = consoleLines.length;
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&pace=normal`);
+  const opened = await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, from, 20000);
+  if (!opened) detail = "?hub=1 did not open the hub";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  const beatLine = /^crash: hub beat (\d+) trace (\d+) (\d+) depth (\d+) cell (\d+) daemons ([\d,]*)$/;
+  let first = null, cells = [];
+  if (!detail) {
+    const m0 = consoleLines.length;
+    first = await waitLine(beatLine, m0, 5000);
+    if (!first) detail = "no beat line within 5 s";
+    else {
+      const t0 = Date.now();
+      await sleep(2600);
+      const beats = consoleLines.slice(first.index).filter((l) => beatLine.test(l));
+      const expected = Math.round((Date.now() - t0) / 500);
+      if (beats.length < expected - 1 || beats.length > expected + 2) detail = `${beats.length} beats in ${Date.now() - t0} ms at 120 bpm (expected about ${expected})`;
+      else {
+        const cell0 = parseInt(first.m[5], 10);
+        const m1 = consoleLines.length;
+        await press("ArrowRight");
+        await sleep(700);
+        await press("ArrowRight");
+        await sleep(100);
+        await press("ArrowRight");   // the same beat: the last press wins, one move
+        await sleep(900);
+        cells = consoleLines.slice(m1).filter((l) => beatLine.test(l)).map((l) => parseInt(l.match(beatLine)[5], 10));
+        // one action per beat: no beat line moves the runner more than one cell, and
+        // three presses land as two or three moves (the third's beat depends on the
+        // clock's phase against the presses: in the same beat as the second it is
+        // dropped, the last press winning; in the next it is its own move)
+        const steps = cells.map((c, i) => Math.abs(c - (i === 0 ? cell0 : cells[i - 1])));
+        const moved = steps.filter((s) => s > 0).length;
+        if (cells.length === 0) detail = "no beat lines after the presses";
+        else if (steps.some((s) => s > 1)) detail = `a beat moved the runner ${Math.max(...steps)} cells (${cells.join(" ")})`;
+        else if (moved < 2 || moved > 3) detail = `three presses moved the runner on ${moved} beats (${cells.join(" ")}), not two or three`;
+        else {
+          // the daemons' pace: their cells hold on every beat the pace skips
+          const lines = consoleLines.slice(first.index).map((l) => l.match(beatLine)).filter(Boolean);
+          const still = lines.filter((m, i) => i > 0 && (parseInt(m[1], 10) - 1) % PACE !== 0);
+          const wrong = still.filter((m, i) => m[6] !== lines[lines.indexOf(m) - 1][6]);
+          const movedOnce = lines.some((m, i) => i > 0 && m[6] !== lines[i - 1][6]);
+          if (lines.length < 4) detail = `only ${lines.length} beat lines to read the daemons' pace from`;
+          else if (wrong.length) detail = `a daemon moved on beat ${wrong[0][1]}, a beat NORMAL's pace skips (${wrong[0][6]} after ${lines[lines.indexOf(wrong[0]) - 1][6]})`;
+          else if (!movedOnce) detail = `no daemon moved over ${lines.length} beats: the pace check read nothing`;
+        }
+      }
+    }
+  }
+  if (detail) fail("hub", detail);
+  else pass("hub", `the hub stepped at 120 bpm; three ArrowRight presses moved the runner one cell a beat (${cells.join(" ")}): one action per beat; the daemons held on every beat NORMAL's pace skips`);
 }
 
 // code: a share code round-trips (gate leg 2). FREE PLAY -> DEFRAG says
@@ -2303,6 +2543,88 @@ async function downTo(order, id, at = 0) {
   else pass("scores", "a fresh origin reads every cell empty; a stored board (stack hacker 1234/72/3, cards original 900/110/1, stack streak 4) reads back on the SCORES screen after a reload");
 }
 
+// ---- 9f. music: the soundtrack live from .cts (M1, D59) ---------------------
+// Read from the whole run's console lines: the boot's pick is seeded
+// ("crash: music pick NAME seed N for TABLE", and the reload leg's second boot of the
+// same board picks the same NAME), the track was heard ("crash: music
+// playing NAME P R": the sink pulled past the open position), the fill ran
+// up to the trace (David's ruling, 2026-09-22): "section fill asked at P R"
+// during the traced leg's run-up, "section fill at P2 R2" landing on a bar
+// row at the fill mark, and the fill's END (its landing plus its length,
+// from the tune's tempo, speed and the fill's patterns) within a bar of the
+// trace completing (the traced leg's "counter 0" line); tense began at the
+// strike: "section tense at P3 R3" at the tense mark on a bar row, within a
+// bar of the strike either way (the fill running into tense a little early,
+// or the jump landing at the next bar), and said once (the fill never
+// looped: David's phone, 2026-09-22); the pause panel said its title line with
+// the tune's name: ("crash: menu-playing TITLE"); the main menu opened its
+// theme ("crash: music open black-glass-title ..."). The return to calm has
+// no path in today's trace model (the counter phase never falls back), so
+// it is not asserted. Rows per bar and the marks are read from the served
+// assets/tunes/NAME.cts.
+{
+  let detail = "";
+  const pickRe = /^crash: music pick ([a-z0-9-]+) seed (\d+) for (stack|cards)$/;
+  const picks = consoleLines.map((l) => l.match(pickRe)).filter(Boolean);
+  const pick = picks[0];
+  let tune = null;
+  if (!pick) detail = "no \"crash: music pick NAME seed N\" line in the run";
+  else {
+    try {
+      const text = await (await fetch(`http://127.0.0.1:${PORT}/assets/tunes/${pick[1]}.cts`)).text();
+      const meter = text.match(/meter: \((\d+) (\d+)/);
+      const marks = text.match(/\(marks ([^)]*)\)/);
+      const mark = (k) => { const m = marks && marks[1].match(new RegExp(`${k}: (\\d+)`)); return m ? Number(m[1]) : null; };
+      const tempo = Number((text.match(/tempo: (\d+)/) || [])[1] || 125), speed = Number((text.match(/speed: (\d+)/) || [])[1] || 6);
+      const order = ((text.match(/\(order ([\d ]*)\)/) || [])[1] || "").trim().split(/\s+/).map(Number);
+      const rows = {}; for (const m of text.matchAll(/\(pattern id: (\d+) rows: (\d+)/g)) rows[m[1]] = Number(m[2]);
+      const fill = mark("fill"), tense = mark("tense");
+      const rowMs = 2500 * speed / tempo;
+      const fillRows = fill !== null && tense !== null ? order.slice(fill, tense).reduce((n, id) => n + (rows[id] || 0), 0) : null;
+      tune = { name: (text.match(/name: "([^"]*)"/) || [])[1], barRows: meter ? Number(meter[1]) * Number(meter[2]) : 16, fill, tense, calm: mark("calm"),
+               rowMs, barMs: (meter ? Number(meter[1]) * Number(meter[2]) : 16) * rowMs, fillMs: fillRows === null ? null : fillRows * rowMs };
+    } catch (e) { detail = `cannot read assets/tunes/${pick[1]}.cts: ${e.message}`; }
+  }
+  if (!detail) {
+    const playing = consoleLines.find((l) => l.startsWith(`crash: music playing ${pick[1]} `));
+    const find = (re) => { const i = consoleLines.findIndex((l) => re.test(l)); return i < 0 ? null : { m: consoleLines[i].match(re), index: i, at: consoleTimes[i] }; };
+    const count = (re) => consoleLines.filter((l) => re.test(l)).length;
+    const fillAsked = find(/^crash: music section fill asked at (\d+) (\d+)$/);
+    const fillAt = find(/^crash: music section fill at (\d+) (\d+)$/);
+    const tenseAt = find(/^crash: music section tense at (\d+) (\d+)$/);
+    const tenseAsked = find(/^crash: music section tense asked at (\d+) (\d+)$/);
+    const other = picks.find((p) => p[1] !== pick[1] && p[2] === pick[2] && p[3] === pick[3]);   // the same seed on the same table (the P4 legs deal seed 1 on both tables: different pools)
+    const again = picks.find((p) => p[2] === pick[2] && p[3] === pick[3] && p !== pick);
+    const np = consoleLines.map((l) => l.match(/^crash: menu-playing (.*)$/)).filter(Boolean)[0];
+    const theme = consoleLines.find((l) => /^crash: music open black-glass-title /.test(l));
+    const slack = tune.barMs + 500;   // a bar either way, plus the lines' own latency (a frame, the sink's queue read)
+    const fillEnd = fillAt && tune.fillMs !== null ? fillAt.at + tune.fillMs : null;
+    if (!playing) detail = `no "crash: music playing ${pick[1]} ..." line: the track opened but the sink never pulled past the open position`;
+    else if (other) detail = `seed ${pick[2]} on the ${pick[3]} picked ${pick[1]} and then ${other[1]}`;
+    else if (!again) detail = `the board's second boot (the reload leg) printed no pick for seed ${pick[2]}`;
+    else if (strikeAt === null) detail = "the traced leg recorded no strike (the trace never completed): the fill's run-up cannot be read";
+    else if (tune.fill === null || tune.tense === null) detail = `${pick[1]} has no fill and tense marks (fill ${tune.fill}, tense ${tune.tense})`;
+    else if (!fillAsked) detail = "no \"crash: music section fill asked at P R\" line in the trace's run-up";
+    else if (fillAsked.at > strikeAt) detail = `the fill was asked ${((fillAsked.at - strikeAt) / 1000).toFixed(1)} s AFTER the trace completed, not in its run-up`;
+    else if (!fillAt) detail = `fill asked at ${fillAsked.m[1]} ${fillAsked.m[2]} but no "crash: music section fill at P R" landing line`;
+    else if (count(/^crash: music section fill at /) !== 1) detail = `the fill landed ${count(/^crash: music section fill at /)} times: it looped`;
+    else if (Number(fillAt.m[2]) % tune.barRows !== 0) detail = `the fill landed at row ${fillAt.m[2]}, not a bar row (${tune.barRows} rows a bar)`;
+    else if (Number(fillAt.m[1]) !== tune.fill) detail = `the fill landed at order position ${fillAt.m[1]}, not the fill mark ${tune.fill}`;
+    else if (Math.abs(fillEnd - strikeAt) > slack) detail = `the fill (${(tune.fillMs / 1000).toFixed(1)} s) landed ${((strikeAt - fillAt.at) / 1000).toFixed(1)} s before the trace completed: it ends ${((fillEnd - strikeAt) / 1000).toFixed(1)} s ${fillEnd > strikeAt ? "after" : "before"} the strike, over a bar (${(tune.barMs / 1000).toFixed(1)} s)`;
+    else if (!tenseAsked || tenseAsked.at < strikeAt - 500) detail = tenseAsked ? "tense was asked before the trace completed" : "no \"crash: music section tense asked at P R\" line at the strike";
+    else if (!tenseAt) detail = "no \"crash: music section tense at P R\" line: tense never began (the fill looped?)";
+    else if (count(/^crash: music section tense at /) !== 1) detail = `tense began ${count(/^crash: music section tense at /)} times`;
+    else if (Number(tenseAt.m[2]) % tune.barRows !== 0) detail = `tense began at row ${tenseAt.m[2]}, not a bar row (${tune.barRows} rows a bar)`;
+    else if (Number(tenseAt.m[1]) !== tune.tense) detail = `tense began at order position ${tenseAt.m[1]}, not the tense mark ${tune.tense}`;
+    else if (Math.abs(tenseAt.at - strikeAt) > slack) detail = `tense began ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s ${tenseAt.at > strikeAt ? "after" : "before"} the strike, over a bar (${(tune.barMs / 1000).toFixed(1)} s)`;
+    else if (!np) detail = "no \"crash: menu-playing TITLE\" line: the pause panel showed no title line";
+    else if (tune.name && np[1] !== tune.name) detail = `the title line said "${np[1]}", the tune's name: is "${tune.name}"`;
+    else if (!theme) detail = "the main menu never opened its theme (no \"crash: music open black-glass-title\" line)";
+    else pass("music", `seed ${pick[2]} picked ${pick[1]} twice; heard; fill asked ${((strikeAt - fillAsked.at) / 1000).toFixed(1)} s before the trace, landed at ${fillAt.m[1]}:${fillAt.m[2]} (bar ${tune.barRows}, fill ${tune.fill}, ${(tune.fillMs / 1000).toFixed(1)} s) ending ${((fillEnd - strikeAt) / 1000).toFixed(1)} s from the strike; tense at ${tenseAt.m[1]}:${tenseAt.m[2]} ${((tenseAt.at - strikeAt) / 1000).toFixed(1)} s from the strike, once; title line "${np[1]}"; menu theme opened`);
+  }
+  if (detail) fail("music", detail);
+}
+
 // ---- 10. manifest: the PWA is installable from this origin ------------------
 {
   try {
@@ -2347,12 +2669,16 @@ const realErrors = consoleErrors.filter((l) => !ABORTED.test(l));
 // the three lines before the first error are the context a reader needs
 const firstErrorAt = consoleLines.findIndex((l) => /^Error: /.test(l));
 if (firstErrorAt > 0) console.log(`  before the first error: ${JSON.stringify(consoleLines.slice(Math.max(0, firstErrorAt - 3), firstErrorAt))}`);
+// the forty lines around the first runtime error, for the reader (a page that dies at its first frame says little else)
+if (firstErrorAt > 0) console.log("  around it:\n" + consoleLines.slice(Math.max(0, firstErrorAt - 30), firstErrorAt + 10).map((l, i) => `    ${Math.max(0, firstErrorAt - 30) + i}: ${l}`).join("\n"));
 if (realErrors.length === 0 && runtimeErrors.length === 0) pass("console", `${consoleLines.length} console lines, 0 errors${abortedFetches.length ? `, ${abortedFetches.length} image fetch(es) aborted by a reload` : ""}`);
 else fail("console", `${realErrors.length + runtimeErrors.length} error(s): ${JSON.stringify(realErrors.concat(runtimeErrors).slice(0, 5))}`);
 
 // ---- screenshot for the record ----------------------------------------------
 const shot = await send("Page.captureScreenshot", { format: "png" });
 fs.writeFileSync(SHOT, Buffer.from(shot.data, "base64"));
+// the whole console beside it: a red leg says where, this says what led there
+fs.writeFileSync(SHOT.replace(/\.png$|$/, "") + ".console.txt", consoleLines.join("\n") + "\n");
 console.log(`screenshot -> ${SHOT}`);
 
 const failed = results.filter((r) => r[1] === "FAIL").length;

@@ -8,7 +8,7 @@
 //
 //   imports    tracker/crash-tracker.wasm imports only wasi + gl + sigil_wasm_gles3 +
 //              sigil_browser + sigil_wasm_audio (as the game's wasm; no env)
-//   sizes      the game's wasm is within 0.3 MB of master's 24,465,466 bytes (0b3258d)
+//   sizes      the game's wasm is within M1's +10 MB budget over master 0b3258d's 24,465,466 bytes
 //              (the tracker is not in it) and the tracker's within 20 MB
 //   open       /tracker/?tune=spy: "crash: tracker open spy" then "crash: tune loaded spy"
 //              (the page fetched assets/tunes/spy.cts and handed it over in chunks)
@@ -227,7 +227,27 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
     if (names.join(" ") === want.join(" ")) pass("imports", names.map((n) => `${n}(${mods[n]})`).join(" "));
     else fail("imports", `import modules ${names.join(" ")}, want ${want.join(" ")}`);
   } catch (e) { fail("imports", "compile: " + e.message); }
-  const BASE = 24465466, SLACK = 300 * 1024, TRACKER_MAX = 20 * 1024 * 1024;   // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21
+  // BASE: master 0b3258d through scripts/dev (OPTIMIZE on), measured 2026-09-21. SLACK: M1 brought
+  // motif's player back into the game wasm on a +10 MB budget (D59), and P5's hub then spent the
+  // rest of it. David raised the budget to 16,000,000 bytes on 2026-09-23, so the ceiling is
+  // 40,465,466 and the gated build sits 1,702,276 under it. The measurements he decided on,
+  // e46d110 (M1's tip) against 758d521 (the P5 gate), both OPTIMIZE=1:
+  //   M1 33,394,983 -> P5 38,763,190: the hub is +5,368,207, +16.1%, and 5,269 lines of new
+  //   Sigil became 5.37 MB of wasm (~1,019 bytes a line);
+  //   the DOWNLOAD is 1,850,003 brotli -q 11 / 4,251,799 gzip -9 — this ceiling measures what the
+  //   phone decodes and compiles, not what it fetches;
+  //   no Binaryen level shrinks it: wasm-opt -Oz saves 5,059 bytes (and gzips 3,823 WORSE), -O2
+  //   comes out 5,769 bytes LARGER. The module is 99.1% code, 5,850 functions, 15.47M IR nodes.
+  // So a real reduction is a sigil codegen matter, not a flag we are failing to pass. Raise this
+  // number only on David's word, never to clear a red.
+  //
+  // 19,500,000 since 2026-09-23 (David again), for sigil 0.22.5's phantom fix: rooting a tail
+  // call's arguments costs +3,158,074 raw bytes here, +8.15%, 38,763,190 -> 41,921,264 on the same
+  // tree. It is not a download cost — brotli -q 11 went DOWN 0.69% (1,850,003 -> 1,837,246) because
+  // the rooting code is so repetitive, and gzip -9 rose only 3.08%. What grew is what the phone
+  // decodes and compiles, which is what this ceiling measures. Narrowing the rooting to builtins
+  // that can actually allocate is sigil's t-4364b0; if that lands, this number comes back down.
+  const BASE = 24465466, SLACK = 19500000, TRACKER_MAX = 20 * 1024 * 1024;
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
@@ -402,7 +422,9 @@ if (firstURL) {
   const gate = await waitLine(/^crash: literal-check ok$/, from, 40000);
   await sleep(1500);
   await press("Enter");   // the title gate
-  const live = await waitLine(/^crash: ambient start$/, from, 60000);   // the menu live (the music began)
+  // 120 s, not 60: the boot's audio step waits for the theme's text and its first
+  // pull, and a loaded box takes its time over both (measured at loadavg 34)
+  const live = await waitLine(/^crash: music start$/, from, 120000);   // the menu live (the music began)
   const top = await waitLine(/^crash: menu top /, from, 5000);
   let detail = "";
   if (!gate || !live || !top) detail = `gate ${!!gate}, live ${!!live}, top line ${!!top}`;

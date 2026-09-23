@@ -88,9 +88,11 @@ ws.addEventListener("message", (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
   if (msg.method === "Runtime.consoleAPICalled") lines.push((msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" "));
+  if (msg.method === "Runtime.exceptionThrown") lines.push("exception: " + (msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text));   // P5: a page exception shows in the console list
+  if (msg.method === "Log.entryAdded") lines.push("log: " + msg.params.entry?.level + " " + msg.params.entry?.text);
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
-await send("Page.enable"); await send("Runtime.enable");
+await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");   // P5: browser log entries too
 // a landscape phone: the canvas fills the height, dpr 3, touch
 await send("Emulation.setDeviceMetricsOverride", { width: 844, height: 390, deviceScaleFactor: 3, mobile: true });
 await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
@@ -128,7 +130,7 @@ async function key(k) {
 }
 
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${QUERY}` });
-const boot = await waitLine(/^crash: (seed|cards seed|menu) /, 0, 30000);
+const boot = await waitLine(/^crash: (seed|cards seed|menu|hub open)/, 0, 30000);   // P5: a ?hub= boot opens on the hub
 if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(0, 14))); shutdown(2); }
 await sleep(600);
 
@@ -136,6 +138,10 @@ let lineFrom = 0;
 for (const action of actions) {
   const [kind, rest] = [action.slice(0, action.indexOf(":")), action.slice(action.indexOf(":") + 1)];
   if (kind === "wait") await sleep(parseInt(rest, 10));
+  else if (kind === "eval") {   // P5: is the page alive? evaluate an expression, with a bound
+    const r = await Promise.race([evalJS(rest), sleep(5000).then(() => "EVAL-TIMEOUT (the main thread is busy)")]);
+    console.log(`eval: ${rest} -> ${JSON.stringify(r)}`);
+  }
   else if (kind === "line") {
     // from the last matched line on, so a repeated line (a second shuffle) waits for a new one
     const l = await waitLine(new RegExp(rest), lineFrom, 150000);

@@ -18,7 +18,9 @@
         (crash stack turtle)
         (crash geometry)
         (crash input)
-        (crash look))
+        (crash look)
+        (crash trace)
+        (sigil math))
 
 (define SEED 11)
 (define VW 640)
@@ -334,3 +336,55 @@
              (cleared (pick-by-hint selected (car pair))))
         (assert-false (board-selected (session-board cleared)))
         (assert-equal 144 (board-tile-count (session-board cleared)))))))
+
+;; --- the node's objective (P5, D64) -------------------------------------------
+
+(test-group "the objective: marked pairs from the deal's own line"
+  (test "mark-slots takes k pairs from the middle third of the solution, evenly spaced; a fresh session has none"
+    (let* ((s (session-new lay SEED))
+           (b (session-board s))
+           (line (board-solution b))
+           (n (length line))
+           (marks (mark-slots b 3)))
+      (assert-equal '() (session-marks s))
+      (assert-equal 6 (length marks))
+      (assert-equal 72 n)
+      ;; every mark is a slot of a pair whose position in the line lies in [n/3, 2n/3)
+      (let ((positions (map (lambda (id)
+                              (let loop ((l line) (i 0))
+                                (cond ((null? l) #f)
+                                      ((or (= (car (car l)) id) (= (cdr (car l)) id)) i)
+                                      (else (loop (cdr l) (+ i 1))))))
+                            marks)))
+        (assert-true (every (lambda (p) (and p (>= p (quotient n 3)) (< p (quotient (* 2 n) 3)))) positions))
+        (assert-equal '(24 24 32 32 40 40) positions))
+      (assert-equal '() (mark-slots b 0))
+      (assert-equal (mark-slots b 3) (mark-slots (session-board (session-new lay SEED)) 3))))   ; per seed
+  (test "the last mark off extracts: the rest of the board leaves at once, the trace finishes, the session reads extracted"
+    (let* ((s0 (session-new lay SEED))
+           (b0 (session-board s0))
+           (line (board-solution b0))
+           (s (session-with-marks s0 (mark-slots b0 2)))
+           (last-mark (list-ref (session-marks s) 3))
+           ;; play the line until the pair holding the last mark is next
+           (upto (let loop ((l line) (acc '()))
+                   (if (or (= (car (car l)) last-mark) (= (cdr (car l)) last-mark))
+                       (cons (reverse acc) (car l))
+                       (loop (cdr l) (cons (car l) acc)))))
+           (played (fold-left (lambda (s pair) (session-pick (session-pick s (car pair)) (cdr pair))) s (car upto)))
+           (pair (cdr upto)))
+      (assert-equal 2 (length (session-marks-left played)))
+      (assert-false (session-extracted? played))
+      (assert-true (> (board-tile-count (session-board played)) 2))
+      (let ((done (session-pick (session-pick played (car pair)) (cdr pair))))
+        (assert-true (session-extracted? done))
+        (assert-true (board-cleared? (session-board done)))
+        (assert-equal '() (session-marks-left done))
+        (assert-equal 'cleared (trace-phase (session-trace done)))
+        (assert-equal (+ 1 (session-moves played)) (session-moves done))
+        ;; undo takes the extraction back: the board after the last pair, the pair itself one more undo back
+        (assert-equal (- (board-tile-count (session-board played)) 2) (board-tile-count (board-undo (session-board done))))
+        (assert-equal (board-tile-count (session-board played)) (board-tile-count (board-undo (board-undo (session-board done))))))
+      ;; a board with no marks clears only when the last tile leaves
+      (let ((plain (fold-left (lambda (s pair) (session-pick (session-pick s (car pair)) (cdr pair))) s0 (car upto))))
+        (assert-false (board-cleared? (session-board (session-pick (session-pick plain (car pair)) (cdr pair)))))))))

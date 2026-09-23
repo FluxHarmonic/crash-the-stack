@@ -64,6 +64,22 @@
   // false the page claims the canvas's pointerdown (preventDefault, the
   // loader's documented stand-down) and the same synthetic pointerdown
   // must produce no selection.
+  // ?rate=N (M1, D59): the audio context at N Hz instead of the device's
+  // rate; the browser resamples its output to the device. The live synth's
+  // cost scales with the rate (PULL in the ?ms readout is per 1024 frames
+  // at RATE), so 22050 halves the per-frame cost against 44100 and more
+  // against 48000, at the cues' and the music's bandwidth. A measurement
+  // door for David's phone; the bridge reads window.AudioContext when the
+  // game opens its context, so the shim must be in place before then.
+  (function () {
+    var m = /[?&]rate=(\d+)(&|$)/.exec(location.search);
+    if (!m || !window.AudioContext) return;
+    var rate = Number(m[1]), AC = window.AudioContext;
+    var Shim = function (opts) { return new AC(Object.assign({}, opts || {}, { sampleRate: rate })); };
+    Shim.prototype = AC.prototype;
+    window.AudioContext = Shim;
+  })();
+
   (function () {
     "use strict";
     var POINTER_FORWARDING = true;
@@ -111,7 +127,7 @@
     // When the page's fetches are safe (ruling D40): the service worker
     // is active (navigator.serviceWorker.ready, plus a 750 ms grace), or there is none, or 2.5
     // s passed. A fetch pending while the worker activates failed under
-    // load (P3), which is what the game's texture delay and the ambient's
+    // load (P3), which is what the game's texture delay and the tune's
     // timer guarded against; this resolves as soon as the real condition
     // holds, so on a revisit the boot's steps start at once. Told to the
     // game as ("sw", "ready").
@@ -125,7 +141,7 @@
       if (!navigator.serviceWorker.controller) { fire(); return; }
       // 750 ms after activation, not at it: a fetch made right at ready still
       // failed under load (2026-09-19, the arm), the P3 finding again; the
-      // page retries a lost ambient fetch and the game a lost texture fetch
+      // page retries a lost tune fetch and the game a lost texture fetch
       navigator.serviceWorker.ready.then(function () { setTimeout(fire, 750); }, fire);
     });
 
@@ -156,8 +172,17 @@
     //          (top right) copies the summary to the clipboard, or shows it
     //          in a selectable overlay when the clipboard is refused. Reset & close
     //          starts a fresh measurement window; wait, then tap the readout again.
-    //   adepth=N: frames the audio keeps ahead of the output (6144: the
-    //          cue latency and the stall a frame may take; 3072 was P3's).
+    //   tune=NAME: every deal picks this tune of assets/tunes/ (basement-circuit,
+    //          black-glass, black-glass-title, blind-spot, breach-vector, clock-edge,
+    //          closed-loop, cold-boot, dead-sector, dirty-cache, glass-current,
+    //          obsidian-index, quiet-array, relay-ghost, sector-drift, shadow-protocol)
+    //          instead of the table's pool: David's ear on the host, with
+    //          trace-at=N (the trace lands N s into a fresh deal: the fill in its
+    //          run-up, tense at the strike) and stack / cards.
+    //   music-rate=N: the live soundtrack rendered at N Hz and upsampled (M1;
+    //          none: the game's ladder picks from the device's measured cost).
+    //   adepth=N: frames the audio keeps ahead of the output (12288: the
+    //          cue latency and the stall a frame may take; 3072 was P3's, 6144 M1's until 2026-09-22).
     //   ms: the frame's wall time in the corner (MS n), David's own
     //          frame-cost readout on the phone.
     //   touch: a touch screen starts every launch with the hint tags
@@ -179,7 +204,7 @@
     // Multiple callbacks can share one animation frame (including an audio
     // upload). Aggregate their cost instead of treating each as another frame.
     var pageFrames = { cb: [], gap: [], stamp: null, start: 0, cost: 0, epoch: 0, ignore: null };
-    var audioWork = { upload: [], finish: [], settled: 0, failed: 0, loading: "none" };
+
     var audioOutput = { mode: "unobserved", context: null, block: 0, previous: null, gaps: [] };
     function remember(xs, value) { xs.push(value); if (xs.length > 3600) xs.shift(); }
     // ?ms observes the actual output node, including a failed worklet's
@@ -212,7 +237,7 @@
       pageFrames.ignore = pageFrames.stamp;
       pageFrames.stamp = null; pageFrames.start = 0; pageFrames.cost = 0;
       pageFrames.cb = []; pageFrames.gap = []; pageFrames.epoch++;
-      audioWork.upload = []; audioWork.finish = [];
+      tuneWork.upload = [];
       audioOutput.previous = null; audioOutput.gaps = [];
     }
     (function () {
@@ -250,13 +275,102 @@
       };
       var over = pageFrames.cb.filter(function (c) { return c > 16.7; }).length;
       var ctx = audioOutput.context;
+      // The bridge names each sink's mode (sigil-wasm-audio 0.22.4: worklet-sab,
+      // worklet-msg, scriptprocessor); the sinks are the cues' then the music's.
+      // A host without COOP/COEP (the wg0 host) never runs worklet-sab: that is
+      // crashthestack.com's path, so a read here measures the other one.
+      var bridge = window.SigilWasmAudio;
+      var sinks = bridge && bridge.sinkMode ? [1, 2].map(bridge.sinkMode).filter(String).join("/") : "";
+      var mode = sinks || audioOutput.mode;
+      // A phone's Chrome allows AudioWorklet only on a secure context: the
+      // plain-http wg0 host is not one, so it reads scriptprocessor whatever
+      // the bridge can do (David's phone, 2026-09-22); scripts/serve-web-tls.mjs
+      // hosts the same build over https for the worklet paths.
+      var where = !window.isSecureContext ? " (scriptprocessor: AudioWorklet needs a secure context here; the published site is secure and isolated, and runs worklet-sab)"
+        : window.crossOriginIsolated ? "" : " (not isolated: the published site is, and runs worklet-sab)";
       return "page raf-interval " + line("", pageFrames.gap).trim() + "\npage callback " + line("", pageFrames.cb).trim() + "\npage callbacks over 16.7 ms " + over + " of " + pageFrames.cb.length +
-        "\npage music settled " + audioWork.settled + "/3 failed " + audioWork.failed + " loading " + audioWork.loading +
-        "\n" + line("page audio-upload", audioWork.upload) + "\n" + line("page audio-finish", audioWork.finish) +
-        "\npage audio node " + audioOutput.mode + " state " + (ctx ? ctx.state : "unknown") +
+        "\npage tunes fetched " + tuneWork.fetched + " failed " + tuneWork.failed + " loading " + tuneWork.loading +
+        "\n" + line("page tune-upload", tuneWork.upload) +
+        "\npage starved-at " + (starved.log.length ? starved.log.map(function (e) { return e[0] + "s cues+" + e[1] + " music+" + e[2]; }).join(", ") : "(none)") +
+        "\npage events " + (starved.events.length ? starved.events.map(function (e) { return e[0] + "s " + e[1]; }).join(", ") : "(none)") +
+        "\npage audio node " + mode + " state " + (ctx ? ctx.state : "unknown") +
         " rate " + (ctx ? ctx.sampleRate : 0) + " block " + audioOutput.block +
-        " secure " + (window.isSecureContext ? "yes" : "no") + " isolated " + (window.crossOriginIsolated ? "yes" : "no") +
+        " secure " + (window.isSecureContext ? "yes" : "no") + " isolated " + (window.crossOriginIsolated ? "yes" : "no") + where +
+        " sw " + (window.crashUpdate ? window.crashUpdate.state + (window.crashUpdate.reason ? " (" + window.crashUpdate.reason + ": no precache, every boot fetches fresh)" : "") : "none") +
         "\n" + line("page audio-callback-gap", audioOutput.gaps);
+    }
+
+    // The live soundtrack (M1, D59): the game asks for a tune's text with
+    // one "crash: tune-fetch NAME" line; the page fetches assets/tunes/NAME.cts
+    // (once the service worker is active: a fetch inside its activation
+    // window failed under load, D40) and hands it over in 12 KB base64
+    // chunks then ("tune-done", NAME). A failure says "crash: tune-unavailable
+    // NAME" (a prefix this hook does not act on) after two retries for
+    // network-level failures, none for a 404, and then ("tune-done", NAME)
+    // with no chunks, so the game knows. The first tune asked for is the menu
+    // theme (the game asks at boot; its boot's audio step waits for it or
+    // 3 s): crashThemeSettled resolves when it landed or was given up, and
+    // an update waiting to apply waits on that (the worker's activation
+    // under a fetch in flight hung twice in four runs, 2026-09-19).
+    var tuneWork = { fetched: 0, failed: 0, loading: "none", upload: [] };
+    // When the sinks starved (the leader's question, 2026-09-22: the phone's
+    // 55040 starved cue frames on the https host, one stall or spread over
+    // the taps?): every 100 ms the bridge's cumulative starved-frame counts
+    // are read, and a growth is kept as [the second since load, cues delta,
+    // music delta], one entry a second; the page's own events (a tune landing) are kept beside
+    // them with their seconds, so the two lines of the stats say which.
+    var starved = { cues: 0, music: 0, log: [], events: [] };
+    function pageEvent(what) { starved.events.push([(performance.now() / 1000).toFixed(1), what]); if (starved.events.length > 40) starved.events.shift(); }
+    setInterval(function () {
+      var b = window.SigilWasmAudio; if (!b || !b.sinkUnderruns) return;
+      var c = b.sinkUnderruns(1) || 0, m = b.sinkUnderruns(2) || 0;
+      if (c > starved.cues || m > starved.music) {
+        // one entry per second of the page's life, so a spread starvation
+        // never pushes the boot's out of the 60 kept
+        var sec = Math.floor(performance.now() / 1000), last = starved.log[starved.log.length - 1];
+        if (last && last[0] === sec) { last[1] += c - starved.cues; last[2] += m - starved.music; }
+        else starved.log.push([sec, c - starved.cues, m - starved.music]);
+        if (starved.log.length > 60) starved.log.shift();
+      }
+      starved.cues = c; starved.music = m;
+    }, 100);
+    var themeSettled = null, themeAsked = false;
+    window.crashThemeSettled = new Promise(function (resolve) { themeSettled = resolve; });
+    function fetchTune(name, attempt, first) {
+      if (!attempt) { attempt = 1; first = !themeAsked; themeAsked = true; }
+      function settled(failed) {
+        tuneWork.fetched++; if (failed) tuneWork.failed++;
+        pageEvent((failed ? "tune-failed " : "tune-landed ") + name);
+        tuneWork.loading = "none";
+        if (first) themeSettled();
+      }
+      if (!/^[a-z0-9-]+$/.test(name)) { console.log("crash: tune-unavailable " + name + " (not a bundled name)"); settled(true); return; }
+      tuneWork.loading = name;
+      withApp(function (app) {
+        swReady.then(function () {
+          return fetch("assets/tunes/" + name + ".cts", { cache: "force-cache" });
+        }).then(function (r) {
+          if (!r.ok) throw new Error("tune " + r.status);
+          return r.text();
+        }).then(function (text) {
+          var bytes = new TextEncoder().encode(text), CHUNK = 12 * 1024, i = 0;
+          var t0 = performance.now();
+          while (i < bytes.length) {
+            var part = bytes.subarray(i, Math.min(i + CHUNK, bytes.length)), s = "";
+            for (var k = 0; k < part.length; k++) s += String.fromCharCode(part[k]);
+            app.dispatch("tune-chunk", btoa(s));
+            i += CHUNK;
+          }
+          app.dispatch("tune-done", name);
+          remember(tuneWork.upload, performance.now() - t0);
+          settled(false);
+        }, function (err) {
+          if (attempt < 3 && !/tune 404/.test(err.message)) { setTimeout(function () { fetchTune(name, attempt + 1, first); }, 800); return; }
+          console.log("crash: tune-unavailable " + name + " " + err.message + " (try " + attempt + ")");
+          app.dispatch("tune-done", name);   // no chunks: given up
+          settled(true);
+        });
+      });
     }
 
     // The stats summary (P3c): with ?ms a tap on the readout makes the
@@ -271,6 +385,7 @@
         if (typeof first === "string" && first.indexOf("crash: stats reset ") === 0) resetPageStats();
         // FREE PLAY > TRACKER: the tracker is its own page (P3b, David 2026-09-21)
         if (first === "crash: open tracker") location.assign("tracker/");
+        if (typeof first === "string" && first.indexOf("crash: tune-fetch ") === 0) fetchTune(first.slice("crash: tune-fetch ".length).trim());   // the live soundtrack (M1)
         if (typeof first === "string" && first.indexOf("crash: clipboard ") === 0) {
           var text = first.slice("crash: clipboard ".length).split("~").join("\n") + "\n" + pageStats();
           log.call(console, "crash: page-stats " + pageStats().split("\n").join("~"));
@@ -311,6 +426,10 @@
       if (params.has("stack")) app.dispatch("stack", "on");
       if (params.has("seed")) app.dispatch("seed", params.get("seed"));
       if (params.has("bg")) app.dispatch("bg", params.get("bg"));
+      if (params.has("hub")) app.dispatch("hub", params.get("hub"));   // ?hub=SEED: the hub live (P5)
+      if (params.has("bpm")) app.dispatch("bpm", params.get("bpm"));   // ?bpm=N: the hub's clock pinned (P5)
+      if (params.has("hubat")) app.dispatch("hubat", params.get("hubat"));   // &hubat=N: the runner on key node N (P5; the arms)
+      if (params.has("pace")) app.dispatch("pace", params.get("pace"));      // &pace=easy|normal|elite: a door-started run's difficulty (D65; the arms)
       if (params.has("bghold")) app.dispatch("bghold", params.get("bghold"));
       if (params.has("bgstride")) app.dispatch("bgstride", params.get("bgstride"));
       if (params.has("rsteps")) app.dispatch("rsteps", params.get("rsteps"));
@@ -321,6 +440,13 @@
       if (params.has("demo")) app.dispatch("demo", params.get("demo"));
       if (params.has("atlas")) app.dispatch("atlas", params.get("atlas"));
       if (params.has("adepth")) app.dispatch("adepth", params.get("adepth"));
+      // M1: the music's render rate pinned (music-rate=N), else the game's ladder
+      // starts one step down on a weak device (the hints: cores and memory)
+      if (params.has("music-rate")) app.dispatch("music-rate", params.get("music-rate"));
+      if (params.has("music-budget")) app.dispatch("music-budget", params.get("music-budget"));   // the ladder forced (the arm)
+      if (params.has("trace-at")) app.dispatch("trace-at", params.get("trace-at"));   // the trace lands at N s: the fill's run-up (the arm)
+      if (params.has("tune")) app.dispatch("tune", params.get("tune"));   // every deal picks this tune (David's ear)
+      app.dispatch("device", (navigator.hardwareConcurrency || 0) + "," + (navigator.deviceMemory || 0));
       if (params.has("code")) app.dispatch("code", params.get("code"));   // P4: a share code's board at boot
       if (params.has("skip")) app.dispatch("skip", params.get("skip"));   // the soak's bisection door: parts of the tick left out
       // P4: the pause menu's COPY: the game answers 1 once when asked, and the
@@ -337,6 +463,33 @@
           }
         } catch (e) { console.log("crash: copy poll error " + e); }
       }, 300);
+      // P5: the hub's touch overlay buzzes on a press (navigator.vibrate(10)); the game
+      // answers 1 once when a button was pressed; nothing natively
+      //   crash: page vibrate ok|blocked|absent      once per outcome change (a phone's console tells)
+      var vibrateSaid = "";
+      setInterval(function () {
+        try {
+          if (app.dispatch("vibrate", "asked?") === 1) {
+            var outcome = !navigator.vibrate ? "absent" : (navigator.vibrate(10) ? "ok" : "blocked");
+            if (outcome !== vibrateSaid) { vibrateSaid = outcome; console.log("crash: page vibrate " + outcome); }
+          }
+        } catch (e) { /* no haptics */ }
+      }, 50);
+      // Which page is actually running: the service worker serves the
+      // cached one until an update is accepted (it never calls skipWaiting,
+      // ruling D14), so a fix to this file reaches a phone only after the
+      // player takes the update. Say it once, always, so a console capture
+      // names the build it came from (David's swipe, 2026-09-22: fixed in
+      // the tree, still there on his phone, because his page was the old
+      // cached one).
+      console.log("crash: page build __VERSION__");
+      // An uncaught error from the wasm says WHERE, not only what: the
+      // runtime's type errors reach the console with no stack otherwise,
+      // and a boot that dies is a storm of them (2026-09-22).
+      window.addEventListener("error", function (e) {
+        var stack = e.error && e.error.stack ? String(e.error.stack).split("\n").slice(0, 6).join(" | ") : String(e.message);
+        console.log("crash: page error " + stack.slice(0, 600));
+      });
       app.dispatch("version", "__VERSION__");
       if (params.has("ms")) app.dispatch("ms", "on");
       app.dispatch("dpr", String(window.crashDpr.effective));
@@ -354,7 +507,7 @@
       updates.ready(app);
       // The reveal's frames belong to the reveal (David, on the phone:
       // "extremely glitchy at startup ... with the typing beeps"): the
-      // ambient's chunk decodes and the worker's precache of a new version
+      // tune's chunks and the worker's precache of a new version
       // wait until the game says the reveal is over (("title", "running?")
       // answers 1 while it runs; a ?stack boot has none), or 20 s. The
       // promise itself is made at script load (the worker script reads it).
@@ -367,41 +520,14 @@
         if (app.dispatch("title", "live?") === 1) { liveDone(); return; }
         setTimeout(pollLive, 500);
       })();
-      Promise.all([swReady, window.crashRevealOver]).then(function () { fetchAmbient(app); });
+      Promise.all([swReady, window.crashRevealOver]).then(function () { fetchCredits(app); });
     });
 
-    // The music (P4, ruling D50): three OGG Vorbis tunes under
-    // assets/audio/ (mono 22050, ~1 MB each: the 7 MB PCM renders are not
-    // shipped), fetched here because the wasm's bridges have no bytes
-    // fetch, decoded by the browser (decodeAudioData on an offline context
-    // at the tune's rate, so no resampling), and handed to the game as
-    // s16le mono PCM in base64 chunks through the dispatch: ("track",
-    // NAME) opens one, ("audio-size", bytes) reserves its PCM buffer,
-    // ("audio-chunk", b64) fills it, ("audio-done", n)
-    // closes it; ("audio-done", 0) after ("track", NAME) means that tune
-    // was given up. The menu theme (spy) goes first: the boot's audio step
-    // waits for it (D40); the others land while the menu is up. Fetched
-    // once swReady resolves, outside the service worker's activation
-    // window, and never fatal: no tune means sound effects alone. One
-    // 512 KB chunk per animation frame (the game decodes it in C; the
-    // ambient's 16 KB a frame would take a 7.5 MB tune 460 frames, minutes
-    // on a slow box, and the boot waits on the theme). The receiver copies
-    // each chunk into the one buffer audio-size reserved, no final
-    // concatenation.
-    //
-    // BG1 (2026-09-21) measured this against a worker-converted, adaptive
-    // 64..256 KB delivery on the phone viewport (SwiftShader, ?ms, load ~20):
-    // the theme landed 0.5-0.6 s after its decode here against 2.1-3.0 s
-    // there (15 chunks against ~30 that start small), the per-chunk
-    // dispatch 8.3 ms mean / 20-31 max here against 5-6 mean / 8-31 max,
-    // and the frames over 50 ms during the theme 0-1 against 0-16. The
-    // faster start stays.
-    var TRACKS = ["spy", "groove", "breaker"];
-    var ambientSettled = null;
-    window.crashAmbientSettled = new Promise(function (resolve) { ambientSettled = resolve; });
-    function fetchAmbient(app) { fetchTracks(app, 0); }
-    // The credits crawl's text (P4c): fetched after the tunes and handed
-    // over whole as ("credits", text); a failed fetch leaves the crawl empty.
+    // The credits crawl's text (P4c): fetched once the worker is active and
+    // the reveal is over, and handed over whole as ("credits", text); a
+    // failed fetch leaves the crawl empty. (P4's three OGG tracks were
+    // fetched, decoded and delivered here until M1: the music plays live
+    // from the .cts the game asks for, fetchTune above.)
     function fetchCredits(app) {
       fetch("assets/credits.txt", { cache: "force-cache" }).then(function (r) {
         if (!r.ok) throw new Error("credits " + r.status);
@@ -411,58 +537,6 @@
       }).catch(function (err) {
         console.log("crash: credits failed " + err.message);
       });
-    }
-    function fetchTracks(app, index) {
-      if (index >= TRACKS.length) { fetchCredits(app); return; }
-      var name = TRACKS[index];
-      var TRIES = 3, tries = 0;
-      audioWork.loading = name;
-      function settled(failed) {
-        audioWork.settled++; if (failed) audioWork.failed++;
-        audioWork.loading = "none";
-        if (index === 0) ambientSettled();
-        fetchTracks(app, index + 1);
-      }
-      function deliver(pcm) {
-        // float32 mono at the tune's rate -> s16le, then 512 KB a frame
-        var n16 = pcm.length, bytes = new Uint8Array(n16 * 2);
-        for (var i = 0; i < n16; i++) {
-          var v = Math.max(-1, Math.min(1, pcm[i])), s = v < 0 ? v * 32768 : v * 32767;
-          var u = s < 0 ? s + 65536 : s;
-          bytes[2 * i] = u & 255; bytes[2 * i + 1] = (u >> 8) & 255;
-        }
-        var CHUNK = 512 * 1024, i2 = 0, n = 0;
-        app.dispatch("track", name);
-        app.dispatch("audio-size", String(bytes.length));
-        (function next() {
-          if (i2 >= bytes.length) { app.dispatch("audio-done", String(n)); settled(false); return; }
-          var part = bytes.subarray(i2, Math.min(i2 + CHUNK, bytes.length)), s = "";
-          for (var k = 0; k < part.length; k += 8192) s += String.fromCharCode.apply(null, part.subarray(k, Math.min(k + 8192, part.length)));
-          var t0 = performance.now();
-          app.dispatch("audio-chunk", btoa(s));
-          remember(audioWork.upload, performance.now() - t0);
-          i2 += CHUNK; n++;
-          requestAnimationFrame(next);
-        })();
-      }
-      (function attempt() {
-        tries++;
-        fetch("assets/audio/" + name + ".ogg", { cache: "force-cache" }).then(function (r) {
-          if (!r.ok) throw new Error(name + " " + r.status);
-          return r.arrayBuffer();
-        }).then(function (buf) {
-          // decoded at 22050 mono on an offline context: what the file holds
-          var ctx = new OfflineAudioContext(1, 1, 22050);
-          return ctx.decodeAudioData(buf);
-        }).then(function (audio) {
-          console.log("crash: track " + name + " decoded " + audio.length + " frames at " + audio.sampleRate);
-          deliver(audio.getChannelData(0));
-        }).catch(function (err) {
-          console.log("crash: track " + name + " failed " + err.message + " (try " + tries + ")");
-          if (tries < TRIES) setTimeout(attempt, 1500);
-          else { app.dispatch("track", name); app.dispatch("audio-done", "0"); settled(true); }   // D40: the boot's audio step does not wait on a lost fetch
-        });
-      })();
     }
 
     // Every user gesture reaches the game as ("gesture", name), so it can
@@ -481,6 +555,16 @@
         }
       }, true);
     });
+
+    // The soundtrack's pump on the page's own clock (M1, D59): every 12 ms
+    // the game tops up the music's sink from the live player, so a gap
+    // between frames (the phone's rAF p95 was 93 ms, 2026-09-21) does not
+    // run it dry; a frame in flight is never interrupted (one thread), the
+    // timer fires between frames. ?pump=off leaves the tick as the only pump
+    // (the before/after measurement).
+    if (!/[?&]pump=off(&|$)/.test(location.search)) {
+      setInterval(function () { if (updates.app) updates.app.dispatch("pump", ""); }, 12);
+    }
     globalThis.__crashUpdates = updates;
 
     var canvas = document.getElementById("stage");
@@ -489,12 +573,22 @@
       canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); });
     }
 
+    // P5: the hub walks while a d-pad arrow is held; the loader forwards
+    // pointerdown only, so the page sends the release (no coordinates needed)
+    window.addEventListener("pointerup", function () { if (updates.app) updates.app.dispatch("pointerup", ""); }, true);   // the window: a mouse let go off the canvas ends the walk too
+    window.addEventListener("pointercancel", function () { if (updates.app) updates.app.dispatch("pointerup", ""); }, true);
+
     // The loader maps a swipe anywhere on the document to an arrow key. On
     // the board a swipe would then both select (at pointerdown) and move
-    // the keyboard highlight; keep the board to one meaning per gesture by
-    // not letting its touches reach the document-level swipe tracking.
+    // the keyboard highlight, and on the hub a swipe is not a move (D65:
+    // the touch overlay is the way; a swipe on the letterbox around the
+    // canvas in fullscreen was reaching the loader): keep every gesture to
+    // one meaning by not letting any touch reach the document-level swipe
+    // tracking. The page's own capture-phase gesture listeners above still
+    // see them (capture runs before this bubble-phase stop).
+    var main = document.querySelector("main");
     ["touchstart", "touchmove", "touchend"].forEach(function (name) {
-      canvas.addEventListener(name, function (e) { e.stopPropagation(); }, { passive: true });
+      main.addEventListener(name, function (e) { e.stopPropagation(); }, { passive: true });
     });
 
     // Fullscreen toggles on the game container, buttons included, so the
@@ -504,7 +598,6 @@
     // recomputes the letterbox scale from the new buffer: nothing here or in
     // the game needs to know. The loader also reports this click as
     // ("click", "fullscreen") to the game, which ignores it.
-    var main = document.querySelector("main");
     document.getElementById("fullscreen").addEventListener("click", function () {
       if (document.fullscreenElement) {
         document.exitFullscreen();
@@ -521,12 +614,25 @@
     // lock is dropped by the browser when the page hides and taken again
     // when it shows. Needs a secure context; elsewhere the request rejects
     // and nothing happens.
-    var wakeLock = null;
+    // Taken again on every gesture while none is held (a lock the browser
+    // released, or a request that failed before the first activation); said
+    // once each way so a phone's console tells (D65: the hub lost it).
+    //   crash: page wakelock on
+    //   crash: page wakelock off REASON   ("absent" outside a secure context)
+    var wakeLock = null, wakeSaid = "";
     function keepAwake() {
-      if (!("wakeLock" in navigator) || document.visibilityState !== "visible") return;
-      navigator.wakeLock.request("screen").then(function (lock) { wakeLock = lock; }).catch(function () {});
+      if (document.visibilityState !== "visible") return;
+      if (!("wakeLock" in navigator)) { if (wakeSaid !== "absent") { wakeSaid = "absent"; console.log("crash: page wakelock off absent"); } return; }
+      if (wakeLock && !wakeLock.released) return;
+      navigator.wakeLock.request("screen").then(function (lock) {
+        wakeLock = lock;
+        if (wakeSaid !== "on") { wakeSaid = "on"; console.log("crash: page wakelock on"); }
+      }).catch(function (err) {
+        if (wakeSaid !== "off") { wakeSaid = "off"; console.log("crash: page wakelock off " + (err && err.name ? err.name : err)); }
+      });
     }
     document.addEventListener("visibilitychange", keepAwake);
+    ["pointerup", "keydown"].forEach(function (name) { document.addEventListener(name, keepAwake, true); });
     keepAwake();
 
     // Tab is the keys-model cycle key; without this the browser also moves
@@ -852,12 +958,12 @@
       // not while the boot's big fetch is in flight: the waiting worker cannot
       // activate until the active one's fetch events have finished, and an
       // update applied mid-boot did not activate within 20 s twice in four arm
-      // runs once D40 started fetches earlier (2026-09-19); the ambient fetch
+      // runs once D40 started fetches earlier (2026-09-19); the theme's fetch
       // in flight is the likely holder (a hypothesis, the fix costs nothing):
       // the promise resolves once
-      // the ambient landed or was given up, at once when no page asked for it
+      // the theme landed or was given up, at once when no page asked for it
       // and never held forever by a fetch that hangs: 15 s, then apply anyway
-      Promise.race([window.crashAmbientSettled || Promise.resolve(), new Promise(function (r) { setTimeout(r, 15000); })]).then(applyNow);
+      Promise.race([window.crashThemeSettled || Promise.resolve(), new Promise(function (r) { setTimeout(r, 15000); })]).then(applyNow);
     }
     function applyNow() {
       if (!status.reg || !status.reg.waiting || applied) return;
@@ -892,7 +998,13 @@
       console.log("crash: sw registered");   // the arms read it (the registration waits for the menu to be live)
       track(reg);
     }).catch(function (err) {
-      status.state = "failed";
+      // A self-signed https host (scripts/serve-web-tls.mjs): the tapped-through
+      // certificate exception does not cover the worker's script fetch, so no
+      // worker, no precache, no UPDATE, and every boot fetches fresh (part of
+      // the boot stall a phone measures there; not the published site's case)
+      var selfSigned = /certificate|SSL/i.test(err.message);
+      status.state = "failed"; status.reason = selfSigned ? "self-signed host" : err.message;
+      console.log(selfSigned ? "crash: sw not registered, self-signed host (no precache, no UPDATE, every boot fetches fresh)" : "crash: sw refused " + err.message);
       document.getElementById("status").textContent = "Service worker refused: " + err.message;
     });
   })();

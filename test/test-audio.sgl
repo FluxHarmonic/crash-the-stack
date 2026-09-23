@@ -2,8 +2,8 @@
 ;;;
 ;;; Native half: every cue renders non-silent and short at both rates the
 ;;; targets run (44100 natively, 48000 on most browsers); the mixer's core
-;;; (pure) puts a cue into a buffer with a measurable level, and a silent
-;;; ambient plus no cue gives silence (the positive control of the level
+;;; (pure) puts a cue into a buffer with a measurable level, and no cue
+;;; gives silence (the positive control of the level
 ;;; measure); the cue detector answers the eight cues from the rules'
 ;;; own events on the stack and the card table; and, when this box has
 ;;; an audio device, the real sink accepts frames from audio-pump!
@@ -53,108 +53,43 @@
                         CUES))
             '(44100 48000)))
 
-(test-group "audio: the mix"
+(test-group "audio: the cues' mix"
   (let* ((out (make-bytevector (* 8 512) 0))
          (match (render-cue 'match 48000))
-         (r (mix-into out 512 #f 0 0.0 1.0 (list (cons match 0)) 0.0)))
+         (left (mix-cues-into out 512 (list (cons match 0)))))
     (test "a cue alone gives a level, stereo"
       (assert-true (> (rms out 512 8) 0.01))
       (assert-equal (bytevector-ieee-single-ref out 0 'little) (bytevector-ieee-single-ref out 4 'little)))
     (test "the voice advanced 512 frames and is still playing"
-      (assert-equal 512 (cdr (car (cadr r))))
-      (assert-equal 1 (length (cadr r))))
+      (assert-equal 512 (cdr (car left)))
+      (assert-equal 1 (length left)))
     (test "silence in, silence out (the level measure can say zero)"
       (let ((quiet (make-bytevector (* 8 512) 0)))
-        (mix-into quiet 512 #f 0 0.0 1.0 '() 0.0)
+        (mix-cues-into quiet 512 '())
         (assert-equal 0.0 (rms quiet 512 8))))
-    (test "a finished voice leaves; the ambient loops and resamples"
+    (test "a finished voice leaves"
       (let* ((short (render-cue 'select 48000))
              (n (cue-frames short))
-             (out2 (make-bytevector (* 8 (+ n 8)) 0))
-             (amb (make-bytevector 20 0))         ; ten s16 frames of silence
-             (r2 (mix-into out2 (+ n 8) amb 10 0.0 0.5 (list (cons short 0)) 0.5)))
-        (assert-equal '() (cadr r2))
-        (assert-true (< (car r2) 10))))))
+             (out2 (make-bytevector (* 8 (+ n 8)) 0)))
+        (assert-equal '() (mix-cues-into out2 (+ n 8) (list (cons short 0))))))
+    (test "the mix clamps to the rails and sums two voices"
+      (let* ((loud (render-cue 'match 48000))
+             (one (make-bytevector (* 8 512) 0))
+             (two (make-bytevector (* 8 512) 0)))
+        (mix-cues-into one 512 (list (cons loud 0)))
+        (mix-cues-into two 512 (list (cons loud 0) (cons loud 0)))
+        (assert-true (>= (rms two 512 8) (rms one 512 8)))
+        (let loop ((i 0) (ok #t))
+          (if (>= i 512)
+              (assert-true ok)
+              (loop (+ i 1) (and ok (<= (abs (bytevector-ieee-single-ref two (* 8 i) 'little)) 1.0)))))))))
 
-;; The cached pump (P3c) against mix-into, the reference: a synthetic s16
-;; ambient (a ramp, 300 frames at 22050 -> 600 cache frames at the
-;; module's default 44100) mixed with a cue over chunks that cross the
-;; loop's end, sample for sample within float32 rounding; then the
-;; voice leaves in both.
-(test-group "audio: the cached pump matches mix-into"
-  (let* ((amb (let ((bv (make-bytevector 600 0)))
-                (let loop ((i 0))
-                  (when (< i 300)
-                    (let ((v (- (* i 200) 30000)))
-                      (let ((u (if (< v 0) (+ v 65536) v)))
-                        (bytevector-u8-set! bv (* 2 i) (modulo u 256))
-                        (bytevector-u8-set! bv (+ 1 (* 2 i)) (quotient u 256))))
-                    (loop (+ i 1))))
-                bv))
-         (cue (render-cue 'select 44100))
-         (n 256)
-         (chunks 5)                               ; 1280 frames: past the 600-frame loop twice
-         (ref (make-bytevector (* 8 n) 0))
-         (got (make-bytevector (* 8 n) 0))
-         (worst 0.0))
-    (audio-cache-reset!)
-    (audio-set-ambient! amb 22050)
-    (let loop ((k 0) (pos 0.0) (ref-voices (list (cons cue 0))) (voices (list (cons cue 0))))
-      (when (< k chunks)
-        (let* ((r (mix-into ref n amb 300 pos 0.5 ref-voices AMBIENT-GAIN))
-               (left (mix-cached-into got n #t voices)))
-          (let cmp ((i 0))
-            (when (< i (* 2 n))
-              (let ((d (abs (- (bytevector-ieee-single-ref ref (* 4 i) 'little)
-                               (bytevector-ieee-single-ref got (* 4 i) 'little)))))
-                (when (> d worst) (set! worst d)))
-              (cmp (+ i 1))))
-          (loop (+ k 1) (car r) (cadr r) left))))
-    ;; read now, in the group body: a test runs after every group body
-    ;; has run, and the sink group below resets the cache when it opens
-    (let ((rendered (audio-cache-rendered)))
-      (test "the cache rendered the whole loop once and no more"
-        (assert-equal 600 rendered)))
-    (test (string-append "five chunks across the loop: worst sample difference " (number->string worst) " (under 1e-5)")
-      (assert-true (< worst 1e-5)))
-    (test "a chunk longer than the loop (1300 frames over 600) matches too"
-      (audio-cache-reset!)
-      (let ((ref (make-bytevector (* 8 1300) 0))
-            (got (make-bytevector (* 8 1300) 0)))
-        (mix-into ref 1300 amb 300 0.0 0.5 '() AMBIENT-GAIN)
-        (mix-cached-into got 1300 #t '())
-        (let cmp ((i 0) (worst 0.0))
-          (if (= i 2600)
-              (assert-true (< worst 1e-5))
-              (cmp (+ i 1)
-                   (max worst (abs (- (bytevector-ieee-single-ref ref (* 4 i) 'little)
-                                      (bytevector-ieee-single-ref got (* 4 i) 'little)))))))))
-    (test "silence without an ambient, the voice still plays and leaves"
-      (audio-set-ambient! #f 22050)
-      (let ((out (make-bytevector (* 8 512) 0)))
-        (let ((left (mix-cached-into out 512 #f '())))
-          (assert-equal 0.0 (rms out 512 8))
-          (assert-equal '() left))
-        (let ((left (mix-cached-into out 512 #f (list (cons cue 0)))))
-          (assert-true (> (rms out 512 8) 0.01))
-          (assert-equal 512 (cdr (car left))))))))
 
 (define lay (turtle-layout))
 (define geom (make-geometry lay 640 400))
 (define (frame pressed . rest) (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
-
-
 (test-group "audio: the master volume and the MUSIC / SFX switches (P4's settings)"
-  (let* ((amb (let ((bv (make-bytevector 600 0)))
-                (let loop ((i 0))
-                  (when (< i 300)
-                    (let ((v (- (* i 200) 30000)))
-                      (let ((u (if (< v 0) (+ v 65536) v)))
-                        (bytevector-u8-set! bv (* 2 i) (modulo u 256))
-                        (bytevector-u8-set! bv (+ 1 (* 2 i)) (quotient u 256))))
-                    (loop (+ i 1))))
-                bv))
-         (cue (render-cue 'select 44100))
+  (let* ((cue (render-cue 'select 44100))
          (out (make-bytevector (* 8 512) 0)))
     (test "the volume defaults to 1.0 and clamps to 0..1"
       (assert-equal 1.0 (audio-volume))
@@ -163,28 +98,19 @@
       (audio-set-volume! -1)
       (assert-equal 0.0 (audio-volume))
       (audio-set-volume! 1))
-    (test "half volume halves the ambient's samples and the cue's, zero silences both"
+    (test "half volume halves the cue's samples, zero silences it (the music takes the volume on its own gain)"
       (audio-set-volume! 1.0)
-      (audio-set-ambient! amb 22050)
-      (mix-cached-into out 512 #t '())
+      (mix-cues-into out 512 (list (cons cue 0)))
       (let ((full (rms out 512 8)))
         (audio-set-volume! 0.5)
-        (mix-cached-into out 512 #t '())
+        (mix-cues-into out 512 (list (cons cue 0)))
         (let ((half (rms out 512 8)))
           (assert-true (> full 0.01))
           (assert-true (< (abs (- half (* 0.5 full))) 1e-4)))
         (audio-set-volume! 0.0)
-        (mix-cached-into out 512 #t '())
-        (assert-equal 0.0 (rms out 512 8))
-        (mix-cached-into out 512 #f (list (cons cue 0)))
-        (assert-equal 0.0 (rms out 512 8))
-        (audio-set-volume! 0.5)
-        (mix-cached-into out 512 #f (list (cons cue 0)))
-        (let ((cue-half (rms out 512 8)))
-          (audio-set-volume! 1.0)
-          (mix-cached-into out 512 #f (list (cons cue 0)))
-          (assert-true (< (abs (- cue-half (* 0.5 (rms out 512 8)))) 1e-4)))))
-    (test "the switches default on; SFX off drops a cue at audio-cue!, MUSIC off is read by the pump (the flags)"
+        (mix-cues-into out 512 (list (cons cue 0)))
+        (assert-equal 0.0 (rms out 512 8))))
+    (test "the switches default on; SFX off drops a cue at audio-cue!; MUSIC is a flag the shell reads for the music's gain"
       (assert-true (audio-music?))
       (assert-true (audio-sfx?))
       (audio-set-sfx! #f)

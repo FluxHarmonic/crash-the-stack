@@ -1,0 +1,648 @@
+;;; (crash music live) - The soundtrack live from .cts on motif's player (M1, D59)
+;;;
+;;; One player at a time, mixed into the sink through (crash audio)'s source
+;;; hook the tracker uses. (crash music) is the data (the pools, the pick,
+;;; the section a phase asks for, the menu theme); this module runs it:
+;;;
+;;;   (live-music-frame! screen phase remaining table seed)   every frame the menu or a table is up
+;;;                                                 (remaining: ms until the trace lands, or #f)
+;;;   (live-music-fresh!)                           a new deal: its pick from the calm mark, from the top
+;;;   (live-music-off!) / (live-music-stop!)               silence (the cascade, the severed screen)
+;;;   (live-music-provide! name text)                     a tune's text landed (the web page's fetch)
+;;;   (live-music-unavailable! name)                      the page gave a fetch up: never asked again
+;;;   (live-music-prefetch! name)                         ask for a text ahead of its need
+;;;   (live-music-set-loader! proc)                       how a tune's text is asked for: (proc name) -> text | #f
+;;;
+;;; The moves: a new deal opens its pick from the calm mark, from the top;
+;;; CONTINUE or a return from the menu resumes where the track left off;
+;;; the menu theme resumes where IT left off; a switch fades the leaving
+;;; track ~0.5 s and the coming one in ~1 s (two source gains, one player
+;;; each way: the leaving player finishes its fade before the next opens,
+;;; so at most one player runs). The fill runs up to the trace landing:
+;;; it is asked for one fill-length ahead (plus the wait for a bar row and
+;;; the sink's queue) so it ends as the ICE strikes, and runs on into the
+;;; tense region; the phase turning counter (the strike) asks for tense
+;;; at the next bar row unless the fill is already there; the phase falling
+;;; back asks for calm at the next bar row with a 300 ms dip (no track has
+;;; a composed return fill yet). MUSIC / VOLUME apply on the source gain.
+;;;
+;;; Lines (say with ?trace / --trace):
+;;;   crash: music pick NAME seed N for TABLE  the deal's track (stack | cards)
+;;;   crash: music open NAME top|resume POS ROW ms N   (N: the open's cost, the compile and the voice graphs)
+;;;   crash: music section fill|tense|calm asked at POS ROW   (the trace's ask; POS ROW the walker's)
+;;;   crash: music section fill|tense|calm at POS ROW        (the landing, a bar row; tense's also when the fill runs into it)
+;;;   crash: music fade out|in NAME
+;;;   crash: music playing NAME POS ROW        the sink pulled past the open position (heard, if the context runs)
+
+(define-library (crash music live)
+  (import (sigil math)
+          (sigil time)
+          (sigil list)
+          (motif tune)
+          (motif tune player)
+          (crash music)
+          (crash audio)
+          (crash music resample))
+
+  (export live-music-frame! live-music-fresh! live-music-off! live-music-stop! live-music-provide!
+          live-music-unavailable! live-music-prefetch! live-music-has-text?
+          live-music-set-loader! live-music-set-gain! live-music-set-say!
+          live-music-playing? live-music-title live-music-position live-music-chunk-ms
+          live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms live-music-clock-rate
+          live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-FLOOR MUSIC-BUDGET-MS RATES
+          LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
+
+  (begin
+    (define LIVE-GAIN 0.55)       ; the tracks' level under the cues (TRACK-GAIN's value)
+    (define FADE-OUT-MS 500)
+    (define FADE-IN-MS 1000)
+    (define RETURN-DIP-MS 300)
+
+    ;; --- state -------------------------------------------------------------------
+    (define *player* #f)          ; the one player, or #f
+    (define *name* #f)            ; the track it plays
+    (define *tune* #f)
+    (define *section* 'calm)      ; the section asked for last
+    (define *want* #f)            ; the track wanted now: NAME | #f (silence) | 'pending (text asked)
+    (define *want-fresh* #f)      ; the wanted track starts from its calm mark
+    (define *positions* '())      ; ((name . (pos . row)) ...): where each track left off
+    (define *last-pick* '())      ; the last track a deal picked, per table: ((table . name) ...)
+    (define *fresh* #f)           ; a new deal was dealt: the next pick is fresh and starts from the top
+    (define *restart* #f)         ; the wanted track is the playing one but a fresh deal wants it from the top
+    (define *texts* '())          ; ((name . text) ...): tune texts that landed
+    (define *refused* '())        ; names whose text would not read: never opened again this session
+    (define *loader* #f)          ; (proc name) -> text | #f; #f asks the page (a fetch line)
+    (define *asked* '())          ; names asked of the page
+    (define *gain* 1.0)           ; MUSIC x VOLUME, a factor on LIVE-GAIN
+    (define *fade* #f)            ; (from to start-ms dur-ms then) or #f: the source gain's ramp; then = 'close | #f
+    (define *chunk-ms* 0.0)
+    (define *say* (lambda parts #f))
+    (define *landed-seen* #f)     ; the last landing reported (the arm reads the line once)
+    (define *opened-at* #f)       ; (pos . row) the track opened at; #f once "playing" was said (the sink pulled past it)
+    (define *pending* #f)         ; the mark asked for and not yet landed (re-asked by a reopen), or #f
+    (define *in-tense* #f)        ; the walk has entered the tense region (by the fill running into it, or a jump)
+    (define *timing* #f)          ; the playing tune's (row-ms bar-rows fill-rows fill-pos tense-pos end-pos), fill-rows #f without a fill
+
+    (define (live-music-playing?) (and *player* #t))
+    (define (live-music-title) (and *tune* (tune-name *tune*)))
+    (define (live-music-name) *name*)
+    (define (live-music-section) *section*)
+    (define (live-music-chunk-ms) *chunk-ms*)
+    (define (live-music-pending?) (eq? *want* 'pending))
+    (define (live-music-set-loader! proc) (set! *loader* proc))
+    (define (live-music-set-say! proc) (set! *say* proc))
+    ;; ?tune=NAME / --music-tune NAME (a dev door, David 2026-09-22): every deal's
+    ;; pick is this tune (the slug of assets/tunes/NAME.cts) instead of the pool's
+    (define *tune-door* #f)
+    (define (live-music-set-tune-door! name) (set! *tune-door* name))
+    (define (live-music-position)
+      (and *player*
+           (player-position *player*
+                            (if (resampling?)
+                                ;; the sink's frames in the player's rate, plus what the upsampler holds unread
+                                (exact (round (+ (* (audio-source-depth) (rs-ratio)) (resampler-unread *rs*))))
+                                (audio-source-depth)))))
+
+    ;; --- the fill's run-up (David's ruling, 2026-09-22) ------------------------------
+    ;; The fill starts one fill-length before the trace lands, so it ends as
+    ;; the ICE strikes, and tense begins at the strike. A mark jump lands on
+    ;; the walker's next bar row, and the walker runs ahead of the ear by
+    ;; the sink's queue, so the fill is asked for when the trace's remaining
+    ;; ms are within: the queue's latency + the walker's wait for its next
+    ;; bar row + the fill's length + half a bar (the wait and the remaining
+    ;; ms shrink together between bar rows, so the fill's end misses the
+    ;; trace by at most half a bar either way). The lengths come from the
+    ;; tune's header tempo and speed (a tempo effect inside the fill moves
+    ;; the end by its amount: within the tolerance for the tunes shipped).
+    (define (tune-timing t)
+      (let* ((row-ms (/ (* 2500.0 (tune-speed t)) (tune-tempo t)))
+             (m (tune-meter t))
+             (bar-rows (* (car m) (cdr m)))
+             (rs (tune-mark-regions t))
+             (fill (assq 'fill rs))
+             (tense (assq 'tense rs))
+             (rows-of (lambda (from to)
+                        (let loop ((i from) (n 0))
+                          (if (>= i to) n
+                              (let ((pat (list-find (lambda (p) (= (tune-pattern-id p) (list-ref (tune-order t) i))) (tune-patterns t))))
+                                (loop (+ i 1) (+ n (if pat (tune-pattern-rows pat) 0)))))))))
+        (list row-ms bar-rows
+              (and fill tense (rows-of (cadr fill) (cddr fill)))
+              (and fill (cadr fill))
+              (and tense (cadr tense))
+              (if tense (cddr tense) (length (tune-order t))))))
+    (define (timing-row-ms) (list-ref *timing* 0))
+    (define (timing-bar-rows) (list-ref *timing* 1))
+    (define (timing-fill-rows) (list-ref *timing* 2))
+    (define (timing-fill-pos) (list-ref *timing* 3))
+    (define (timing-tense-pos) (list-ref *timing* 4))
+    (define (timing-end-pos) (list-ref *timing* 5))
+
+    ;; The walker's own position (the row being rendered now, ahead of the ear)
+    (define (walker-position) (and *player* (player-position *player* 0)))
+
+    ;; ms the ear is behind the walker: the source's queue at the device rate
+    (define (queue-ms) (/ (* 1000.0 (audio-source-depth)) (max 1 (audio-rate))))
+
+    ;; The window's arithmetic, apart from the player so a test can hold
+    ;; every term (the reviewer's MEDIUM 3: the tests run with no sink, so
+    ;; the queue term was identically zero and could not have caught a
+    ;; mistake in it). row: the walker's row, the one being rendered now.
+    ;;   queue-ms   the ear is this far behind the walker (the sink's frames)
+    ;;   wait       the walker's rows until its next bar row: a jump lands there
+    ;;   fill-rows  the fill's own length in rows
+    ;;   half a bar the slack is constant within a bar and steps up by a bar
+    ;;              at each bar row, so asking at the half-bar point misses
+    ;;              the trace by at most half a bar either way
+    ;;
+    ;; `rate` converts the answer from the music's clock to the trace's. The
+    ;; four terms are REAL ms (the audio plays at the device's rate whatever
+    ;; the game does), while `remaining` is TRACE ms, and the two run at the
+    ;; same speed only while the game keeps up: (crash tween)'s clock drops
+    ;; the ticks it owes past MAX-STEPS-PER-FRAME, so a frame over 100 ms
+    ;; leaves the trace behind the wall for good. At rate 1 nothing changes;
+    ;; at 0.66 (a box dropping a third of its ticks) the fill takes 10.4 s of
+    ;; real time but only 6.9 s of trace, so the ask must come later or the
+    ;; fill ends before the strike (the arm on a loaded box, 2026-09-22:
+    ;; -5.3 s, two bars early).
+    (define (fill-window-ms queue-ms row-ms bar-rows row fill-rows rate)
+      (let ((wait-rows (- bar-rows (modulo row bar-rows))))
+        (* rate
+           (+ queue-ms
+              (* wait-rows row-ms)
+              (* fill-rows row-ms)
+              (* 0.5 bar-rows row-ms)))))
+
+    ;; The trace's ms per real ms, smoothed over the frames since the deal:
+    ;; 1.0 while the game keeps up, less when it drops ticks. A frame that
+    ;; moves `remaining` the wrong way or by a jump (a hint's 30 s, a
+    ;; shuffle's 60 s, a new deal) is not a measurement. Kept in [0.2, 1.0]:
+    ;; the trace never runs faster than the wall, and a wholly stalled clock
+    ;; must not make the window unbounded.
+    (define CLOCK-JUMP-MS 2000.0)         ; a step larger than this is a charge, not the clock
+    (define *clock-rate* 1.0)
+    (define *clock-last* #f)              ; (wall-ms . remaining) of the last measured frame
+    (define (clock-rate! remaining)
+      (let ((now (current-milliseconds)))
+        (if (not remaining)
+            (set! *clock-last* #f)
+            (let ((last *clock-last*))
+              (set! *clock-last* (cons now remaining))
+              (when last
+                (let ((wall (- now (car last)))
+                      (fell (- (cdr last) remaining)))
+                  (when (and (> wall 8.0) (> fell 0.0) (< fell CLOCK-JUMP-MS) (< wall CLOCK-JUMP-MS))
+                    (let ((r (max 0.2 (min 1.0 (/ fell wall)))))
+                      (set! *clock-rate* (+ (* 0.95 *clock-rate*) (* 0.05 r)))))))))))
+    (define (live-music-clock-rate) *clock-rate*)
+
+    ;; How far ahead of the trace the fill must be asked for, in TRACE ms;
+    ;; #f when the tune has no fill (tense is asked at the strike alone).
+    (define (fill-window)
+      (and *timing* *player* (timing-fill-rows) (timing-tense-pos)
+           (let ((wp (or (walker-position) (cons 0 0))))
+             (fill-window-ms (queue-ms) (timing-row-ms) (timing-bar-rows) (cdr wp) (timing-fill-rows) *clock-rate*))))
+
+    ;; The region the walk loops in for the section asked: calm's; the fill
+    ;; runs on into tense (fill's start to tense's end) until the walk is in
+    ;; tense, then tense's own. Or #f when the tune has no such marks.
+    (define (section-region)
+      (let ((rs (tune-mark-regions *tune*)))
+        (cond ((and (eq? *section* 'fill) (not *in-tense*))
+               (let ((f (assq 'fill rs)) (tn (assq 'tense rs)))
+                 (and f (cons (cadr f) (if tn (cddr tn) (cddr f))))))
+              ((or *in-tense* (eq? *section* 'tense))
+               (let ((r (assq 'tense rs))) (and r (cdr r))))
+              (else
+               (let ((r (assq 'calm rs))) (and r (cdr r)))))))
+    (define (apply-region! p)
+      (let ((r (section-region)))
+        (when r (player-set-region! p (car r) (cdr r)))))
+
+    ;; MUSIC / VOLUME: a factor applied at once
+    (define (live-music-set-gain! g)
+      (set! *gain* (max 0.0 (min 1.0 g)))
+      (apply-gain! (current-fade-gain)))
+
+    ;; --- the music's rate (D59, David's rulings during the row) ---------------------
+    ;; The synth's cost scales with the rate: David's phone at 48 kHz spent
+    ;; ~46 % of real time in it (PULL 9.8 ms per 1024 frames, 2026-09-21)
+    ;; and stuttered; the whole context at 22050 ran clean but dulled the
+    ;; cues and delayed them (their ring's depth in ms doubled). So the
+    ;; cues stay at the device's rate and the MUSIC renders at its own rate,
+    ;; upsampled into its sink by (crash native)'s %upsample! (4-tap cubic).
+    ;; The rate is chosen per device by a ladder: the music starts at the
+    ;; device's rate (or the rate remembered in the store, or 24000 when the
+    ;; page's hints say a weak device), and after LADDER-PULLS measured pulls at a
+    ;; rate the MEDIAN cost per 60 fps frame over MUSIC-BUDGET-MS steps down
+    ;; to the next of RATES (the player reopens at the audible position, the
+    ;; section kept); it never steps up (a step is a reopen, heard as a
+    ;; short gap). A pull within CUE-QUIET-MS of a cue (a tap's frame: its
+    ;; draw and the effect) or of a tune's open is not measured, and one
+    ;; pull never decides (David's phone, 2026-09-22: the first tile tap's
+    ;; frame stepped a mean from 48000 to 32000). MUSIC-FLOOR is David's phone's setting: the floor, not the
+    ;; ceiling. ?music-rate=N / --music-rate N pin a rate (no ladder).
+    ;;   crash: music rate N per-frame-ms M     the ladder stepped (or the pin, at open)
+    (define RATES '(32000 24000 22050))   ; below the device's rate, in order
+    (define MUSIC-FLOOR 22050)
+    (define MUSIC-BUDGET-MS 4.0)          ; the steady pull cost per 60 fps frame a device may spend
+    (define *budget* MUSIC-BUDGET-MS)     ; --music-budget MS / ?music-budget=MS: the arm's door to force the ladder
+    (define (live-music-set-budget! ms) (when (and (number? ms) (> ms 0)) (set! *budget* (* 1.0 ms))))
+    (define LADDER-PULLS 60)              ; pulls measured at a rate before a step (about a second)
+    (define LADDER-SKIP 30)               ; pulls after an open not measured (the boot's own work around them)
+    (define *ladder-skip* LADDER-SKIP)
+    (define *rate* #f)                    ; the music's render rate; #f = the device's
+    (define *rate-pinned* #f)
+    (define *ladder-pulls* 0)
+    (define *ladder-samples* (make-vector LADDER-PULLS 0.0))   ; ms per 1024 device frames, the measured pulls
+    (define CUE-QUIET-MS 150)             ; a pull this soon after a cue or an open is a tap's or a landing's frame: not measured
+    (define *opened-ms* 0)                ; when the player last opened
+    ;; why the music is at its rate, for the readout: device | stored | hint | pin | (ladder . seconds-since-boot)
+    (define *rate-reason* 'device)
+    (define *boot-ms* (current-milliseconds))
+    (define (live-music-rate-reason)
+      (cond ((pair? *rate-reason*) (string-append "LADDER@" (number->string (cdr *rate-reason*)) "S"))
+            ((eq? *rate-reason* 'stored) "STORED")
+            ((eq? *rate-reason* 'hint) "HINT")
+            ((eq? *rate-reason* 'pin) "PIN")
+            (else "DEVICE")))
+    (define *rs* (make-resampler))       ; the render at *rate* and its read position ((crash music resample))
+
+    ;; never above the device's rate: the upsampler only goes up
+    (define (live-music-rate) (if *rate* (min *rate* (audio-rate)) (audio-rate)))
+    (define (live-music-rate-set?) (and *rate* #t))
+    ;; rate: a number (pinned when pinned? is true: the door; a pin is never
+    ;; overridden by the store's or the hints' setting), 'weak (the page's
+    ;; hints: start one step down, the ladder may go lower), or #f (the
+    ;; device's rate, the ladder).
+    (define (live-music-set-rate! rate . rest)
+      (let ((pin? (and (pair? rest) (eq? (car rest) #t))))
+        (cond ((and *rate-pinned* (not pin?)) #f)
+              ((eq? rate 'weak) (unless *rate* (set! *rate* 24000) (set! *rate-reason* 'hint)))
+              ((eq? rate 'stored) #f)   ; the shell says a stored rate as (live-music-set-rate! N 'stored)
+              ((and (number? rate) (> rate 0)) (set! *rate* rate) (set! *rate-pinned* pin?)
+               (set! *rate-reason* (cond (pin? 'pin) ((and (pair? rest) (eq? (car rest) 'stored)) 'stored) (else 'device))))
+              ;; (live-music-set-rate! #f #t): the device's rate AND the pin
+              ;; lifted, so the ladder runs again (the pin is otherwise
+              ;; permanent for the process: the door is a boot argument)
+              (else (set! *rate* #f) (set! *rate-pinned* #f) (set! *rate-reason* 'device)))))
+    (define (rate-below r)
+      (let loop ((rs RATES))
+        (cond ((null? rs) #f)
+              ((< (car rs) r) (car rs))
+              (else (loop (cdr rs))))))
+    (define (resampling?) (and *rate* (< (live-music-rate) (audio-rate))))
+    (define (rs-ratio) (/ (* 1.0 (live-music-rate)) (audio-rate)))
+    (define (open-player t start)
+      (set! *ladder-skip* LADDER-SKIP)
+      (set! *ladder-pulls* 0)
+      (set! *opened-ms* (current-milliseconds))
+      (resampler-reset! *rs*)
+      (set! *player-rate* (live-music-rate))
+      (open-tune-player t (live-music-rate) start: start loop: #t))
+
+    ;; The ladder, once a frame: after LADDER-PULLS measured pulls at this
+    ;; rate, the MEDIAN cost per 60 fps frame (ms per 1024 device frames x
+    ;; device frames per 60 fps frame / 1024) against the budget. A median:
+    ;; one pull (a GC pause inside it, a tap's frame that slipped the quiet
+    ;; rule) never decides.
+    (define (ladder!)
+      (when (and *player* (>= *ladder-pulls* LADDER-PULLS))
+        (let* ((unread (if (resampling?) (resampler-unread *rs*) 0))   ; read before the rate moves (LOW 5)
+               (per-1024 (median-of *ladder-samples* LADDER-PULLS))
+               (per-frame (* per-1024 (/ (audio-rate) 61440.0)))
+               (next (rate-below (live-music-rate))))
+          (set! *ladder-pulls* 0)
+          (when (and (not *rate-pinned*) (> per-frame *budget*) next)
+            (set! *rate* next)
+            (set! *rate-reason* (cons 'ladder (/ (round (/ (- (current-milliseconds) *boot-ms*) 100)) 10.0)))
+            (*say* "music" "rate" next "per-frame-ms" (/ (round (* 10 per-frame)) 10.0))
+            (when *remember* (*remember* next))
+            (reopen! unread)))))
+    (define (median-of v n)
+      (let ((s (list-sort < (vector->list (vector-copy v 0 n)))))
+        (if (even? n)
+            (/ (+ (list-ref s (- (quotient n 2) 1)) (list-ref s (quotient n 2))) 2.0)
+            (list-ref s (quotient n 2)))))
+    ;; A pull's cost is measured unless it is within CUE-QUIET-MS of a cue
+    ;; (a tap's frame) or of the open (the landing's frame), or in the
+    ;; LADDER-SKIP pulls after an open.
+    (define (measure-pull! per-1024)
+      (let ((now (current-milliseconds))
+            (cue-at (audio-cue-at)))
+        (cond ((> *ladder-skip* 0) (set! *ladder-skip* (- *ladder-skip* 1)))
+              ((and cue-at (< (- now cue-at) CUE-QUIET-MS)) #f)
+              ((< (- now *opened-ms*) CUE-QUIET-MS) #f)
+              ;; the window is full until the frame's ladder! reads it: the page's
+              ;; 12 ms timer pumps between frames, and a long frame (the boot)
+              ;; fits more than LADDER-PULLS pumps (the arm on 7e5178c: every
+              ;; pump after the 60th failed on the vector's end, 11852 times)
+              ((>= *ladder-pulls* LADDER-PULLS) #f)
+              (else
+               (vector-set! *ladder-samples* *ladder-pulls* per-1024)
+               (set! *ladder-pulls* (+ *ladder-pulls* 1))))))
+    (define *remember* #f)   ; (proc rate): the shell keeps the ladder's choice for the next boot
+    (define (live-music-set-remember! proc) (set! *remember* proc))
+
+    ;; The same track, from its audible position, at the rate now in force;
+    ;; the section and its region kept; the source's sink stays open.
+    ;; The same track at the rate now in force, continuing exactly where
+    ;; the old player's render stopped: the sink already holds up to
+    ;; SOURCE-DEPTH frames of it ahead of the ear, so a reopen at the
+    ;; AUDIBLE position played those frames twice (David's phone,
+    ;; 2026-09-21: every ladder step stuttered). The render head is the
+    ;; old player's frames rendered less what the resampler holds unread;
+    ;; the timeline gives the row that head is in and its start sample, and
+    ;; the new player skips the head's offset into that row at its own
+    ;; rate. The section and its region are kept; the source's sink stays open.
+    ;; unread: what the resampler held when the OLD player rendered its last
+    ;; frames, captured by the caller before the rate moved (ladder! assigns
+    ;; the new rate first, so (resampling?) here would describe the player
+    ;; being opened, not the one whose counters are being read: the
+    ;; reviewer's LOW 5, 2026-09-22).
+    (define (reopen! unread)
+      (let* ((old *player*)
+             (old-rate (player-rate-of old))
+             (head (- (player-rendered old) unread))
+             (entry (let loop ((es (player-timeline old)))   ; newest first: #(pos row start)
+                      (cond ((null? es) #f)
+                            ((<= (vector-ref (car es) 2) head) (car es))
+                            (else (loop (cdr es))))))
+             (pos (if entry (cons (vector-ref entry 0) (vector-ref entry 1)) (or (live-music-position) (cons 0 0))))
+             (skip (if entry (max 0 (exact (round (* (- head (vector-ref entry 2)) (/ (live-music-rate) (* 1.0 old-rate)))))) 0))
+             (t0 (current-milliseconds))
+             (p (open-player *tune* pos)))
+        (player-close! old)
+        (set! *player* p)
+        (set! *player-rate* (live-music-rate))
+        (apply-region! p)
+        (when *pending* (player-jump-to-mark! p *pending*))   ; a jump asked and not landed survives the reopen
+        (discard! p skip)
+        (set! *landed-seen* #f)
+        (set! *opened-at* #f)
+        (apply-gain! (current-fade-gain))
+        (*say* "music" "reopen" (car pos) (cdr pos) "skip" skip "head" head "ms" (- (current-milliseconds) t0))))
+    (define *player-rate* #f)   ; the rate the player was opened at
+    (define (player-rate-of p) (or *player-rate* (audio-rate)))
+    (define *scratch* #f)
+    (define (discard! p frames)
+      (unless *scratch* (set! *scratch* (make-bytevector (* 8 SOURCE-PUSH-MAX) 0)))
+      (let loop ((left frames))
+        (when (> left 0)
+          (let ((n (min left SOURCE-PUSH-MAX)))
+            (player-pull! p *scratch* 0 n)
+            (loop (- left n))))))
+
+    ;; --- the source ----------------------------------------------------------------
+    ;; n stereo f32 frames at the device's rate into out from byte-offset:
+    ;; the player's own output at the device's rate, or its render at
+    ;; *rate* upsampled. The upsampler reads from one frame before its
+    ;; position to two past the last one it needs, so the buffer keeps that
+    ;; window and the player fills the rest.
+    (define (pull! out byte-offset n)
+      (let* ((t0 (current-milliseconds))
+             (on (and *player*
+                      (if (resampling?)
+                          (pull-resampled! out byte-offset n)
+                          (player-pull! *player* out byte-offset n)))))
+        (let ((ms (- (current-milliseconds) t0)))
+          (when (> n 0)
+            (let ((per-1024 (/ (* 1024.0 ms) n)))
+              ;; smoothed over the last ~20 pulls (one pull is noise), and summed for the ladder
+              (set! *chunk-ms* (+ (* 0.95 *chunk-ms*) (* 0.05 per-1024)))
+              (measure-pull! per-1024))))
+        (if on #t (begin (close-player!) #f))))
+
+    ;; The source's render by hand (the tests drive the walker without a sink)
+    (define (live-music-pull! out byte-offset n) (pull! out byte-offset n))
+
+    (define (pull-resampled! out byte-offset n)
+      (let ((p *player*))
+        (resampler-pull! *rs* (lambda (buf off frames) (player-pull! p buf off frames)) out byte-offset n (rs-ratio))))
+
+    (define (apply-gain! fade-gain)
+      (when *player* (audio-set-source! pull! (* LIVE-GAIN *gain* fade-gain))))
+
+    (define (current-fade-gain)
+      (if *fade*
+          (let* ((from (list-ref *fade* 0)) (to (list-ref *fade* 1))
+                 (start (list-ref *fade* 2)) (dur (list-ref *fade* 3))
+                 (k (min 1.0 (/ (- (current-milliseconds) start) (* 1.0 (max 1 dur))))))
+            (+ from (* k (- to from))))
+          1.0))
+
+    (define (fade! from to ms then)
+      (set! *fade* (list from to (current-milliseconds) ms then))
+      (apply-gain! from))
+
+    ;; a fade in flight moves every frame; a finished fade-out closes the player
+    (define (fade-frame!)
+      (when *fade*
+        (let ((g (current-fade-gain)))
+          (apply-gain! g)
+          (when (>= (- (current-milliseconds) (list-ref *fade* 2)) (list-ref *fade* 3))
+            (let ((then (list-ref *fade* 4)))
+              (set! *fade* #f)
+              (when (eq? then 'close) (close-player!)))))))
+
+    (define (close-player!)
+      (when *player*
+        (let ((p (player-position *player* 0)))
+          (when (and p *name*)
+            (set! *positions* (cons (cons *name* p) (filter (lambda (e) (not (eq? (car e) *name*))) *positions*)))))
+        (audio-set-source! #f 0.0)
+        (player-close! *player*)
+        (set! *player* #f)
+        (set! *name* #f)
+        (set! *tune* #f)
+        (set! *fade* #f)))
+
+    (define (live-music-stop!) (close-player!) (set! *want* #f))
+    (define (live-music-fresh!) (set! *fresh* #t))
+    (define (live-music-off!) (live-music-stop!))
+
+    ;; --- the texts ----------------------------------------------------------------
+    ;; A tune the page could not fetch: never asked again this session
+    ;; (the name stays in *asked*), the want stays pending — silence, not
+    ;; a loop of fetches (the P3b review's MEDIUM 2, applied here).
+    (define (live-music-unavailable! name)
+      (unless (memq name *asked*) (set! *asked* (cons name *asked*))))
+    ;; Ask for a tune's text ahead of its need (the web page's fetch; the
+    ;; menu theme under the boot). Nothing when it landed or was asked.
+    (define (live-music-prefetch! name) (text-for name) #f)
+    (define (live-music-has-text? name) (and (assq name *texts*) #t))
+    (define (live-music-provide! name text)
+      (set! *asked* (filter (lambda (n) (not (eq? n name))) *asked*))
+      (set! *texts* (cons (cons name text) (filter (lambda (e) (not (eq? (car e) name))) *texts*))))
+
+    ;; A tune's text: what landed, else the loader's answer (natively the
+    ;; file; on the web the page's fetch, which prints its own request line
+    ;; and answers #f until the text lands through live-music-provide!);
+    ;; a name is asked of the loader once.
+    (define (text-for name)
+      (let ((e (assq name *texts*)))
+        (cond (e (cdr e))
+              ((memq name *asked*) #f)
+              (*loader*
+               (set! *asked* (cons name *asked*))
+               (let ((text (*loader* name)))
+                 (when text (live-music-provide! name text))
+                 text))
+              (else #f))))
+
+    ;; --- opening a track -------------------------------------------------------------
+    ;; A tune whose text will not read must not take the game with it. The
+    ;; open is guarded: the failure is said ONCE with the tune's name and the
+    ;; length of the text that would not read, the name is refused for the
+    ;; rest of the session, and the caller is told 'failed so it can fall to
+    ;; the next tune or to silence. Without this the driver retried the parse
+    ;; every frame, and since it runs before the screen's own step, the menu
+    ;; stopped answering taps: David's phone, 2026-09-23, on a 62,428-byte
+    ;; theme that reads perfectly on the desktop build.
+    ;;   crash: music refused NAME chars N MESSAGE
+    (define (refused? name) (and (memq name *refused*) #t))
+    (define (refuse! name text e)
+      (set! *refused* (cons name *refused*))
+      (*say* "music" "refused" (symbol->string name) "chars" (if (string? text) (string-length text) 0)
+             (if (error-object? e) (error-object-message e) "unreadable")))
+
+    (define (open! name fresh?)
+      (let ((text (text-for name)))
+        (if (or (not text) (refused? name))
+            (if (refused? name) 'failed 'pending)
+            ;; The parse and the open stall the frame: a known stall, the cues
+            ;; pre-rolled and its starvation counted apart. A tune that fails
+            ;; to read or validate must still close the bracket, or every
+            ;; starved frame after it is folded into the known count (the
+            ;; reviewer's LOW 4, 2026-09-22).
+            (guard (e (#t (audio-stall-end!) (refuse! name text e) 'failed))
+            (let* ((stall (audio-stall-begin!))
+                   (t (read-tune-string text))
+                   (calm (or (tune-mark t 'calm) 0))
+                   (left (assq name *positions*))
+                   (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
+                   (t0 (current-milliseconds))
+                   (p (open-player t start))
+                   (open-ms (- (current-milliseconds) t0)))
+              (set! *player* p)
+              (set! *name* name)
+              (set! *tune* t)
+              (set! *section* 'calm)
+              (set! *in-tense* #f)
+              (set! *pending* #f)
+              (set! *timing* (tune-timing t))
+              ;; a resume inside tense (a return from the menu under the ICE) stays there
+              (when (and (timing-tense-pos) (>= (car start) (timing-tense-pos)))
+                (set! *section* 'tense)
+                (set! *in-tense* #t))
+              (set! *landed-seen* #f)
+              (set! *opened-at* start)
+              (apply-region! p)
+              (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
+              (fade! 0.0 1.0 FADE-IN-MS #f)
+              (audio-stall-end!)
+              'open)))))
+
+    ;; --- the frame ---------------------------------------------------------------------
+    ;; screen: menu | stack | cards; phase: trace | counter | severed | cleared | #f;
+    ;; table: the table the pick is for (stack | cards); seed: the board's;
+    ;; fresh?: a new deal (its pick from the top).
+    (define (live-music-frame! screen phase remaining table seed)
+      (fade-frame!)
+      (ladder!)
+      (let* ((fresh? (and *fresh* (not (eq? screen 'menu)) (not (memq phase '(cleared severed)))))
+             (want (cond ((eq? screen 'menu) MENU-THEME)
+                         ((memq phase '(cleared severed)) #f)
+                         (else (pick-for table seed fresh?)))))
+        (when fresh? (set! *fresh* #f) (set! *restart* #t))
+        (cond
+          ;; silence wanted: fade the playing track out
+          ((and (not want) *player* (not (fading-out?)))
+           (set! *want* #f)
+           (*say* "music" "fade" "out" (symbol->string *name*))
+           (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
+          ;; another track, or the same one from the top: fade out, then open.
+          ;; A tune that refuses to read leaves the game silent rather than
+          ;; retrying: `want` is dropped, so the next frame asks for nothing
+          ;; and the screen keeps its own step (see refuse!).
+          ((and want (not (refused? want)) (or (not (eq? want *name*)) *restart*))
+           (cond ((and *player* (not (fading-out?)))
+                  (*say* "music" "fade" "out" (symbol->string *name*))
+                  (fade! (current-fade-gain) 0.0 FADE-OUT-MS 'close))
+                 ((not *player*)
+                  (let ((r (open! want *restart*)))
+                    (set! *restart* #f)
+                    (set! *want* (cond ((eq? r 'pending) 'pending)
+                                       ((eq? r 'failed) #f)
+                                       (else want))))))))
+        ;; the first pull past the open position: the track is heard (once per open)
+        (when (and *player* *opened-at*)
+          (let ((p (live-music-position)))
+            (when (and p (not (equal? p *opened-at*)))
+              (set! *opened-at* #f)
+              (*say* "music" "playing" (symbol->string *name*) (car p) (cdr p)))))
+        ;; the section follows the trace: the fill in its run-up, tense at
+        ;; the strike, each landing on the walker's next bar row
+        (when (and *player* (not (eq? screen 'menu)) (eq? want *name*))
+          (clock-rate! remaining)   ; the trace's ms per real ms (the window is real, remaining is trace)
+          (let ((section (music-section phase remaining (fill-window) *section*)))
+            (unless (eq? section *section*)
+              (set! *section* section)
+              (let ((p (walker-position)))
+                (*say* "music" "section" (symbol->string section) "asked" "at" (if p (car p) "-") (if p (cdr p) "-")))
+              (cond ((eq? section 'fill)
+                     (set! *in-tense* #f)   ; a resume that left the flag set must not swallow the strike's tense ask
+                     (ask-jump! 'fill))
+                    ((eq? section 'tense)
+                     ;; the fill that ran into tense already is there: nothing to jump
+                     (unless *in-tense* (ask-jump! 'tense)))
+                    (else
+                     (set! *in-tense* #f)
+                     (ask-jump! 'calm)
+                     (player-dip! *player* RETURN-DIP-MS)))))
+          ;; a mark's landing, once: the fill's runs on into tense; tense's is tense
+          (let ((l (player-landed *player*)))
+            (when (and l (not (equal? l *landed-seen*)))
+              (set! *landed-seen* l)
+              (set! *pending* #f)
+              (when (and (timing-tense-pos) (>= (car l) (timing-tense-pos)))
+                (set! *in-tense* #t))
+              (apply-region! *player*)
+              (*say* "music" "section" (if *in-tense* "tense" (symbol->string *section*)) "at" (car l) (cadr l))))
+          ;; the fill ran into tense on its own: the walk loops tense from here
+          (when (and (eq? *section* 'fill) (not *in-tense*) (not *pending*) (timing-tense-pos))
+            (let ((wp (walker-position)))
+              (when (and wp (>= (car wp) (timing-tense-pos)))
+                (set! *in-tense* #t)
+                (apply-region! *player*)
+                (*say* "music" "section" "tense" "at" (car wp) (cdr wp))))))))
+
+    ;; A mark jump asked (lands on the walker's next bar row); a tune
+    ;; without the mark gets tense for a missing fill, nothing for the rest.
+    (define (ask-jump! name)
+      (let ((name (if (and (eq? name 'fill) (not (tune-mark *tune* 'fill))) 'tense name)))
+        (when (player-jump-to-mark! *player* name)
+          (set! *pending* name))))
+
+    (define (fading-out?) (and *fade* (eq? (list-ref *fade* 4) 'close)))
+
+    ;; the deal's pick, remembered per table while the deal lasts
+    (define *picked* '())   ; ((table seed . name) ...)
+    (define (pick-for table seed fresh?)
+      (let ((e (assq table *picked*)))
+        (if (and e (= (cadr e) (or seed 0)) (not fresh?))
+            (cddr e)
+            (let* ((last (let ((l (assq table *last-pick*))) (and l (cdr l))))
+                   (door *tune-door*)
+                   (name (or door (music-pick table seed last))))
+              (set! *picked* (cons (cons table (cons (or seed 0) name)) (filter (lambda (x) (not (eq? (car x) table))) *picked*)))
+              (set! *last-pick* (cons (cons table name) (filter (lambda (x) (not (eq? (car x) table))) *last-pick*)))
+              ;; a table with no pool answers #f, which is a legitimate ask for
+              ;; silence (P5's entry screen); say it without calling
+              ;; symbol->string on it, which threw and killed the frame before
+              ;; the fade could run (the gate, 2026-09-23)
+              (cond ((not name) (*say* "music" "pick" "none" "for" (symbol->string table)))
+                    (door (*say* "music" "pick" (symbol->string name) "door" "for" (symbol->string table)))
+                    (else (*say* "music" "pick" (symbol->string name) "seed" (or seed 0) "for" (symbol->string table))))
+              name))))
+    ))

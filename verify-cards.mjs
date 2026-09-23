@@ -258,7 +258,7 @@ async function tap(vx, vy) {
 // bb6e8b5): the first page waits for the worker to control it before the
 // second boot, and in the console leg a raced loader line with no
 // "crash: texture missing" after it is a note, not a failure; the page's
-// own "crash: ambient failed (try N)" is a console.log the arm never
+// own "crash: tune-unavailable NAME" is a console.log the arm never
 // counted, and its retry is asserted by the boot's audio step.
 let swWaited = false;
 async function waitForWorker() {
@@ -679,8 +679,8 @@ else pass("reload", restored.m[0]);
 const runtimeErrors = consoleLines.filter((l) => /^(Error:|Scheme error)/.test(l));
 {
   // and the browser's own "Failed to load resource: net::ERR_FAILED" for a fetch
-  // the page then retried (the ambient: a "crash: ambient N" line after it)
-  const ambientLanded = consoleLines.some((l) => /^crash: ambient [1-9]/.test(l));
+  // the page then retried (a tune: a "crash: music landed" line after it)
+  const ambientLanded = consoleLines.some((l) => /^crash: music landed /.test(l));
   const raced = consoleErrors.filter((e) => /image fetch failed/.test(e) || (ambientLanded && /Failed to load resource: net::ERR_FAILED/.test(e)));
   const missing = consoleLines.filter((l) => /^crash: texture missing/.test(l));
   if (raced.length && !missing.length) {

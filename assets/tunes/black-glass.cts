@@ -1322,10 +1322,12 @@
       (row 240 (2 "E-3" 2 44 "000") (3 "C-8" 3 11 "000"))
       (row 255 (1 "..." 0 0 "B07"))))
   (order 0 1 2 3 4 5 6 7 8 9 10 11 12)
+  (marks calm: 0 fill: 6 tense: 7)
   (history
     ("codex" "2026-09-21" "Black Glass; original dark halftime dubstep; F minor.")
     ("codex" "2026-09-21" "calm: order 0-5; fill: 6; tense: 7-12; B07 loops tense.")
     ("codex" "2026-09-21" "Speed 3; eight rows per quarter, 32 rows per bar. Eight-bar variants; four-bar fill. All onsets on straight sixteenths except final snare roll.")
     ("codex" "2026-09-21" "Minor pedal harmony, sparse low-register phrases, drum drops and negative space; written after the darker-game listening feedback.")
     ("codex" "2026-09-21" "Existing synth bank: envelope-shaped pressure bass and cutoff variants; no free-running wobble or automation lane. Full audition includes fill.")
-    ("codex" "2026-09-21" "Separate Grit audition: tense pressure lead gains driven, crushed FM grit layered with the resonant saw. Calm/fill, drum/sub parts, pitches and all note/gate timing unchanged; original Black Glass preserved.")))
+    ("codex" "2026-09-21" "Separate Grit audition: tense pressure lead gains driven, crushed FM grit layered with the resonant saw. Calm/fill, drum/sub parts, pitches and all note/gate timing unchanged; original Black Glass preserved.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 6 tense: 7")))

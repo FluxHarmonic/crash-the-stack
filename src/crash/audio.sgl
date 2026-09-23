@@ -1,61 +1,63 @@
-;;; (crash audio) - The sound, through one streaming sink on both targets.
+;;; (crash audio) - The sound, through streaming sinks on both targets.
 ;;;
 ;;; (sigil audio sink) is the one door the two targets share: sokol's
 ;;; ring natively, the WebAudio bridge on the web (an AudioWorklet when
 ;;; the page is cross-origin isolated, a ScriptProcessorNode otherwise;
-;;; [[topics/sigil-wasm-audio-bridge]]). Everything else is Sigil: the
-;;; eight cues of (crash synth) are rendered once at the context's rate
-;;; into a bank, the ambient loop arrives as s16 mono PCM at its own rate
-;;; (the motif render, shipped under assets/audio/), and each frame the
-;;; mixer fills the sink's free room with the ambient resampled by linear
-;;; interpolation plus every voice still playing, stereo, and pushes it
+;;; [[topics/sigil-wasm-audio-bridge]]). The cues of (crash synth) are
+;;; rendered once at the context's rate into a bank, and each frame the
+;;; mixer fills the cues' sink with every voice still playing, stereo,
 ;;; up to TARGET-DEPTH frames ahead of the output: that depth is both the
 ;;; latency a cue lands within (128 ms at 48 kHz, plus the device's own)
 ;;; and the stall a frame may take before the output runs dry (P3c),
 ;;; and the sink's ring (BUFFER-FRAMES) is the headroom for a frame that
 ;;; runs long, not the latency. A pump that always filled the ring put
-;;; every cue 170..190 ms after its tap (the slices 5-7 review).
+;;; every cue 170..190 ms after its tap (the slices 5-7 review). The
+;;; music is a SOURCE (M1, D59: motif's player, (crash music live); P3b's
+;;; tracker plays its tune the same way) on a sink of its own, deeper
+;;; (SOURCE-DEPTH), pumped here too. The OGG tracks of P4 (D50) and the
+;;; ambient cache of P3c left with M1: nothing decoded ships.
 ;;;
 ;;; The context opens at boot on both targets and must be RESUMED from a
 ;;; user gesture on the web (the autoplay policy): the shell calls
 ;;; audio-resume! on the first tap. Every entry point is safe without a
 ;;; context (the sink missing, the device absent under Kiln): the game
-;;; plays silent. The mixer's core is pure (mix-into), so the gate can
-;;; hold the cues and the mix headless.
+;;; plays silent. The cues' mixer (mix-cues-into, add-voices!) is pure
+;;; over a buffer, so the gate can hold it headless.
 
 (define-library (crash audio)
   (import (sigil math)
+          (sigil time)
           (sigil audio sink)
-          (crash synth)
-          (crash native))
+          (crash synth))
 
-  (export audio-open! audio-resume! audio-cue! audio-set-ambient! audio-pump!
+  (export audio-open! audio-resume! audio-cue! audio-pump!
           audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-volume audio-set-volume! audio-music? audio-set-music! audio-sfx? audio-set-sfx!
           audio-set-depth! audio-depth
-          audio-add-track! audio-track? audio-track-names audio-track-bytes audio-play! audio-fade-out! audio-playing
-          audio-player-gain audio-players audio-positions audio-mix-chunk! FADE-IN-MS FADE-OUT-MS TRACK-GAIN
-          audio-voices audio-ambient-frames audio-ambient-play! audio-ambient-playing? audio-underruns
-          mix-cached-into audio-cache-reset! audio-cache-rendered
-          audio-set-source! audio-source? audio-source-depth
+          audio-voices audio-underruns audio-preroll! audio-stall-begin! audio-stall-end! audio-known-starved audio-known-stalls audio-cue-at
+          mix-cues-into add-voices!
+          audio-set-source! audio-source? audio-source-depth audio-source-underruns audio-source-pump!
+          SOURCE-DEPTH SOURCE-BUFFER SOURCE-PUSH-MAX
           audio-state
-          mix-into
-          AMBIENT-GAIN CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
+          CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
 
   (begin
-    (define AMBIENT-GAIN 0.55)
     (define CUE-GAIN 1.0)
     (define PUSH-MAX 4096)         ; frames per pump at most (85 ms at 48 kHz)
-    (define BUFFER-FRAMES 8192)    ; the sink's ring: 170 ms at 48 kHz, the stall headroom
+    (define BUFFER-FRAMES 16384)   ; the sink's ring: 341 ms at 48 kHz, the stall headroom (8192 before 2026-09-22)
     ;; TARGET-DEPTH is two things at once: the latency a cue lands within,
     ;; and the stall a frame may take before the output runs dry. At 3072
     ;; (64 ms at 48 kHz) any frame past ~64 ms underran; David heard the
     ;; tap hitch on his phone (2026-09-19, 5f26a45). 6144 rides a 100 ms
     ;; hitch on top of a 30 fps frame at 128 ms of cue latency (139 at
     ;; 44.1 kHz), plus the device's own; ?adepth=N on the web and
-    ;; --audio-depth N natively set it for a comparison.
-    (define TARGET-DEPTH 6144)
+    ;; --audio-depth N natively set it for a comparison. 12288 (256 ms at
+    ;; 48 kHz) since 2026-09-22 (David's ruling): with the worklet draining
+    ;; off the main thread, a tap's frame (its draw and the cue) still ran
+    ;; a 128 ms ring dry on his phone in bursts of 1-4k frames; 256 ms of
+    ;; cue latency was judged acceptable, the effects still immediate.
+    (define TARGET-DEPTH 12288)
     (define *target-depth* TARGET-DEPTH)
 
     ;; --- state ---------------------------------------------------------------
@@ -64,22 +66,33 @@
     (define *rate* 44100)
     (define *bank* '())            ; ((cue . float-buffer) ...) at *rate*
     (define *voices* '())          ; ((buffer . position) ...), playing
-    (define *ambient* #f)          ; s16le mono bytevector, or #f
-    (define *ambient-rate* 22050)
-    (define *ambient-pos* 0.0)     ; frame position in the ambient, fractional
-    (define *ambient-on* #f)       ; the loop is playing: from the menu live on (David, 2026-09-20: nothing under the reveal)
     (define *muted* #f)
     (define *volume* 1.0)          ; the master, 0..1: folded into the gains (the settings' VOLUME row)
     (define *music-on* #t)         ; the ambient (MUSIC): off keeps its position, silent
     (define *sfx-on* #t)           ; the cues (SFX)
     (define *out* #f)              ; the stereo f32 push buffer, PUSH-MAX frames
-    ;; The tracker's stream (P3b): a procedure (out byte-offset n) -> #t that
-    ;; fills n stereo f32 frames, mixed at *source-gain* after the ambient
-    ;; and the cues; #f from it ends the source. Additive: nothing else in
-    ;; the mixer changes when no source is set.
+    ;; The source's stream (P3b: the tracker's tune; M1: the live soundtrack):
+    ;; a procedure (out byte-offset n) -> #t that fills n stereo f32 frames;
+    ;; #f from it ends the source. The source renders into a SINK OF ITS OWN
+    ;; (M1, D59): SOURCE-DEPTH ahead on a SOURCE-BUFFER ring, deeper than the
+    ;; cues' stream, so a frame that stalls (a GC pause of 138 ms and 118 ms
+    ;; p95 frames on David's phone, 2026-09-21: DRY 106496 on the shared
+    ;; ring) does not run the music dry, while the cues keep their 128 ms
+    ;; latency on the main stream. The gain is the sink's own volume (an
+    ;; atomic the worklet reads at output time, so a fade is heard at once),
+    ;; not a loop over the samples. A refill after a stall is capped at
+    ;; SOURCE-PUSH-MAX frames per pump, so the catch-up spreads over a few
+    ;; frames instead of one long one. Additive: nothing else in the mixer
+    ;; changes when no source is set. The stream opens with the source and
+    ;; closes with it (an idle sink counts starved frames).
+    (define SOURCE-BUFFER 32768)   ; the ring: 683 ms at 48 kHz
+    (define SOURCE-DEPTH 16384)    ; kept ahead: 341 ms at 48 kHz (743 at 22050)
+    (define SOURCE-PUSH-MAX 4096)  ; frames per pump at most: ~4 ms of synth at 1 ms per 1024
     (define *source* #f)
     (define *source-gain* 0.0)
-    (define *src* #f)              ; the source's buffer, PUSH-MAX frames
+    (define *src* #f)              ; the source's buffer, SOURCE-PUSH-MAX frames
+    (define *src-stream* #f)       ; the source's sink, open while a source is set
+    (define *src-underruns* 0)     ; the starved frames of closed source sinks (the count carries over)
 
     (define (audio-open?) (and *stream* #t))
     ;; The frames kept ahead of the output: TARGET-DEPTH unless set; a
@@ -96,11 +109,46 @@
     (define (audio-set-source! proc gain)
       (set! *source* proc)
       (set! *source-gain* gain)
-      (when (and proc (not *src*)) (set! *src* (make-bytevector (* 8 PUSH-MAX) 0))))
+      (cond ((and proc (not *src-stream*) *ctx* (not *muted*))
+             (set! *src* (or *src* (make-bytevector (* 8 SOURCE-PUSH-MAX) 0)))
+             (set! *src-stream* (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: SOURCE-BUFFER)))
+             (when *src-stream* (set-audio-stream-volume! *src-stream* (max 0.0 (min 1.0 gain)))))
+            ((and proc *src-stream*)
+             (set-audio-stream-volume! *src-stream* (max 0.0 (min 1.0 gain))))
+            ((and (not proc) *src-stream*)
+             (close-source-stream!))))
+    (define (close-source-stream!)
+      (when *src-stream*
+        (set! *src-underruns* (+ *src-underruns* (audio-stream-underruns *src-stream*)))
+        (close-audio-stream! *src-stream*)
+        (set! *src-stream* #f)))
     (define (audio-source?) (and *source* #t))
     ;; The frames between the source's render position and the device: what
-    ;; the sink still holds. A clock over the source subtracts it.
-    (define (audio-source-depth) (if *stream* (audio-stream-depth *stream*) 0))
+    ;; its sink still holds. A clock over the source subtracts it.
+    (define (audio-source-depth) (if *src-stream* (audio-stream-depth *src-stream*) 0))
+    ;; The source sink's cumulative starved frames (the music ran dry).
+    (define (audio-source-underruns) (+ *src-underruns* (if *src-stream* (audio-stream-underruns *src-stream*) 0)))
+    ;; The source's pump: toward SOURCE-DEPTH, at most SOURCE-PUSH-MAX frames
+    ;; per pump, or SOURCE-PUSH-RAMP while the sink holds under SOURCE-RAMP-BELOW
+    ;; (a fresh sink, or one that ran dry): the fill then spreads over
+    ;; pumps of ~43 ms of audio each instead of four of 85 ms in the first
+    ;; frames (David's phone, 2026-09-21: "hangs for half a second right
+    ;; when it starts"); at 2048 frames per 12 ms timer tick the sink still
+    ;; gains on real time. #f from the source ends it and closes its sink.
+    ;; Answers the frames pushed.
+    (define SOURCE-PUSH-RAMP 2048)   ; 43 ms of audio a pump: 1024 starved 768-1536 frames at the start on a loaded box (the timer's jitter past 21 ms)
+    (define SOURCE-RAMP-BELOW 4096)
+    (define (audio-source-pump!) (pump-source!))
+    (define (pump-source!)
+      (if (and *source* *src-stream*)
+          (let* ((depth (audio-stream-depth *src-stream*))
+                 (n (min (if (< depth SOURCE-RAMP-BELOW) SOURCE-PUSH-RAMP SOURCE-PUSH-MAX)
+                         (audio-stream-room *src-stream*)
+                         (- SOURCE-DEPTH depth))))
+            (cond ((<= n 0) 0)
+                  ((*source* *src* 0 n) (push-audio-samples *src-stream* *src* n))
+                  (else (set! *source* #f) (close-source-stream!) 0)))
+          0))
     (define (audio-rate) *rate*)
     (define (audio-muted?) *muted*)
     (define (audio-set-muted! m) (set! *muted* m))
@@ -109,27 +157,45 @@
     (define (audio-set-music! on?) (set! *music-on* (and on? #t)))
     (define (audio-sfx?) *sfx-on*)
     (define (audio-set-sfx! on?) (set! *sfx-on* (and on? #t)))
-    ;; The master volume, 0..1, a factor on both gains. The ambient cache
-    ;; carries its gain baked in, so a change re-renders it from its top
-    ;; (the loop restarts; a render from the play position would render
-    ;; the whole prefix at once, a stall of the loop's length); the cues take
-    ;; the factor as they are added, so the bank stays.
+    ;; The master volume, 0..1: the cues take it as they are added (the bank
+    ;; stays); the music takes it on its own gain ((crash shell) apply-audio-settings!).
     (define (audio-set-volume! v)
-      (let ((v (max 0.0 (min 1.0 (* 1.0 v)))))
-        (unless (= v *volume*)
-          (set! *volume* v)
-          (cache-reset!))))
+      (set! *volume* (max 0.0 (min 1.0 (* 1.0 v)))))
     (define (audio-voices) *voices*)
-    (define (audio-ambient-frames) (if *ambient* (bytes->frames *ambient*) 0))
-    ;; Start the loop from its top; it is held (preloaded, silent) until
-    ;; then. The cache plays from its top too.
-    (define (audio-ambient-play!) (set! *ambient-pos* 0.0) (set! *cache-pos* 0) (set! *ambient-on* #t))
-    (define (audio-ambient-playing?) (and *ambient-on* *ambient* #t))
     ;; The sink's cumulative starved frames (the output ran dry): the
     ;; measure of a stall the pump did not ride out.
     (define (audio-underruns) (if *stream* (audio-stream-underruns *stream*) 0))
-    (define (audio-cache-rendered) *rendered*)
-    (define (audio-cache-reset!) (cache-reset!))
+
+    ;; A known stall (a tune's parse and open on the main thread: a tune
+    ;; landing): the caller pre-rolls the cues' sink to the ring's full
+    ;; capacity first (audio-preroll!: the stall headroom beyond the target
+    ;; depth), and brackets the stall so the frames it still starved are
+    ;; counted apart (audio-known-starved, and how many stalls): the readout
+    ;; then says what was a known event and what was the game's frames.
+    (define *known-starved* 0)
+    (define *known-stalls* 0)
+    (define *stall-mark* #f)
+    (define (audio-preroll!)
+      (when *stream*
+        (let loop ((guard 0))
+          (let ((n (min PUSH-MAX (audio-stream-room *stream*))))
+            (when (and (> n 0) (< guard 8))
+              (set! *voices* (mix-cues-into *out* n *voices*))
+              (push-audio-samples *stream* *out* n)
+              (loop (+ guard 1)))))))
+    (define (audio-stall-begin!)
+      (audio-preroll!)
+      (set! *stall-mark* (audio-underruns)))
+    (define (audio-stall-end!)
+      (when *stall-mark*
+        (set! *known-starved* (+ *known-starved* (- (audio-underruns) *stall-mark*)))
+        (set! *known-stalls* (+ *known-stalls* 1))
+        (set! *stall-mark* #f)))
+    (define (audio-known-starved) *known-starved*)
+    (define (audio-known-stalls) *known-stalls*)
+    ;; When the last cue started, ms (the ladder leaves a tap's frame out)
+    (define *cue-at* #f)
+    (define (audio-cue-at) *cue-at*)
 
     ;; Open the context and the stream, render the cues the title needs
     ;; first (FIRST-CUES: the reveal's beeps and the gate's dial, short
@@ -147,7 +213,7 @@
           (set! *ctx* ctx)
           (when ctx
             (set! *rate* (audio-context-sample-rate ctx))
-            (cache-reset!)   ; the ambient cache is at the context's rate
+
             (set! *stream* (open-audio-stream channels: 2 buffer-frames: BUFFER-FRAMES))
             (set! *out* (make-bytevector (* 8 PUSH-MAX) 0))
             (set! *bank* (map (lambda (name) (cons name (render-cue name *rate*))) FIRST-CUES)))
@@ -182,79 +248,8 @@
         (set! *bank* (cons (cons name (render-cue name *rate*)) *bank*)))
       (let ((entry (assq name *bank*)))
         (when (and entry (not *muted*) *sfx-on*)
+          (set! *cue-at* (current-milliseconds))
           (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
-
-    ;; The ambient loop: s16le mono PCM at rate, looping; #f clears it.
-    ;; --- the ambient cache (P3c) ------------------------------------------------
-    ;;
-    ;; David's phone summary at 7604742: the pump cost 9 ms a frame. mix-into
-    ;; resampled the s16 ambient and summed the voices sample by sample in
-    ;; Sigil, ~800 audio frames per game frame at 48 kHz, two native
-    ;; writes each. The ambient is now rendered ONCE into a stereo f32
-    ;; cache at the context's rate with its gain applied, lazily, just
-    ;; ahead of the play cursor (the first loop through the ambient costs
-    ;; what a frame cost before, spread the same way; every loop after is
-    ;; free), and a pump is one or two bytevector-copy! calls plus, while a
-    ;; cue plays, one Sigil pass over the chunk adding the voice. The
-    ;; voices advance once per chunk, not per audio frame (mix-into consed
-    ;; a voice list per audio frame). mix-into stays as the reference the
-    ;; gate holds the cached path to, sample for sample.
-    (define ZERO (make-bytevector (* 8 PUSH-MAX) 0))   ; silence, copied when there is no ambient
-    (define *cache* #f)            ; stereo f32 at *rate*, gain applied, or #f
-    (define *cache-frames* 0)      ; its length in frames
-    (define *rendered* 0)          ; frames rendered so far, from 0
-    (define *cache-pos* 0)         ; the play cursor, a frame index
-
-    (define (cache-reset!)
-      (set! *cache* #f)
-      (set! *cache-frames* 0)
-      (set! *rendered* 0)
-      (set! *cache-pos* 0))
-
-    ;; Render cache frames [*rendered*, upto): the same interpolation
-    ;; mix-into does (frame i of the cache is ambient position i * ratio).
-    (define (render-cache! upto)
-      (let ((frames (bytes->frames *ambient*))
-            (ratio (/ (* 1.0 *ambient-rate*) *rate*)))
-        (let loop ((i *rendered*))
-          (when (< i upto)
-            (let* ((pos (* i ratio))
-                   (k (exact (floor pos)))
-                   (frac (- pos k))
-                   (a (bytes-ref *ambient* (modulo k frames)))
-                   (b (bytes-ref *ambient* (modulo (+ k 1) frames)))
-                   (v (* AMBIENT-GAIN *volume* (+ a (* frac (- b a))))))
-              (bytevector-ieee-single-set! *cache* (* 8 i) v 'little)
-              (bytevector-ieee-single-set! *cache* (+ 4 (* 8 i)) v 'little))
-            (loop (+ i 1))))
-        (set! *rendered* (max *rendered* upto))))
-
-    ;; The cache ready for [*cache-pos*, *cache-pos* + n): allocated on
-    ;; first use, rendered up to what the chunk reads (the wrap-around
-    ;; part is rendered already: rendering runs from 0 in play order).
-    (define (ensure-cache! n)
-      (unless *cache*
-        (set! *cache-frames* (max 1 (exact (floor (/ (* (bytes->frames *ambient*) *rate*) (* 1.0 *ambient-rate*))))))
-        (set! *cache* (make-bytevector (* 8 *cache-frames*) 0))
-        (set! *rendered* 0)
-        (set! *cache-pos* 0))
-      (render-cache! (min *cache-frames* (+ *cache-pos* n))))
-
-    ;; n frames of the ambient from the cursor into out, the cursor
-    ;; advanced: one copy per pass over the loop's end, however many
-    ;; (an ambient shorter than a pump, the test's 300-frame ramp against
-    ;; a 3,576-frame device pump, wraps several times; the first cut copied
-    ;; twice and read past the cache, which the bytecode runner let
-    ;; through and the native one refused, 2026-09-20).
-    (define (copy-ambient! out n)
-      (copy-frames! out 0 n))
-
-    (define (copy-frames! out at n)
-      (when (> n 0)
-        (let ((take (min n (- *cache-frames* *cache-pos*))))
-          (bytevector-copy! out (* 8 at) *cache* (* 8 *cache-pos*) (* 8 (+ *cache-pos* take)))
-          (set! *cache-pos* (modulo (+ *cache-pos* take) *cache-frames*))
-          (copy-frames! out (+ at take) (- n take)))))
 
     ;; The voices over n frames of out (added, clamped), each advanced by
     ;; n; finished ones leave. Answers the voices left.
@@ -277,204 +272,31 @@
               (loop (cdr vs)
                     (if (>= (+ at n) len) kept (cons (cons cue (+ at n)) kept)))))))
 
-    ;; The cached mix of n frames into out: the ambient (or silence) then
-    ;; the voices. Answers the voices left. Pure over the cache state, so
-    ;; the gate can hold it against mix-into.
-    ;; Add the source's n frames into out (stereo), clamped.
-    (define (add-source! out n)
-      (let ((g *source-gain*))
-        (let loop ((i 0))
-          (when (< i n)
-            (let* ((o (* 8 i))
-                   (l (+ (bytevector-ieee-single-ref out o 'little)
-                         (* g (bytevector-ieee-single-ref *src* o 'little))))
-                   (r (+ (bytevector-ieee-single-ref out (+ o 4) 'little)
-                         (* g (bytevector-ieee-single-ref *src* (+ o 4) 'little)))))
-              (bytevector-ieee-single-set! out o (max -1.0 (min 1.0 l)) 'little)
-              (bytevector-ieee-single-set! out (+ o 4) (max -1.0 (min 1.0 r)) 'little))
-            (loop (+ i 1))))))
-
-    (define (mix-cached-into out n ambient? voices)
-      (if ambient?
-          (begin (ensure-cache! n) (copy-ambient! out n))
-          (bytevector-copy! out 0 ZERO 0 (* 8 n)))
+    ;; The cues' mix of n frames into out: silence, then the voices.
+    ;; Answers the voices left. (P3c's ambient cache and P4's OGG track
+    ;; players lived here until M1 put the music on motif's player, on a
+    ;; sink of its own: this sink carries the cues alone.)
+    (define ZERO (make-bytevector (* 8 PUSH-MAX) 0))
+    (define (mix-cues-into out n voices)
+      (bytevector-copy! out 0 ZERO 0 (* 8 n))
       (if (null? voices) voices (add-voices! out n voices)))
 
-    (define (audio-set-ambient! bytes rate)
-      (cache-reset!)
-      (set! *ambient* bytes)
-      (set! *ambient-rate* rate)
-      (set! *ambient-pos* 0.0))
-
-    ;; --- the mix ---------------------------------------------------------------
-
-    ;; Fill out with n stereo frames from the ambient (from position pos
-    ;; at ratio ambient-rate/rate, looping over ambient-frames) and the
-    ;; voices; returns (list pos voices) after the n frames. Pure: the gate
-    ;; calls it with a silent ambient and one cue and reads the buffer back.
-    (define (mix-into out n ambient ambient-frames pos ratio voices amb-gain)
-      (let loop ((i 0)
-                 (pos pos)
-                 (voices voices))
-        (if (= i n)
-            (list pos voices)
-            (let* ((amb (if (and ambient (> ambient-frames 0))
-                            (let* ((k (exact (floor pos)))
-                                   (frac (- pos k))
-                                   (a (bytes-ref ambient k))
-                                   (b (bytes-ref ambient (modulo (+ k 1) ambient-frames))))
-                              (* amb-gain (+ a (* frac (- b a)))))
-                            0.0))
-                   (mixed (let sum ((vs voices) (acc amb))
-                            (if (null? vs)
-                                acc
-                                (sum (cdr vs)
-                                     (+ acc (* CUE-GAIN (cue-ref (car (car vs)) (cdr (car vs)))))))))
-                   (sample (max -1.0 (min 1.0 mixed))))
-              (bytevector-ieee-single-set! out (* 8 i) sample 'little)
-              (bytevector-ieee-single-set! out (+ 4 (* 8 i)) sample 'little)
-              (loop (+ i 1)
-                    (if (and ambient (> ambient-frames 0))
-                        (let ((next (+ pos ratio)))
-                          (if (>= next ambient-frames) (- next ambient-frames) next))
-                        pos)
-                    ;; every voice a frame on; finished ones leave
-                    (let advance ((vs voices) (acc '()))
-                      (cond ((null? vs) acc)
-                            ((>= (+ 1 (cdr (car vs))) (cue-frames (car (car vs)))) (advance (cdr vs) acc))
-                            (else (advance (cdr vs) (cons (cons (car (car vs)) (+ 1 (cdr (car vs)))) acc))))))))))
-
-    ;; --- the tracks (P4, ruling D50) --------------------------------------------
-    ;;
-    ;; Music is a set of named tracks, each decoded s16 mono PCM at its
-    ;; own rate ((crash music) says which plays where), played by up to
-    ;; two players at a time so one can fade out under another fading
-    ;; in. A player is (name pos gain target step): its position in
-    ;; source frames (fractional), its gain now, the gain it ramps
-    ;; toward, and the ramp's step per output frame (fixed when the ramp
-    ;; is set, so it lands: a step recomputed from the distance left
-    ;; never arrives). The inner loop is (crash native)'s %mix-track! (C
-    ;; on both targets): a three-minute tune rendered as the ambient's
-    ;; cache would be 65 MB, and the Sigil per-sample loop cost 9 ms a
-    ;; frame on the phone (P3c). Every track's last position is kept so
-    ;; a track resumes where it left off (the menu theme, the rest
-    ;; tracks); 'top starts it over. The master volume and MUSIC apply as
-    ;; factors on the players' gains at mix time, so a change needs no
-    ;; re-render.
-    (define FADE-IN-MS 1000)      ; a track coming in (menu -> board, the theme's return)
-    (define FADE-OUT-MS 500)      ; a track leaving
-    (define TRACK-GAIN 0.55)      ; the tracks' level under the cues (AMBIENT-GAIN's value)
-    (define *tracks* '())         ; ((name . (bytes . rate)) ...)
-    (define *players* '())        ; ((name pos gain target step) ...), the newest first
-    (define *positions* '())      ; ((name . pos) ...), where each track left off
-
-    (define (audio-add-track! name bytes rate)
-      (set! *tracks* (cons (cons name (cons bytes rate))
-                           (filter (lambda (t) (not (eq? (car t) name))) *tracks*))))
-
-    (define (audio-track? name) (and (assq name *tracks*) #t))
-    (define (audio-track-names) (map car *tracks*))
-    ;; the tracks' PCM in bytes (the soak's line; s16 mono: 7.5 MB a three-minute tune)
-    (define (audio-track-bytes)
-      (let loop ((ts *tracks*) (n 0))
-        (if (null? ts) n (loop (cdr ts) (+ n (bytevector-length (cadr (car ts))))))))
-
-    ;; The track playing (fading in or at rest), or #f while everything fades out.
-    (define (audio-playing)
-      (let loop ((ps *players*))
-        (cond ((null? ps) #f)
-              ((> (list-ref (car ps) 3) 0.0) (car (car ps)))
-              (else (loop (cdr ps))))))
-
-    (define (audio-player-gain name)
-      (let ((p (assq name *players*)))
-        (if p (list-ref p 2) 0.0)))
-
-    (define (audio-players) *players*)
-    (define (audio-positions) *positions*)
-
-    ;; A player ramping from its gain to target over ms at the context's rate.
-    (define (ramped name pos gain target ms)
-      (let ((frames (max 1 (exact (round (/ (* ms *rate*) 1000.0))))))
-        (list name pos gain target (/ (- target gain) (* 1.0 frames)))))
-
-    ;; Play name: 'top from its start, 'resume from where it left off. The
-    ;; track already playing at rest or coming in stays; every other player
-    ;; fades out over FADE-OUT-MS and the new one fades in over FADE-IN-MS
-    ;; (a cross-fade when both run). No track of that name: nothing changes.
-    (define (audio-play! name mode)
-      (when (audio-track? name)
-        (let ((current (assq name *players*)))
-          (if (and current (> (list-ref current 3) 0.0) (eq? mode 'resume))
-              #f   ; already on its way in or at rest
-              (let* ((others (map (lambda (p) (ramped (car p) (cadr p) (caddr p) 0.0 FADE-OUT-MS))
-                                  (filter (lambda (p) (not (eq? (car p) name))) *players*)))
-                     (pos (cond ((eq? mode 'top) 0.0)
-                                (current (cadr current))
-                                ((assq name *positions*) => cdr)
-                                (else 0.0)))
-                     (gain (if current (caddr current) 0.0)))
-                (set! *players* (cons (ramped name pos gain 1.0 FADE-IN-MS) others)))))))
-
-    ;; Everything fades out over ms (the cascade, a severed link); 0 is at once.
-    (define (audio-fade-out! ms)
-      (set! *players* (map (lambda (p) (ramped (car p) (cadr p) (caddr p) 0.0 ms)) *players*)))
-
-    ;; A chunk of n stereo frames of the tracks alone into out (the tests'
-    ;; door: silence, then the players), at the context's rate.
-    (define (audio-mix-chunk! out n)
-      (bytevector-copy! out 0 ZERO 0 (* 8 n))
-      (mix-tracks-into! out n))
-
-    ;; The players advanced through n output frames into out (added), at
-    ;; the context's rate; a player that reached silence on its way out
-    ;; leaves, its position kept.
-    (define (mix-tracks-into! out n)
-      (let ((factor (if (and *music-on* (not *muted*)) (* TRACK-GAIN *volume*) 0.0)))
-        (set! *players*
-              (let loop ((ps *players*) (acc '()))
-                (if (null? ps)
-                    (reverse acc)
-                    (let* ((p (car ps))
-                           (name (car p))
-                           (pos (cadr p))
-                           (gain (caddr p))
-                           (target (cadddr p))
-                           (step (list-ref p 4))
-                           (t (assq name *tracks*))
-                           (bytes (car (cdr t)))
-                           (rate (cdr (cdr t)))
-                           (frames (quotient (bytevector-length bytes) 2))
-                           ;; the gain after n frames, landing on the target
-                           (g1 (let ((g (+ gain (* n step))))
-                                 (if (or (and (> step 0.0) (>= g target)) (and (< step 0.0) (<= g target)) (= step 0.0))
-                                     target
-                                     g)))
-                           (pos1 (if (> frames 0)
-                                     (%mix-track! out n bytes frames pos (/ (* 1.0 rate) *rate*) (* factor gain) (* factor g1))
-                                     pos)))
-                      (set! *positions* (cons (cons name pos1) (filter (lambda (e) (not (eq? (car e) name))) *positions*)))
-                      (loop (cdr ps)
-                            (if (and (<= g1 0.0) (<= target 0.0))
-                                acc   ; faded out: leaves, its position kept
-                                (cons (list name pos1 g1 target (if (= g1 target) 0.0 step)) acc)))))))))
-
-    ;; Once a frame: top the sink up to TARGET-DEPTH frames ahead of the
+    ;; Once a frame (twice on the web: the tick and the page's own timer, M1):
+    ;; top the sink up to TARGET-DEPTH frames ahead of the
     ;; output, PUSH-MAX at most. Answers the frames pushed (0 when there is
     ;; no stream, or the depth is already there).
+    ;; Both sinks: the main stream (cues, the OGG ambient) toward its depth,
+    ;; then the source's own (pump-source!). Answers the main stream's push.
     (define (audio-pump!)
       (if (not *stream*)
           0
           (let ((n (min PUSH-MAX
                         (audio-stream-room *stream*)
                         (- *target-depth* (audio-stream-depth *stream*)))))
+            (pump-source!)
             (if (<= n 0)
                 0
                 (begin
-                  (set! *voices* (mix-cached-into *out* n (and (not *muted*) *music-on* *ambient-on* *ambient* #t) *voices*))
-                  (mix-tracks-into! *out* n)   ; the music (P4, D50), over the cues
-                  (when *source*
-                    (if (and (not *muted*) (*source* *src* 0 n))
-                        (add-source! *out* n)
-                        (when (not *muted*) (set! *source* #f))))
-                  (push-audio-samples *stream* *out* n))))))))
+                  (set! *voices* (mix-cues-into *out* n *voices*))
+                  (push-audio-samples *stream* *out* n))))))
+    ))

@@ -1031,6 +1031,7 @@
       (row 248 (1 "===" 0 0 "000") (2 "===" 0 0 "000") (3 "===" 0 0 "000") (4 "===" 0 0 "000") (5 "===" 0 0 "000") (6 "===" 0 0 "000") (7 "===" 0 0 "000") (8 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B01"))))
   (order 0 1 2 3 4 5 6 7 8 9)
+  (marks calm: 0)
   (history
     ("codex" "2026-09-21" "Black Glass; original dark halftime dubstep; F minor.")
     ("codex" "2026-09-21" "calm: order 0-5; fill: 6; tense: 7-12; B07 loops tense.")
@@ -1043,4 +1044,5 @@
     ("codex" "2026-09-21" "72 bars: 4 entrance, 8 statement, 8 groove, 8 development, 8 lower bridge, 4 same-kit lift, 8 return, 8 variation, 8 release, 8 turnaround. Grit first enters at bar 4; full statement at bar 5. B01 skips the one-time entrance on repetition.")
     ("codex" "2026-09-21" "No noise swell or thirty-second roll in the title edit. Final beat releases all voices to make room for the loop return. Full and independent menu-loop auditions are separate from the future finite album cut and mastering pass.")
     ("codex" "2026-09-21" "David likes the improved title balance but requests removal of the FM phrase arpeggios. Restore the first title version's complete lead line and keep II's approximately 4 dB reduction of all 128 pressure-grit/pressure-tear accents and their defaults. Preserve the softer bridge, turnaround, sub, kit, patches, bus and form. His optional idea is a separate rapidly cycling chord stab; no such instrument is added in this pass. Retain title I and II.")
-    ("codex" "2026-09-21" "David confirms he wants rapidly cycling tracker chords and requests that old-school flavor. Add twelve brief pulse-wave stabs in gaps on the contact channel. 037 cycles root/minor-third/fifth each tick; 058 supplies an F-minor inversion. Each stab has one attack and a held gate, with no retrigger during pitch cycling. Preserve every prior event, restored FM lead, reduced grit levels, soft bridge/turnaround, bus and menu form. Title III retained.")))
+    ("codex" "2026-09-21" "David confirms he wants rapidly cycling tracker chords and requests that old-school flavor. Add twelve brief pulse-wave stabs in gaps on the contact channel. 037 cycles root/minor-third/fifth each tick; 058 supplies an F-minor inversion. Each stab has one attack and a held gate, with no retrigger during pitch cycling. Preserve every prior event, restored FM lead, reduced grit levels, soft bridge/turnaround, bus and menu form. Title III retained.")
+    ("m1 (the title theme: intro then its own B01 loop)" "2026-09-21" "set marks calm: 0")))

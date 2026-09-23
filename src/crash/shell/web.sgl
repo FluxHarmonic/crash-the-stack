@@ -123,6 +123,11 @@
           (crash menu)
           (crash title)
           (crash title draw)
+          (crash hub world)   ; P5: the hub (JACK IN is a hub run)
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub run)
+          (crash hub draw)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -134,10 +139,8 @@
           (crash stats)
           (crash sfx)
           (crash audio)
-          (crash audio transfer)
           (crash shell)
           (crash code)
-          (crash run)
           (only (crash scores) scores-best scores-streak)
           (only (crash daily) daily-date)
           (only (crash native) %b64-decode %fatal!)
@@ -146,7 +149,8 @@
           (crash cards save)
           (crash cards seeds)
           (crash gpu post)
-          (crash music))
+          (crash music)
+          (crash music live))   ; M1: the soundtrack live from .cts (D59)
 
   (export web-main web-dispatch)
 
@@ -160,6 +164,8 @@
     (define *skip* (quote ()))  ; ?skip=audio,draw,frame,sim: parts of the tick left out (the soak's bisection door)
     (define (skip? part) (and (memq part *skip*) #t))
     (define *keys* '())      ; key symbols currently held (sigil-app's names)
+    (define *pointer-up* #f)  ; a pointer released this frame (the page's pointerup; P5)
+    (define *vibrate-asked* #f) ; the page's vibrate poll: 1 once when a touch button was pressed (P5)
     (define *pressed* '())   ; keys that went down since the last frame
     (define *click* #f)      ; (x . y) in virtual pixels, or #f
     (define *textures* '())  ; loaded look textures by path, tex or #f once given up
@@ -174,7 +180,10 @@
     (define *version* #f)    ; the page's build stamp, for the menu's corner
     (define *announced* #f)  ; the boot lines have been printed for this deal
     (define *booted* #f)     ; a table has been booted (on the first frame)
-    (define *screen* 'menu)  ; menu | stack | cards
+    (define *screen* 'menu)  ; menu | stack | cards | hub (P5)
+    (define *hub-seed* #f)   ; ?hub=SEED: JACK IN at boot with this run seed (P5; the arms)
+    (define *hub-at* #f)     ; &hubat=N: the runner set down on key node N after the jack in (P5; the arms)
+    (define *pace* 'normal)  ; &pace=easy|normal|elite: the difficulty of a run the doors start (D65; the arms)
     (define *overlay* #f)    ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
     (define *menu* #f)       ; the first screen, (crash menu)
     (define *update* #f)     ; waiting | prompt | #f: the page's word on a new version
@@ -186,7 +195,6 @@
     (define *clock-at* 0.0)  ; now-ms when the clock landed (the epoch second is the clock plus the time since)
     (define *code* #f)       ; ?code=: a share code to deal at boot (P4)
     (define *sw-ready* #f)   ; the page said its service worker is active (or there is none): fetches are safe (P3d, D40)
-    (define *ambient-ready* #f) ; the ambient landed, or the page gave it up: the boot's audio step (D40)
     (define *deal* #f)       ; the card table's deal, (crash cards input)
     (define *card-geom* #f)
     (define *card-fx* #f)    ; the card table's effects and clock, (crash cards fx)
@@ -228,7 +236,8 @@
     (define *ms-skip* 1)     ; the first tick has no previous frame to sample
     (define *ms* #f)         ; ?ms: the frame's wall dt in the corner, for the phone's frame cost
     (define *audio-ready* #f) ; the context and sink opened (audio-open!)
-    (define *track-transfer* #f) ; one preallocated PCM buffer, filled incrementally
+    (define *device-hint* #f)  ; (cores memory) from the page, or #f
+    (define *tune-chunks* '())
     (define *resumed* #f)    ; the context was seen running after a gesture (the line is said once)
     (define *ms-sum* 0.0)    ; and, with ?trace, a line every MS-EVERY frames: mean and max ms
     (define *ms-max* 0.0)
@@ -252,12 +261,14 @@
     (define *ms-flush* 0.0)
     (define *tick-start* 0.0)
     (define *tick-ms* 0.0)       ; the whole web-tick, wasm side
-    (define *boot-ms* 0.0)       ; initial boot!, boot-tick!, ambient-tick!
+    (define *boot-ms* 0.0)       ; initial boot!, boot-tick!, music-tick!
     (define *count-ms* 0.0)      ; count-frame! (the stats bookkeeping, a gc-stats read)
     (define *pump-ms* 0.0)       ; audio-pump!
     (define *ms-tick* 0.0)
     (define *ms-pump* 0.0)
     (define *ms-other* 0.0)
+    (define *ms-resize* 0.0)
+    (define *resize-ms* 0.0)   ; gles3-resize-to-display this frame: the display query and the buffer resize
     (define *ms-boot* 0.0)
     (define *ms-count* 0.0)
     ;; The sim's parts on the stack table (the tap hitch, David on 5f26a45),
@@ -272,7 +283,7 @@
 
     (define (now-ms) (/ (* 1000.0 (current-jiffy)) (jiffies-per-second)))
     (define MS-EVERY 120)      ; two seconds at 60 fps: the worst-frame readout refreshes often enough to catch a tap
-    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN tick MEAN pump MEAN other MEAN boot MEAN count MEAN underruns FRAMES
+    ;;   crash: frame-ms MEAN MAX step MEAN present MEAN gc MINOR MAJOR alloc BYTES gcms MS sim MEAN draw MEAN flush MEAN tick MEAN pump MEAN resize MEAN other MEAN boot MEAN count MEAN underruns FRAMES
     ;;                                        (underruns: the audio sink's starved frames in the window: the music stalled)
     ;;                                        over the last MS-EVERY frames (?ms with
     ;;                                        ?trace), ms to a tenth; the GC's
@@ -283,7 +294,7 @@
     ;; The tick's time outside every timed part: the shell's glue, the
     ;; input frame, the trace lines, the texture fetch bookkeeping.
     (define (other-ms)
-      (max 0.0 (- *tick-ms* *sim-ms* *draw-ms* *flush-ms* *pump-ms* *boot-ms* *count-ms*)))
+      (max 0.0 (- *tick-ms* *sim-ms* *draw-ms* *flush-ms* *pump-ms* *boot-ms* *count-ms* *resize-ms*)))
 
     ;; gc-stats is read every GC-SAMPLE frames, not every frame: the read
     ;; costs about 8 ms on the desktop wasm build (measured 2026-09-19 as
@@ -322,7 +333,8 @@
                      " adepth " (number->string (audio-depth))
                      " atlas " (if (atlas-on?) "on" "off")
                      " copper " (if (number? *copper*) (number->string *copper*) (symbol->string *copper*))
-                     " phosphor " (symbol->string *phosphor*)))
+                     " phosphor " (symbol->string *phosphor*)
+                     " " (music-readout)))
 
     ;; The ring as text, to the page for the clipboard (a console line the
     ;; page's hook reads, newlines as ~, printed whether or not ?trace is
@@ -357,6 +369,7 @@
       (set! *ms-tick* 0.0)
       (set! *ms-pump* 0.0)
       (set! *ms-other* 0.0)
+      (set! *ms-resize* 0.0)
       (set! *ms-boot* 0.0)
       (set! *ms-count* 0.0)
       (set! *worst* #f)
@@ -383,6 +396,7 @@
         (set! *ms-tick* (+ *ms-tick* *tick-ms*))
         (set! *ms-pump* (+ *ms-pump* *pump-ms*))
         (set! *ms-other* (+ *ms-other* (other-ms)))
+        (set! *ms-resize* (+ *ms-resize* *resize-ms*))
         (set! *ms-boot* (+ *ms-boot* *boot-ms*))
         (set! *ms-count* (+ *ms-count* *count-ms*))
         (when (or (not *worst*) (> ms (car *worst*)))
@@ -396,7 +410,8 @@
                  "alloc" (- (caddr now) (caddr was))
                  "gcms" (tenth (/ (- (cadddr now) (cadddr was)) 1000000.0))
                  "sim" (tenth (/ *ms-sim* MS-EVERY)) "draw" (tenth (/ *ms-draw* MS-EVERY)) "flush" (tenth (/ *ms-flush* MS-EVERY))
-                 "tick" (tenth (/ *ms-tick* MS-EVERY)) "pump" (tenth (/ *ms-pump* MS-EVERY)) "other" (tenth (/ *ms-other* MS-EVERY))
+                 "tick" (tenth (/ *ms-tick* MS-EVERY)) "pump" (tenth (/ *ms-pump* MS-EVERY))
+                 "resize" (tenth (/ *ms-resize* MS-EVERY)) "other" (tenth (/ *ms-other* MS-EVERY))
                  "boot" (tenth (/ *ms-boot* MS-EVERY)) "count" (tenth (/ *ms-count* MS-EVERY))
                  "underruns" (- (audio-underruns) *underruns-last*))
             (set! *underruns-last* (audio-underruns))
@@ -405,6 +420,7 @@
             (set! *ms-tick* 0.0)
             (set! *ms-pump* 0.0)
             (set! *ms-other* 0.0)
+            (set! *ms-resize* 0.0)
             ;;   crash: worst-frame MS sim S draw D flush F step A advance B save C cues D fx E
             (when *worst*
               (apply say "worst-frame" (exact (round (car *worst*)))
@@ -479,58 +495,29 @@
 
     ;; --- the sound (P3) ----------------------------------------------------------
 
-    ;; The page fetches and decodes each tune under assets/audio/ (there is
-    ;; no bytes fetch in the bridges the wasm has; the page has fetch and
-    ;; decodeAudioData) and hands the PCM over as ("track", name), then
-    ;; ("audio-size", byte-count), ("audio-chunk", base64) dispatches, then
-    ;; ("audio-done", count): see
-    ;; the music below. Decoded here into one s16le bytevector a track.
     ;;   crash: audio open|closed             the context and sink at boot
     ;;   crash: audio resumed                 a gesture resumed the context (said once)
     ;; ("ambient", "off") fades the music out and holds it: the browser
-    ;; arm's way to hear a cue by itself.
-    ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a 7.5 MB
-    ;; tune decoded in Sigil a character at a time cost whole frames per
-    ;; 16 KB chunk (2026-09-20, the ambient's delivery; the tune is six
-    ;; times the ambient). The page now adapts small conversion/delivery
-    ;; batches to a time budget; the receiver copies into one track buffer.
+    ;; arm's way to hear a cue by itself (the name is the P3 loop's; the
+    ;; door outlived it).
+    ;; base64 -> bytes is (crash native)'s %b64-decode (C, P4): a tune's
+    ;; text arrives in 12 KB chunks (the live soundtrack, M1); the OGG
+    ;; tracks of P4 (D50) and their 7.5 MB deliveries left with M1.
     (define (b64-decode text) (%b64-decode text))
 
-    ;; The music's tracks (P4, ruling D50): the page decodes each OGG and
-    ;; hands the PCM over in base64 chunks: ("track", NAME) opens one,
-    ;; ("audio-size", bytes) reserves its buffer, ("audio-chunk", b64) fills
-    ;; it, and ("audio-done", n) publishes the complete buffer to the
-    ;; player. The menu theme (spy) is what the boot's audio step waits for
-    ;; (the ambient's old place, and its lines: the arms read them):
-    ;;   crash: track NAME FRAMES             a track landed (0: given up)
-    ;;   crash: ambient FRAMES                the theme landed (spy; 0: given up)
-    ;;   crash: ambient start                 the music began (the menu live)
-    (define *track-name* 'spy)
+    ;; The boot's audio step waits for the menu theme's text (the page's
+    ;; fetch, asked for at boot: the theme opens the frame the menu is
+    ;; live, with nothing to wait for then) or THEME-WAIT-MS, whichever
+    ;; comes first: a lost fetch never holds the boot (D40).
+    ;;   crash: music landed NAME BYTES        a tune's text landed (the page's fetch)
+    ;;   crash: music unavailable NAME         the page gave the fetch up
+    (define THEME-WAIT-MS 3000)
+    (define *theme-ready* #f)
+    (define *theme-asked-at* #f)
+    (define (theme-ready?)
+      (or *theme-ready*
+          (and *theme-asked-at* (> (- *since-boot* *theme-asked-at*) THEME-WAIT-MS))))
 
-    (define (track! payload)
-      (set! *track-name* (string->symbol payload))
-      (set! *track-transfer* #f)
-      0)
-
-    (define (audio-chunk! payload)
-      (set! *track-transfer*
-            (transfer-append *track-transfer* (b64-decode payload)))
-      0)
-
-    (define (audio-done! payload)
-      (let ((bytes (or (transfer-finish *track-transfer* (string->number payload))
-                       (bytevector)))
-            (name *track-name*))
-        (set! *track-transfer* #f)
-        ;; no chunks: the page gave the track up (a failed fetch); the
-        ;; boot's audio step does not wait on the theme then
-        (when (> (bytevector-length bytes) 0)
-          (audio-add-track! name bytes AMBIENT-RATE))
-        (say "track" name (quotient (bytevector-length bytes) 2))
-        (when (eq? name 'spy)
-          (set! *ambient-ready* #t)
-          (say "ambient" (quotient (bytevector-length bytes) 2)))
-        0))
 
     ;; A user gesture (a pointer down, a key, the page's pointerup and
     ;; touchend and click): resume the context whenever it is not running.
@@ -662,12 +649,12 @@
     ;; so the line is built first (str) and written once; println's newline
     ;; is a second, empty entry, which nothing reads.
     ;; ?diag: the last DIAG-LINES trace lines that say what landed (the
-    ;; textures, the boot steps, the card, the ambient, the audio, the
+    ;; textures, the boot steps, the card, the music, the audio, the
     ;; atlas, the worker), drawn on every frame (render.sgl's
     ;; draw-diag-lines); a phone has no console to read them from.
     (define DIAG-LINES 16)          ; a 116 px band: the title's own diag lines start at y 126
     (define DIAG-KEEP '("crash: texture" "crash: boot" "crash: title card ready" "crash: title card skipped" "crash: title card done"
-                        "crash: title gate" "crash: title settled" "crash: ambient" "crash: audio" "crash: atlas" "crash: sw"
+                        "crash: title gate" "crash: title settled" "crash: music" "crash: audio" "crash: atlas" "crash: sw"
                         "crash: menu chose" "crash: page" "crash: bg " "crash: literal" "crash: update"))
     (define *diag* #f)
     (define *diag-lines* '())   ; newest first
@@ -885,12 +872,14 @@
     ;; (measured 2026-09-17: under load "dr" arrived as "rd" and picked
     ;; nothing).
     (define (input-this-frame)
-      (let ((f (make-input-frame (reverse *pressed*)
-                                 (filter (lambda (k) (memq k MODIFIERS))
+      (let ((f (make-input-frame (append (reverse *pressed*)
+                                         (if (and *pointer-up* (eq? *screen* 'hub)) (list 'pointer-up) '()))   ; the release as the hub's pseudo-key (P5): on a board it would read as a key
+                                 (filter (lambda (k) (or (memq k MODIFIERS) (memq k HUB-HELD-KEYS)))   ; the hub walks on a held arrow (P5)
                                          *keys*)
                                  *click*)))
         (set! *pressed* '())
         (set! *click* #f)
+        (set! *pointer-up* #f)
         f))
 
     ;; The frame's wall dt in seconds from the rAF timestamp (ms): the
@@ -945,7 +934,9 @@
                         (draw-deal after *card-geom* x (texture-for-path PORTRAITS-PATH) (background) *copper*))))
         (ensure-texture! dt PORTRAITS-PATH)))
 
+
     (define (stack-tick f dt)
+
       ;; The boot lines wait for trace to be switched on, and repeat after
       ;; a new deal.
       (when (and *trace* (not *announced*))
@@ -1056,6 +1047,9 @@
           (when (and (eq? (menu-screen m) 'pause) (menu-code-line m))
             (let ((r (code-line-rect m VW VH)))
               (say "menu-code" (code-display (menu-code-line m)) (+ (car r) (half (caddr r))) (+ (cadr r) (half (cadddr r))))))
+          ;;   crash: menu-playing TITLE          the title line (M1: a note glyph then the title)
+          (when (and (eq? (menu-screen m) 'pause) (menu-now-playing m))
+            (say "menu-playing" (menu-now-playing m)))
           (when (eq? (menu-screen m) 'scores)
             (let ((s (menu-scores m)))
               (apply say "scores"
@@ -1084,14 +1078,14 @@
     ;; the order they run: every texture a look or the title names (each
     ;; through the same on-demand fetch, one in flight at a time, so the
     ;; steps run one after another), then the audio (the context opened
-    ;; at boot; the ambient the page fetches, or gives up). Each is a
+    ;; at boot; the menu theme's text the page fetches, or gives up). Each is a
     ;; thunk that answers done; (crash title) runs them one frame at a
     ;; time from the menu tick and the menu is live when the last is done.
     ;;   crash: boot step NAME done
     ;;   crash: boot done N                   all N steps done (or forced by the timeout)
     ;; Is the title's reveal over (or was there none)? The boot's steps
     ;; after the backdrop wait for it: a PNG decode (load-image-from-memory,
-    ;; on this thread), a texture upload, the atlas bake and the ambient's
+    ;; on this thread), a texture upload, the atlas bake and the tune text's
     ;; chunk decodes each cost a frame or more, and inside the reveal they
     ;; read as stutter under the modem beeps (David, on the phone). After
     ;; settle they run under the CONNECTING line, before the menu is live:
@@ -1105,11 +1099,11 @@
           (title-settled? (menu-title *menu*))))
 
     ;; Is the reveal itself running (ungated, not settled)? The page holds
-    ;; the ambient's chunks and the worker's registration while it is.
+    ;; the tune's chunks and the worker's registration while it is.
     (define (reveal-running?)
       (and *booted* *menu* (menu-title *menu*)
            (not (title-gated? (menu-title *menu*)))
-           (not (title-dialing? (menu-title *menu*)))   ; D45: the page delivers the ambient and registers the worker under the meter
+           (not (title-dialing? (menu-title *menu*)))   ; D45: the page delivers the tune and registers the worker under the meter
            (not (title-settled? (menu-title *menu*)))))
 
     (define (boot-steps!)
@@ -1131,8 +1125,8 @@
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
       ;; a frame), after the reveal; the step waits for it
       (boot-add-step! 'atlas (lambda () (and (reveal-over?) (atlas-ready?))))
-      ;; the rest of the cue bank, one cue a frame, then the ambient
-      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) *ambient-ready*)))))
+      ;; the rest of the cue bank, one cue a frame, then the menu theme's text (or THEME-WAIT-MS)
+      (boot-add-step! 'audio (lambda () (or (not *audio-ready*) (and (audio-render-next!) (theme-ready?))))))
 
     (define BOOT-BUDGET 4.0)   ; ms of boot steps a frame
     (define (boot-tick! dt)
@@ -1299,24 +1293,35 @@
                     (say "menu" "slow-frame" (exact (round (- t3 t0))) "step" (exact (round (- t1 t0))) "draw" (exact (round (- t2 t1))) "end" (exact (round (- t3 t2))))))))
             (tick-screen (make-input-frame '() '() #f) dt))))
 
-    ;; The music (P4, D50; the ambient's start before it, David on 410e39e):
+    ;; The music (M1; P4's tracks and the ambient before them, David on 410e39e):
     ;; silent under the card, the reveal and its beeps; from the frame the
     ;; menu is ready (the slant settled, the boot's steps done) or, on a
     ;; table boot, the frame the boot is done, what plays follows the
     ;; screen and the table's phase ((crash shell) music-frame!).
-    ;;   crash: ambient start                 the music began
-    (define *ambient-started* #f)
-    (define (ambient-tick!)
+    ;;   crash: music start                   the music began
+    (define *music-started* #f)
+    (define (music-tick!)
       (when (and *booted* (boot-done?)
                  (let ((t (and *menu* (menu-title *menu*))))
                    (or (not t) (title-settled? t))))
-        (unless *ambient-started*
-          (set! *ambient-started* #t)
-          (say "ambient" "start"))
+        (unless *music-started*
+          (set! *music-started* #t)
+          (say "music" "start"))
         (case *screen*
           ((menu) (music-frame! 'menu #f))
-          ((stack) (when *session* (music-frame! 'stack (trace-phase (session-trace *session*)))))
-          (else (when *deal* (music-frame! 'cards (trace-phase (deal-trace *deal*))))))))
+          ;; P5 on M1's live model (D59): the entry screen asks for a table
+          ;; with no pool, so the driver fades the theme out; the hub asks for
+          ;; its own pool with the RUN's seed, so one JACK IN is one tune all
+          ;; the way down, and its alert reads as the tense section
+          ;; the entry screen wants silence, and the model already has a word
+          ;; for it: a phase the driver reads as "fade what is playing". Asking
+          ;; instead for a table with no pool reached music-pick, which answers
+          ;; #f, and the driver's own trace line then called symbol->string on
+          ;; it and threw — the fade never ran (the gate, 2026-09-23).
+          ((entry) (music-frame! 'entry 'cleared))
+          ((hub) (music-frame! 'hub (hub-music-phase) (hub-music-seed)))
+          ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
+          (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
     ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
     ;; bookkeeping, the audio pump, and OTHER = the tick minus every timed
@@ -1348,13 +1353,15 @@
         (set! *pump-ms* (- (now-ms) t0)))
       (let ((t0 (now-ms)))
         (boot-tick! dt)   ; the boot's steps, one frame at a time, whatever the screen (D40)
-        (ambient-tick!)   ; the loop starts once the menu is ready, not under the reveal
+        (music-tick!)   ; the music starts once the menu is ready, not under the reveal
         (set! *boot-ms* (+ *boot-ms* (- (now-ms) t0))))
       (set! *tick-t0* (now-ms))
       (set! *sim-ms* 0.0)
       (set! *draw-ms* 0.0)
       (set! *flush-ms* 0.0)
-      (gles3-resize-to-display)
+      (let ((t0 (now-ms)))
+        (gles3-resize-to-display)
+        (set! *resize-ms* (- (now-ms) t0)))
       (tick-screen (input-this-frame) dt)
       (let ((t0 (now-ms)))
         (unless (skip? (quote audio)) (audio-pump!))   ; and again after the draw: a cue queued this frame goes out now
@@ -1365,6 +1372,8 @@
       (let ((click (input-frame-click f)))
         (case *screen*
           ((menu) (menu-tick f dt))
+          ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
+          ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
                  ((or (menu-frame? f)
@@ -1417,14 +1426,8 @@
     (define *run-done-at* 0)
     (define (layer-done! table)
       (set! *layer-cleared* #f)
-      (let ((r (run-in-force)))
-        (cond ((not r) #f)
-              ((run-done? r) (run-request! 'next table))
-              (else
-               (say "run" "layer-done" table)
-               (set! *overlay* (menu-new-layer-done table r (run-code r)))
-               (set! *overlay-at* (now-ms))
-               (set! *menu-said* #f)))))
+      ;; P5: the hub's node crashed; back to the layer once the cascade is over (its toast says so)
+      (run-request! 'next table))
 
     ;; --- the table's overlay (ruling D51) ------------------------------------------
     ;;
@@ -1436,15 +1439,15 @@
     ;; free play) lands on the main menu with CONTINUE.
     ;;   crash: pause on|off TICKS            the overlay opened or closed; the table's clock (it holds between)
     (define (table-ticks)
-      (if (eq? *screen* 'cards)
-          (trace-ticks (deal-trace *deal*))
-          (trace-ticks (session-trace *session*))))
+      (cond ((eq? *screen* 'hub) (world-beat (hub-screen-world (hub-run-in-force))))   ; P5: the hub's beats
+            ((eq? *screen* 'cards) (trace-ticks (deal-trace *deal*)))
+            (else (trace-ticks (session-trace *session*)))))
 
     (define (open-overlay!)
       (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
         (when (and *session* (eq? table 'stack))
           (set-board-selected! (session-board *session*) #f))   ; nothing to come back to
-        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t))
+        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t (music-title)))
         (set! *menu-said* #f)
         (say "pause" "on" (table-ticks))))
 
@@ -1455,7 +1458,7 @@
     ;; A tap on the bar's MENU button while the overlay is up: RESUME.
     (define (overlay-button-tap? f)
       (let ((click (input-frame-click f)))
-        (and click
+        (and click (not (eq? *screen* 'hub))   ; the hub has no bar button (P5)
              (eq? 'menu
                   (if (eq? *screen* 'cards)
                       (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click))
@@ -1484,19 +1487,29 @@
               ((eq? choice 'copy) (copy-code!))
               ((memq choice (list 'disconnect 'back-to-menu))
                (close-overlay!)
-               (open-menu!))
+               ;; DISCONNECT on a hub-launched board: the board is held at its node and the
+               ;; runner is back in the world there (ruled 2026-09-22); else the main menu
+               (if (and (eq? choice 'disconnect) (memq *screen* (list 'stack 'cards))
+                        (if (eq? *screen* 'cards)
+                            (hub-run-hold! 'cards (deal-trace *deal*))
+                            (hub-run-hold! 'stack (session-trace *session*))))
+                   (open-hub!)
+                   (open-menu!)))
               (else #f)))
       ;; the frame: the table hidden under the overlay's panel
       (when *overlay*
         (present! #f
                   (lambda ()
-                    (if (eq? *screen* 'cards)
-                        (begin
-                          (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
-                          (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*))))
-                        (begin
-                          (draw-session *session* *geom* *fx* (background) *copper* #t)
-                          (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
+                    (cond ((eq? *screen* 'hub)   ; P5
+                           (hub-draw! VW VH (background))
+                           (draw-overlay *overlay* VW VH BOARD-H))
+                          ((eq? *screen* 'cards)
+                           (begin
+                             (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
+                             (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*)))))
+                          (else
+                           (draw-session *session* *geom* *fx* (background) *copper* #t)
+                           (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -1508,8 +1521,12 @@
     ;; here sees every one of them.
     ;; The live board's share code for the pause menu, or #f.
     (define (live-code)
-      ;; the table up, else the one the store names (the pause menu after a table)
-      (case (if (memq *screen* (list 'stack 'cards)) *screen* (active-game))
+      ;; the run held for CONTINUE shows its own code (P5); else the table up, else
+      ;; the one the store names (the pause menu after a table)
+      (case (cond ((and (not (memq *screen* (list 'stack 'cards))) (hub-run-in-force)) 'run)
+                  ((memq *screen* (list 'stack 'cards)) *screen*)
+                  (else (active-game)))
+        ((run) (hub-run-code))
         ((stack) (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
         ((cards) (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
         (else #f)))
@@ -1522,11 +1539,12 @@
       (set! *announced* #f)
       ;; a menu rebuilt mid-reveal (the update word landing) keeps the reveal (P3d)
       (set! *menu* (let ((m (launch-menu (and *update* #t)
-                                (and (case (active-game)
-                                       ((stack) *session*)
-                                       ((cards) *deal*)
-                                       (else #f))
-                                     #t)
+                                (or (and (hub-run-in-force) #t)   ; P5: a live hub run continues
+                                    (and (case (active-game)
+                                         ((stack) *session*)
+                                         ((cards) *deal*)
+                                         (else #f))
+                                       #t))
                                 (or *seed* *clock*)   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
                                 (live-code)
                                 #t      ; COPY: the page writes the clipboard
@@ -1658,35 +1676,164 @@
 
     ;; JACK IN: a new run from a seed (the clock's, or a run code's),
     ;; its first layer dealt.
-    (define (jack-in! seed)
-      (let ((r (run-new seed)))
-        (set-run! r)
-        (say "run" "start" (run-seed r) (run-code r))
-        (open-spec! (run-spec r))))
+    ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
+
+    ;; --- the entry (D65's transition, 2026-09-22) ---------------------------------
+    ;;
+    ;; JACK IN and CONTINUE used to generate the layer AND bake the tiles on
+    ;; the frames right after the menu: David's phone read a 1050 ms frame
+    ;; and 94 GC pauses over the twenty seconds after. The work is the same;
+    ;; the entry screen carries it. The first frame only draws the screen
+    ;; (and fades the menu's music); the next makes the run (the layer's
+    ;; generation); the frames after bake one light step each, which
+    ;; hub-prepare! already paces, until lit-ready?; then the hub opens.
+    ;;   crash: hub entry                     the screen is up
+    ;;   crash: hub entry ready MS FRAMES     the hub opens, with the entry's wall time
+    (define *entry* #f)          ; a thunk answering the run, then #t once it has run
+    (define *entry-frames* 0)
+    (define *entry-ms* 0.0)
+
+    (define (enter-hub! make-run)
+      (set! *screen* 'entry)
+      (set! *overlay* #f)
+      (set! *entry* make-run)
+      (set! *entry-frames* 0)
+      (set! *entry-ms* 0.0)
+      (say "hub" "entry"))
+
+    (define (entry-tick! f dt)
+      (set! *entry-frames* (+ 1 *entry-frames*))
+      (set! *entry-ms* (+ *entry-ms* (* 1000.0 dt)))
+      ;; the run is made on the second frame: the first drew the screen
+      (when (and (procedure? *entry*) (> *entry-frames* 1))
+        (*entry*)
+        (set! *entry* #t))
+      (present! #f (lambda () (draw-hub-entry VW VH (background) (lit-progress) (entry-step))))
+      ;; the bake ran in the present's prepare; once it is done the hub opens
+      (when (and (eq? *entry* #t) (lit-ready?))
+        (say "hub" "entry" "ready" (exact (round *entry-ms*)) *entry-frames*)
+        (open-hub!)))
+
+    (define (entry-step)
+      (cond ((procedure? *entry*) 0)
+            ((not (lit-ready?)) 1)
+            (else 2)))
+
+    ;; JACK IN: a hub run from the seed at a difficulty (D65: the menu's pick;
+    ;; a run code or a door takes &pace=), layer 1, the field seeded by the run.
+    ;;   crash: run start SEED CODE DIFFICULTY
+    (define (jack-in! seed difficulty)
+      (enter-hub! (lambda ()
+                    (hub-run-set! (hub-run-start! seed difficulty))
+                    (say "run" "start" seed (hub-run-code) difficulty))))
+
+    ;; &hubat=N: the runner set down on key node N (the arms: a walk is seed-specific).
+    (define (hub-at! n)
+      (let* ((hs (hub-run-in-force))
+             (w (hub-screen-world hs))
+             (node (find (lambda (x) (and (node-key x) (= (node-index x) n))) (world-nodes w))))
+        (when node
+          (hub-run-set! (hub-screen-teleport hs (node-cell node)))
+          (say "hub" "at" n (node-cell node)))))
+
+    ;; The hub screen up behind the entry screen (a new run, CONTINUE): the
+    ;; layer's generation and the bake happen there, not on one frame.
+    (define (open-hub-entry!)
+      (if (lit-ready?)
+          (open-hub!)                       ; the tiles are baked: no wait to sell
+          (enter-hub! (lambda () (hub-run-in-force)))))
+
+    ;; The hub screen up (a new run, a return from a board, CONTINUE).
+    (define (open-hub!)
+      (set! *entry* #f)
+      (set! *screen* 'hub)
+      (set! *overlay* #f)
+      (set! *announced* #f)
+      (set! *layer-cleared* #f)   ; a board left during its cascade does not carry its clear into the next board
+      (hub-run-set! (hub-screen-with-touch (hub-run-in-force) *touch*))   ; the touch overlay on a coarse pointer (a loaded run too)
+      (field-for-deal! (world-run-seed (hub-screen-world (hub-run-in-force))))
+      ;; &hubat=N (the arms): the runner set down on key node N, once there is a hub
+      (when *hub-at* (let ((n *hub-at*)) (set! *hub-at* #f) (hub-at! n)))
+      (let ((w (hub-screen-world (hub-run-in-force))))
+        (say "hub" "open" (world-depth w) (world-beat w) "keys" (length (world-keys w)) "cleared"
+             (length (filter (lambda (n) (eq? (node-state n) 'cleared)) (world-nodes w))))))
+
+    ;; One frame of the hub: the screen steps on its clock with this frame's
+    ;; input; a launch request deals the node's board with the settings' draw
+    ;; and scoring; a menu request opens the main menu (CONTINUE resumes).
+    ;;   crash: hub beat N trace T B depth D cell C daemons C,C,...    once per beat stepped
+    ;; The hub's alert as the music model's phase (D50's vocabulary):
+    ;; 'counter while the layer is alert or hunted, else 'trace.
+    (define (hub-music-phase)
+      (let ((hs (hub-run-in-force)))
+        (if (and hs (memq (hub-alert (hub-screen-world hs)) (list 'alert 'hunted))) 'counter 'trace)))
+
+    ;; The seed the hub's pick is made from: the RUN's, so a run keeps one
+    ;; hub tune through every descent and every board it comes back from
+    ;; (ruled 2026-09-22; the driver caches a pick per table and seed).
+    (define (hub-music-seed)
+      (let ((hs (hub-run-in-force)))
+        (and hs (world-run-seed (hub-screen-world hs)))))
+
+    (define (hub-tick f dt)
+      (let* ((hs0 (hub-run-in-force))
+             (hs (hub-screen-tick hs0 (* 1000.0 dt) f)))
+        (hub-run-set! hs)
+        (when (hub-screen-buzz hs) (set! *vibrate-asked* #t))   ; the touch overlay's press: the page vibrates
+        ;; one line per BEAT stepped, not per frame: a slow frame steps
+        ;; several, and a line a frame made two honest beats look like one
+        ;; beat moving the runner two cells (the gate, 2026-09-23)
+        (when *trace*
+          (let ((w (hub-screen-world hs)))
+            (for-each (lambda (b)
+                        (say "hub" "beat" (car b) "trace" (caddr b) (descriptor-budget (hub-descriptor w)) "depth" (world-depth w) "cell" (cadr b)
+                             "daemons" (fold-left (lambda (acc d) (if (string=? acc "") (number->string (daemon-cell d)) (string-append acc "," (number->string (daemon-cell d)))))
+                                                  "" (world-daemons w))))
+                      (hub-screen-stepped hs))))
+        (case (hub-screen-request hs)
+          ((launch)
+           (let ((l (hub-run-launch! (setting 'draw) (setting 'scoring))))
+             (when l
+               (say "hub" "launch" (node-index (launch-node l)) (encode (launch-spec l)))
+               (if (hub-run-resume?)   ; a held board: back to it as CONTINUE would
+                   (if (eq? (node-table (launch-node l)) 'cards) (open-cards! #t) (open-stack! #t))
+                   (open-spec! (launch-spec l))))))
+          ((menu)
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           ;; the pause panel over the world (P5): RESUME, SETTINGS, DISCONNECT = RUN HELD
+           (set! *overlay* (menu-new-overlay 'hub #t (settings-in-force) #f #f))
+           (say "pause" "on" (table-ticks)))
+          ((jack-out)   ; the severed panel's JACK OUT: the main menu, the run held for CONTINUE
+           (hub-run-set! (cdr (hub-screen-take-request hs)))
+           (say "run" "jack-out")
+           (open-menu!))
+          ((finished)   ; RUN COMPLETE: the run is over, the store forgets it, the main menu
+           (say "run" "complete")
+           (set-run! #f)
+           (open-menu!))
+          (else #f))
+        (when (eq? *screen* 'hub)
+          (present! #f (lambda () (hub-draw! VW VH (background)))))))
 
     ;; NEXT or RETRY came out of a table (its own next or retry board is
     ;; dealt already): inside a run, replace it with the run's next layer
     ;; (after a clear), a new attempt of the layer (RECONNECT after a
     ;; sever), or the ledger when the run is done; outside, the dealt
     ;; board stands.
+    ;; NEXT or RETRY came out of a table inside a run: the board's outcome is
+    ;; in the world already (a clear at the clear, run-clear-line!; a sever
+    ;; here) and the hub comes back up. Outside a run the dealt board stands.
+    ;; A board left any other way (NEW STACK, ctrl+n, NEXT before the clear)
+    ;; is severed too: the launch still pending is the sign, and a re-deal
+    ;; of the same node without the sever would be a free retry (the phase-2
+    ;; review, 2026-09-22).
     (define (run-request! request table)
       (let ((r (run-in-force)))
         (cond ((not r) #f)
-              ((run-done? r)
-               (say "run" "done" (run-seed r))
-               (open-menu!)
-               (set! *menu* (menu-open-run-done *menu* (cons r (run-code r))))
-               (set! *run-done-at* (now-ms))
-               (set-run! #f))
-              ((eq? request 'retry)
-               ;; a sever counted by the table's step: the layer's next attempt
-               (let ((r (run-severed r)))
-                 (set-run! r)
-                 (say "run" "reconnect" (run-layer-number r) (run-attempt r))
-                 (open-spec! (run-spec r))))
               (else
-               (say "run" "layer" (run-layer-number r))
-               (open-spec! (run-spec r))))))
+               (when (hub-run-severed! table) (say "run" "reconnect" table))
+               (say "run" "back" table)
+               (open-hub!)))))
 
     ;; The update's state reaches the stack's session (the game draws it
     ;; and takes the choice, (crash input) step-update) and the menu (its
@@ -1729,16 +1876,18 @@
                 (let ((sp (cdr choice)))
                   (say "code" "read" (encode sp) (spec-table sp))
                   (if (eq? (spec-table sp) 'run)
-                      (jack-in! (spec-seed sp))
+                      (jack-in! (spec-seed sp) *pace*)
                       (begin (set-run! #f) (open-spec! sp)))))
                (else #f)))
             (else
              (case choice
                ((continue)
-                (case (active-game)
-                  ((cards) (open-cards! #t))
-                  (else (open-stack! #t))))
-               ((jack-in) (jack-in! (now-second)))
+                (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
+                    (open-hub-entry!)
+                    (case (active-game)
+                    ((cards) (open-cards! #t))
+                    (else (open-stack! #t)))))
+               ((easy normal elite) (jack-in! (now-second) choice))   ; JACK IN's pick (D65)
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
                ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
@@ -1797,7 +1946,7 @@
     ;; the cascade runs (ruling D36.2) or the probe is on; the ?ms
     ;; readout over it; then the held line, once the frame is out.
     (define (present! cascading? draw)
-      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? (quote draw)) (lambda () #f) draw))))
+      (unless (skip? (quote frame)) (present-frame! cascading? (if (skip? 'draw) (lambda () #f) draw))))
 
     (define (present-frame! cascading? draw)
       (set! *sim-ms* (- (now-ms) *tick-t0*))
@@ -1808,6 +1957,8 @@
           (tiles-ensure! *geom*))
         ;; the menu's and the overlay's bakes, before the passes (they are passes)
         (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
+              ((eq? *screen* 'entry) (hub-prepare!))                                           ; P5: the entry screen carries the bake (D65)
+              ((eq? *screen* 'hub) (hub-prepare!) (when *overlay* (menu-prepare! *overlay*)))   ; P5: the tile bake is a pass, and the pause panel's
               (*overlay* (menu-prepare! *overlay*)))
         (when (and *bg* (bg-gpu? *bg*)) (gpu-bg-prepare! *bg*))
         ;; the phosphor's compose pass first, then the frame (or the composed
@@ -1831,7 +1982,7 @@
         (draw-diag!)
         (when *ms*
           (let ((gpu (gpu-bg-ms)))
-            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text*)))
+            (draw-frame-ms *frame-ms* (+ *advance-ms* (car gpu)) (cdr gpu) *worst-text* (music-readout))))
         (set! *draw-ms* (- (now-ms) t1))
         (end-frame)
         (set! *flush-ms* (- (now-ms) t1 *draw-ms*)))
@@ -1839,6 +1990,19 @@
       (say-held!))
 
     (define (boot!)
+      ;; the live soundtrack (M1, D59): a tune's text comes from the page (one
+      ;; "crash: tune-fetch NAME" line per name; the text lands as tune-chunk/done)
+      (live-music-set-loader! (lambda (name) (println "~a" (string-append "crash: tune-fetch " (symbol->string name))) #f))
+      ;; the menu theme's text asked for now (the fetch runs under the reveal; the
+      ;; boot's audio step waits for it, THEME-WAIT-MS at most)
+      (live-music-prefetch! MENU-THEME)
+      (set! *theme-asked-at* *since-boot*)
+      (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
+      ;; the music's render rate (M1): the ladder's last choice on this device
+      ;; from the store, kept for the next boot when the ladder steps
+      (let ((r (store-get "music-rate")))
+        (when (and r (string->number r)) (live-music-set-rate! (string->number r) 'stored)))
+      (live-music-set-remember! (lambda (rate) (store-set! "music-rate" (number->string rate))))
       (set! *session* #f)
       (set! *deal* #f)
       ;; the field: ?bg= pins a rule for this boot (the dev door); else each
@@ -1868,21 +2032,43 @@
         (if (null? bad)
             (say "literal-check" "ok")
             (apply say "literal-check" "FAILED" bad)))
+      ;; A boot that throws on the MENU path says why: the loader prints only
+      ;; the message, and a menu that never opened is a struct-ref storm every
+      ;; frame after, so the first line is worth naming (S8, 2026-09-19). Each
+      ;; table branch says which it took.
+      ;;   crash: boot-error MESSAGE IRRITANTS
+      ;;
+      ;; The guard covers that branch and no more. M1 widened it over the whole
+      ;; dispatch as the workaround for the wasm phantom
+      ;; ([[topics/sigil-wasm-phantom-vector-ref]], t-409696); sigil 0.22.5
+      ;; carries the real fix — the tail call's arguments are rooted, so a
+      ;; collection inside a C builtin can no longer free them — and the
+      ;; workaround came back out on 2026-09-23. A widened guard is worse than
+      ;; useless for a gate: it catches a fault on any boot path and lets the
+      ;; game limp on, so an arm reads a game that half-booted instead of one
+      ;; that failed. Every path but the menu's is unguarded now and dies where
+      ;; it breaks.
       (cond ((and *code* (decode *code*))
              (let ((sp (decode *code*)))
                (say "code" "read" (encode sp) (spec-table sp))
                (if (eq? (spec-table sp) (quote run))
-                   (jack-in! (spec-seed sp))
+                   (jack-in! (spec-seed sp) *pace*)
                    (begin (set-run! #f) (open-spec! sp)))))   ; a code's board ends a run (the review)
             (*code* (say "code" "refused" *code*) (open-menu!))
-            (*cards* (open-cards! #t))
-            (*stack* (open-stack! #t))
-            ;; a boot that throws says why (the loader prints only the
-            ;; message, and a menu that never opened is a struct-ref
-            ;; storm every frame after)
+            (*cards* (say "boot" "step" "cards") (open-cards! #t))
+            (*stack* (say "boot" "step" "stack") (open-stack! #t))
+            ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub-entry!))   ; ?hub=continue: the saved run (P5; the arms)
+            ((number? *hub-seed*) (jack-in! *hub-seed* *pace*))   ; ?hub=SEED: JACK IN at boot (&hubat=N lands when the entry screen opens the hub; P5, the arms)
+            ;; S8's line, and then the error goes on its way: the loader reports
+            ;; it and the page dies where it broke. Saying alone would hide the
+            ;; failure from every arm — `say` prints only under ?trace and at
+            ;; log level, no leg greps `boot-error`, and the console leg counts
+            ;; console.error entries, thrown exceptions and lines matching
+            ;; /^(Error:|Scheme error)/. The re-raise is what makes it loud.
             (else (guard (e (#t (say "boot-error"
                                      (if (error-object? e) (error-object-message e) e)
-                                     (if (error-object? e) (error-object-irritants e) '()))))
+                                     (if (error-object? e) (error-object-irritants e) '()))
+                                (raise e)))
                     (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
       ;; any session: the table takes it here, once
@@ -1917,8 +2103,9 @@
             ((string=? type "keydown") (key-down! payload) 0)
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
+            ((string=? type "pointerup") (set! *pointer-up* #t) 0)   ; P5: the hub's hold-to-walk ends on the release
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
-            ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")))))
+            ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")) (when *fresh* (hub-run-forget-store!)))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
             ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))
             ((string=? type "update")
@@ -1934,6 +2121,10 @@
             ((string=? type "touch") (param! (lambda () (set! *touch* (string=? payload "on")))))
             ;; ?bg=reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off (a name outside the rule table is off); it wins over the BACKGROUND setting
             ((string=? type "bg") (param! (lambda () (set! *bg-mode* (string->symbol payload)) (set! *bg-asked* #t))))
+            ((string=? type "hub") (param! (lambda () (set! *hub-seed* (if (string=? payload "continue") 'continue (let ((n (string->number payload))) (and n (exact? n) (integer? n) (>= n 0) (min SEED-MAX (max 1 n)))))))))   ; ?hub=SEED: JACK IN at boot with this run seed; ?hub=continue resumes the saved run (P5; the arms)
+            ((string=? type "bpm") (param! (lambda () (hub-run-bpm! payload))))   ; ?bpm=N: the hub's clock pinned (P5, until M1's player)
+            ((string=? type "hubat") (param! (lambda () (set! *hub-at* (string->number payload)))))   ; &hubat=N: the runner on key node N at boot (P5; the arms)
+            ((string=? type "pace") (param! (lambda () (let ((d (string->symbol payload))) (when (difficulty? d) (set! *pace* d))))))   ; &pace=easy|normal|elite (D65; the arms)
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))
             ((string=? type "bgstride") (param! (lambda () (set! *bg-stride* (let ((n (string->number payload))) (and n (>= n 1) n))))))
             ((string=? type "rsteps") (param! (lambda () (set! *bg-rsteps* (let ((n (string->number payload))) (and n (>= n 1) n))))))
@@ -1944,6 +2135,25 @@
             ((string=? type "demo") (param! (lambda () (set! *demo* (and (string=? payload "cleared") 'cleared)))))
             ((string=? type "atlas") (param! (lambda () (atlas-set! (not (string=? payload "off"))))))
             ((string=? type "adepth") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n)) (audio-set-depth! n))))))
+            ;; M1: ?music-rate=N pins the music's render rate (no ladder); the
+            ;; page's device hints "cores,memory" start the ladder one step down
+            ;; on a weak device (4 cores or fewer, or 2 GB or less), unless a
+            ;; rate is remembered from an earlier boot's ladder
+            ((string=? type "music-rate") (param! (lambda () (let ((n (string->number payload))) (when (and n (exact? n) (> n 0)) (live-music-set-rate! n #t))))))
+            ((string=? type "music-budget") (param! (lambda () (let ((n (string->number payload))) (when n (live-music-set-budget! n))))))
+            ;; ?trace-at=N: the next deal's trace lands at N s (the arm's door to the fill's run-up)
+            ((string=? type "trace-at") (param! (lambda () (let ((n (string->number payload))) (when (and n (> n 0)) (set-trace-at-door! n))))))
+            ;; ?tune=NAME: every deal picks this tune (a dev door for the ear)
+            ((string=? type "tune") (param! (lambda () (when (> (string-length payload) 0) (live-music-set-tune-door! (string->symbol payload))))))
+            ((string=? type "device")
+             (param! (lambda ()
+                       (let* ((c (string-find payload ","))
+                              (cores (and c (string->number (substring payload 0 c))))
+                              (mem (and c (string->number (substring payload (+ c 1) (string-length payload))))))
+                         (set! *device-hint* (list cores mem))
+                         (when (and (or (and cores (> cores 0) (<= cores 4)) (and mem (> mem 0) (<= mem 2)))
+                                    (not (live-music-rate-set?)))
+                           (live-music-set-rate! 'weak))))))
             ((string=? type "dpr") (param! (lambda () (set! *dpr* payload))))
             ;; ?hud=strip: the bar's layout for this boot (and stored)
             ((string=? type "version") (set! *version* (string-append "WEB " payload)) (title-stamp! payload) 0)
@@ -1984,19 +2194,39 @@
             ((string=? type "code") (param! (lambda () (set! *code* payload))))
             ;; the page polls for a COPY (1 once): it reads the store's "code" key then
             ((string=? type "copy") (if (string=? payload "asked?") (copy-asked?) 0))
-            ((string=? type "track") (track! payload))
-            ((string=? type "audio-size")
-             (set! *track-transfer* (transfer-new (string->number payload)))
-             0)
-            ((string=? type "audio-chunk") (audio-chunk! payload))
+            ((string=? type "vibrate") (if (and (string=? payload "asked?") *vibrate-asked*) (begin (set! *vibrate-asked* #f) 1) 0))   ; P5: the touch overlay's buzz
+            ;; the live soundtrack (M1, D59): the page fetches a tune's text on
+            ;; "crash: tune-fetch NAME" and hands it over in base64 chunks then
+            ;; ("tune-done", NAME); (crash music live) opens it on the next frame
+            ((string=? type "tune-chunk") (set! *tune-chunks* (cons (b64-decode payload) *tune-chunks*)) 0)
+            ((string=? type "tune-done")
+             (let ((text (utf8->string (apply bytevector-append (reverse *tune-chunks*))))
+                   (name (string->symbol payload)))
+               (set! *tune-chunks* '())
+               (when (> (string-length payload) 0)
+                 (cond ((> (string-length text) 0)
+                        (live-music-provide! name text)
+                        (say "music" "landed" payload (string-length text)))
+                       (else
+                        ;; no chunks: the page gave the fetch up (tune-unavailable);
+                        ;; the model stops asking, the boot stops waiting
+                        (live-music-unavailable! name)
+                        (say "music" "unavailable" payload)))
+                 (when (eq? name MENU-THEME) (set! *theme-ready* #t)))
+               0))
             ((string=? type "gesture") (gesture! payload))
-            ;; the ambient off (the browser arm mutes it to hear a cue alone)
+            ;; the page's own pump timer (M1): the source's sink topped up between
+            ;; frames, so a rAF gap (p95 93 ms on David's phone, 2026-09-21) does
+            ;; not run the music dry; a frame in flight cannot be interrupted (one
+            ;; thread), so this only lands between frames. Answers the frames pushed.
+            ((string=? type "pump") (if *audio-ready* (audio-source-pump!) 0))
+            ;; the music off (the browser arm mutes it to hear a cue alone; the door keeps P3's name)
             ((string=? type "ambient") (when (string=? payload "off") (music-off!)) 0)
             ((string=? type "audio-done") (audio-done! payload))
             ;; the page's service worker is active (or absent): fetches are safe (D40)
             ((string=? type "sw") (param! (lambda () (set! *sw-ready* #t))))
             ;; the page asks whether the reveal is still running (it holds the
-            ;; ambient's chunks and the worker's registration until it is over)
+            ;; tune's chunks and the worker's registration until it is over)
             ((string=? type "title")
              (cond ((string=? payload "running?") (if (or (not *booted*) (reveal-running?)) 1 0))
                    ;; "live?": the menu is ready (settled, boot done) or a table is up: the page
@@ -2012,6 +2242,8 @@
             ;;   crash: visibility hidden|visible
             ((string=? type "visibility")
              (set! *last-ms* #f)
+             (set! *keys* '())          ; a keyup missed while hidden would hold the key forever (P5: the hub walks on a held arrow)
+             (set! *pointer-up* #t)
              (say "visibility" payload)
              0)
             ;; ?trap: the page guard's trap door. "now" fires at once, inside this

@@ -56,6 +56,7 @@
 
   (export deal deal? deal-new deal-restore
           deal-game deal-seed deal-message deal-won?
+          deal-marks deal-with-marks deal-extracted? deal-marks-home mark-cards mark-text
           deal-labels deal-labels-shown deal-typed deal-auto deal-bank
           deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
           deal-step deal-advance deal-undo deal-next deal-toggle-draw
@@ -77,6 +78,7 @@
   (begin
     (define MSG-DEALT "JACKED IN. DUMP LOADED. TRACE RUNNING.")
     (define MSG-WON "SYSTEM ONLINE.")
+    (define MSG-EXTRACTED "EXTRACTED.")   ; the node objective met (D64)
     (define MSG-STUCK "STACK JAMMED.")   ; a toast; the HUD line says what is left to do (JAMMED-LINE)
     (define MSG-PROBING "PROBING FOR A LINE...")
     (define MSG-NO-LINE "NO LINE FROM HERE. ROLLBACK OR SCRAMBLE.")
@@ -118,6 +120,7 @@
       (hud default: DEFAULT-LAYOUT)  ; the bar's layout, (crash hud)
       (keys-shown default: #f)       ; the keys line in place of the instruction line (?)
       (note default: #f)             ; the shell's line for the won deal (a run's layer, the scoreboard's news), or #f
+      (marks default: '())           ; the node's objective (D64): cards to get home; the deal is won when every one is
       (device default: 'mouse)       ; the last input device: touch | mouse | keyboard (the prompt follows it)
       (request default: #f)          ; for the shell: menu, or #f
       (message default: ""))
@@ -191,8 +194,9 @@
     ;; tableau card is face up (the history is cut then: the run is not
     ;; undone, like an ICE event).
     (define (with-game d g)
-      (let* ((arm? (and (not (deal-auto d))
-                        (not (game-won? g))
+      (let* ((won? (deal-won? (deal d game: g)))   ; the deck home, or the marks (D64)
+             (arm? (and (not (deal-auto d))
+                        (not won?)
                         (game-all-up? g)))
              (g (if arm? (game g history: '() selected: #f) g)))
         (deal d
@@ -202,16 +206,17 @@
               shown: #f
               probing: #f
               auto: (or (deal-auto d) arm?)
-              trace: (if (and (game-won? g) (deal-trace d))
+              trace: (if (and won? (deal-trace d) (not (eq? (trace-phase (deal-trace d)) 'cleared)))
                          (trace-finish (deal-trace d))
                          (deal-trace d))
-              scrambles: (if (and (game-won? g)
+              scrambles: (if (and won?
                                   (deal-trace d)
                                   (eq? (trace-mode (deal-trace d)) 'twist)
                                   (eq? (trace-phase (deal-trace d)) 'trace))
                              (min SCRAMBLE-MAX (+ 1 (deal-scrambles d)))
                              (deal-scrambles d))
-              message: (cond ((game-won? g) MSG-WON)
+              message: (cond ((and won? (not (game-won? g))) MSG-EXTRACTED)
+                             ((game-won? g) MSG-WON)
                              ((or arm? (deal-auto d)) MSG-AUTO)
                              ((game-stuck? g) MSG-STUCK)
                              (else "")))))
@@ -463,8 +468,53 @@
                        trace: (if (pair? rest) (car rest) (trace-new 'twist)))
                  g))
 
+    ;; Won: every foundation full, or the node's marked cards all home (D64).
     (define (deal-won? d)
-      (game-won? (deal-game d)))
+      (or (game-won? (deal-game d)) (deal-extracted? d)))
+
+    ;; --- the objective (D64) -------------------------------------------------
+    ;;
+    ;; A hub node's deal asks for marked cards brought home rather than
+    ;; the whole deck: k cards buried k deep under the top of the middle
+    ;; piles (the deal is a winnable seed, so every card reaches a
+    ;; foundation; how deep it starts is the difficulty). The deal reads
+    ;; won when every mark sits on a foundation; the shell keeps such a
+    ;; win off the scoreboard.
+
+    (define MARK-PILES (list 3 4 2 5 1 6 0))   ; the middle piles first
+
+    ;; k cards, each k deep under its pile's top, from the middle piles out.
+    (define (mark-cards g k)
+      (let loop ((piles MARK-PILES) (acc '()))
+        (cond ((or (= (length acc) k) (null? piles)) (reverse acc))
+              (else
+               (let ((pile (game-pile g (car piles))))
+                 (if (> (length pile) k)
+                     (loop (cdr piles) (cons (pile-card (list-ref pile k)) acc))
+                     (loop (cdr piles) acc)))))))
+
+    (define (deal-with-marks d marks)
+      (deal d marks: marks))
+
+    (define (card-home? g c)
+      (let loop ((i 0))
+        (cond ((= i FOUNDATIONS) #f)
+              ((memv c (game-foundation g i)) #t)
+              (else (loop (+ i 1))))))
+
+    ;; The marked cards on a foundation.
+    (define (deal-marks-home d)
+      (filter (lambda (c) (card-home? (deal-game d) c)) (deal-marks d)))
+
+    (define (deal-extracted? d)
+      (and (pair? (deal-marks d))
+           (= (length (deal-marks-home d)) (length (deal-marks d)))))
+
+    ;; "7 OF DSK": the card as the bar names it (the suits are subsystems).
+    (define (mark-text c)
+      (string-append (let ((r (card-rank c))) (cond ((= r 1) "A") ((= r 10) "10") ((= r 11) "J") ((= r 12) "Q") ((= r 13) "K") (else (number->string r))))
+                     " OF "
+                     (vector-ref (vector "MEM" "PWR" "TX" "DSK") (card-suit c))))
 
     ;; An undo that changed something costs UNDO-COST on the trace.
     (define (deal-undo d)
@@ -651,9 +701,14 @@
 
     ;; The instruction line under the readouts when the keys line is hidden.
     (define (deal-instruction d)
-      (cond ((deal-won? d) (or (deal-note d) "SYSTEM ONLINE. NEXT DEALS ANOTHER."))
+      (cond ((deal-won? d) (or (deal-note d) (if (game-won? (deal-game d)) "SYSTEM ONLINE. NEXT DEALS ANOTHER." "EXTRACTED. THE NODE IS YOURS.")))
             ((deal-auto d) "AUTOCOMMIT RUNNING.")
             ((deal-probe-running? d) "PROBING THE BUFFER.")
+            ((pair? (deal-marks d))   ; the objective (D64): the marked cards still out
+             (let ((out (filter (lambda (c) (not (card-home? (deal-game d) c))) (deal-marks d))))
+               (string-append "EXTRACT THE " (mark-text (car out))
+                              (if (> (length out) 1) (string-append " (+" (number->string (- (length out) 1)) ")") "")
+                              (if (game-selected (deal-game d)) ". NOW WHERE IT GOES." "."))))
             ((game-selected (deal-game d)) "NOW WHERE IT GOES.")
             ((eq? (deal-device d) 'keyboard) "STACK THE PACKETS BY CLASS. F PULLS.")
             (else "STACK THE PACKETS BY CLASS. TAP THE FEED TO PULL.")))

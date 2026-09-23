@@ -1,0 +1,153 @@
+;;; (crash hub run) - JACK IN is a hub run: the one live run the shells
+;;; share, the board it launched, and what comes back from it.
+;;;
+;;; Phase 2 step 4 (P5): P4a's fixed six-layer sequence ((crash run))
+;;; gives way to the world. The state here is what both shells read:
+;;; the live hub screen (or #f), the launch the board up was dealt from
+;;; (so the board's clear or sever knows which node it answers, and the
+;;; deal gets the node's thresholds), and the clock pin the ?bpm= door
+;;; sets before a run starts. The shells call hub-run-start! from JACK
+;;; IN, hand the screen's launch request to the tables through
+;;; hub-run-launch!, and report the board back with hub-run-cleared! /
+;;; hub-run-severed!, which route the outcome into the world (D23). The
+;;; run's share code is the seed's (table `run`), as before. Rules family
+;;; but for the module state the shells share; no platform.
+
+(define-library (crash hub run)
+  (import (sigil struct)
+          (sigil math)
+          (crash code)
+          (crash trace)
+          (crash tween)
+          (crash hub world)
+          (crash hub rules)
+          (crash hub screen)
+          (crash hub save))
+
+  (export hub-run-in-force hub-run-set! hub-run-start! hub-run-end! hub-run-bpm! hub-run-forget-store!
+          hub-run-launch! hub-run-launch-pending hub-run-table hub-run-spec hub-run-code
+          hub-run-cleared! hub-run-severed! hub-run-hold! hub-run-resume? board-heat ticks->beats)
+
+  (begin
+    (define *run* 'unread)     ; the live hub screen, #f, or unread (the store's on first use: CONTINUE mid-layer)
+    (define *saved-beats* -1)  ; the screen's beat count at the last save
+    (define *saved-world* #f)  ; the world at the last save (a panel's frames replace the screen, not the world)
+    (define SAVE-EVERY 8)      ; beats between saves while nothing else changes
+    (define *launch* #f)       ; the launch the board up was dealt from, or #f
+    (define *bpm* #f)          ; ?bpm= / --bpm: the clock pinned for the next run
+
+    (define (hub-run-in-force)
+      (when (eq? *run* 'unread)
+        (set! *run* (hub-load))
+        (when *run*
+          (set! *saved-beats* (hub-screen-beats *run*))
+          (set! *saved-world* (hub-screen-world *run*))
+          ;; a board was up: its launch is a function of the world (the node under
+          ;; the runner, its attempts), so it is recomputed rather than stored
+          (when (eq? (world-request (hub-screen-world *run*)) 'launch)
+            (set! *launch* (hub-launch (hub-screen-world *run*) 1 'vegas)))))
+      *run*)
+    ;; The screen replaced; saved when it holds a request, when a panel is
+    ;; up over a world not yet saved (the panel's own frames, a row moved,
+    ;; replace the screen and not the world: no write), or every
+    ;; SAVE-EVERY beats (a store write per beat would be the cost).
+    (define (hub-run-set! hs)
+      (set! *run* hs)
+      (when (and hs
+                 (or (hub-screen-request hs)
+                     (and (hub-screen-panel hs) (not (eq? (hub-screen-world hs) *saved-world*)))
+                     (>= (- (hub-screen-beats hs) *saved-beats*) SAVE-EVERY)))
+        (save! hs)))
+
+    (define (save! hs)
+      (hub-save! hs)
+      (set! *saved-beats* (hub-screen-beats hs))
+      (set! *saved-world* (hub-screen-world hs)))
+
+    (define (hub-run-bpm! text)
+      (let ((n (and (string? text) (string->number text))))
+        (set! *bpm* (and n (> n 0) n))
+        (when (hub-screen? *run*) (set! *run* (hub-screen-with-bpm *run* *bpm*)))))   ; not before the first use (unread)
+
+    ;; JACK IN: a run from its seed at a difficulty (D65: the pick before the
+    ;; run; NORMAL when none is given), on layer 1.
+    (define (hub-run-start! seed . rest)
+      (set! *launch* #f)
+      (set! *run* (hub-screen-with-bpm (apply hub-screen-new (max 1 seed) rest) *bpm*))
+      (save! *run*)
+      *run*)
+
+    ;; A fresh boot (?fresh / --fresh): the stored run is not offered; a run
+    ;; started in this session still is.
+    (define (hub-run-forget-store!)
+      (when (eq? *run* 'unread) (set! *run* #f)))
+
+    (define (hub-run-end!)
+      (set! *run* #f)
+      (set! *launch* #f)
+      (hub-clear!))
+
+    ;; The screen asked for a launch: the launch for the board, kept until
+    ;; its outcome returns; the screen's request is taken (the world's
+    ;; stays, so the world holds under the board).
+    (define (hub-run-launch! draw scoring)
+      (and *run*
+           (eq? (hub-screen-request *run*) 'launch)
+           (let ((l (hub-screen-launch *run* draw scoring)))
+             (set! *launch* l)
+             (set! *run* (cdr (hub-screen-take-request *run*)))
+             (save! *run*)
+             l)))
+
+    (define (hub-run-launch-pending) *launch*)
+    ;; Does the pending launch resume a held board rather than deal one?
+    (define (hub-run-resume?)
+      (and *launch* (eq? (node-state (launch-node *launch*)) 'held)))
+    (define (hub-run-table) (and *launch* (node-table (launch-node *launch*))))
+    (define (hub-run-spec) (and *launch* (launch-spec *launch*)))
+
+    ;; The run's share code: the seed under table `run`, as P4a's.
+    (define (hub-run-code)
+      (and *run* (encode (spec-new 'run 'hacker 1 'vegas 'turtle (world-run-seed (hub-screen-world *run*))))))
+
+    ;; How hot a board finished: its trace value against its trace-at, 0..1.
+    (define (board-heat tr)
+      (let ((at (trace-trace-at tr)))
+        (if (<= at 0) 1.0 (min 1.0 (/ (trace-value tr) at)))))
+
+    ;; Sim ticks (60 a second) as beats at a tempo.
+    (define (ticks->beats ticks bpm)
+      (exact (round (* (/ ticks TICKS-PER-SECOND) (/ bpm 60.0)))))
+
+    ;; The board cleared: its node opens (D23); answers the HUD's line, or
+    ;; #f when no launch of this table is pending.
+    (define (hub-run-cleared! table tr moves)
+      (and *run* *launch* (eq? table (hub-run-table))
+           (let* ((w (hub-screen-world *run*))
+                  (bpm (descriptor-calm-bpm (hub-descriptor w))))
+             (set! *run* (hub-screen-return *run* (list 'cleared (ticks->beats (trace-ticks tr) bpm) moves (board-heat tr) '())))
+             (set! *launch* #f)
+             (save! *run*)
+             "NODE CRASHED. BACK TO THE LAYER.")))
+
+    ;; DISCONNECT on the board: held at its node (ruled 2026-09-22). The shell
+    ;; keeps the board (its table saves it as it plays; its trace does not
+    ;; tick while held); the node reads HELD with the board's heat (its trace
+    ;; against its trace-at: D65); the next launch of that node resumes it
+    ;; (hub-run-resume? says so).
+    (define (hub-run-hold! table tr)
+      (and *run* *launch* (eq? table (hub-run-table))
+           (begin
+             (set! *run* (hub-screen-hold-board *run* (board-heat tr)))
+             (set! *launch* #f)
+             (save! *run*)
+             #t)))
+
+    ;; The board severed: back at the node, its ICE alerted (D23).
+    (define (hub-run-severed! table)
+      (and *run* *launch* (eq? table (hub-run-table))
+           (begin
+             (set! *run* (hub-screen-return *run* (list 'severed '())))
+             (set! *launch* #f)
+             (save! *run*)
+             #t)))))

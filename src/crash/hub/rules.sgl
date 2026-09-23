@@ -1,0 +1,902 @@
+;;; (crash hub rules) - The beat: what one step of the world does.
+;;;
+;;; The world advances on the music's beat whether or not the runner acts
+;;; (D60): hub-step takes a world and one action and answers the next
+;;; world, pure, and the shell calls it once per beat with `wait` when
+;;; the player gave nothing. A hold (a menu, the pause panel, a board, a
+;;; market) is the shell not calling it: the world has no wall clock. The
+;;; order inside a beat: the runner's action and its pickups; every
+;;; daemon one cell (its route, or toward what it hunts); the bar's ICE
+;;; pulse; detection (sight fans, contact, the ICE); the trace's own beat;
+;;; the timers; the beat count; the sever. Nothing here is random at
+;;; step time: ties go to the lowest index, so the arms and the
+;;; auto-player replay a run from its seed and its actions.
+;;;
+;;; What a node launches (hub-launch) is a (crash code) spec the board
+;;; deals from, with the runner's board tools and this depth's
+;;; thresholds; what comes back (hub-return) is the board's outcome: a
+;;; clear opens the node, yields its key, effect, bounty and loot and
+;;; lets its finishing trace follow the runner out; a severed link puts
+;;; him back at the node with its ICE alerted and the trace high (D23).
+;;; A severed layer regrows from the next attempt of the same seed,
+;;; tools kept, layer credits lost (hub-severed-layer); the ladder down
+;;; banks the layer and enters the next (hub-descend). Rules family: no
+;;; platform, no drawing. The numbers are (crash hub world)'s block.
+
+(define-library (crash hub rules)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash code)
+          (crash hub world)
+          (crash hub gen))
+
+  (export hub-new hub-step hub-launch hub-return hub-descend hub-severed-layer hub-with-layer outcome-valid?
+          hub-enter-layer hub-descriptor
+          hub-alert hub-tense? hub-tempo hub-trace-fraction hub-pulse?
+          hub-passable? hub-daemon-passable? hub-can-descend? hub-at-market? hub-can-buy?
+          hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent? hub-runner-sight hub-path
+          hub-nearest-daemon hub-node-here hub-buy hub-market-request hub-remember hub-hold-board
+          launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson launch-marks
+          action-valid? ACTIONS)
+
+  (begin
+    (define ACTIONS (list 'move 'wait 'use 'enter 'buy 'descend 'market))
+
+    ;; The descriptor of the world's depth.
+    (define (hub-descriptor w) (descriptor-at (world-depth w)))
+
+    ;; --- construction ----------------------------------------------------------
+
+    ;; The world at the top of a layer: its layer from (run seed, depth,
+    ;; attempt), the runner on the ladder up, the live copies of the nodes
+    ;; and the daemons, nothing opened, taken, dark or held (keys are the
+    ;; layer's), no layer credits, the trace and the beat at zero.
+    (define (hub-with-layer w l depth attempt)
+      (remember
+       (world w
+              depth: depth
+              attempt: attempt
+              layer: l
+              runner: (runner cell: (layer-entry l))
+              nodes: (layer-nodes l)
+              daemons: (layer-daemons l)
+              keys: '()
+              opened: '()
+              taken: '()
+              dark: '()
+              decoys: '()
+              layer-credits: 0
+              trace: 0
+              beat: 0
+              last-seen: #f
+              request: #f
+              events: '()
+              seen: (make-vector (layer-size l) #f))))
+
+    (define (hub-enter-layer w depth attempt)
+      (let ((l (generate-layer (world-run-seed w) depth attempt)))
+        (unless l (error "hub: no layer built for this run seed, depth and attempt" (world-run-seed w) depth attempt))
+        (hub-with-layer w l depth attempt)))
+
+    ;; The world with the runner's sight added to its memory.
+    (define (remember w)
+      (let ((v (vector-copy (world-seen w))))
+        (for-each (lambda (c) (vector-set! v c #t)) (hub-runner-sight w))
+        (world w seen: v)))
+
+    (define (hub-remember w) (remember w))
+
+    ;; The room holding cell c joins the memory: a cleared node maps its
+    ;; own room, whatever the runner has seen of it (D64's visible
+    ;; rewards). A cell in a corridor reveals nothing.
+    (define (reveal-room w c)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (x (idx-x c width))
+             (y (idx-y c width))
+             (room (find (lambda (r) (room-contains? r x y)) (layer-rooms l))))
+        (if (not room)
+            w
+            (let ((v (vector-copy (world-seen w))))
+              (for-each (lambda (i) (vector-set! v i #t)) (room-cells room width))
+              (world w seen: v)))))
+
+    ;; A run from its seed, on layer 1.
+    ;; A run from its seed at a difficulty (NORMAL when none is given).
+    (define (hub-new run-seed . rest)
+      (let ((difficulty (if (and (pair? rest) (difficulty? (car rest))) (car rest) 'normal)))
+        (hub-enter-layer (world run-seed: (max 1 run-seed) difficulty: difficulty) 1 0)))
+
+    ;; --- queries ---------------------------------------------------------------
+
+    (define (hub-trace-fraction w)
+      (let ((budget (descriptor-budget (hub-descriptor w))))
+        (if (<= budget 0) 1.0 (/ (world-trace w) budget))))
+
+    ;; A daemon hunting the runner or an alerted node counts; one held by a
+    ;; decoy does not (the decoy is the runner's move, not the layer's alarm).
+    (define (any-daemon-alert? w)
+      (any (lambda (d) (and (daemon-alert d) (memq (daemon-hunting d) (list 'runner 'node))
+                            (not (eq? (daemon-kind d) 'hunter))   ; a hunter's own chase does not keep it awake
+                            #t))
+           (world-daemons w)))
+
+    (define (hub-tense? w)
+      (or (>= (hub-trace-fraction w) TENSE-AT) (any-daemon-alert? w)))
+
+    ;; Beats per minute for the section the world is in (phase 2 hands
+    ;; this to the player, which owns the beat clock).
+    (define (hub-tempo w)
+      (let ((d (hub-descriptor w)))
+        (if (hub-tense? w) (descriptor-tense-bpm d) (descriptor-calm-bpm d))))
+
+    ;; quiet | alert | hunted, the layer's state for the draw and the shell.
+    (define (hub-alert w)
+      (let ((f (hub-trace-fraction w)))
+        (cond ((>= f HUNTED-AT) 'hunted)
+              ((or (>= f ALERT-AT) (any-daemon-alert? w)) 'alert)
+              (else 'quiet))))
+
+    ;; Does the ICE pulse on this beat? The bar's first beat; every half
+    ;; bar when hunted.
+    (define (hub-pulse? w)
+      (let ((period (if (eq? (hub-alert w) 'hunted)
+                        (max 1 (quotient BEATS-PER-BAR 2))
+                        BEATS-PER-BAR)))
+        (= 0 (modulo (world-beat w) period))))
+
+    (define (gate-open? w c)
+      (and (memv c (world-opened w)) #t))
+
+    (define (has-key? w color)
+      (and (memq color (world-keys w)) #t))
+
+    ;; May the runner step into c? Walkable, and a gate only opened or
+    ;; with its key in hand.
+    (define (hub-passable? w c)
+      (let* ((l (world-layer w))
+             (kind (layer-cell l c)))
+        (and (cell-walkable? kind)
+             (or (not (eq? kind 'gate))
+                 (gate-open? w c)
+                 (has-key? w (layer-gate-color l c))))))
+
+    ;; A daemon never opens a gate.
+    (define (hub-daemon-passable? w c)
+      (let* ((l (world-layer w))
+             (kind (layer-cell l c)))
+        (and (cell-walkable? kind)
+             (or (not (eq? kind 'gate)) (gate-open? w c)))))
+
+    (define (hub-node-here w)
+      (layer-node-at (world-layer w) (runner-cell (world-runner w)))
+      )
+
+    ;; The live node under the runner, by index (the layer's copy is the placement).
+    (define (live-node-here w)
+      (let ((n (hub-node-here w)))
+        (and n (world-node w (node-index n)))))
+
+    (define (hub-can-descend? w)
+      (eq? (layer-cell (world-layer w) (runner-cell (world-runner w))) 'ladder-down))
+
+    (define (hub-at-market? w)
+      (eq? (layer-cell (world-layer w) (runner-cell (world-runner w))) 'market))
+
+    (define (spendable w) (+ (world-credits w) (world-layer-credits w)))
+
+    (define (hub-can-buy? w tool)
+      (and (hub-at-market? w)
+           (memq tool (descriptor-shop (hub-descriptor w)))
+           (let ((p (hub-tool-price tool)))
+             (and p (<= p (spendable w))))))
+
+    (define (cell-adjacent? a b width)
+      (= 1 (+ (abs (- (idx-x a width) (idx-x b width)))
+              (abs (- (idx-y a width) (idx-y b width))))))
+
+    (define (manhattan a b width)
+      (+ (abs (- (idx-x a width) (idx-x b width)))
+         (abs (- (idx-y a width) (idx-y b width)))))
+
+    ;; The daemon nearest a cell by grid distance (lowest index on a tie), or #f.
+    (define (hub-nearest-daemon w c)
+      (let ((width (layer-width (world-layer w))))
+        (let loop ((ds (world-daemons w)) (best #f) (best-d #f))
+          (cond ((null? ds) best)
+                ((or (not best-d) (< (manhattan (daemon-cell (car ds)) c width) best-d))
+                 (loop (cdr ds) (car ds) (manhattan (daemon-cell (car ds)) c width)))
+                (else (loop (cdr ds) best best-d))))))
+
+    ;; --- sight -----------------------------------------------------------------
+
+    ;; Bresenham from a to b: every cell strictly between them lets sight
+    ;; through, and b itself is not a barrier.
+    (define (line-of-sight? l a b)
+      (let* ((w (layer-width l))
+             (x0 (idx-x a w)) (y0 (idx-y a w))
+             (x1 (idx-x b w)) (y1 (idx-y b w))
+             (dx (abs (- x1 x0)))
+             (dy (- (abs (- y1 y0))))
+             (sx (if (< x0 x1) 1 -1))
+             (sy (if (< y0 y1) 1 -1)))
+        (and (not (cell-blocks-sight? (layer-cell l b)))
+             (let loop ((x x0) (y y0) (err (+ dx dy)))
+               (cond ((and (= x x1) (= y y1)) #t)
+                     ((and (not (and (= x x0) (= y y0)))
+                           (cell-blocks-sight? (layer-cell l (idx x y w))))
+                      #f)
+                     (else
+                      (let* ((e2 (* 2 err))
+                             (x (if (>= e2 dy) (+ x sx) x))
+                             (err (if (>= e2 dy) (+ err dy) err))
+                             (y (if (<= e2 dx) (+ y sy) y))
+                             (err (if (<= e2 dx) (+ err dx) err)))
+                        (loop x y err))))))))
+
+    ;; The cells a daemon sees, by its kind (D65): a drone, a sentinel and
+    ;; an awake hunter see the fan; a dormant hunter nothing; a crawler
+    ;; the link line ahead. Ascending cell order, no repeats.
+    (define (daemon-sight l d)
+      (cond ((not (daemon-awake? d)) '())
+            ((eq? (daemon-kind d) 'crawler) (link-line l d))
+            (else (daemon-fan l d))))
+
+    ;; A crawler's sight: the link cells straight ahead of its facing, up
+    ;; to SIGHT, stopping at the first cell that is not a link.
+    (define (link-line l d)
+      (let* ((w (layer-width l))
+             (h (layer-height l))
+             (f (daemon-facing d)))
+        (let loop ((at (daemon-cell d)) (k 0) (acc '()))
+          (let ((next (and (< k SIGHT) (step-cell at f w h))))
+            (if (and next (eq? (layer-cell l next) 'link))
+                (loop next (+ k 1) (cons next acc))
+                (reverse acc))))))
+
+    ;; The fan: SIGHT cells ahead of the facing in a 90 degree fan (across
+    ;; no farther than ahead), each with a line of sight from the daemon,
+    ;; plus its four neighbors whatever it faces.
+    (define (daemon-fan l d)
+      (let* ((w (layer-width l))
+             (h (layer-height l))
+             (pos (daemon-cell d))
+             (px (idx-x pos w))
+             (py (idx-y pos w))
+             (f (direction-delta (daemon-facing d)))
+             (fx (car f))
+             (fy (cdr f))
+             (qx (- fy))     ; the perpendicular
+             (qy fx))
+        (let ahead ((k 1) (acc (filter (lambda (n) (not (cell-blocks-sight? (layer-cell l n))))
+                                       (filter-map (lambda (dir) (step-cell pos dir w h))
+                                                   (list 'up 'down 'left 'right)))))
+          (if (> k SIGHT)
+              (list-sort < (dedupe (list-sort < acc)))
+              (ahead (+ k 1)
+                     (let across ((j (- k)) (acc acc))
+                       (if (> j k)
+                           acc
+                           (let ((x (+ px (* k fx) (* j qx)))
+                                 (y (+ py (* k fy) (* j qy))))
+                             (across (+ j 1)
+                                     (if (and (in-bounds? x y w h)
+                                              (line-of-sight? l pos (idx x y w)))
+                                         (cons (idx x y w) acc)
+                                         acc))))))))))
+
+    (define (dedupe sorted)
+      (cond ((null? sorted) '())
+            ((null? (cdr sorted)) sorted)
+            ((= (car sorted) (cadr sorted)) (dedupe (cdr sorted)))
+            (else (cons (car sorted) (dedupe (cdr sorted))))))
+
+    ;; What the runner sees: every walkable cell within RUNNER-SIGHT
+    ;; (Euclidean) with a line of sight from his cell, his own cell first,
+    ;; ascending. Fog and light are one system (D61): this is what the
+    ;; draw lights and what joins the memory each beat.
+    (define (hub-runner-sight w)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (c (runner-cell (world-runner w)))
+             (cx (idx-x c width))
+             (cy (idx-y c width))
+             (r2 (* RUNNER-SIGHT RUNNER-SIGHT)))
+        (let rows ((y (max 0 (- cy RUNNER-SIGHT))) (acc '()))
+          (if (> y (min (- height 1) (+ cy RUNNER-SIGHT)))
+              (reverse acc)
+              (rows (+ y 1)
+                    (let cols ((x (max 0 (- cx RUNNER-SIGHT))) (acc acc))
+                      (if (> x (min (- width 1) (+ cx RUNNER-SIGHT)))
+                          acc
+                          (cols (+ x 1)
+                                (let ((i (idx x y width)))
+                                  (if (and (<= (+ (* (- x cx) (- x cx)) (* (- y cy) (- y cy))) r2)
+                                           (cell-walkable? (layer-cell l i))
+                                           (line-of-sight? l c i))
+                                      (cons i acc)
+                                      acc))))))))))
+
+    ;; Is the runner hidden from this daemon? Cloaked: yes. In contact or
+    ;; beside it: no. In shadow: yes, unless beside it. Else: hidden when
+    ;; out of the fan.
+    (define (hub-runner-hidden? w d)
+      (let* ((l (world-layer w))
+             (r (world-runner w))
+             (c (runner-cell r)))
+        (cond ((> (runner-cloak r) 0) #t)
+              ((= c (daemon-cell d)) #f)
+              ((cell-adjacent? c (daemon-cell d) (layer-width l)) #f)
+              ((eq? (layer-cell l c) 'shadow) #t)
+              (else (not (memv c (daemon-sight l d)))))))
+
+    ;; The shortest path from the runner to a cell over what he may pass
+    ;; now, as directions, or #f. For the auto-player and the doors.
+    (define (hub-path w target)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (parent (make-vector (layer-size l) #f))
+             (from (runner-cell (world-runner w))))
+        (vector-set! parent from (cons from #f))
+        (let loop ((front (list from)) (back '()))
+          (cond ((and (null? front) (null? back)) #f)
+                ((null? front) (loop (reverse back) '()))
+                ((= (car front) target)
+                 (let walk ((c target) (acc '()))
+                   (let ((p (vector-ref parent c)))
+                     (if (not (cdr p)) acc (walk (car p) (cons (cdr p) acc))))))
+                (else
+                 (loop (cdr front)
+                       (fold-left (lambda (back dir)
+                                    (let ((n (step-cell (car front) dir width height)))
+                                      (if (and n (not (vector-ref parent n)) (hub-passable? w n))
+                                          (begin (vector-set! parent n (cons (car front) dir)) (cons n back))
+                                          back)))
+                                  back
+                                  (list 'up 'down 'left 'right))))))))
+
+    ;; --- the runner's phase ------------------------------------------------------
+
+    (define (action-valid? a)
+      (or (memq a (list 'wait 'enter 'descend 'market))
+          (and (pair? a) (pair? (cdr a)) (null? (cddr a))
+               (or (and (eq? (car a) 'move) (direction? (cadr a)))
+                   (and (eq? (car a) 'use) (tool-known? (cadr a)))
+                   (and (eq? (car a) 'buy) (tool-known? (cadr a)))))))
+
+    (define (add-event w e)
+      (world w events: (cons e (world-events w))))
+
+    ;; The first key of that color leaves the ring (a hand-built layer may hold two).
+    (define (remove-one x lst)
+      (cond ((null? lst) '())
+            ((eq? (car lst) x) (cdr lst))
+            (else (cons (car lst) (remove-one x (cdr lst))))))
+
+    (define (inventory-add inv tool n)
+      (let ((count (+ n (let ((e (assq tool inv))) (if e (cdr e) 0)))))
+        (cons (cons tool count)
+              (filter (lambda (e) (not (eq? (car e) tool))) inv))))
+
+    (define (inventory-take inv tool n)
+      (let ((count (max 0 (- (let ((e (assq tool inv))) (if e (cdr e) 0)) n))))
+        (if (= count 0)
+            (filter (lambda (e) (not (eq? (car e) tool))) inv)
+            (cons (cons tool count)
+                  (filter (lambda (e) (not (eq? (car e) tool))) inv)))))
+
+    (define (ledger-add l field n)
+      (cond ((eq? field 'moves) (ledger l moves: (+ n (ledger-moves l))))
+            ((eq? field 'beats) (ledger l beats: (+ n (ledger-beats l))))
+            ((eq? field 'seen) (ledger l seen: (+ n (ledger-seen l))))
+            ((eq? field 'reconnects) (ledger l reconnects: (+ n (ledger-reconnects l))))
+            ((eq? field 'severed-layers) (ledger l severed-layers: (+ n (ledger-severed-layers l))))
+            ((eq? field 'cleared) (ledger l cleared: (+ n (ledger-cleared l))))
+            (else (ledger l credits: (+ n (ledger-credits l))))))
+
+    ;; Whatever lies on the cell the runner just entered.
+    (define (pick-up w c)
+      (let ((cache (layer-cache-at (world-layer w) c)))
+        (if (or (not cache) (memv c (world-taken w)))
+            w
+            (let ((w (world w taken: (cons c (world-taken w)))))
+              (if (eq? (car cache) 'credits)
+                  (add-event (world w layer-credits: (+ (cdr cache) (world-layer-credits w)))
+                             (list 'pickup 'credits (cdr cache)))
+                  (add-event (world w inventory: (inventory-add (world-inventory w) (cdr cache) 1))
+                             (list 'pickup 'tool (cdr cache))))))))
+
+    (define (do-move w dir)
+      (let* ((l (world-layer w))
+             (r (world-runner w))
+             (from (runner-cell r))
+             (to (step-cell from dir (layer-width l) (layer-height l))))
+        (cond ((or (not to) (not (hub-passable? w to)))
+               (add-event (world w runner: (runner r facing: dir)) (list 'bump dir)))
+              (else
+               (let* ((gate? (and (eq? (layer-cell l to) 'gate) (not (gate-open? w to))))
+                      (color (and gate? (layer-gate-color l to)))
+                      (w (if gate?
+                             (add-event (world w
+                                               opened: (cons to (world-opened w))
+                                               keys: (remove-one color (world-keys w)))
+                                        (list 'gate-opened to color))
+                             w)))
+                 (pick-up (world w
+                                 runner: (runner r cell: to facing: dir)
+                                 ledger: (ledger-add (world-ledger w) 'moves 1))
+                          to))))))
+
+    (define (chebyshev a b width)
+      (max (abs (- (idx-x a width) (idx-x b width)))
+           (abs (- (idx-y a width) (idx-y b width)))))
+
+    ;; Every ICE cell within JAM-RADIUS of the runner goes dark for
+    ;; JAM-BEATS, unless dark for good already.
+    (define (jam w)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (c (runner-cell (world-runner w)))
+             (near (filter (lambda (i) (and (eq? (layer-cell l i) 'ice)
+                                            (<= (chebyshev c i width) JAM-RADIUS)))
+                           (iota (layer-size l)))))
+        (world w dark: (fold-left (lambda (dark i)
+                                    (let ((e (assv i dark)))
+                                      (if (and e (= (cdr e) -1))
+                                          dark
+                                          (cons (cons i JAM-BEATS)
+                                                (filter (lambda (e) (not (= (car e) i))) dark)))))
+                                  (world-dark w)
+                                  near))))
+
+    (define (do-use w tool)
+      (cond ((or (not (hub-tool? tool)) (= 0 (world-inventory-count w tool)))
+             (add-event w (list 'refused 'use tool)))
+            (else
+             (let ((w (world w inventory: (inventory-take (world-inventory w) tool 1))))
+               (add-event
+                (cond ((eq? tool 'cloak)
+                       (world w runner: (runner (world-runner w) cloak: CLOAK-BEATS)))
+                      ((eq? tool 'decoy)
+                       (world w decoys: (cons (cons (runner-cell (world-runner w)) DECOY-BEATS)
+                                              (world-decoys w))))
+                      (else (jam w)))
+                (list 'used tool))))))
+
+    (define (do-enter w)
+      (let ((n (live-node-here w)))
+        (if (and n (not (eq? (node-state n) 'cleared)))
+            (add-event (world w request: 'launch) (list 'enter (node-index n)))
+            (add-event w (list 'refused 'enter)))))
+
+    ;; A purchase without a beat: the market is a hold (D61 phase 2, ruled:
+    ;; a panel); the shell calls this per row chosen. The beat form below
+    ;; stays for a policy that buys on the move.
+    (define (hub-buy w tool)
+      (if (not (hub-can-buy? w tool))
+          (add-event w (list 'refused 'buy tool))
+          (let* ((price (hub-tool-price tool))
+                 (from-layer (min price (world-layer-credits w)))
+                 (from-run (- price from-layer)))
+            (add-event (world w
+                              layer-credits: (- (world-layer-credits w) from-layer)
+                              credits: (- (world-credits w) from-run)
+                              inventory: (inventory-add (world-inventory w) tool 1))
+                       (list 'bought tool price)))))
+
+    (define (do-buy w tool) (hub-buy w tool))
+
+    ;; Standing on the market: the runner asks for the panel (a hold). The
+    ;; verb takes a beat like the others.
+    (define (hub-market-request w)
+      (if (hub-at-market? w)
+          (add-event (world w request: 'market) 'market)
+          (add-event w (list 'refused 'market))))
+
+    (define (do-descend w)
+      (if (hub-can-descend? w)
+          (add-event (world w request: 'descend) 'descend)
+          (add-event w (list 'refused 'descend))))
+
+    (define (runner-phase w action)
+      (cond ((eq? action 'wait) w)
+            ((eq? action 'enter) (do-enter w))
+            ((eq? action 'descend) (do-descend w))
+            ((eq? action 'market) (hub-market-request w))
+            ((eq? (car action) 'move) (do-move w (cadr action)))
+            ((eq? (car action) 'use) (do-use w (cadr action)))
+            (else (do-buy w (cadr action)))))
+
+    ;; --- the daemons' phase ----------------------------------------------------
+
+    ;; The first step of a shortest path from `from` to `to` over what a
+    ;; daemon may enter, or #f when there is none. Breadth-first,
+    ;; neighbors up, down, left, right.
+    (define (step-toward w from to)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (parent (make-vector (layer-size l) #f)))
+        (vector-set! parent from from)
+        (let loop ((front (list from)) (back '()))
+          (cond ((and (null? front) (null? back)) #f)
+                ((null? front) (loop (reverse back) '()))
+                ((= (car front) to)
+                 (let walk ((c to))
+                   (if (= (vector-ref parent c) from) c (walk (vector-ref parent c)))))
+                (else
+                 (loop (cdr front)
+                       (fold-left (lambda (back n)
+                                    (if (and (not (vector-ref parent n))
+                                             (hub-daemon-passable? w n))
+                                        (begin (vector-set! parent n (car front)) (cons n back))
+                                        back))
+                                  back
+                                  (filter-map (lambda (dir) (step-cell (car front) dir width height))
+                                              (list 'up 'down 'left 'right)))))))))
+
+    (define (direction-between a b width)
+      (let ((dx (- (idx-x b width) (idx-x a width)))
+            (dy (- (idx-y b width) (idx-y a width))))
+        (cond ((> dx 0) 'right) ((< dx 0) 'left) ((> dy 0) 'down) ((< dy 0) 'up) (else #f))))
+
+    (define (moved d to width)
+      (let ((dir (direction-between (daemon-cell d) to width)))
+        (daemon d cell: to facing: (or dir (daemon-facing d)))))
+
+    ;; A decoy in the daemon's sight takes it: the nearest, lowest cell on a tie.
+    (define (decoy-in-sight w d)
+      (let ((sight (daemon-sight (world-layer w) d)))
+        (let loop ((ds (list-sort (lambda (a b) (< (car a) (car b))) (world-decoys w))))
+          (cond ((null? ds) #f)
+                ((memv (car (car ds)) sight) (car ds))
+                (else (loop (cdr ds)))))))
+
+    ;; One move of a daemon, by its kind (D65). A sentinel turns a quarter
+    ;; instead of moving (a hunt only holds its facing on the target's
+    ;; side, its alert running down where it stands); a crawler patrols
+    ;; its link route and watches what it hunts without leaving the
+    ;; links; a drone and an awake hunter chase, return and patrol; a
+    ;; hunter with no hunt of its own walks toward the runner's last seen
+    ;; cell and waits there.
+    (define (step-daemon w d)
+      (let* ((width (layer-width (world-layer w)))
+             (decoy (decoy-in-sight w d))
+             (d (if decoy (daemon d alert: (cons (car decoy) (cdr decoy)) hunting: 'decoy returning?: #f) d))
+             ;; a daemon passes THROUGH the runner (D23): one standing on his
+             ;; cell at the start of a beat walks on, so it cannot park on him
+             ;; (the arm's run leg, 2026-09-22: a hunting drone reached the
+             ;; runner and sat there, contact spiking, 440/400 in twenty beats)
+             (d (if (= (daemon-cell d) (runner-cell (world-runner w))) (push-through w d) d))
+             (alert (daemon-alert d))
+             (kind (daemon-kind d)))
+        (cond ((eq? kind 'sentinel)
+               (if alert
+                   (if (<= (cdr alert) 0)
+                       (daemon d alert: #f hunting: #f)
+                       (daemon d alert: (cons (car alert) (- (cdr alert) 1))
+                               facing: (or (direction-between (daemon-cell d) (car alert) width) (daemon-facing d))))
+                   (daemon d facing: (turn-right (daemon-facing d)))))
+              ((and (eq? kind 'crawler) alert)
+               (if (<= (cdr alert) 0)
+                   (daemon d alert: #f hunting: #f)
+                   (daemon d alert: (cons (car alert) (- (cdr alert) 1)))))
+              (alert
+               (let ((target (car alert))
+                     (ttl (cdr alert)))
+                 (if (or (= (daemon-cell d) target) (<= ttl 0))
+                     (daemon d alert: #f hunting: #f returning?: (not (eq? kind 'hunter)))
+                     (let ((next (step-toward w (daemon-cell d) target)))
+                       (daemon (if next (moved d next width) d)
+                               alert: (cons target (- ttl 1)))))))
+              ((daemon-returning? d)
+               (let ((home (vector-ref (daemon-route d) (daemon-step d))))
+                 (if (= (daemon-cell d) home)
+                     (daemon d returning?: #f)
+                     (let ((next (step-toward w (daemon-cell d) home)))
+                       (if next (moved d next width) d)))))
+              ((eq? kind 'hunter)
+               (let ((scent (world-last-seen w)))
+                 (if (or (not scent) (= scent (daemon-cell d)))
+                     d
+                     (let ((next (step-toward w (daemon-cell d) scent)))
+                       (if next (moved d next width) d)))))
+              (else
+               (let* ((route (daemon-route d))
+                      (step (modulo (+ 1 (daemon-step d)) (vector-length route))))
+                 (daemon (moved d (vector-ref route step) width) step: step))))))
+
+    ;; A daemon off the runner's cell: one cell on in its facing, else any
+    ;; other cell it may enter, else where it stands (a dead end of one).
+    (define (push-through w d)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (here (daemon-cell d))
+             (ahead (step-cell here (daemon-facing d) width height))
+             (target (or (and ahead (hub-daemon-passable? w ahead) ahead)
+                         (let loop ((dirs (list 'up 'down 'left 'right)))
+                           (cond ((null? dirs) #f)
+                                 ((let ((n (step-cell here (car dirs) width height)))
+                                    (and n (hub-daemon-passable? w n) n)))
+                                 (else (loop (cdr dirs))))))))
+        (if target (moved d target width) d)))
+
+    (define (turn-right d)
+      (cond ((eq? d 'up) 'right) ((eq? d 'right) 'down) ((eq? d 'down) 'left) (else 'up)))
+
+    ;; The daemons' beat (D65): the hunters wake while the layer is alert
+    ;; or hunted (the trace, or a drone's or sentinel's hunt) and sleep
+    ;; when it is quiet again, where they stand; an awake hunter moves
+    ;; every beat at every difficulty; the others on the difficulty's
+    ;; pace (once a bar at EASY, every other beat at NORMAL, every beat at
+    ;; ELITE).
+    (define (daemon-phase w)
+      (let* ((awake (not (eq? (hub-alert w) 'quiet)))
+             (w (world w daemons: (map (lambda (d) (if (eq? (daemon-kind d) 'hunter) (daemon d awake?: awake) d))
+                                       (world-daemons w))))
+             (paced? (= 0 (modulo (world-beat w) (daemon-pace (world-difficulty w))))))
+        (world w daemons: (map (lambda (d)
+                                 (cond ((eq? (daemon-kind d) 'hunter) (if (daemon-awake? d) (step-daemon w d) d))
+                                       (paced? (step-daemon w d))
+                                       (else d)))
+                               (world-daemons w)))))
+
+    ;; --- detection ---------------------------------------------------------------
+
+    (define (ice-dark? w c)
+      (and (assv c (world-dark w)) #t))
+
+    (define (ice-phase w)
+      (let* ((l (world-layer w))
+             (c (runner-cell (world-runner w))))
+        (if (and (hub-pulse? w)
+                 (eq? (layer-cell l c) 'ice)
+                 (not (ice-dark? w c))
+                 (= 0 (runner-cloak (world-runner w))))
+            (add-event (world w trace: (+ ICE-SPIKE (world-trace w))) 'ice-hit)
+            w)))
+
+    ;; Every daemon that sees the runner hunts his cell. The trace spikes
+    ;; once per beat, on a sighting by a daemon not already hunting HIM (a
+    ;; hunter keeps him in view without spiking again: one spike per
+    ;; detection, the design's "detection is a trace spike"; a daemon held
+    ;; by a decoy or an alerted node has not seen him and spikes when it
+    ;; does) or on contact (his cell), and the ledger counts the beat as
+    ;; one sighting.
+    ;; One spike per detection, contact included (2026-09-22): a daemon
+    ;; already hunting the runner does not spike again while it keeps him,
+    ;; whether at range or standing on him. Before, contact spiked every
+    ;; beat, so a daemon that walked onto the runner and stayed filled the
+    ;; layer's budget in twenty beats with nothing to answer it (the arm's
+    ;; run leg found it). Arriving on his cell is still a fresh detection
+    ;; worth CONTACT-FACTOR times the spike, and a daemon that loses him
+    ;; and finds him again spikes again.
+    (define (detection-phase w)
+      (let* ((c (runner-cell (world-runner w)))
+             (seen (filter (lambda (d) (not (hub-runner-hidden? w d))) (world-daemons w)))
+             (spiking (filter (lambda (d) (not (eq? (daemon-hunting d) 'runner))) seen)))
+        (if (null? seen)
+            w
+            (let* ((spike (fold-left (lambda (best d)
+                                       (max best (if (= (daemon-cell d) c)
+                                                     (* CONTACT-FACTOR SEEN-SPIKE)
+                                                     SEEN-SPIKE)))
+                                     0
+                                     spiking))
+                   (w (world w
+                             trace: (+ spike (world-trace w))
+                             last-seen: c   ; the hunters' scent
+                             ledger: (if (null? spiking) (world-ledger w) (ledger-add (world-ledger w) 'seen 1))
+                             daemons: (map (lambda (d)
+                                             (if (memq d seen)
+                                                 (daemon d alert: (cons c ALERT-BEATS) hunting: 'runner returning?: #f)
+                                                 d))
+                                           (world-daemons w)))))
+              (fold-left (lambda (w d) (add-event w (list (if (= (daemon-cell d) c) 'contact 'seen) (daemon-index d))))
+                         w
+                         spiking)))))
+
+    ;; --- the timers ---------------------------------------------------------------
+
+    (define (tick-alist entries)
+      (filter-map (lambda (e)
+                    (cond ((= (cdr e) -1) e)
+                          ((<= (cdr e) 1) #f)
+                          (else (cons (car e) (- (cdr e) 1)))))
+                  entries))
+
+    (define (timer-phase w)
+      (let ((r (world-runner w)))
+        (world w
+               runner: (runner r cloak: (max 0 (- (runner-cloak r) 1)))
+               decoys: (tick-alist (world-decoys w))
+               dark: (tick-alist (world-dark w)))))
+
+    ;; --- the step ---------------------------------------------------------------
+
+    ;; One beat. A world holding a request, or done, does not move.
+    (define (hub-step w action)
+      (cond ((or (world-request w) (world-done? w) (not (action-valid? action))) w)
+            (else
+             (let* ((w (world w events: '()))
+                    (w (runner-phase w action))
+                    (w (daemon-phase w))
+                    (w (ice-phase w))
+                    (w (detection-phase w))
+                    (w (world w trace: (+ 1 (world-trace w))))
+                    (w (timer-phase w))
+                    (w (remember w))
+                    (w (world w
+                              beat: (+ 1 (world-beat w))
+                              ledger: (ledger-add (world-ledger w) 'beats 1))))
+               ;; the sever outranks whatever the beat asked for: the trace decides the link (D23)
+               (if (>= (world-trace w) (descriptor-budget (hub-descriptor w)))
+                   (add-event (world w request: 'severed) 'severed)
+                   w)))))
+
+    ;; --- the node's board -------------------------------------------------------
+
+    ;; What the shell deals: the spec, the node, the runner's board tools
+    ;; for its table (alist tool -> count), this depth's thresholds, Gibson's lines.
+    (define-struct launch
+      (spec default: #f)
+      (node default: #f)
+      (tools default: '())
+      (trace-at default: 180)
+      (sever-at default: 220)
+      (marks default: 0)                ; the objective (D64): marked pairs (STACK) or cards (DEFRAG) to extract
+      (gibson default: '()))
+
+    ;; The launch of the node under the runner, or #f without a launch
+    ;; request. draw and scoring are the settings' (the card table's).
+    (define (hub-launch w draw scoring)
+      (let ((n (live-node-here w))
+            (d (hub-descriptor w)))
+        (and (eq? (world-request w) 'launch)
+             n
+             (let* ((seed (hub-mix (layer-seed (world-run-seed w) (world-depth w) (world-attempt w))
+                                   (+ 1 (node-index n))
+                                   (node-attempts n)))
+                    (spec (spec-new (node-table n) 'hacker draw scoring 'turtle seed)))
+               (and spec
+                    (launch spec: spec
+                            node: n
+                            tools: (filter (lambda (e) (eq? (tool-table (car e)) (node-table n)))
+                                           (world-inventory w))
+                            trace-at: (descriptor-trace-at d)
+                            sever-at: (descriptor-sever-at d)
+                            marks: (descriptor-marks d)
+                            gibson: (descriptor-gibson d)))))))
+
+    (define (replace-node w n)
+      (world w nodes: (map (lambda (m) (if (= (node-index m) (node-index n)) n m)) (world-nodes w))))
+
+    (define (replace-daemon w d)
+      (world w daemons: (map (lambda (e) (if (= (daemon-index e) (daemon-index d)) d e)) (world-daemons w))))
+
+    (define (consume w consumed)
+      (world w inventory: (fold-left (lambda (inv e) (inventory-take inv (car e) (cdr e)))
+                                     (world-inventory w)
+                                     consumed)))
+
+    ;; The nearest daemon hunts the cell (an alerted node: D23).
+    (define (alert-nearest w c)
+      (let ((d (hub-nearest-daemon w c)))
+        (if d
+            (replace-daemon w (daemon d alert: (cons c ALERT-BEATS) hunting: 'node returning?: #f))
+            w)))
+
+    ;; A node's subsystem effect on clear: dark (its ICE cells, for good),
+    ;; open (a gate cell), reroute (a daemon's route collapses to where it stands).
+    (define (apply-effect w effect arg)
+      (cond ((eq? effect 'dark)
+             (world w dark: (fold-left (lambda (dark c)
+                                         (cons (cons c -1) (filter (lambda (e) (not (= (car e) c))) dark)))
+                                       (world-dark w)
+                                       arg)))
+            ((eq? effect 'open)
+             (world w opened: (cons arg (world-opened w))))
+            ((eq? effect 'reroute)
+             (let ((d (find (lambda (d) (= (daemon-index d) arg)) (world-daemons w))))
+               (if d
+                   (replace-daemon w (daemon d route: (vector (daemon-cell d)) step: 0 alert: #f returning?: #f))
+                   w)))
+            (else w)))
+
+    ;; The board's outcome back into the world (D23). outcome:
+    ;;   (cleared beats moves trace-fraction consumed)
+    ;;   (severed consumed)
+    ;; consumed: alist tool -> count the board used.
+    ;; An outcome the shell may hand back: its tag and its arity, nothing else.
+    (define (outcome-valid? outcome)
+      (and (list? outcome)
+           (pair? outcome)
+           (or (and (eq? (car outcome) 'cleared) (= (length outcome) 5)
+                    (every (lambda (x) (and (number? x) (>= x 0))) (list (cadr outcome) (caddr outcome) (cadddr outcome)))
+                    (list? (list-ref outcome 4)))
+               (and (eq? (car outcome) 'severed) (= (length outcome) 2)
+                    (list? (cadr outcome))))))
+
+    ;; A board's finishing trace can reach the budget on its own: the
+    ;; link is cut there and then, not on the next beat.
+    (define (sever-if-over w)
+      (if (>= (world-trace w) (descriptor-budget (hub-descriptor w)))
+          (add-event (world w request: 'severed) 'severed)
+          w))
+
+    (define (hub-return w outcome)
+      (let ((n (live-node-here w)))
+        (if (not (and (eq? (world-request w) 'launch) n (outcome-valid? outcome)))
+            w
+            (let ((w (world w request: #f events: '())))
+              (if (eq? (car outcome) 'cleared)
+                  (let* ((beats (cadr outcome))
+                         (moves (caddr outcome))
+                         (fraction (cadddr outcome))
+                         (consumed (list-ref outcome 4))
+                         (budget (descriptor-budget (hub-descriptor w)))
+                         (w (replace-node w (node n state: 'cleared)))
+                         (w (if (node-key n) (world w keys: (cons (node-key n) (world-keys w))) w))
+                         (w (if (node-effect n) (apply-effect w (node-effect n) (node-effect-arg n)) w))
+                         (w (if (node-loot n) (world w inventory: (inventory-add (world-inventory w) (node-loot n) 1)) w))
+                         (w (world w
+                                   layer-credits: (+ (node-bounty n) (world-layer-credits w))
+                                   trace: (+ (world-trace w) (exact (floor (* fraction CARRY budget))))
+                                   ledger: (ledger-add (ledger-add (world-ledger w) 'beats beats) 'moves moves)))
+                         (w (if (>= fraction 0.5) (alert-nearest w (node-cell n)) w))
+                         (w (reveal-room w (node-cell n)))   ; the reward shows (D64): the node's room is mapped
+                         (w (consume w consumed)))
+                    (sever-if-over (add-event w (list 'cleared (node-index n)))))
+                  (let* ((consumed (cadr outcome))
+                         (budget (descriptor-budget (hub-descriptor w)))
+                         (w (replace-node w (node n state: 'alerted attempts: (+ 1 (node-attempts n)))))
+                         (w (alert-nearest w (node-cell n)))
+                         (w (world w
+                                   trace: (max (world-trace w) (exact (floor (* HIGH budget))))
+                                   ledger: (ledger-add (world-ledger w) 'reconnects 1)))
+                         (w (consume w consumed)))
+                    (sever-if-over (add-event (add-event w (list 'severed-board (node-index n))) 'gibson))))))))
+
+    ;; DISCONNECT on a node's board (ruled 2026-09-22): the board is held at its
+    ;; node, the runner is back in the world there, the node reads HELD;
+    ;; entering it again resumes the held board (the shell keeps the board,
+    ;; its trace paused). heat is the board's trace against its trace-at,
+    ;; 0..1: the cabinet shows it, and a board held at HELD-ALERT-AT or
+    ;; hotter counts as alerted, a daemon drifting to the node (D65).
+    (define (hub-hold-board w . rest)
+      (let ((n (live-node-here w))
+            (heat (if (and (pair? rest) (number? (car rest))) (max 0.0 (min 1.0 (car rest))) 0.0)))
+        (if (not (and (eq? (world-request w) 'launch) n))
+            w
+            (let* ((w (replace-node (world w request: #f events: '()) (node n state: 'held heat: heat)))
+                   (w (if (>= heat HELD-ALERT-AT) (alert-nearest w (node-cell n)) w)))
+              (add-event w (list 'held (node-index n)))))))
+
+    ;; The ladder down: the layer's credits bank, the ledger counts the
+    ;; layer, and the next layer begins; past the last the run is done.
+    (define (hub-descend w)
+      (if (not (eq? (world-request w) 'descend))
+          w
+          (let* ((banked (world-layer-credits w))
+                 (w (world w
+                           credits: (+ banked (world-credits w))
+                           layer-credits: 0
+                           ledger: (ledger-add (ledger-add (world-ledger w) 'cleared 1) 'credits banked)))
+                 (next (+ 1 (world-depth w))))
+            (if (> next (layer-count))
+                (world w request: 'done done?: #t events: (list 'done))
+                (add-event (hub-enter-layer w next 0) (list 'descended next))))))
+
+    ;; The layer's link severed: it regrows from the next attempt, tools
+    ;; kept, layer credits lost, the ledger counting it.
+    (define (hub-severed-layer w)
+      (if (not (eq? (world-request w) 'severed))
+          w
+          (add-event (hub-enter-layer (world w ledger: (ledger-add (world-ledger w) 'severed-layers 1))
+                                      (world-depth w)
+                                      (+ 1 (world-attempt w)))
+                     'severed-layer)))))

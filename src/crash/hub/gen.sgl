@@ -1,0 +1,723 @@
+;;; (crash hub gen) - A layer of the stack from a seed.
+;;;
+;;; Nethack's rooms and corridors in the game's words: sectors joined by
+;;; links, deterministic from (run seed, depth, attempt) through the
+;;; game's own MINSTD stream ((crash stack prng)), so a seed names a
+;;; layer for as long as the game exists and a severed layer's regrowth
+;;; is the next attempt of the same seed (D23).
+;;;
+;;; Keys before doors, by construction (the design note's generation
+;;; paragraph): the rooms are joined by a nearest-neighbor spanning
+;;; tree; the entry is the room nearest the top-left corner and the exit
+;;; the farthest along the tree; `required` links on the tree path
+;;; between them get a gate each, and cutting the tree at the gated
+;;; links splits the rooms into regions in path order, region 0 holding
+;;; the entry. Gate k's key node goes in a room of region k, so every
+;;; key sits before its door. Links are carved by a breadth-first search
+;;; over void cells that never lets a corridor touch a room or a corridor
+;;; of another region (a touch is a connection: movement is
+;;; four-directional and a corridor beside a floor cell joins it), the
+;;; gated links first, so no loop bypasses a gate. Then the ladders, the
+;;; optional nodes, the market, the caches, the ICE fields, the shadow
+;;; patches and the daemons' routes go on plain floor. A breadth-first
+;;; search over (cell, keys held) proves the ladder down reachable; a
+;;; try that fails any placement or the proof is thrown away and the
+;;; next sub-seed is tried, up to GEN-TRIES, which is what keeps the
+;;; result a function of its inputs and always solvable.
+;;;
+;;; Daemons and the trace are not in the proof: nothing they do blocks a
+;;; cell for good (a daemon passes through the runner, contact is a
+;;; spike; D18: never a death). Rules family: no platform, no drawing.
+
+(define-library (crash hub gen)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash stack prng)
+          (crash hub world))
+
+  (export hub-mix layer-seed generate-layer build-layer
+          layer-solvable? layer-reachable?
+          GEN-TRIES ROOM-MIN-W ROOM-MAX-W ROOM-MIN-H ROOM-MAX-H ROOM-GAP
+          room-cells room-center room-contains?)
+
+  (begin
+    (define GEN-TRIES 64)
+    (define ROOM-MIN-W 5)            ; no closets at the 20x11 view (ruled 2026-09-22)
+    (define ROOM-MAX-W 8)
+    (define ROOM-MIN-H 4)
+    (define ROOM-MAX-H 6)
+    (define ROOM-GAP 3)              ; cells between rooms: barrier, link, barrier
+    (define MARGIN 2)                ; rooms keep this far from the grid's edge
+
+    ;; run.sgl's 31-bit mix, the same arithmetic, so a run seed, a depth
+    ;; and an attempt name one layer here as they name one board there.
+    (define TWO31 (expt 2 31))
+    (define (hub-mix seed a b)
+      (let* ((s (modulo (+ (* seed 2654435761) (* a 40503) (* b 97) 1597334677) TWO31))
+             (s (modulo (+ (* s 1103515245) 12345) TWO31))
+             (s (modulo (+ (* (quotient s 65536) 2654435761) (modulo s 65536)) TWO31)))
+        (max 1 s)))
+
+    (define (layer-seed run-seed depth attempt)
+      (hub-mix run-seed depth attempt))
+
+    ;; A stream: (next n) draws the next integer in [0, n). The state is
+    ;; private to the generator run; every draw is in a fixed order, so
+    ;; the layer is a function of the seed.
+    (define (make-stream seed)
+      (let ((s (prng-seed seed)))
+        (lambda (n)
+          (set! s (prng-next s))
+          (if (<= n 1) 0 (prng-index s n)))))
+
+    ;; --- rooms -----------------------------------------------------------------
+
+    ;; A room is (x y w h).
+    (define (room-x r) (car r))
+    (define (room-y r) (cadr r))
+    (define (room-w r) (caddr r))
+    (define (room-h r) (cadddr r))
+
+    (define (room-center r w)
+      (idx (+ (room-x r) (quotient (room-w r) 2))
+           (+ (room-y r) (quotient (room-h r) 2))
+           w))
+
+    (define (room-contains? r x y)
+      (and (>= x (room-x r)) (< x (+ (room-x r) (room-w r)))
+           (>= y (room-y r)) (< y (+ (room-y r) (room-h r)))))
+
+    ;; Every cell of the room, row by row.
+    (define (room-cells r w)
+      (let loop ((y (+ (room-y r) (room-h r) -1)) (acc '()))
+        (if (< y (room-y r))
+            acc
+            (loop (- y 1)
+                  (let cols ((x (+ (room-x r) (room-w r) -1)) (acc acc))
+                    (if (< x (room-x r))
+                        acc
+                        (cols (- x 1) (cons (idx x y w) acc))))))))
+
+    ;; Rooms too close to host a barrier, a link and a barrier between them.
+    (define (rooms-touch? a b)
+      (not (or (>= (room-x a) (+ (room-x b) (room-w b) ROOM-GAP))
+               (>= (room-x b) (+ (room-x a) (room-w a) ROOM-GAP))
+               (>= (room-y a) (+ (room-y b) (room-h b) ROOM-GAP))
+               (>= (room-y b) (+ (room-y a) (room-h a) ROOM-GAP)))))
+
+    ;; n rooms that do not touch, or #f when the grid would not take them.
+    (define (place-rooms rnd d)
+      (let ((w (descriptor-width d))
+            (h (descriptor-height d))
+            (n (descriptor-rooms d)))
+        (let loop ((rooms '()) (tries 0))
+          (cond ((= (length rooms) n) (reverse rooms))
+                ((= tries (* n 80)) #f)
+                (else
+                 (let* ((rw (+ ROOM-MIN-W (rnd (+ 1 (- ROOM-MAX-W ROOM-MIN-W)))))
+                        (rh (+ ROOM-MIN-H (rnd (+ 1 (- ROOM-MAX-H ROOM-MIN-H)))))
+                        (x (+ MARGIN (rnd (- w rw (* 2 MARGIN) -1))))
+                        (y (+ MARGIN (rnd (- h rh (* 2 MARGIN) -1))))
+                        (r (list x y rw rh)))
+                   (if (any (lambda (o) (rooms-touch? r o)) rooms)
+                       (loop rooms (+ tries 1))
+                       (loop (cons r rooms) (+ tries 1)))))))))
+
+    ;; --- the tree --------------------------------------------------------------
+
+    (define (center-distance rooms w a b)
+      (let ((ca (room-center (list-ref rooms a) w))
+            (cb (room-center (list-ref rooms b) w)))
+        (+ (abs (- (idx-x ca w) (idx-x cb w)))
+           (abs (- (idx-y ca w) (idx-y cb w))))))
+
+    ;; Prim's nearest-neighbor tree from room 0: edges (a . b), a already
+    ;; connected. Ties go to the lowest pair, so the tree is a function
+    ;; of the rooms.
+    (define (spanning-tree rooms w)
+      (let ((n (length rooms)))
+        (let loop ((connected (list 0)) (edges '()))
+          (if (= (length connected) n)
+              (reverse edges)
+              (let ((best #f) (best-d #f))
+                (let outer ((c (reverse connected)))
+                  (unless (null? c)
+                    (let inner ((u 0))
+                      (when (< u n)
+                        (when (and (not (memv u connected))
+                                   (let ((d (center-distance rooms w (car c) u)))
+                                     (or (not best-d) (< d best-d))))
+                          (set! best (cons (car c) u))
+                          (set! best-d (center-distance rooms w (car c) u)))
+                        (inner (+ u 1))))
+                    (outer (cdr c))))
+                (loop (cons (cdr best) connected) (cons best edges)))))))
+
+    (define (edge-joins? e a b)
+      (or (and (= (car e) a) (= (cdr e) b))
+          (and (= (car e) b) (= (cdr e) a))))
+
+    ;; The rooms adjacent to r over the edges, ascending.
+    (define (neighbors-of r edges)
+      (list-sort <
+                 (filter-map (lambda (e)
+                               (cond ((= (car e) r) (cdr e))
+                                     ((= (cdr e) r) (car e))
+                                     (else #f)))
+                             edges)))
+
+    ;; Breadth-first over the rooms along the edges from start: a vector
+    ;; of (distance . parent), distance #f where unreached.
+    (define (room-bfs n edges start)
+      (let ((seen (make-vector n #f)))
+        (vector-set! seen start (cons 0 #f))
+        (let loop ((queue (list start)))
+          (unless (null? queue)
+            (let* ((r (car queue))
+                   (d (car (vector-ref seen r))))
+              (loop (append (cdr queue)
+                            (filter-map (lambda (u)
+                                          (and (not (vector-ref seen u))
+                                               (begin (vector-set! seen u (cons (+ d 1) r)) u)))
+                                        (neighbors-of r edges)))))))
+        seen))
+
+    ;; The rooms from start to goal along the tree, start first.
+    (define (room-path bfs goal)
+      (let loop ((r goal) (acc '()))
+        (if (not r)
+            acc
+            (loop (cdr (vector-ref bfs r)) (cons r acc)))))
+
+    ;; The room nearest the top-left corner: the entry.
+    (define (entry-room rooms w)
+      (let loop ((i 0) (best 0) (best-d #f))
+        (if (= i (length rooms))
+            best
+            (let* ((c (room-center (list-ref rooms i) w))
+                   (d (+ (idx-x c w) (idx-y c w))))
+              (if (or (not best-d) (< d best-d))
+                  (loop (+ i 1) i d)
+                  (loop (+ i 1) best best-d))))))
+
+    ;; The room farthest from the entry along the tree (lowest index on a tie).
+    (define (exit-room bfs n)
+      (let loop ((i 0) (best 0) (best-d -1))
+        (if (= i n)
+            best
+            (let ((d (car (vector-ref bfs i))))
+              (if (> d best-d) (loop (+ i 1) i d) (loop (+ i 1) best best-d))))))
+
+
+    ;; The gated edges: `count` of the path's edges, spread evenly, in path order.
+    (define (choose-gated path count)
+      (let* ((edges (let loop ((p path) (acc '()))
+                      (if (or (null? p) (null? (cdr p)))
+                          (reverse acc)
+                          (loop (cdr p) (cons (cons (car p) (cadr p)) acc)))))
+             (m (length edges)))
+        (if (<= m count)
+            edges
+            (let loop ((i 0) (acc '()))
+              (if (= i count)
+                  (reverse acc)
+                  (loop (+ i 1)
+                        (cons (list-ref edges (quotient (* (+ i 1) m) (+ count 1))) acc)))))))
+
+    ;; Each room's region: the tree cut at the gated edges, numbered
+    ;; along the path (the entry's side is 0).
+    (define (room-regions n edges gated path)
+      (let ((region (make-vector n -1))
+            (open (filter (lambda (e) (not (any (lambda (g) (edge-joins? e (car g) (cdr g))) gated)))
+                          edges)))
+        (let loop ((p path) (k 0))
+          (unless (null? p)
+            (let ((r (car p)))
+              (if (>= (vector-ref region r) 0)
+                  (loop (cdr p) k)
+                  (let ((bfs (room-bfs n open r)))
+                    (let fill ((i 0))
+                      (when (< i n)
+                        (when (vector-ref bfs i) (vector-set! region i k))
+                        (fill (+ i 1))))
+                    (loop (cdr p) (+ k 1)))))))
+        region))
+
+    ;; --- carving ---------------------------------------------------------------
+
+    ;; The private grid the generator carves: cells (symbols) and region
+    ;; (the room or corridor's region, -1 none, -2 a gate cell).
+
+    ;; The four neighbors without a list: f over each one that exists,
+    ;; folding acc. The searches below visit every cell of a layer several
+    ;; times over GEN-TRIES tries and the solvability proof, and a list of
+    ;; four per visit was the generator's largest allocation (David's
+    ;; phone, 2026-09-22: 94 GC pauses totalling 1006 ms over the twenty
+    ;; seconds after a JACK IN).
+    (define (fold-orthogonal i w h acc f)
+      (let* ((x (modulo i w))
+             (y (quotient i w))
+             (acc (if (> y 0) (f acc (- i w)) acc))
+             (acc (if (< y (- h 1)) (f acc (+ i w)) acc))
+             (acc (if (> x 0) (f acc (- i 1)) acc))
+             (acc (if (< x (- w 1)) (f acc (+ i 1)) acc)))
+        acc))
+
+    ;; Each cell's room index, or #f: one vector, so the carve asks a
+    ;; vector-ref rather than walking the room list per neighbor.
+    (define (room-index-of rooms w h)
+      (let ((v (make-vector (* w h) #f)))
+        (let loop ((rs rooms) (i 0))
+          (unless (null? rs)
+            (for-each (lambda (c) (vector-set! v c i)) (room-cells (car rs) w))
+            (loop (cdr rs) (+ i 1))))
+        v))
+
+    ;; The cells one outside the room's rectangle, where a link may touch it.
+    (define (room-ring r w h)
+      (let ((x0 (- (room-x r) 1)) (y0 (- (room-y r) 1))
+            (x1 (+ (room-x r) (room-w r))) (y1 (+ (room-y r) (room-h r))))
+        (filter (lambda (c) c)
+                (append (map (lambda (x) (and (in-bounds? x y0 w h) (idx x y0 w))) (iota (- x1 x0 -1) x0))
+                        (map (lambda (x) (and (in-bounds? x y1 w h) (idx x y1 w))) (iota (- x1 x0 -1) x0))
+                        (map (lambda (y) (and (in-bounds? x0 y w h) (idx x0 y w))) (iota (- y1 y0 -1) y0))
+                        (map (lambda (y) (and (in-bounds? x1 y w h) (idx x1 y w))) (iota (- y1 y0 -1) y0))))))
+
+    ;; May a link of `region` (or a gated link when region is #f) run
+    ;; through cell c, touching at most the room `touch` (#f: no room)?
+    ;; c is void, inside the edge margin, and every orthogonal neighbor
+    ;; is void, floor of `touch`, or (not gated) a link of the same
+    ;; region. Any other room's floor is out whatever its region: a
+    ;; corridor beside a floor cell is a door into it.
+    (define (carvable? cells regions room-index w h touch region c)
+      (and (eq? (vector-ref cells c) 'void)
+           (let ((x (modulo c w)) (y (quotient c w)))
+             (and (>= x 1) (< x (- w 1)) (>= y 1) (< y (- h 1))))
+           (fold-orthogonal c w h #t
+                            (lambda (ok n)
+                              (and ok
+                                   (let ((kind (vector-ref cells n)))
+                                     (or (eq? kind 'void)
+                                         (and (eq? kind 'floor)
+                                              touch
+                                              (eqv? (vector-ref room-index n) touch))
+                                         (and region (eq? kind 'link) (= (vector-ref regions n) region)))))))))
+
+    (define (beside-room? room-index w h room c)
+      (fold-orthogonal c w h #f
+                       (lambda (found n) (or found (eqv? (vector-ref room-index n) room)))))
+
+    ;; The corridor from beside room a to beside room b, a list of cells,
+    ;; or #f. Multi-source breadth-first from every cell of a's ring that
+    ;; may touch it (in cell order; neighbors up, down, left, right) to
+    ;; the first cell that may touch b; the cells between touch no room
+    ;; at all, so a corridor meets a room once at each end and never
+    ;; runs along a wall.
+    (define (find-corridor cells regions room-index rooms w h a b region)
+      (let* ((size (* w h))
+             (parent (make-vector size #f))
+             (start? (lambda (c) (and (carvable? cells regions room-index w h a region c)
+                                      (beside-room? room-index w h a c))))
+             (goal? (lambda (c) (and (beside-room? room-index w h b c)
+                                     (carvable? cells regions room-index w h b region c))))
+             (inner? (lambda (c) (carvable? cells regions room-index w h #f region c)))
+             (starts (filter start? (list-sort < (room-ring (list-ref rooms a) w h)))))
+        (for-each (lambda (c) (vector-set! parent c c)) starts)
+        ;; a two-list queue: pop from front, push on back, so a step is O(1)
+        (let loop ((front starts) (back '()))
+          (cond ((and (null? front) (null? back)) #f)
+                ((null? front) (loop (reverse back) '()))
+                ((goal? (car front))
+                 (let walk ((c (car front)) (acc '()))
+                   (if (= (vector-ref parent c) c)
+                       (cons c acc)
+                       (walk (vector-ref parent c) (cons c acc)))))
+                (else
+                 (loop (cdr front)
+                       (fold-orthogonal (car front) w h back
+                                        (lambda (back n)
+                                          (if (and (not (vector-ref parent n))
+                                                   (or (inner? n) (goal? n)))
+                                              (begin (vector-set! parent n (car front)) (cons n back))
+                                              back)))))))))
+
+    ;; --- placement helpers -----------------------------------------------------
+
+    (define (plain-cells cells room w)
+      (filter (lambda (c) (eq? (vector-ref cells c) 'floor)) (room-cells room w)))
+
+    ;; A random plain floor cell of the room, or #f.
+    (define (pick-plain rnd cells room w)
+      (let ((cs (plain-cells cells room w)))
+        (and (pair? cs) (list-ref cs (rnd (length cs))))))
+
+    ;; A 2x2 patch of plain floor in the room, or #f after a few tries.
+    (define (pick-patch rnd cells room w)
+      (let loop ((tries 0))
+        (and (< tries 8)
+             (or (and (>= (room-w room) 2) (>= (room-h room) 2)
+                      (let* ((x (+ (room-x room) (rnd (- (room-w room) 1))))
+                             (y (+ (room-y room) (rnd (- (room-h room) 1))))
+                             (patch (list (idx x y w) (idx (+ x 1) y w) (idx x (+ y 1) w) (idx (+ x 1) (+ y 1) w))))
+                        (and (every (lambda (c) (eq? (vector-ref cells c) 'floor)) patch) patch)))
+                 (loop (+ tries 1))))))
+
+    ;; The cells from a to b inside a room: across, then down.
+    (define (room-walk a b w)
+      (let ((ax (idx-x a w)) (ay (idx-y a w)) (bx (idx-x b w)) (by (idx-y b w)))
+        (let across ((x ax) (acc (list a)))
+          (if (not (= x bx))
+              (let ((nx (if (< x bx) (+ x 1) (- x 1))))
+                (across nx (cons (idx nx ay w) acc)))
+              (let down ((y ay) (acc acc))
+                (if (= y by)
+                    (reverse acc)
+                    (let ((ny (if (< y by) (+ y 1) (- y 1))))
+                      (down ny (cons (idx bx ny w) acc)))))))))
+
+    (define (direction-between a b w)
+      (let ((dx (- (idx-x b w) (idx-x a w)))
+            (dy (- (idx-y b w) (idx-y a w))))
+        (cond ((> dx 0) 'right) ((< dx 0) 'left) ((> dy 0) 'down) (else 'up))))
+
+    ;; A daemon of a kind (D65, the roster). A drone in the room: two
+    ;; distinct cells, the walk between them and back as its route. A
+    ;; sentinel: one cell, a random facing, a one-cell route (it never
+    ;; moves). A hunter: one cell, dormant. A crawler: a corridor's link
+    ;; cells end to end and back (a layer without a corridor of two cells
+    ;; gets a drone instead).
+    (define (place-daemon rnd cells room w h index kind)
+      (let ((cs (room-cells room w)))
+        (cond ((memq kind (list 'sentinel 'hunter))
+               (and (pair? cs)
+                    (let ((a (list-ref cs (rnd (length cs)))))
+                      (daemon index: index kind: kind cell: a
+                              facing: (list-ref (list 'up 'down 'left 'right) (rnd 4))
+                              route: (vector a) step: 0
+                              awake?: (not (eq? kind 'hunter))))))
+              ((eq? kind 'crawler)
+               (or (place-crawler rnd cells w h index)
+                   (place-daemon rnd cells room w h index 'drone)))
+              (else
+               (and (>= (length cs) 2)
+                    (let* ((a (list-ref cs (rnd (length cs))))
+                           (b (let loop () (let ((b (list-ref cs (rnd (length cs))))) (if (= b a) (loop) b))))
+                           (there (room-walk a b w)))
+                      (let ((route (list->vector (append there (cdr (reverse (cdr there)))))))
+                        (daemon index: index kind: 'drone
+                                cell: a
+                                facing: (direction-between a (cadr there) w)
+                                route: route
+                                step: 0))))))))
+
+    ;; The link cells beside a cell.
+    (define (link-neighbors cells i w h)
+      (filter (lambda (n) (and n (eq? (vector-ref cells n) 'link)))
+              (map (lambda (dir) (step-cell i dir w h)) (list 'up 'down 'left 'right))))
+
+    ;; A corridor as a path of link cells: from a random link cell, walk
+    ;; one way to an end (a cell with no further link neighbor, or a
+    ;; branch), then from that end back through the start as far as the
+    ;; corridor runs without branching.
+    (define (corridor-path cells start w h)
+      (let ((walk-through (lambda (from next)   ; from, then next, then on while the way is single
+                            (let loop ((at next) (prev from) (acc (list next from)))
+                              (let ((on (filter (lambda (n) (and (not (eqv? n prev)) (not (memv n acc))))
+                                                (link-neighbors cells at w h))))
+                                (if (= (length on) 1)
+                                    (loop (car on) at (cons (car on) acc))
+                                    (reverse acc)))))))
+        (let ((ns (link-neighbors cells start w h)))
+          (if (null? ns)
+              (list start)
+              (let* ((to-end (walk-through start (car ns)))
+                     (back (reverse to-end)))   ; the end first, then the cell before it
+                (walk-through (car back) (cadr back)))))))
+
+    (define (place-crawler rnd cells w h index)
+      (let ((links (let loop ((i (- (vector-length cells) 1)) (acc '()))
+                     (if (< i 0) acc (loop (- i 1) (if (eq? (vector-ref cells i) 'link) (cons i acc) acc))))))
+        (and (pair? links)
+             (let ((path (corridor-path cells (list-ref links (rnd (length links))) w h)))
+               (and (>= (length path) 2)
+                    (daemon index: index kind: 'crawler
+                            cell: (car path)
+                            facing: (direction-between (car path) (cadr path) w)
+                            route: (list->vector (append path (cdr (reverse (cdr path)))))
+                            step: 0))))))
+
+    ;; --- the build -------------------------------------------------------------
+
+    ;; One try: the layer, or #f when a placement or a carve failed.
+    (define (build-layer d seed try)
+      (let* ((rnd (make-stream seed))
+             (w (descriptor-width d))
+             (h (descriptor-height d))
+             (size (* w h))
+             (rooms (place-rooms rnd d)))
+        (and rooms
+             (let* ((n (length rooms))
+                    (edges (spanning-tree rooms w))
+                    (entry (entry-room rooms w))
+                    (bfs (room-bfs n edges entry))
+                    (exit (exit-room bfs n))
+                    (path (room-path bfs exit))
+                    (gated (choose-gated path (descriptor-required d)))
+                    (regions (room-regions n edges gated path))
+                    (room-index (room-index-of rooms w h))
+                    (cells (make-vector size 'void))
+                    (cregion (make-vector size -1))
+                    (gates '())
+                    (failed #f))
+               ;; rooms
+               (let loop ((rs rooms) (i 0))
+                 (unless (null? rs)
+                   (for-each (lambda (c)
+                               (vector-set! cells c 'floor)
+                               (vector-set! cregion c (vector-ref regions i)))
+                             (room-cells (car rs) w))
+                   (loop (cdr rs) (+ i 1))))
+               ;; the gated links first: the gate at the corridor's middle,
+               ;; the cells before it in a's region, after it in b's
+               (let loop ((gs gated) (k 0))
+                 (unless (or failed (null? gs))
+                   (let* ((a (car (car gs)))
+                          (b (cdr (car gs)))
+                          (path (find-corridor cells cregion room-index rooms w h a b #f)))
+                     (if (not path)
+                         (set! failed #t)
+                         (let ((mid (quotient (length path) 2)))
+                           (let cells-loop ((p path) (i 0))
+                             (unless (null? p)
+                               (cond ((= i mid)
+                                      (vector-set! cells (car p) 'gate)
+                                      (vector-set! cregion (car p) -2)
+                                      (set! gates (cons (cons (car p) (list-ref KEY-COLORS k)) gates)))
+                                     (else
+                                      (vector-set! cells (car p) 'link)
+                                      (vector-set! cregion (car p) (vector-ref regions (if (< i mid) a b)))))
+                               (cells-loop (cdr p) (+ i 1))))
+                           (loop (cdr gs) (+ k 1)))))))
+               ;; the tree's other links, then the extra ones, within a region
+               (let loop ((es (filter (lambda (e) (not (any (lambda (g) (edge-joins? e (car g) (cdr g))) gated))) edges)))
+                 (unless (or failed (null? es))
+                   (let* ((a (car (car es)))
+                          (b (cdr (car es)))
+                          (region (vector-ref regions a))
+                          (path (find-corridor cells cregion room-index rooms w h a b region)))
+                     (if (not path)
+                         (set! failed #t)
+                         (for-each (lambda (c)
+                                     (vector-set! cells c 'link)
+                                     (vector-set! cregion c region))
+                                   path))
+                     (loop (cdr es)))))
+               (unless failed
+                 (let loop ((left (descriptor-extra-links d)) (tries 0))
+                   (when (and (> left 0) (< tries 20))
+                     (let* ((a (rnd n))
+                            (b (rnd n)))
+                       (if (or (= a b)
+                               (not (= (vector-ref regions a) (vector-ref regions b)))
+                               (any (lambda (e) (edge-joins? e a b)) edges))
+                           (loop left (+ tries 1))
+                           (let ((path (find-corridor cells cregion room-index rooms w h a b (vector-ref regions a))))
+                             (if path
+                                 (begin
+                                   (for-each (lambda (c)
+                                               (vector-set! cells c 'link)
+                                               (vector-set! cregion c (vector-ref regions a)))
+                                             path)
+                                   (loop (- left 1) (+ tries 1)))
+                                 (loop left (+ tries 1)))))))))
+               (and (not failed)
+                    (let* ((entry-cell (room-center (list-ref rooms entry) w))
+                           (exit-cell (room-center (list-ref rooms exit) w))
+                           (other-rooms (filter (lambda (i) (not (= i entry))) (iota n)))
+                           (nodes '())
+                           (caches '())
+                           (daemons '())
+                           (market #f)
+                           (next-index 0))
+                      (vector-set! cells entry-cell 'ladder-up)
+                      (vector-set! cells exit-cell 'ladder-down)
+                      ;; the key nodes: gate k's in a room of region k, not the entry when it can be helped
+                      (let loop ((k 0))
+                        (when (and (not failed) (< k (length gated)))
+                          (let* ((in-region (filter (lambda (i) (= (vector-ref regions i) k)) (iota n)))
+                                 (choices (let ((not-entry (filter (lambda (i) (not (= i entry))) in-region)))
+                                            (if (pair? not-entry) not-entry in-region)))
+                                 (room (list-ref rooms (list-ref choices (rnd (length choices)))))
+                                 (cell (pick-plain rnd cells room w)))
+                            (if (not cell)
+                                (set! failed #t)
+                                (begin
+                                  (vector-set! cells cell 'node)
+                                  (set! nodes (cons (node index: next-index cell: cell table: (descriptor-table d)
+                                                          bounty: (descriptor-bounty d) key: (list-ref KEY-COLORS k)
+                                                          required?: #t)
+                                                    nodes))
+                                  (set! next-index (+ next-index 1))
+                                  (loop (+ k 1)))))))
+                      ;; the optional nodes, anywhere, with loot in the descriptor's order
+                      (let loop ((i 0))
+                        (when (and (not failed) (< i (descriptor-optional d)))
+                          (let* ((room (list-ref rooms (rnd n)))
+                                 (cell (pick-plain rnd cells room w))
+                                 (loot (let ((l (descriptor-loot d)))
+                                         (and (pair? l) (list-ref l (modulo i (length l)))))))
+                            (when cell
+                              (vector-set! cells cell 'node)
+                              (set! nodes (cons (node index: next-index cell: cell table: (descriptor-table d)
+                                                      bounty: (descriptor-optional-bounty d) loot: loot)
+                                                nodes))
+                              (set! next-index (+ next-index 1)))
+                            (loop (+ i 1)))))
+                      ;; the market, off the entry and the exit
+                      (when (descriptor-market? d)
+                        (let* ((choices (filter (lambda (i) (not (or (= i entry) (= i exit)))) (iota n)))
+                               (choices (if (pair? choices) choices other-rooms))
+                               (cell (and (pair? choices)
+                                          (pick-plain rnd cells (list-ref rooms (list-ref choices (rnd (length choices)))) w))))
+                          (when cell
+                            (vector-set! cells cell 'market)
+                            (set! market cell))))
+                      ;; the caches: credits and tools by turns
+                      (let loop ((i 0))
+                        (when (< i (descriptor-caches d))
+                          (let ((cell (pick-plain rnd cells (list-ref rooms (rnd n)) w)))
+                            (when cell
+                              (vector-set! cells cell 'cache)
+                              (set! caches (cons (cons cell
+                                                       (if (even? i)
+                                                           (cons 'credits (+ 10 (* 5 (rnd 5))))
+                                                           (cons 'tool (list-ref (list 'cloak 'decoy 'jam) (rnd 3)))))
+                                                 caches))))
+                          (loop (+ i 1))))
+                      ;; the ICE fields and the shadow patches, 2x2 on plain floor, off the entry
+                      (let loop ((i 0))
+                        (when (and (< i (descriptor-ice d)) (pair? other-rooms))
+                          (let ((patch (pick-patch rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w)))
+                            (when patch (for-each (lambda (c) (vector-set! cells c 'ice)) patch)))
+                          (loop (+ i 1))))
+                      (let loop ((i 0))
+                        (when (< i (descriptor-shadows d))
+                          (let ((patch (pick-patch rnd cells (list-ref rooms (rnd n)) w)))
+                            (when patch (for-each (lambda (c) (vector-set! cells c 'shadow)) patch)))
+                          (loop (+ i 1))))
+                      ;; the daemons, in rooms other than the entry, their kinds cycled
+                      ;; over the descriptor's list (D65)
+                      (let loop ((i 0))
+                        (when (and (< i (descriptor-daemons d)) (pair? other-rooms))
+                          (let* ((kinds (descriptor-kinds d))
+                                 (kind (if (pair? kinds) (list-ref kinds (modulo i (length kinds))) 'drone))
+                                 (dm (place-daemon rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w h i kind)))
+                            (when dm (set! daemons (cons dm daemons))))
+                          (loop (+ i 1))))
+                      ;; barriers: void beside anything walkable, eight ways.
+                      ;; Walked from the WALKABLE cells out (a layer has far
+                      ;; fewer of those than void ones, and the neighbours of
+                      ;; one are eight vector-refs rather than nine cells'
+                      ;; worth of bounds arithmetic): the same set of cells
+                      ;; either way, since "void beside walkable" is
+                      ;; symmetric. Measured at depth 6 (2040 cells):
+                      ;; 234 ms before, and the whole layer 601 ms (2026-09-22).
+                      (let ((mark '()))
+                        (let loop ((c 0))
+                          (when (< c size)
+                            (when (cell-walkable? (vector-ref cells c))
+                              (let ((x (modulo c w)) (y (quotient c w)))
+                                (let around ((dy -1))
+                                  (when (<= dy 1)
+                                    (let ((ny (+ y dy)))
+                                      (when (and (>= ny 0) (< ny h))
+                                        (let across ((dx -1))
+                                          (when (<= dx 1)
+                                            (let ((nx (+ x dx)))
+                                              (when (and (>= nx 0) (< nx w))
+                                                (let ((n (+ (* ny w) nx)))
+                                                  (when (eq? (vector-ref cells n) 'void)
+                                                    (set! mark (cons n mark))))))
+                                            (across (+ dx 1))))))
+                                    (around (+ dy 1))))))
+                            (loop (+ c 1))))
+                        (for-each (lambda (n) (vector-set! cells n 'barrier)) mark))
+                      (and (not failed)
+                           (layer depth: (descriptor-depth d)
+                                  seed: seed
+                                  width: w
+                                  height: h
+                                  cells: cells
+                                  gates: (reverse gates)
+                                  nodes: (reverse nodes)
+                                  caches: (reverse caches)
+                                  daemons: (reverse daemons)
+                                  entry: entry-cell
+                                  exit: exit-cell
+                                  rooms: (cons (list-ref rooms entry) (filter (lambda (r) (not (eq? r (list-ref rooms entry)))) rooms))
+                                  market: market
+                                  try: try))))))))
+
+    ;; --- the proof -------------------------------------------------------------
+
+    (define (color-bit color)
+      (expt 2 (list-index color KEY-COLORS)))
+
+    ;; Can the runner reach the ladder down from the entry? A breadth-first
+    ;; search over (cell, keys held): a node's key joins the set on its
+    ;; cell (when collect? is on: every board is winnable by its
+    ;; generator), a gate passes with its color's key or once opened.
+    ;; With collect? off the search asks whether the gates matter at all.
+    (define (layer-reachable? l collect? opened)
+      (let* ((w (layer-width l))
+             (h (layer-height l))
+             (size (* w h))
+             (seen (make-vector (* size 16) #f))
+             (start (layer-entry l))
+             (goal (layer-exit l)))
+        (vector-set! seen start #t)
+        (let loop ((front (list (cons start 0))) (back '()))
+          (cond ((and (null? front) (null? back)) #f)
+                ((null? front) (loop (reverse back) '()))
+                ((= (car (car front)) goal) #t)
+                (else
+                 (let* ((c (car (car front)))
+                        (mask (let ((n (layer-node-at l c)))
+                                (if (and collect? n (node-key n))
+                                    (let ((bit (color-bit (node-key n))))
+                                      (if (= 0 (modulo (quotient (cdr (car front)) bit) 2))
+                                          (+ (cdr (car front)) bit)
+                                          (cdr (car front))))
+                                    (cdr (car front))))))
+                   (loop (cdr front)
+                         (fold-orthogonal
+                          c w h back
+                          (lambda (back n)
+                            (let ((kind (layer-cell l n)))
+                              (if (and (cell-walkable? kind)
+                                       (or (not (eq? kind 'gate))
+                                           (memv n opened)
+                                           (let ((bit (color-bit (layer-gate-color l n))))
+                                             (= 1 (modulo (quotient mask bit) 2))))
+                                       (not (vector-ref seen (+ n (* mask size)))))
+                                  (begin (vector-set! seen (+ n (* mask size)) #t)
+                                         (cons (cons n mask) back))
+                                  back))))))))))
+)
+    (define (layer-solvable? l)
+      (layer-reachable? l #t '()))
+
+    ;; The layer for (run seed, depth, attempt): sub-seeds tried in order
+    ;; until one builds and proves solvable, or #f after GEN-TRIES (never
+    ;; seen over the tested seeds; the test counts).
+    (define (generate-layer run-seed depth attempt)
+      (let ((d (descriptor-at depth))
+            (base (layer-seed run-seed depth attempt)))
+        (and d
+             (let loop ((try 0))
+               (and (< try GEN-TRIES)
+                    (let ((l (build-layer d (hub-mix base try 0) try)))
+                      (if (and l (layer-solvable? l))
+                          l
+                          (loop (+ try 1)))))))))))

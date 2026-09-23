@@ -9,8 +9,8 @@ tick while the tune plays.
 
 The tune file format is motif's; `motif tune check FILE.cts` validates
 one, `motif tune render` renders it to WAV, and `motif mcp` lets an
-agent edit the same file. The three soundtrack tunes ship in
-`assets/tunes/` (`spy`, `breaker`, `groove`) with `demo-columns`, which
+agent edit the same file. The soundtrack's twenty tunes ship in
+`assets/tunes/` (the game plays them live: docs/soundtrack.md) with `demo-columns`, which
 touches every column, every effect and every instrument.
 
 ## Running it
@@ -31,7 +31,7 @@ Web: `/tracker/` is the door, its own page and wasm beside the game's
 row is a link there).
 
     /tracker/                 a blank tune
-    /tracker/?tune=spy        a bundled tune (spy, breaker, groove, demo-columns)
+    /tracker/?tune=spy        a bundled tune (any of assets/tunes/: spy, blind-spot, demo-columns, ...)
     /tracker/#t=...           a shared tune (see Sharing)
 
 `Ctrl-O` cycles the bundled tunes; `Ctrl-S` and `Ctrl-E` both make the

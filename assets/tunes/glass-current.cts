@@ -1911,6 +1911,7 @@
       (row 254 (2 "F#3" 2 30 "000") (3 "C-8" 3 18 "000") (6 "===" 0 0 "000") (8 "===" 0 0 "000"))
       (row 255 (1 "..." 0 0 "B08") (4 "===" 0 0 "000"))))
   (order 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14)
+  (marks calm: 0 fill: 7 tense: 8)
   (history
     ("codex" "2026-09-21" "Glass Current; original liquid; key D minor.")
     ("codex" "2026-09-21" "calm: order 0-6; fill: 7; tense: 8-14; B08 loops tense.")
@@ -1922,4 +1923,5 @@
     ("codex" "2026-09-21" "Original timing-v2 source remains unchanged at tunes/liquid.cts; this is a separate audition, not a replacement.")
     ("codex" "2026-09-21" "After Dark II: complete melodic calls and answers with longer gates and release tails. Dark harmony, drums, bass, fill cells and loop structure preserved. Separate listening alternative; earlier sources unchanged.")
     ("codex" "2026-09-21" "Percussion identity audition: rounder compact kick, papery less tonal snare shared by main hits, ghosts and fill, lighter brushed hats. Add 39 sparse root-tuned 18 ms digital ticks on channel 8 away from the riser, with two per calm pattern and four per tense pattern except final turnaround. Lower riser source amplitude from 0.4 to 0.3 to suit the lighter kit. Preserve all existing notes, accents, timing, bass, pads, pluck, lead, sections and bus. After Dark II retained.")
-    ("codex" "2026-09-21" "Retain the approved paper drums. Lower all swell source amplitudes from 0.3 to 0.2 (-3.52 dB). Give the tense-only Reese modest presence: cutoff 650 to 900 Hz, drive 0.4 to 0.48, resonance 0.25 to 0.28, index 0.002 to 0.003 and slow index motion 0.0015 to 0.0025; preserve spread, envelope and motion rate. Raise its 272 accents by 3 (36/39 to 39/42) and default 39 to 42. Preserve all pitches, rhythm, gates, effects, calm bass, musical parts, sections and bus. Paper Kit I retained.")))
+    ("codex" "2026-09-21" "Retain the approved paper drums. Lower all swell source amplitudes from 0.3 to 0.2 (-3.52 dB). Give the tense-only Reese modest presence: cutoff 650 to 900 Hz, drive 0.4 to 0.48, resonance 0.25 to 0.28, index 0.002 to 0.003 and slow index motion 0.0015 to 0.0025; preserve spread, envelope and motion rate. Raise its 272 accents by 3 (36/39 to 39/42) and default 39 to 42. Preserve all pitches, rhythm, gates, effects, calm bass, musical parts, sections and bus. Paper Kit I retained.")
+    ("m1 (marks from the documented layout)" "2026-09-21" "set marks calm: 0 fill: 7 tense: 8")))
