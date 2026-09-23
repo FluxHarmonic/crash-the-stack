@@ -259,3 +259,17 @@ Closed Loop II is now mastered and published. The release retains its existing
 +3 dB gain, measures -17.1 LUFS-I/-1.7 dBTP as MP3, and passes browser playback
 verification. [The release record](CLOSED-LOOP-II.md) keeps source adoption,
 mastering, publication and future deployment handoff details together.
+
+## Dirty Cache: Phrases I
+
+David requested the next track. [Phrases I](../alternates/dirty-cache-phrases-i/README.md)
+develops the quiet lower reed reply and recalls it later in the tense section,
+varies a separate tense phrase into a complete question/answer, and auditions
+a short chord gap before the tense entrance. The approved calmer opening,
+on-beat distant pluck, bass/drum pocket, harmonic correction and original full
+reed hooks remain intact. Instruments and mix are fixed for this composition pass.
+
+The game/album candidates share one proposed phrase pool. Four contextual A/B
+pairs separate the ideas; complete before/after versions preserve the full
+3:42.545 arrangement. Maintained shared sources and public audio remain at the
+accepted version pending listening. All fifteen regeneration checks pass.
