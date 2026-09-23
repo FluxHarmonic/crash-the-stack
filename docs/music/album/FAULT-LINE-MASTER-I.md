@@ -47,3 +47,6 @@ open. Website publication and the existing fifteen-track selection are unchanged
 | FLAC | -17.6 | 11.8 LU | -1.5 dBTP | -90.3 dBFS |
 | MP3 | -17.6 | 11.8 LU | -1.2 dBTP | -84.3 dBFS |
 | OGG | -17.6 | 11.8 LU | -1.3 dBTP | -84.3 dBFS |
+
+Mastering tool and evidence commit: d38f08b. The share MP3 was delivered to
+Telegram with confirmed message 1198. Its SHA-256 is recorded in master-checks.json.
