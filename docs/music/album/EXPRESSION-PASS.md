@@ -368,3 +368,10 @@ as both halves' baseline. It preserves the opening figure, adds a two-beat breat
 and descends E–D–C–B–A through a connected slide before the existing reprise.
 Only that late acid passage changes; the paired game/album candidates share it.
 This is a short listening experiment, not adoption or publication.
+
+Turnaround I's single 30.968-second A/B was delivered as Telegram message 1164;
+the revised half begins at 0:15.484. Compiled pitch checks confirm the connected
+descent reaches A with one trigger and an actual breath; all backing ticks match.
+Native clocks, B06, all fifteen source checks, reproducibility and encoded audio
+checks pass. The OGG measures -16.4 LUFS-I/-4.2 dBTP with equal -0.5 dB gain.
+Keep both this experiment and Expression I intact pending the listening choice.

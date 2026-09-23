@@ -183,3 +183,13 @@ Use `expression-render.sgl` for native/delivery stages and `album-audit.sgl` wit
 `--track basement-circuit --source CANDIDATE.cts`. The composer protects drum,
 sub, chord, swell and auxiliary-percussion events and does not adopt candidates.
 The frozen references support later reproduction after accepted sources evolve.
+
+### Short Basement Circuit turnaround comparison
+
+`basement-turnaround.sgl` uses the frozen Expression I candidate to compare one
+late acid turnaround, retaining synchronized game/album candidates and excerpt
+maps. `short-ab-render.sgl --input SCORE_DIR --output EXTERNAL_DIR --motif PATH`
+renders just two excerpts from a manifest naming `before_stem`, `after_stem`,
+`half_seconds` and `title`. It concatenates before/after with one common gain,
+records source/renderer provenance, and checks encoded duration, format, peak
+and final decay. Excerpt scores must already include their release tails.

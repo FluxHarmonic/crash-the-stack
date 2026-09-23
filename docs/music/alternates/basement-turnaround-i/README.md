@@ -53,3 +53,23 @@ It renders only the two excerpts, keeping the requested deliverable short.
 
 External audio and checks live under
 ~/Ops/artifacts/crash-the-stack-album/basement-turnaround-i/.
+
+## Validation and delivery
+
+Telegram acknowledged the single short A/B as **message 1164**. No full-track
+files were sent. Listening feedback is pending.
+
+All eleven generated files reproduce byte-for-byte. The compiled pitch trace
+confirms E2, D2, C2, B1 and A1 are reached, the answer triggers once, the breath
+releases the acid voice, and every backing-channel tick matches the reference.
+The full album candidate reports 2,919 attacks with zero sample error, its four
+original fill 32nds and every final gate released. The game reports 2,514
+triggers, zero sample error and its preserved B06 loop. All fifteen maintained
+song regeneration checks pass.
+
+Both native halves measure -15.9 LUFS-I. One common -0.5 dB monitoring gain
+produces the 30.968-second OGG at -16.4 LUFS-I/-4.2 dBTP. Duration, stereo
+44.1 kHz format and ending decay pass; the final second peaks at -90.3 dBFS.
+The descriptive delivery filename is a byte-identical copy of the renderer's
+comparison.ogg. Source snapshots, commands, renderer hash, pitch/audit scripts,
+raw logs and the Telegram receipt remain in the external artifact directory.
