@@ -110,3 +110,6 @@ David approved the complete candidate and authorized release. The shared pool
 and both maintained arrangements now match this audition exactly; all fifteen
 regeneration checks pass. See [Sector Drift II](../../album/SECTOR-DRIFT-II.md)
 for mastering and publication details.
+
+Sector Drift II is now mastered and published. Telegram 1174 contains the
+full master; the release record above preserves export and verification details.

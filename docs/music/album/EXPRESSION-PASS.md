@@ -472,3 +472,10 @@ arrangements match the approved candidates exactly. Preserve the original groove
 and landing. [Sector Drift II](SECTOR-DRIFT-II.md) records release progress. David
 plans a new assignment alongside continued soundtrack polish; receive that brief
 before starting another track.
+
+Sector Drift II is mastered and published; Telegram 1174 contains the full
+master. The previous +3.5 dB mastering gain is retained, and MP3 measures
+-17.7 LUFS-I/-2.1 dBTP. All-song source checks, exports and fresh-browser
+playback pass. [The release record](SECTOR-DRIFT-II.md) retains provenance
+and the next game deployment handoff. Ready for David's incoming assignment
+alongside the continuing soundtrack review.
