@@ -294,3 +294,19 @@ One continuous 21.818-second clip was delivered as Telegram message 1158, per
 David's request for a single short example without A/B. Native timing/slide and
 encoded audio checks pass. This direction remains an audition; the other replies
 and synchronized full arrangements await listening feedback before adaptation.
+
+## Dirty Cache: connected full arrangement
+
+David approved the short connected-reed sketch and requested the complete track.
+[The full candidate](../alternates/dirty-cache-connected-full/README.md) retains
+both tense motifs exactly and introduces the lower motif with the softer calm
+reed in the bridge. The transition chord gap remains. Three conflicting reed
+entry gates are reconciled in the proposed game/album layouts; both candidates
+come from the same shared parts. The groove, distant plucks and original hooks
+retain their existing parts.
+
+The complete 3:42.545 OGG was delivered as Telegram message 1159. Native timing,
+game-loop and encoded audio checks pass; all fifteen maintained songs regenerate
+cleanly. It uses the same -0.8 dB monitoring gain as the approved sketch and
+measures -15.6 LUFS-I/-1.5 dBTP. Full-track approval is pending before shared
+source adoption, mastering or publication.

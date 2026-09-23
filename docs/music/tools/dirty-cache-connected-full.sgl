@@ -1,0 +1,137 @@
+#!/usr/bin/env sigil
+;;; Integrate the approved sketch into one synchronized game/album candidate.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define (channel-events p channel)
+  (filter (lambda (row) (pair? (cddr row)))
+    (map (lambda (row)
+           (append (take row 2)
+             (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+         (skip p 5))))
+
+(define (integrate-line p approved calm?)
+  (let ((result
+          (append (take p 5)
+            (filter (lambda (row) (pair? (cddr row)))
+              (map (lambda (row)
+                     (append (take row 2)
+                       (filter (lambda (cell) (not (= (car cell) 8)))
+                               (cddr row))))
+                   (skip p 5))))))
+    (each row (channel-events approved 8)
+      (let* ((cell (caddr row))
+             (cell
+               (if (and calm? (= (caddr cell) 15))
+                   (list 8
+                         (cadr cell)
+                         8
+                         (if (attack? cell) (- (list-ref cell 3) 1) (list-ref cell 3))
+                         (list-ref cell 4))
+                   cell)))
+        (set! result (put-cell result (cadr row) cell))))
+    (each channel '(1 2 3 4 5 6 7)
+      (check (equal? (channel-events p channel) (channel-events result channel))
+             "Protected backing changed" (field p id:) channel))
+    (unless calm?
+      (check (equal? (channel-events approved 8) (channel-events result 8))
+             "Approved reed phrase changed" (field p id:)))
+    result))
+
+;;; Preserve the layout's existing readable formatting. Only the three entry
+;;; note-offs that now conflict with a downbeat reed attack may be removed.
+(define (reconcile-layout text)
+  (let ((count 0))
+    (let ((result
+            (string-join
+              (map (lambda (line)
+                     (if (and (contains? line "(entry-offs")
+                              (or (contains? line "\"tense-8\"")
+                                  (contains? line "\"album: Lower reed echo over bass and pluck\"")))
+                         (begin
+                           (check (contains? line " (8 \"===\" 0 0 \"000\")")
+                                  "Expected channel-8 entry gate missing")
+                           (set! count (+ count 1))
+                           (string-replace line " (8 \"===\" 0 0 \"000\")" ""))
+                         line))
+                   (split text "\n"))
+              "\n")))
+      (check (= count 3) "Unexpected entry gate reconciliation count" count)
+      result)))
+
+(define (write-preserved file text)
+  (if (file? file)
+      (check (equal? (read-text file) text) "Refusing to overwrite differing audition" file)
+      (write-text file text)))
+
+(cli "dirty-cache-connected-full" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/dirty-cache-phrases-i"))
+           (parts-file (path reference "parts-after.cts"))
+           (layout-file (path reference "arrangements.sgl"))
+           (sketch-file
+             (path (root) "docs/music/alternates/dirty-cache-connected-reed/dirty-cache-connected-reed.cts"))
+           (parts (read-score parts-file))
+           (layout (read-score layout-file))
+           (sketch (read-score sketch-file))
+           (changed
+             (replace-child parts 'patterns
+               (cons 'patterns
+                 (map (lambda (p)
+                        (case (field p id:)
+                          ((8) (integrate-line p (pattern sketch 1) #f))
+                          ((10) (integrate-line p (pattern sketch 0) #f))
+                          ((13) (integrate-line p (pattern sketch 0) #t))
+                          (else p)))
+                      (cdr (child parts 'patterns)))))))
+      (ensure-directory output)
+      (check (equal? (child parts 'instruments) (child sketch 'instruments))
+             "Sketch instrument bank differs from shared pool")
+      (apply-song-plans (list (song-plan "dirty-cache" motif)) "check" #f)
+      (write-preserved (path output "arrangements-before.sgl") (read-text layout-file))
+      (write-preserved (path output "arrangements-after.sgl")
+        (reconcile-layout (read-text layout-file)))
+      (write-canonical motif (path output "parts-before.cts") parts)
+      (write-canonical motif (path output "parts-after.cts") changed)
+      (let* ((new-layout (read-score (path output "arrangements-after.sgl")))
+             (arrangements (child new-layout 'arrangements)))
+        (each spec '((game "dirty-cache-game-after") (album "dirty-cache-after"))
+          (let* ((arrangement (child arrangements (car spec)))
+                 (before (build-song-score parts layout
+                           (child (child layout 'arrangements) (car spec))))
+                 (after (build-song-score changed new-layout arrangement))
+                 (destination (path output (str (cadr spec) ".cts"))))
+            (each section '(instruments bus order chart history)
+              (check (equal? (child before section) (child after section))
+                     "Protected score section changed" section))
+            (write-canonical motif destination after)
+            ($ ,motif tune check ,destination))))
+      ;; The arrangement clock and pattern lengths stay fixed; retain its map.
+      (write-json-file (path output "dirty-cache-after-map.json")
+        (dict-set
+          (json-decode
+            (read-text
+              (path (root)
+                "docs/music/alternates/dirty-cache-connected-full/dirty-cache-after-map.json")))
+          sources: (list->array '("parts-after.cts" "arrangements-after.sgl" "dirty-cache-after.cts"))))
+      (write-json-file (path output "source-checks.json")
+        (dict phrases_i_parts_sha256: (song-hash parts-file)
+              approved_sketch_sha256: (song-hash sketch-file)
+              candidate_parts_sha256: (song-hash (path output "parts-after.cts"))
+              candidate_layout_sha256: (song-hash (path output "arrangements-after.sgl"))
+              approved_tense_lines_identical: #t
+              calm_bridge_patch: 8
+              calm_bridge_note_level_offset: -1
+              reconciled_entry_offs: 3
+              protected_backing_identical: #t
+              phrases_i_transition_gap_retained: #t
+              game_and_album_from_same_candidate_parts: #t))
+      (display "Connected phrasing integrated into synchronized full candidates.\n"))))

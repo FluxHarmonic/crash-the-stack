@@ -61,3 +61,10 @@ and 44.1 kHz stereo checks pass. This is not a release master.
 
 Telegram acknowledged the single clip as **message 1158**. No A/B or additional
 full-track files were sent. Listening review is pending.
+
+## Listening decision
+
+David approved the sketch as much better and requested full integration.
+[The full candidate](../dirty-cache-connected-full/README.md) preserves both
+approved tense lines exactly and adapts the lower motif to the softer calm
+bridge. Telegram message 1159 contains the complete track for listening review.
