@@ -5,7 +5,12 @@
 # safe zone a launcher may crop to a circle or a squircle). Cells scale by
 # nearest neighbour so the pixels stay crisp. The palette letters are the
 # roles of assets/palette.sgl: k C-BG, c C-SELECTED, m C-HIGHLIGHT,
-# s C-BAR-C. Needs gawk and ImageMagick's convert (guix: imagemagick).
+# s C-BAR-C. It also writes assets/src/windows/crash-the-stack.ico, the icon
+# the Windows build links into the exe (sigil's windows config icon: key):
+# one .ico holding 16, 32, 48 and 256, each an exact multiple of the 16x16
+# art, so Explorer picks a size without resampling. Cells scale by nearest
+# neighbour so the pixels stay crisp. Needs gawk, ImageMagick's convert
+# (guix: imagemagick) and icotool (guix: icoutils).
 set -e
 cd "$(dirname "$0")"
 art=$(grep -v '^#' icon.txt | tr -d '|')
@@ -29,6 +34,17 @@ for size in 192 512; do
   convert /tmp/crash-icon.ppm -background "#0D0A1A" -gravity center -extent 24x24 -filter point -resize "${size}x${size}" "../icon-maskable-$size.png"
   identify "../icon-maskable-$size.png"
 done
+# the Windows exe's icon: one .ico of 16, 32, 48 and 256 (1x, 2x, 3x, 16x
+# of the 16x16 art). sigil's windows config links it through icon:.
+# It lives under assets/src because it is a build input, not a shipped
+# asset: the exe embeds it, and the archives leave src/ and refs/ out.
+mkdir -p windows
+for size in 16 32 48 256; do
+  convert /tmp/crash-icon.ppm -filter point -resize "${size}x${size}" "/tmp/crash-ico-$size.png"
+done
+icotool -c -o windows/crash-the-stack.ico /tmp/crash-ico-16.png /tmp/crash-ico-32.png /tmp/crash-ico-48.png /tmp/crash-ico-256.png
+rm -f /tmp/crash-ico-16.png /tmp/crash-ico-32.png /tmp/crash-ico-48.png /tmp/crash-ico-256.png
+icotool -l windows/crash-the-stack.ico
 # the site's favicon: the same art at 32
 convert /tmp/crash-icon.ppm -filter point -resize 32x32 "../../site/assets/favicon-32.png"
 cp ../icon-192.png ../../site/assets/icon-192.png
