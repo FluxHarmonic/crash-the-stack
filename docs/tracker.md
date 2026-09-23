@@ -17,7 +17,7 @@ agent edit the same file. The soundtrack's twenty tunes ship in
 `groove`, `breaker`, `black-glass`, `black-glass-title`,
 `basement-circuit`, `blind-spot`, `breach-vector`, `clock-edge`,
 `closed-loop`, `cold-boot`, `dead-sector`, `dirty-cache`,
-`glass-current`, `obsidian-index`, `quiet-array`, `relay-ghost`,
+`fault-line`, `glass-current`, `obsidian-index`, `quiet-array`, `relay-ghost`,
 `sector-drift` and `shadow-protocol`, with `demo-columns`, which touches
 every column, every effect and every instrument.
 

@@ -141,8 +141,17 @@ function notRun() { const done = new Set(results.map((r) => r[0])); return plann
 
 // ---- 1. imports, from the file on disk (no browser needed) -----------------
 {
-  const wasmPath = path.join(GAME, "crash-the-stack.wasm");
-  if (!fs.existsSync(wasmPath)) { console.log(`SETUP-FAILED imports: ${wasmPath} missing`); process.exit(2); }
+  // build/web keeps the wasm beside the page; a staged tree has it at
+  // w/<sha16>/crash-the-stack.wasm, where scripts/wasm-to-r2 put it and the
+  // page's data-wasm points (the deploy serves that path from R2). Read
+  // whichever is there, so this arm runs on either tree.
+  let wasmPath = path.join(GAME, "crash-the-stack.wasm");
+  if (!fs.existsSync(wasmPath)) {
+    const hashed = path.join(GAME, "w");
+    const dir = fs.existsSync(hashed) ? fs.readdirSync(hashed).find((h) => fs.existsSync(path.join(hashed, h, "crash-the-stack.wasm"))) : null;
+    if (dir) wasmPath = path.join(hashed, dir, "crash-the-stack.wasm");
+  }
+  if (!fs.existsSync(wasmPath)) { console.log(`SETUP-FAILED imports: no crash-the-stack.wasm under ${GAME} (beside the page, or at w/<sha16>/)`); process.exit(2); }
   const mod = new WebAssembly.Module(fs.readFileSync(wasmPath));
   const byModule = {};
   for (const imp of WebAssembly.Module.imports(mod)) (byModule[imp.module] = byModule[imp.module] || []).push(imp.name);
@@ -252,6 +261,9 @@ function killChromeGroup(sig) {
 let exiting = false;
 function shutdown(code) {
   if (exiting) return; exiting = true;
+  // the verdict first: the exit below sits in an unref'd timer, so a run whose
+  // loop empties before it fires exits naturally, and without this it exits 0
+  process.exitCode = code;
   try { server.close(); } catch { /* not listening */ }
   killChromeGroup("SIGTERM");
   let tries = 0;
@@ -1793,7 +1805,11 @@ async function dealFrom(free, table, row = "new-board") {
                    "free-cards": "new-board daily-board version back",
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
-    if (r.top.order.join(" ") !== "continue jack-in free-play settings credits") detail = `the pause menu's rows are ${r.top.order.join(" ")}`;
+    // NEWS joins the top screen wherever a feed sits beside the game, which
+    // is the staged tree and the deploy but not build/web (index.template's
+    // fetch is scoped to /jack-in/): both shapes are right, so allow it
+    const topRows = r.top.order.join(" ");
+    if (topRows !== "continue jack-in free-play settings credits" && topRows !== "continue jack-in free-play settings credits news") detail = `the pause menu's rows are ${topRows}`;
     // the sub-screens' first row sits where the main menu's does (David, 2026-09-22), pulled up only when the rows would cross the band
     const rowsFrom = (s) => s.rows[s.order[0]].y - 14;   // the row's center less half its height
     const rowsWant = (s) => Math.max(124, Math.min(168, 380 - s.order.length * 32));

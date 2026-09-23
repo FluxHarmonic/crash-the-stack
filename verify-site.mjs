@@ -98,6 +98,9 @@ function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { 
 let exiting = false;
 function shutdown(code) {
   if (exiting) return; exiting = true;
+  // the verdict first: the exit below sits in an unref'd timer, so a run whose
+  // loop empties before it fires exits naturally, and without this it exits 0
+  process.exitCode = code;
   try { server.close(); } catch { /* not listening */ }
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 1500).unref();
