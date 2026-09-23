@@ -77,3 +77,7 @@ The requested -1.3 dB delivery gain was capped to **-1.9 dB** for every
 reference to retain peak headroom. Decoded OGG: A/B -19.7 LUFS-I / -3.5 dBTP;
 previous full -19.8 / -2.9; revised full -19.8 / -2.1. All delivery duration,
 peak and ending checks pass. These are audition copies, not album masters.
+
+Delivered 2026-09-23: Telegram acknowledged A/B message 1187 and full revised
+demo message 1188. Source/validation commit: 4373dac. Encoded file hashes are
+in encoded.sha256. The previous full reference is retained locally.
