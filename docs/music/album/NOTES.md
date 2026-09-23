@@ -206,3 +206,11 @@ pulse; David clarified **dark synthwave**, so its lead moves down an octave and
 pad/lead brightness softens while preserving chord voicings and the liked snare.
 The short full demos and equal-gain contextual comparisons await feedback.
 See [Style II](../alternates/rock-wave-sketches-ii/README.md) for scope and commands.
+
+## 2026-09-23 — Fault Line heavier rock audition
+
+David requested more rhythm-guitar body/distortion, a small lift for the improved
+tom and a higher pentatonic solo with bends. [Fault Line Style III](../alternates/fault-line-heavy-iii/README.md)
+preserves the backing composition, thickens guitar layers, lifts the tom 1.5 dB
+and adds an upper D-minor pentatonic solo with verified held whole-tone bends.
+It remains a short audition awaiting listening feedback. After Image is unchanged.
