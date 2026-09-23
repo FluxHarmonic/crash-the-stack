@@ -442,3 +442,16 @@ Telegram 1170. The existing 0 dB mastering gain is retained; MP3 measures
 -16.2 LUFS-I/-2.3 dBTP. Source checks, exports and fresh-browser playback pass.
 [The release record](GLASS-CURRENT-II.md) retains provenance and the next game
 deployment handoff. Sector Drift is the next suggested review.
+
+## Sector Drift: Expression I
+
+David requested the next review after Glass Current II was published.
+[Expression I](../alternates/sector-expression-i/README.md) auditions a softer,
+longer-bodied signal pluck separately from developed calm/tense replies and
+more varied bell phrasing in the quiet bridge. The reprise recalls the new
+calm answer. Both full candidates share a proposed phrase/patch pool.
+
+Retain the felt kick, woody rim, dusty hats, round sub, relay taps, minor-tine
+chords and answer bell. The opening hook, rhythm, transition and final G-minor
+landing remain. Four contextual before/after pairs and both full versions are
+being rendered; maintained sources and public audio await listening approval.

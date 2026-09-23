@@ -1,0 +1,252 @@
+#!/usr/bin/env sigil
+;;; Separate patch and phrase auditions; both full forms share one candidate pool.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define PHRASES '(3 8 10 11 12))
+(define PATCHES '(6))
+
+(define (setting form key value)
+  (if (member key form)
+      (set-field form key value)
+      (append form (list key value))))
+
+(define (patches parts)
+  (replace-child parts 'instruments
+    (cons 'instruments
+      (map
+        (lambda (instrument)
+          (if (= (field instrument id:) 6)
+              (let ((patch (field instrument patch:)))
+                (each pair '((index: 0.45) (decay: 0.42) (release: 0.11))
+                  (set! patch (setting patch (car pair) (cadr pair))))
+                (set-field instrument patch: patch))
+              instrument))
+        (cdr (child parts 'instruments))))))
+
+(define (line p channel start instrument specs)
+  (add-notes
+    (append (take p 5)
+      (filter
+        (lambda (row) (pair? (cddr row)))
+        (map
+          (lambda (row)
+            (append (take row 2)
+              (filter
+                (lambda (cell)
+                  (not (and (= (car cell) channel) (>= (cadr row) start))))
+                (cddr row))))
+          (skip p 5))))
+    (map
+      (lambda (spec)
+        (list (car spec) channel (cadr spec) instrument
+              (caddr spec) (list-ref spec 3)))
+      specs)))
+
+(define (calm-answer p quieter?)
+  (let ((answer
+          (line
+            (line p 6 128 6
+              '((132 "A#3" 21 12) (144 "D-4" 18 8) (152 "F-4" 19 12)
+                (176 "D-4" 19 12)
+                (196 "A-3" 20 12) (208 "C-4" 18 8) (216 "D-4" 19 12)
+                (240 "A-3" 16 8) (248 "G-3" 18 6)))
+            7 128 7
+            '((232 "D-4" 12 8)))))
+    ;; The reprise retains its existing quieter presentation. Edit only
+    ;; the new melody cells; do not scale backing or opening notes again.
+    (if quieter?
+        (append (take answer 5)
+          (map
+            (lambda (row)
+              (append (take row 2)
+                (map
+                  (lambda (cell)
+                    (if (and (>= (cadr row) 128)
+                             (member (car cell) '(6 7))
+                             (attack? cell))
+                        (set-list-volume cell (- (list-ref cell 3) 1))
+                        cell))
+                  (cddr row))))
+            (skip answer 5)))
+        answer)))
+
+(define (set-list-volume cell volume)
+  (append (take cell 3) (list volume (list-ref cell 4))))
+
+(define (develop p)
+  (case (field p id:)
+    ;; Later calm answer and album reprise recall the same rising cell,
+    ;; then turn through D minor toward the next G-minor phrase.
+    ((3) (calm-answer p #f))
+    ((12) (calm-answer p #t))
+    ;; Keep the empty first two bars and the descending bell pitches.
+    ;; A longer opening anchor, paired middle notes and a final breath
+    ;; replace the four equally spaced steps over the existing C bass.
+    ((10)
+     (line p 7 0 7
+       '((72 "G-4" 13 16) (96 "D#4" 14 8)
+         (104 "D-4" 12 8) (116 "C-4" 13 10))))
+    ;; Shared final tense phrase and deliberate album variant agree.
+    ;; A quiet bell interrupts the rising pluck, then finishes its answer.
+    ((8 11)
+     (line
+       (line p 6 128 6
+         '((132 "A#3" 21 12) (144 "D-4" 18 8) (152 "F-4" 19 12)
+           (176 "D-4" 20 12)
+           (196 "A-3" 20 12) (208 "C-4" 18 8) (216 "D-4" 20 8)))
+       7 128 7
+       '((168 "A#3" 13 8) (232 "A-3" 15 8) (244 "G-3" 15 10))))
+    (else p)))
+
+(define (phrases parts)
+  (replace-child parts 'patterns
+    (cons 'patterns (map develop (cdr (child parts 'patterns))))))
+
+(define (channel-events p channel)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+      (skip p 5))))
+
+(define (protect before after patch? phrase?)
+  (each key '(name: tempo: speed: channels: meter:)
+    (check (equal? (field before key) (field after key)) "Header changed" key))
+  (each section '(bus order history)
+    (check (equal? (child before section) (child after section))
+           "Protected section changed" section))
+  (each instrument (cdr (child before 'instruments))
+    (let* ((id (field instrument id:))
+           (new (list-find (lambda (i) (= (field i id:) id))
+                          (cdr (child after 'instruments)))))
+      (check
+        (equal? instrument
+          (if (and patch? (member id PATCHES))
+              (set-field new patch: (field instrument patch:))
+              new))
+        "Protected instrument field changed" id)))
+  (each p (cdr (child before 'patterns))
+    (let ((new (pattern after (field p id:))))
+      (check (equal? (take p 5) (take new 5)) "Pattern clock changed")
+      (each channel CHANNELS
+        (unless (and phrase? (member (field p id:) PHRASES)
+                     (member channel '(6 7)))
+          (check (equal? (channel-events p channel) (channel-events new channel))
+                 "Protected performance changed" (field p id:) channel))))))
+
+(cli "sector-expression" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/sector-expression-i"))
+           (frozen? (file? (path reference "parts-before.cts")))
+           (source
+             (if frozen? (path reference "parts-before.cts")
+                 (path (root) "docs/music/songs/sector-drift/parts.cts")))
+           (layout-file
+             (if frozen? (path reference "arrangements.sgl")
+                 (path (root) "docs/music/songs/sector-drift/arrangements.sgl")))
+           (parts (read-score source))
+           (layout (read-score layout-file))
+           (arrangements (child layout 'arrangements))
+           (album (child arrangements 'album))
+           (pluck-parts (patches parts))
+           (phrase-parts (phrases parts))
+           (combined (patches phrase-parts))
+           (base (build-song-score parts layout album))
+           (clips '()))
+      (ensure-directory output)
+      (unless frozen?
+        (apply-song-plans (list (song-plan "sector-drift" motif)) "check" #f))
+      (protect parts pluck-parts #t #f)
+      (protect parts phrase-parts #f #t)
+      (protect parts combined #t #t)
+      (each spec (list (list "before" parts) (list "pluck" pluck-parts)
+                       (list "phrases" phrase-parts)
+                       (list "after" combined))
+        (write-canonical motif (path output (str "parts-" (car spec) ".cts"))
+                         (cadr spec)))
+      (let ((destination (path output "arrangements.sgl")))
+        (if (file? destination)
+            (check (equal? (read-text layout-file) (read-text destination))
+                   "Refusing to overwrite differing layout")
+            (copy-file layout-file destination)))
+      (each spec '((album "sector-drift") (game "sector-drift-game"))
+        (let* ((arrangement (child arrangements (car spec)))
+               (before-file (path output (str (cadr spec) "-before.cts"))))
+          (write-canonical motif before-file (build-song-score parts layout arrangement))
+          (unless frozen?
+            (check (equal? (read-text before-file)
+                           (read-text (path (root) (field arrangement destination:))))
+                   "Accepted score differs from shared reference" (car spec)))
+          (write-canonical motif (path output (str (cadr spec) "-after.cts"))
+                           (build-song-score combined layout arrangement))))
+      (each spec
+        (list (list "pluck" "Calm groove / pluck patch only" '(1) pluck-parts 128)
+              (list "calm" "Later calm answer / phrases only" '(4) phrase-parts #f)
+              (list "bridge" "Bell reflection / phrasing only" '(8) phrase-parts #f)
+              (list "focused" "Focused return / phrases only" '(10) phrase-parts #f))
+        (each variant '("before" "after")
+          (let* ((score
+                   (if (equal? variant "before") base
+                       (build-song-score (list-ref spec 3) layout album)))
+                 (stem (str (car spec) "-" variant))
+                 (sections
+                   (append
+                     (map
+                       (lambda (id)
+                         (let* ((p (pattern score id))
+                                (limit (list-ref spec 4))
+                                (p (if limit
+                                       (set-field
+                                         (append (take p 5)
+                                           (filter
+                                             (lambda (row) (< (cadr row) limit))
+                                             (skip p 5)))
+                                         rows: limit)
+                                       p)))
+                           (list (str "Album pattern " id) p)))
+                       (caddr spec))
+                     (list (list "Two-bar release / comparison gap" (phrase-rows 64 '())))))
+                 (rows (apply + (map (lambda (s) (field (cadr s) rows:)) sections))))
+            (write-album motif output stem
+              (str "Sector Drift / " (cadr spec) " / " variant)
+              score sections
+              '("parts-before.cts" "parts-after.cts" "arrangements.sgl")
+              "Expression I: isolated patch and phrasing auditions; no maintained score replaced."
+              "Patch pair keeps every note; phrase pairs keep original patches. Dust kit, sub, tine chords, opening theme and final landing remain intact."
+              "2026-09-23")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ (* rows 7.5) 100)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "sector-drift"
+              title: "Sector Drift"
+              audition: "expression-i"
+              comment: "Four pairs, each BEFORE then AFTER: pluck patch in calm mix, later calm answer, bell reflection, focused return. Phrase pairs retain original patches. Full candidate combines pluck and phrase changes."
+              full_duration_seconds: 216
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict source_sha256: (song-hash source)
+              layout_sha256: (song-hash layout-file)
+              shared_patch_ids: PATCHES
+              shared_phrase_ids: PHRASES
+              changed_phrase_channels: '(6 7)
+              patch_comparisons_identical_performance: #t
+              phrase_comparison_original_patches: #t
+              drums_sub_tines_transition_bus_protected: #t
+              pluck_comparison_notes_accents_and_output_gain_preserved: #t
+              game_and_album_from_same_candidate_parts: #t))
+      (display "Sector Drift isolated comparisons and synchronized full candidates ready.\n"))))
