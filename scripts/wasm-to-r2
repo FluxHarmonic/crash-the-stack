@@ -105,12 +105,17 @@ LEFT="$(find "$DIR" -name '*.wasm' | sort)"
 
 put() {   # local file, bucket key
   if [ "$DRY" = 1 ]; then echo "wasm-to-r2: would put $2 ($(stat -c%s "$1") bytes) in $BUCKET"; return 0; fi
-  # content-addressed: a key that is there already holds these very bytes
-  if wrangler r2 object get "$BUCKET/$2" --file /dev/null > /dev/null 2>&1; then
+  # --remote on BOTH calls, always. wrangler 4's `r2 object` talks to a LOCAL
+  # simulator by default, which needs workerd (missing from this box's install:
+  # "spawn .../@cloudflare/workerd-linux-64/bin/workerd ENOENT"). Without the
+  # flag a publish writes to a directory nobody serves and says nothing is
+  # wrong, which is the worst of the available failures.
+  # Content-addressed, so a key already there holds these very bytes.
+  if wrangler r2 object get "$BUCKET/$2" --remote --file /dev/null > /dev/null 2>&1; then
     echo "wasm-to-r2: $2 is already in $BUCKET"
     return 0
   fi
-  wrangler r2 object put "$BUCKET/$2" --file "$1" --content-type application/wasm > /dev/null
+  wrangler r2 object put "$BUCKET/$2" --remote --file "$1" --content-type application/wasm > /dev/null
   echo "wasm-to-r2: put $2 ($(stat -c%s "$1") bytes)"
 }
 [ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "wasm-to-r2: wrangler not on PATH"; exit 1; }
