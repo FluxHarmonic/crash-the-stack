@@ -1,3 +1,7 @@
+> Current authoring: [shared song sources](../songs/README.md). Use `songs.sgl`
+> to regenerate/check both game and album versions. Earlier composers below
+> remain historical tools; renderers and validators remain supported.
+
 # Soundtrack shell tools
 
 Run these with Sigil 0.22.2 or newer. The implementation follows the main
@@ -56,6 +60,12 @@ provenance text, not an executable dependency.
 
 ## Telegram
 
+David provided standing authorization on 2026-09-23: "You have my permission
+to send every audition file to telegram, don't ask again". Send soundtrack
+auditions to his existing configured Telegram destination without requesting
+per-file or per-revision confirmation. This covers auditions, not public
+publication or unrelated files. Record confirmed delivery receipts.
+
 Only send explicitly selected full auditions. Choose either environment
 variables TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID, or --env-file FILE.
 An explicit dotenv file may also use the existing COURIER_TELEGRAM_TOKEN and
@@ -73,3 +83,119 @@ sigil docs/music/tools/send-telegram.sgl --env-file /path/to/private.env /path/t
 Historical reports retain their listening decisions and measurements. Their
 sources are immutable references; use SOUNDTRACK.md and catalog.json for the
 current selections. No album arrangements or mastering are performed here.
+
+### Controlled expression auditions
+
+`relay-expression.sgl --motif PATH --output DIR` generates a preserved album
+reference, full patch alternate, six before/after phrase pairs and their maps.
+`expression-audit.sgl --motif PATH --output EXTERNAL_DIR` verifies the committed
+pairs and exact full-track compiled ticks. The patches are reusable Sigil data
+in `(crash soundtrack expression patches)`; accepted game/album scores remain
+unchanged.
+
+`expression-render.sgl --motif PATH --output EXTERNAL_DIR --stage native`
+renders and measures all cases; `--stage delivery` creates the sequential A/B
+and both full OGGs. `--input DIR` selects the generated case directory. Optional
+`--reuse PRIOR_EXTERNAL_DIR` reuses only native WAVs with identical score bytes
+and renderer identity, then remeasures them; changed cases render normally.
+Delivery refuses sources changed since synthesis and uses equal monitoring
+gain within every pair. See `../album/EXPRESSION-PASS.md` for the listening
+protocol and current section map. All scripts use the Sigil shell interface.
+
+`relay-bell-context.sgl --motif PATH --output EXTERNAL_DIR` produces the focused
+calm bell A/B: sixteen identical bars with the preferred contact/dust kit and
+original pluck, first using the existing bell and then the metallic prototype.
+It checks all compiled ticks, allows only instrument 9 to differ, and writes
+a single OGG comparison plus source snapshots and measurement records.
+
+`relay-bass-context.sgl --motif PATH --output EXTERNAL_DIR` compares current,
+upper-synth-down and gritty-bass-down balances over sixteen identical tense
+bars. It requires Motif's new instrument `gain:` support and explicitly checks
+that the renderer preserves that field. Only the specified output gains may
+differ; all compiled tick tables must match. The preferred kit, original bell
+and original pluck remain constant.
+
+### Relay Ghost album II
+
+`album-compose-opening.sgl --relay-revision ii` (the default) adopts the
+approved drum bank and gritty-bass output gain from the preserved audition.
+`--relay-revision i` reproduces album I. Use a Motif renderer containing
+commit `b0d135e` for gain support; the composer verifies gain survives.
+
+`relay-bass-identity.sgl --motif PATH --output EXTERNAL_DIR` renders three
+identification examples: gritty FM bass, separate acid line, then both.
+The acid-only example receives an explicit +8 dB monitoring boost; the
+combined example uses the original relative levels before the approved cut.
+It checks duration, sample format and decoded true peak. Historical audition
+tools read the frozen album-I snapshot so accepted updates do not alter A/Bs.
+
+### Breach Vector phrase comparisons
+
+`breach-phrases.sgl --motif PATH --output SCORE_DIR` preserves the current album
+reference and generates a candidate plus three contextual before/after pairs.
+Once present, the frozen reference drives reproduction. Its source checks
+restrict changes to the five declared pattern/channel pairs.
+
+`expression-render.sgl --input SCORE_DIR --output EXTERNAL_DIR --motif PATH
+--stage native` then `--stage delivery` renders and validates the comparison
+and both complete arrangements. Optional `slug`, `title`, `audition` and
+`comment` fields in comparison.json name other tracks; absent fields preserve
+the original Relay Ghost behavior. This shares the existing gain, fresh-state,
+peak, tail, duration and source-provenance checks.
+
+`album-audit.sgl --track breach-vector --source CANDIDATE.cts --motif PATH
+--output REPORT_DIR` applies the established full-track policy to an alternate
+without installing it as the accepted album. `--source` requires one title.
+Omitting it retains normal album auditing.
+
+`breach-percussion.sgl --motif PATH --output SCORE_DIR` compares a shorter
+chip-snare with a faint FM metal layer against the original snare, using the
+approved Breach Vector Phrases I score on both sides. It generates percussion,
+calm and transition comparisons and both complete scores for the shared
+`expression-render.sgl` workflow. Only instrument 2 may change; the composer
+also verifies that every snare/fill hit uses that instrument.
+
+### Shared Closed Loop phrase comparisons
+
+`closed-loop-phrases.sgl --motif PATH --output SCORE_DIR` freezes the accepted
+shared pool and layout, then generates proposed game/album arrangements and
+three contextual before/after pairs. Only the declared melodic phrases change;
+protected channel events, instruments, bus, order and clock are checked. The
+frozen reference in `alternates/closed-loop-phrases-i/` drives later reruns,
+including after adoption. Use `expression-render.sgl` for native audio and OGG
+delivery, and `album-audit.sgl --track closed-loop --source CANDIDATE.cts` for
+sample-clock and release checks. This composer never adopts the candidate.
+
+### Shared Dirty Cache phrase comparisons
+
+`dirty-cache-phrases.sgl --motif PATH --output SCORE_DIR` freezes the shared
+baseline and generates synchronized game/album candidates with four contextual
+A/B pairs. It preserves the approved on-beat plucks, corrected harmonic return,
+bass/drum events, patches and mix. The proposed chord gap and reed variations
+remain independent choices. Source guards restrict changes to declared
+pattern/channel pairs; chart/order checks apply to the generated arrangements.
+Render with `expression-render.sgl`; audit the complete candidate with
+`album-audit.sgl --track dirty-cache --source CANDIDATE.cts`. Frozen references
+under `alternates/dirty-cache-phrases-i/` make later comparisons reproducible.
+
+### Shared Basement Circuit expression comparisons
+
+`basement-expression.sgl --motif PATH --output SCORE_DIR` freezes the accepted
+shared pool and layout, with separate pluck, acid-envelope and phrase candidates.
+It writes synchronized full game/album alternatives and four A/B pairs: exposed
+pluck, pluck in the calm mix, acid contour, and replies with original patches.
+The exposed pair has an equal monitoring boost; full mixes keep actual levels.
+Use `expression-render.sgl` for native/delivery stages and `album-audit.sgl` with
+`--track basement-circuit --source CANDIDATE.cts`. The composer protects drum,
+sub, chord, swell and auxiliary-percussion events and does not adopt candidates.
+The frozen references support later reproduction after accepted sources evolve.
+
+### Short Basement Circuit turnaround comparison
+
+`basement-turnaround.sgl` uses the frozen Expression I candidate to compare one
+late acid turnaround, retaining synchronized game/album candidates and excerpt
+maps. `short-ab-render.sgl --input SCORE_DIR --output EXTERNAL_DIR --motif PATH`
+renders just two excerpts from a manifest naming `before_stem`, `after_stem`,
+`half_seconds` and `title`. It concatenates before/after with one common gain,
+records source/renderer provenance, and checks encoded duration, format, peak
+and final decay. Excerpt scores must already include their release tails.

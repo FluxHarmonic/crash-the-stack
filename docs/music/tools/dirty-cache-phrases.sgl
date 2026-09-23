@@ -1,0 +1,193 @@
+#!/usr/bin/env sigil
+;;; Develop shared reed replies while preserving the approved bass/pluck pocket.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define CHANGES '((5 5 6) (8 8) (10 8) (13 8)))
+
+;;; Remove only the selected line; entry gates remain owned by the layout.
+(define (replace-line p channel notes)
+  (add-notes
+    (append (take p 5)
+      (filter (lambda (row) (pair? (cddr row)))
+        (map (lambda (row)
+               (append (take row 2)
+                 (filter (lambda (cell) (not (= (car cell) channel)))
+                         (cddr row))))
+             (skip p 5))))
+    notes))
+
+(define (reed-notes instrument specs)
+  (map (lambda (spec)
+         (list (car spec)
+               8
+               (cadr spec)
+               instrument
+               (caddr spec)
+               (list-ref spec 3)))
+       specs))
+
+(define (develop p)
+  (case (field p id:)
+    ;; Keep the first bright chord of the last bar, then let the existing
+    ;; bass and percussion fill carry the entrance. Retain every release gate.
+    ((5)
+     (append (take p 5)
+       (map (lambda (row)
+              (append (take row 2)
+                (filter (lambda (cell)
+                          (not (and (member (cadr row) '(54 58))
+                                    (member (car cell) '(5 6))
+                                    (attack? cell))))
+                        (cddr row))))
+            (skip p 5))))
+    ;; Replace the mechanical first-half scale with a syncopated question and
+    ;; a lower two-bar answer. The first complete tense hook stays unchanged.
+    ((8)
+     (replace-line p 8
+       (reed-notes 15
+         '((0 "D-5" 16 3) (6 "F-5" 14 3) (10 "A-5" 16 3)
+           (16 "G-5" 15 5) (24 "F-5" 14 3) (28 "E-5" 13 3)
+           (36 "D-5" 18 5) (44 "C-5" 16 3) (50 "A-4" 15 3)
+           (56 "C-5" 14 3) (60 "D-5" 16 3)))))
+    ;; Recall the album bridge's lower reply inside the later game/album tense
+    ;; phrase, leaving the following complete high hook to provide the lift.
+    ((10)
+     (replace-line p 8
+       (reed-notes 15
+         '((8 "A-4" 15 4) (16 "C-5" 14 3) (24 "A-4" 15 4)
+           (36 "G-4" 14 4) (44 "F-4" 15 3) (50 "E-4" 13 3)
+           (56 "D-4" 15 5)))))
+    ;; A/C/A is a small question before the familiar G/F/E/D descent. Keep
+    ;; the quiet bridge register and the original calm reed patch.
+    ((13)
+     (replace-line p 8
+       (reed-notes 8
+         '((8 "A-4" 14 4) (16 "C-5" 13 3) (22 "A-4" 14 4)
+           (32 "G-4" 13 4) (40 "F-4" 14 3) (46 "E-4" 12 3)
+           (52 "D-4" 14 6)))))
+    (else p)))
+
+(define (channel-events p channel)
+  (filter (lambda (row) (pair? (cddr row)))
+    (map (lambda (row)
+           (append (take row 2)
+             (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+         (skip p 5))))
+
+(define (check-protected before after)
+  (each key '(name: tempo: speed: channels:)
+    (check (equal? (field before key) (field after key))
+           "Header changed" key))
+  (each section '(instruments bus order history)
+    (check (equal? (child before section) (child after section))
+           "Protected section changed" section))
+  (each original (cdr (child before 'patterns))
+    (let* ((id (field original id:))
+           (revised (pattern after id)))
+      (check (equal? (take original 5) (take revised 5))
+             "Pattern clock changed" id)
+      (each channel CHANNELS
+        (unless (and (assoc id CHANGES) (member channel (cdr (assoc id CHANGES))))
+          (check (equal? (channel-events original channel)
+                         (channel-events revised channel))
+                 "Protected channel changed" id channel))))))
+
+(cli "dirty-cache-phrases" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/dirty-cache-phrases-i"))
+           (frozen? (file? (path reference "parts-before.cts")))
+           (source
+             (if frozen? (path reference "parts-before.cts")
+                 (path (root) "docs/music/songs/dirty-cache/parts.cts")))
+           (layout-file
+             (if frozen? (path reference "arrangements.sgl")
+                 (path (root) "docs/music/songs/dirty-cache/arrangements.sgl")))
+           (parts (read-score source))
+           (layout (read-score layout-file))
+           (arrangements (child layout 'arrangements))
+           (combined-parts
+             (replace-child parts 'patterns
+               (cons 'patterns (map develop (cdr (child parts 'patterns))))))
+           (album (child arrangements 'album))
+           (base (build-song-score parts layout album))
+           (after (build-song-score combined-parts layout album))
+           (clips '()))
+      (ensure-directory output)
+      (unless frozen?
+        (apply-song-plans (list (song-plan "dirty-cache" motif)) "check" #f))
+      (check-protected parts combined-parts)
+      (write-canonical motif (path output "parts-before.cts") parts)
+      (write-canonical motif (path output "parts-after.cts") combined-parts)
+      (let ((destination (path output "arrangements.sgl")))
+        (if (file? destination)
+            (check (equal? (read-text layout-file) (read-text destination))
+                   "Refusing to overwrite a differing layout")
+            (copy-file layout-file destination)))
+      (each spec '((album "dirty-cache") (game "dirty-cache-game"))
+        (let* ((arrangement (child arrangements (car spec)))
+               (before-file (path output (str (cadr spec) "-before.cts")))
+               (before-score (build-song-score parts layout arrangement))
+               (after-score (build-song-score combined-parts layout arrangement)))
+          (each section '(order chart)
+            (check (equal? (child before-score section) (child after-score section))
+                   "Arrangement transport/chart changed" section))
+          (write-canonical motif before-file
+            (build-song-score parts layout arrangement))
+          (unless frozen?
+            (check (equal? (read-text before-file)
+                           (read-text (path (root) (field arrangement destination:))))
+                   "Shared reference differs from accepted score" (car spec)))
+          (write-canonical motif (path output (str (cadr spec) "-after.cts"))
+            (build-song-score combined-parts layout arrangement))))
+      (each spec '(("bridge" "Calm hook into lower reed reply" (6 7))
+                   ("entrance" "Chord breath into tense groove" (11 12))
+                   ("development" "Tense reed question and answer" (14 15))
+                   ("return" "Lower reply into final high hook" (19 20)))
+        (each variant '("before" "after")
+          (let* ((score (if (equal? variant "before") base after))
+                 (stem (str (car spec) "-" variant))
+                 (sections
+                   (append
+                     (map (lambda (id)
+                            (list (str "Album pattern " id) (pattern score id)))
+                          (caddr spec))
+                     (list (list "Two-bar release / comparison gap" (phrase-rows 32 '())))))
+                 (rows (apply + (map (lambda (s) (field (cadr s) rows:)) sections))))
+            (write-album motif output stem
+              (str "Dirty Cache / " (cadr spec) " / " variant)
+              score sections
+              '("parts-before.cts" "parts-after.cts" "arrangements.sgl")
+              "Phrases I: shared reed replies and a chord breath before the tense entrance, awaiting listening approval."
+              "Same instruments, bass, drums, on-beat plucks, harmony, bus and clock. Each comparison half starts from fresh engine state."
+              "2026-09-23")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ (* rows 15.0) 110)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "dirty-cache"
+              title: "Dirty Cache"
+              audition: "phrases-i"
+              comment: "Each pair BEFORE then AFTER: lower reed bridge, chord breath into tense, developed tense reply, late lower answer into the high hook. Same monitoring gain; no new limiter."
+              full_duration_seconds: (/ (* 1632 15.0) 110)
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict source_sha256: (song-hash (path output "parts-before.cts"))
+              candidate_sha256: (song-hash (path output "parts-after.cts"))
+              layout_sha256: (song-hash (path output "arrangements.sgl"))
+              shared_pattern_ids: (map car CHANGES)
+              changed_pattern_channels: CHANGES
+              protected_channels_identical: #t
+              instruments_bus_order_and_clock_identical: #t
+              game_and_album_from_same_candidate_parts: #t))
+      (display "Dirty Cache comparisons and synchronized game/album candidates ready.\n"))))

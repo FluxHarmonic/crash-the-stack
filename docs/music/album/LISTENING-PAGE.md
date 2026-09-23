@@ -236,3 +236,119 @@ Live browser playback confirmed artist David Wilson, the selected album title,
 the new audio URL and fifteen tracks. The browser check was muted and does not
 claim physical phone testing. Publication logs and verification are retained
 in publication-tagged-ii/ and r2-tagged-ii/ outside the repository.
+
+## Obsidian album II and restored page routing
+
+David approved Tension V's added activity for the album on 2026-09-22. The full
+4:05.714 track now carries it from 1:54.286 to 3:25.714. Only its MP3 URL changes;
+the other fourteen public audio objects remain the accepted tagged revision.
+The complete new local MP3 set is tagged-preview-iii/soundtrack/audio/.
+
+Production had advanced to 47c7fbb1 (game 08d3fb9). Its soundtrack HTML route
+returned the game page, although player.js, CSS and the album manifest were
+still available. Fetching index.html followed Pages' redirect to that fallback;
+HTTP 200 was insufficient to validate it. The first Obsidian publication
+76f82193 preserved that broken HTML, which the browser check caught. The final
+stage restores the repository's album HTML and worker bypass using version
+08d3fb9bfd4a-album-ii, preserving the current game and tracker binaries.
+
+The publisher now refuses an HTML bundle without the album audio element and
+a built worker without the soundtrack bypass, so stale build output fails
+before deployment. Existing controlled clients can accept the normal game
+update; no forced worker activation or game-storage clearing is introduced.
+
+The corrected publication is https://a5f3c5c1.crashthestack.pages.dev, source
+6b43936. A fresh browser context loaded the real soundtrack player and played
+Obsidian Index from soundtrack/obsidian-album-ii/ with David Wilson and the
+correct album metadata; all fifteen tracks were present. The check was muted
+and paused afterward. R2 checksum, MIME, range and CORS verification passed.
+Final deployment records are in publication-obsidian-ii/deployment-restored.txt;
+its publication.json records preserved game hashes and the worker restoration.
+
+## Native download control
+
+David requested hiding the player's download button. The native audio element
+now uses controlslist="nodownload". Supporting browsers hide that control while
+retaining native playback, seeking and volume. This is a presentation choice:
+the MP3 stream URLs remain accessible. No context-menu blocking is added.
+
+Published at https://eb656662.crashthestack.pages.dev (source 9d1930d).
+Live Chromium verification confirms native controls remain enabled,
+controlsList contains nodownload, the browser supports that token, and playback
+still advances with all fifteen tracks present. This functional check was muted.
+The single-HTML-change staging and deployment record are external in
+publication-player-controls-i/.
+
+## Relay Ghost approved mix and master II
+
+David approved the complete mix and requested publication. The quieter contact
+and dust drums, original bell/pluck and gritty bass -2 dB now play from the new
+`soundtrack/relay-album-ii/relay-ghost.mp3` object. The release uses +0.5 dB
+mastering gain, retaining 10.8 LU LRA, measuring -16.7 LUFS-I and -1.6 dBTP
+in decoded MP3. Tags and embedded artwork pass the established checks.
+
+Publication https://340709c4.crashthestack.pages.dev changes only Relay Ghost's
+URL in the fifteen-track manifest. All public files in the previous deployment
+were fetched and hash-compared against the preserved stage; game, tracker,
+worker, player, other audio URLs and download-control hint remain intact.
+The new R2 object matches the local MP3 byte-for-byte; byte range 206, MIME and
+CORS checks pass. Evidence is external in publication-relay-ii/, r2-relay-ii/,
+relay-ii-release/ and relay-ii-mp3/.
+
+## Breach Vector approved master II
+
+Publication `cfb7d2bb` adopts the approved phrase development and shorter contact
+snare. Only track 13's URL changes to
+`soundtrack/breach-album-ii/breach-vector.mp3`. Public checksum, range, CORS,
+metadata and browser playback checks pass. See [BREACH-II.md](BREACH-II.md).
+Use `publication-breach-ii/site/soundtrack/` for subsequent game publication.
+
+## Cold Boot album II publication
+
+Cold Boot's approved cleaner mix is mastered and live in deployment `014fbd1d`
+(source `560f743`). The MP3 selector uses `cold-boot-ii-release` / `-album-ii`.
+The preserved current page bundle is
+`~/Ops/artifacts/crash-the-stack-album/publication-cold-boot-ii/site/soundtrack/`;
+use it as `CRASH_SOUNDTRACK_DIR` for later game publishes. The complete local
+MP3 collection is `tagged-preview-vi/soundtrack/audio/` under the album artifact
+root. The other fourteen files are retained from revision V.
+
+The release URL includes `?v=b268d1999e4a`, the MP3 hash prefix. An existence
+probe through the public CDN before upload cached a 404; this query avoids that
+negative cache. For future uploads, check object existence through the storage
+API rather than requesting an unpublished CDN URL. Always verify the exact URL
+that goes into the manifest after upload, including byte identity, range/CORS
+behavior and actual browser playback. See [Cold Boot II](COLD-BOOT-II.md).
+
+## Closed Loop album II publication
+
+Closed Loop's approved phrase development is synchronized in the shared game
+and album sources, mastered and live in deployment `2b9c8cc3` (source `1906d44`).
+Only its MP3 URL changes from production `014fbd1d`. The master selector uses
+`closed-loop-ii-release` / `-album-ii`; the exact public bytes, range/CORS/MIME,
+manifest and fresh browser playback checks pass. See [Closed Loop II](CLOSED-LOOP-II.md).
+
+Use `~/Ops/artifacts/crash-the-stack-album/publication-closed-loop-ii/site/soundtrack/`
+as `CRASH_SOUNDTRACK_DIR` for later game publication. The current complete local
+MP3 collection is `tagged-preview-vii/soundtrack/audio/` under the same artifact
+root. Older bundles remain available; preserve all later accepted track URLs
+when assembling a new game deployment.
+
+## Release integration with feat/p4b
+
+The P4b publisher now stages the site, game and soundtrack together. Its
+default soundtrack comes from the repository, so an external
+`CRASH_SOUNDTRACK_DIR` is optional. `scripts/album-manifest` reads the approved
+per-track MP3 URLs in `docs/music/album/listen/releases.tsv`, preserving all
+fifteen selections from the Sector Drift II publication, including nine later
+revisions and their cache queries. The older uniform preview prefix would
+have silently reverted those mixes. Update the URL list when publishing an
+approved new render; composing or regenerating a score does not publish audio.
+
+Fault Line is integrated into the game's Defrag pool; its mastered audition
+has not been added to the fifteen-track public album. The new staged player
+retains the CC BY credit and native download-control hint.
+
+`scripts/publish-web --dry-run` now passes `--local` to WASM staging. It must
+never upload to R2; the normal publish path retains `--upload`. The game worker
+is scoped to `/jack-in/`, leaving the soundtrack outside its navigation scope.

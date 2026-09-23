@@ -51,6 +51,7 @@ var SHELL = [
   "assets/tunes/dead-sector.cts",
   "assets/tunes/demo-columns.cts",
   "assets/tunes/dirty-cache.cts",
+  "assets/tunes/fault-line.cts",
   "assets/tunes/glass-current.cts",
   "assets/tunes/groove.cts",
   "assets/tunes/obsidian-index.cts",

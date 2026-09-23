@@ -213,3 +213,10 @@ before reporting a file as sent, and do not retry ambiguous uploads blindly.
 The review record should answer: what changed, why, what was preserved, which
 checks passed, what the listener thought, and what remains unverified. This
 supports future revisions, reproducible exports and a safe project handoff.
+
+## Listener notes and hands-on experiments
+
+For the album's deeper review, use the [listening feedback and tracker guide](album/FEEDBACK.md).
+It combines whole-track impressions, versioned timestamp notes, positive
+landmarks and small experiments on copied scores. Game-arrangement feedback
+and album approval remain separate decisions.

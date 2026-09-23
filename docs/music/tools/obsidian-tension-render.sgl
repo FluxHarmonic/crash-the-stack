@@ -1,0 +1,95 @@
+#!/usr/bin/env sigil
+;;; Render a full comparison with unchanged gain, plus delivery OGG and checks.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define TENSE-ENTRY (/ 720.0 7))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                         (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (item) (not (equal? item "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure wav offset log)
+  ($ ffmpeg -hide_banner -nostats -ss ,(number->string offset) -i ,wav
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define (calm-hash file)
+  ;; Exact entry sample at 44.1 kHz: all calm material and the complete fill.
+  (out ffmpeg -v error -nostdin -i ,file
+       -af "atrim=end_sample=4536000" -c:a pcm_s16le -f hash -hash sha256 -))
+
+(cli "obsidian-tension-render" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source (path output "obsidian-index-v5.cts"))
+           (baseline (path output "obsidian-index-v4-reference.cts"))
+           (ogg (path output "ogg/obsidian-index-tension-v-full.ogg"))
+           (commands '())
+           (checks '()))
+      (check (and (starts-with? output "/") (file? source))
+             "Supply the external output of obsidian-tension.sgl")
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Audio must remain outside the repository")
+      (copy-file (path (root) "assets/tunes/obsidian-index.cts") baseline)
+      (ensure-directory (path output "ogg"))
+      (each stem '("obsidian-index-v4-reference" "obsidian-index-v5")
+        (let* ((input (path output (str stem ".cts")))
+               (wav (path output (str stem ".wav")))
+               (argv (list motif "tune" "render" input "-r" "44100" "-o" wav)))
+          (check (not (file-exists? wav)) "Refusing to overwrite a render" wav)
+          (set! commands (append commands (list (list->array argv))))
+          (write-json-file (path output "render-commands.json") (list->array commands))
+          (run-tool argv)
+          (let* ((data (json ffprobe -v error -show_format -show_streams -of json ,wav))
+                 (stream (array-ref (dict-ref data streams:) 0))
+                 (duration (string->number (dict-ref (dict-ref data format:) duration:)))
+                 (full (measure wav 0 (path output (str stem "-full-loudness.txt"))))
+                 (tense (measure wav TENSE-ENTRY (path output (str stem "-tense-loudness.txt")))))
+            (check (and (= (dict-ref stream channels:) 2)
+                        (equal? (dict-ref stream sample_rate:) "44100")
+                        (< (abs (- duration (/ 1360.0 7))) 0.01))
+                   "Unexpected format or duration" wav)
+            (check (< (dict-ref full true_peak_dbtp:) -1) "Insufficient peak headroom" wav)
+            (set! checks
+              (append checks
+                (list (dict source: stem duration_seconds: duration
+                            full: full tense: tense
+                            source_sha256: (out sha256sum ,input)
+                            wav_sha256: (out sha256sum ,wav))))))))
+      (let* ((before (path output "obsidian-index-v4-reference.wav"))
+             (after (path output "obsidian-index-v5.wav"))
+             (argv
+               (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" after
+                     "-c:a" "libvorbis" "-q:a" "7"
+                     "-metadata" "title=Obsidian Index (Tension V audition)"
+                     "-metadata" "artist=David Wilson"
+                     "-metadata" "album=Crash The Stack - Game Auditions"
+                     "-metadata" "comment=Tense enters at 1:42.857. Full game arrangement; unchanged gain."
+                     ogg)))
+        (check (equal? (calm-hash before) (calm-hash after))
+               "Calm or transition audio changed")
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "render-commands.json") (list->array commands))
+        (run-tool argv)
+        ($ ffmpeg -v error -nostdin -i ,ogg -f null -)
+        (let ((measurement (measure ogg 0 (path output "ogg-loudness.txt"))))
+          (check (< (dict-ref measurement true_peak_dbtp:) -1)
+                 "OGG exceeds peak budget")
+          (write-json-file (path output "render-checks.json")
+            (dict calm_and_fill_pcm_identical: #t
+                  tense_entry_seconds: TENSE-ENTRY
+                  renders: (list->array checks)
+                  ogg: measurement
+                  ogg_sha256: (out sha256sum ,ogg)))))
+      (display (str "Verified full audition: " ogg "\n")))))

@@ -1,0 +1,186 @@
+#!/usr/bin/env sigil
+;;; Fresh state for each half; equal monitoring gain within each pair.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                         (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(cli "expression-render" (script-args)
+  (list (option name: 'input long: "input" value: "DIR"
+                default: (path (root) "docs/music/alternates/relay-expression-i"))
+        (option name: 'reuse long: "reuse" value: "DIR")
+        (option name: 'gain-db long: "gain-db" value: "DB" default: "-0.5")
+        (option name: 'stage long: "stage" value: "STAGE"
+                choices: '("native" "delivery") default: "native"))
+  (lambda (options)
+    (let* ((input (option-ref options 'input))
+           (output (option-ref options 'output))
+           (manifest (json-decode (read-text (path input "comparison.json"))))
+           (clips (array->list (dict-ref manifest clips:)))
+           (slug (dict-ref manifest slug: "relay-ghost"))
+           (audition (dict-ref manifest audition: "expression-i"))
+           (ab-stem (str slug "-" audition "-ab"))
+           (full-stems
+             (map (lambda (variant) (str slug "-" variant "-" audition "-full"))
+                  '("before" "after")))
+           (fulls (map (lambda (variant)
+                        (dict stem: (str slug "-" variant)
+                              duration_seconds: (dict-ref manifest full_duration_seconds:)))
+                      '("before" "after")))
+           (commands '()))
+      (check (starts-with? output "/") "Supply an absolute artifact directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep audio outside the repository")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output (str (option-ref options 'stage) "-commands.json"))
+                         (list->array commands))
+        (run-tool argv))
+      (if (equal? (option-ref options 'stage) "native")
+          (let ((motif (require-tool (option-ref options 'motif)))
+                (measurements '()))
+            (write-text (path output "renderer.sha256") (str (out sha256sum ,motif) "\n"))
+            (each clip (append clips fulls)
+              (let* ((stem (dict-ref clip stem:))
+                     (source (path input (str stem ".cts")))
+                     (snapshot (path output (str stem ".cts")))
+                     (wav (path output (str stem ".wav"))))
+                (check (not (file-exists? wav)) "Use a fresh artifact directory" wav)
+                ($ ,motif tune check ,source)
+                (copy-file source snapshot)
+                (let* ((reuse (option-ref options 'reuse))
+                       (cached-source (and reuse (path reuse (str stem ".cts"))))
+                       (cached-wav (and reuse (path reuse (str stem ".wav")))))
+                  (if (and reuse (file? cached-source) (file? cached-wav)
+                           (file? (path reuse "renderer.sha256"))
+                           (equal? (read-text cached-source) (read-text snapshot))
+                           (equal? (read-text (path reuse "renderer.sha256"))
+                                   (read-text (path output "renderer.sha256"))))
+                      (begin
+                        (copy-file cached-wav wav)
+                        (write-text (path output (str stem "-reused-from.txt"))
+                                    (str cached-wav "\n")))
+                      (run (list motif "tune" "render" snapshot "-r" "44100" "-o" wav))))
+                (let* ((probe (json ffprobe -v error -show_format -show_streams -of json ,wav))
+                       (stream (array-ref (dict-ref probe streams:) 0))
+                       (duration (string->number (dict-ref (dict-ref probe format:) duration:)))
+                       (levels (measure wav (path output (str stem "-levels.txt")))))
+                  (check (and (= (dict-ref stream channels:) 2)
+                              (equal? (dict-ref stream sample_rate:) "44100")
+                              (< (abs (- duration (dict-ref clip duration_seconds:))) 0.001))
+                         "Render duration/format mismatch" stem)
+                  (check (< (dict-ref levels true_peak_dbtp:) 0)
+                         "Native render clips; revise the patch gain" stem)
+                  (set! measurements
+                    (append measurements
+                      (list (dict stem: stem levels: levels
+                                  source_sha256: (out sha256sum ,source))))))
+                (write-json-file (path output "native-measurements.json")
+                                 (list->array measurements)))))
+          (let* ((measurements (array->list
+                                (json-decode (read-text (path output "native-measurements.json")))))
+                 (peak (apply max
+                         (map (lambda (m) (dict-ref (dict-ref m levels:) true_peak_dbtp:))
+                              measurements)))
+                 ;; Common base gain, plus equal monitoring boosts for quiet
+                 ;; exposed pairs. No per-half normalization or limiter.
+                 (requested-gain
+                   (or (string->number (option-ref options 'gain-db))
+                       (error "--gain-db must be numeric")))
+                 (gain
+                   (begin
+                     (check (<= -24 requested-gain 12)
+                            "--gain-db must be between -24 and +12")
+                     (min requested-gain (- -2.0 peak))))
+                 (gain-filter (str "volume=" (number->string gain) "dB"))
+                 (ogg-dir (path output "ogg"))
+                 (sequence (path output "sequence.txt"))
+                 (timeline '())
+                 (offset 0))
+            (ensure-directory ogg-dir)
+            (each clip (append clips fulls)
+              (let ((stem (dict-ref clip stem:)))
+                (check (equal? (read-text (path input (str stem ".cts")))
+                               (read-text (path output (str stem ".cts"))))
+                       "Source changed since native rendering" stem)))
+            (write-text sequence
+              (string-join
+                (map (lambda (clip) (str "file '" (dict-ref clip stem:) "-monitor.wav'")) clips)
+                "\n"))
+            (each clip clips
+              (let* ((stem (dict-ref clip stem:))
+                     (boost (dict-ref clip audition_gain_db: 0)))
+                (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                           "-i" (path output (str stem ".wav"))
+                           "-af" (str "volume=" (number->string boost) "dB")
+                           "-c:a" "pcm_f32le"
+                           (path output (str stem "-monitor.wav")))))
+              (set! timeline
+                (append timeline (list (dict label: (dict-ref clip label:)
+                                             start_seconds: offset
+                                             monitoring_boost_db: (dict-ref clip audition_gain_db: 0)))))
+              (set! offset (+ offset (dict-ref clip duration_seconds:))))
+            (let ((comparison (path ogg-dir (str ab-stem ".ogg"))))
+              (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                         "-f" "concat" "-safe" "1" "-i" sequence
+                         "-af" gain-filter "-c:a" "libvorbis" "-q:a" "7"
+                         "-metadata" (str "title=" (dict-ref manifest title: "Relay Ghost") " - " audition " A/B")
+                         "-metadata" "artist=David Wilson"
+                         "-metadata" (str "comment=" (dict-ref manifest comment: "Each pair plays BEFORE then AFTER; two release bars between clips. Final choir pair compares a warm pad prototype, not an original Relay Ghost part."))
+                         comparison)))
+            (each clip fulls
+              (let* ((stem (dict-ref clip stem:))
+                     (wav (path output (str stem ".wav")))
+                     (ogg (path ogg-dir (str stem "-" audition "-full.ogg"))))
+                (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                           "-af" gain-filter "-c:a" "libvorbis" "-q:a" "7"
+                           "-metadata" (str "title=" stem " - " audition " full")
+                           "-metadata" "artist=David Wilson"
+                           "-metadata" "album=Crash The Stack - Auditions"
+                           ogg))))
+            (let ((checks '()))
+              (each stem (cons ab-stem full-stems)
+                (let* ((file (path ogg-dir (str stem ".ogg")))
+                       (levels (measure file (path output (str stem "-ogg-levels.txt")))))
+                  (check (<= (dict-ref levels true_peak_dbtp:) -1)
+                         "Encoded peak exceeds audition ceiling" stem)
+                  (let* ((probe (json ffprobe -v error -show_format -of json ,file))
+                         (duration (string->number
+                                     (dict-ref (dict-ref probe format:) duration:)))
+                         (expected (if (equal? stem ab-stem)
+                                       offset
+                                       (dict-ref manifest full_duration_seconds:))))
+                    (check (< (abs (- duration expected)) 0.001)
+                           "Encoded duration differs" stem))
+                  (when (ends-with? stem "-full")
+                    (let ((ending ($? ffmpeg -hide_banner -nostats -sseof -1
+                                       -i ,file -af volumedetect -f null -)))
+                      (check (ok? ending) "Ending measurement failed" stem)
+                      (write-text (path output (str stem "-ending.txt"))
+                                  (stderr-of ending))
+                      (check (<= (last-number (stderr-of ending) "max_volume:") -70)
+                             "Full ending has not decayed" stem)))
+                  (set! checks (append checks (list (dict stem: stem levels: levels))))))
+              (write-json-file (path output "delivery-checks.json")
+                (dict common_gain_db: gain
+                      requested_gain_db: requested-gain
+                      timeline: (list->array timeline)
+                      encoded: (list->array checks))))
+            (display (str "Comparison and both full versions: " ogg-dir "\n")))))))

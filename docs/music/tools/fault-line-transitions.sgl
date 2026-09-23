@@ -1,0 +1,203 @@
+#!/usr/bin/env sigil
+;;; Composition III: earlier solo anchors, interlude fills and guitar fuzz.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASE "docs/music/alternates/fault-line-composition-ii")
+
+(define (musical row cell)
+  (and (not (equal? (cdr cell) '("..." 0 0 "000"))) cell))
+
+(define (strip-entry p)
+  (append (take p 5)
+    (filter (lambda (r) (pair? (cddr r)))
+      (map (lambda (r)
+             (append (take r 2)
+               (filter (lambda (c)
+                         (not (and (= (cadr r) 0) (equal? (cadr c) "==="))))
+                       (cddr r))))
+           (skip p 5)))))
+
+(define (attack-rows p channel)
+  (filter (lambda (r)
+            (let ((c (assoc channel (cddr r))))
+              (and c (attack? c))))
+          (skip p 5)))
+
+;;; Move complete note events, including their gates and any held-note slide.
+;;; No note, velocity, instrument or ordering changes. Shorten a gate only if
+;;; moving the next onset would otherwise cause an overlap.
+(define (retime p destinations)
+  (let* ((onsets (attack-rows p 7))
+         (result (transform p (lambda (row cell) (and (not (= (car cell) 7)) cell))))
+         (rows (field p rows:)))
+    (check (= (length onsets) (length destinations)) "Melody map length mismatch" (field p id:))
+    (let loop ((rest onsets) (targets destinations))
+      (unless (null? rest)
+        (let* ((start (cadar rest))
+               (end (if (pair? (cdr rest)) (cadr (cadr rest)) rows))
+               (target (car targets))
+               (next (if (pair? (cdr targets)) (cadr targets) rows))
+               (delta (- target start)))
+          (each row (filter (lambda (r) (<= start (cadr r) (- end 1))) (skip p 5))
+            (let ((cell (assoc 7 (cddr row))))
+              (when cell
+                (let ((position (min (+ (cadr row) delta) (- next 1))))
+                  (check (>= position target) "Retimed event precedes its note")
+                  (set! result (put-cell result position cell))))))
+          (loop (cdr rest) (cdr targets)))))
+    (strip-entry result)))
+
+(define SOLO-TARGETS
+  '(0 8 16 24 36 44 56
+    64 76 88 100 108 116
+    128 136 144 160 172 184
+    192 208 216 224 236 248))
+
+(define (fuzz instrument)
+  (if (member (field instrument id:) '(5 6 7 8))
+      (set-field
+        (set-field
+          (set-field instrument patch:
+            (set-field (field instrument patch:) drive: 4.4))
+          layers:
+          (map (lambda (layer)
+                 (if (eq? (car layer) 'chip-saw)
+                     (set-field layer drive: 3.1)
+                     layer))
+               (field instrument layers:)))
+        gain: (* (field instrument gain:) 0.94))
+      instrument))
+
+(define (clear-drums-from p start)
+  (transform p
+    (lambda (row cell)
+      (and (not (and (>= row start) (member (car cell) '(1 2 3 8)))) cell))))
+
+(define (down-fill p)
+  (let ((result (clear-drums-from p 240)))
+    (each channel '(1 2 3 8)
+      (set! result (put-cell result 240 (off channel))))
+    (strip-entry
+      (add-notes result
+        '((240 1 "C-2" 1 34 3)
+          (240 2 "F#3" 2 28 3)
+          (244 8 "D-4" 11 27 3)
+          (248 1 "C-2" 1 27 3)
+          (248 8 "A-3" 11 24 3)
+          (252 8 "D-3" 11 21 3))))))
+
+(define (up-fill p)
+  (let ((result (clear-drums-from p 232)))
+    (each channel '(1 2 3 8)
+      (set! result (put-cell result 232 (off channel))))
+    (strip-entry
+      (add-notes result
+        '((232 2 "F#3" 2 12 2)
+          (236 2 "F#3" 2 18 2)
+          (240 1 "C-2" 1 28 3)
+          (240 8 "D-3" 11 22 3)
+          (244 8 "G-3" 11 24 3)
+          (248 1 "C-2" 1 32 3)
+          (248 2 "F#3" 2 28 3)
+          (252 8 "A-3" 11 28 3))))))
+
+(define (flat form) (trim (score-text form)))
+(define (layout-text layout)
+  (str "(song version: 1\n  (phrases\n"
+       (string-join (map (lambda (p) (str "    " (flat p))) (cdr (child layout 'phrases))) "\n")
+       ")\n  (arrangements\n"
+       (string-join
+         (map (lambda (a)
+                (str "    (" (symbol->string (car a)) " destination: "
+                     (flat (field a destination:)) "\n"
+                     (string-join (map (lambda (s) (str "      " (flat s))) (skip a 3)) "\n")
+                     ")"))
+              (cdr (child layout 'arrangements)))
+         "\n")
+       "))\n"))
+
+(cli "fault-line-transitions" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (old (read-score (path (root) BASE "parts.cts")))
+           (layout (read-score (path (root) BASE "arrangements.sgl")))
+           (patterns
+             (map (lambda (p)
+                    (case (field p id:)
+                      ((17)
+                       (let ((solo (retime p SOLO-TARGETS)))
+                         (set! solo (put-cell solo 18 '(7 "A-4" 0 0 "304")))
+                         (each row '(19 20 21)
+                           (set! solo (put-cell solo row '(7 "..." 0 0 "300"))))
+                         solo))
+                      ((5) (up-fill p))
+                      ((8)
+                       (strip-entry
+                         (add-notes (transform p unchanged) '((0 8 "C-7" 10 24 2)))))
+                      (else p)))
+                  (cdr (child old 'patterns))))
+           (parts
+             (replace-child
+               (replace-child old 'patterns (cons 'patterns patterns))
+               'instruments (cons 'instruments (map fuzz (cdr (child old 'instruments)))))))
+      ;; The descending fill is specific to entering the album interlude.
+      ;; The game keeps that melody over its normal rock groove.
+      (set! parts
+        (replace-child parts 'patterns
+          (append (child parts 'patterns)
+                  (list (set-field (down-fill (pattern parts 18)) id: 23)))))
+      (set! parts (replace-child parts 'order (append (child parts 'order) '(23))))
+      (set! layout
+        (replace-child layout 'phrases
+          (append (child layout 'phrases) '(("Rock harmonic turn / down-fill" 23)))))
+      (set! layout
+        (replace-child layout 'arrangements
+          (cons 'arrangements
+            (map (lambda (a)
+                   (let* ((album? (eq? (car a) 'album))
+                          (revised
+                            (if album?
+                                (replace-child
+                                  (replace-child a 'patterns
+                                    (cons 'patterns
+                                      (map (lambda (ref)
+                                             (if (= (car ref) 5)
+                                                 (cons 5 (cons "Rock harmonic turn / down-fill" (cddr ref)))
+                                                 ref))
+                                           (cdr (child a 'patterns)))))
+                                  'labels
+                                  (cons 'labels
+                                    (map (lambda (label)
+                                           (if (= (car label) 5)
+                                               '(5 "Rock harmonic turn / down-fill") label))
+                                         (cdr (child a 'labels)))))
+                                a))
+                          (template (cadr (child revised 'template))))
+                     ;; Transition's new crash replaces its old row-zero off.
+                     (set! revised
+                       (replace-child revised 'patterns
+                         (cons 'patterns
+                           (map (lambda (ref)
+                                  (if (equal? (cadr ref) "Moving entrance")
+                                      (replace-child ref 'entry-offs
+                                        (cons 'entry-offs
+                                          (filter (lambda (c) (not (= (car c) 8)))
+                                                  (cdr (child ref 'entry-offs)))))
+                                      ref))
+                                (cdr (child revised 'patterns))))))
+                     (replace-child revised 'template
+                       (list 'template
+                         (replace-child template 'history
+                           (append (child template 'history)
+                             '(("codex" "2026-09-23"
+                                "Composition III: earlier beat/eighth-note anchors for the alternate solo, descending and rising interlude fills, slightly fuzzier rhythm guitars with level compensation."))))))))
+                 (cdr (child layout 'arrangements))))))
+      (write-canonical motif (path output "parts.cts") parts)
+      (write-text (path output "arrangements.sgl") (layout-text layout))
+      (println "Melody timing and interlude fills prepared: ~a" output))))

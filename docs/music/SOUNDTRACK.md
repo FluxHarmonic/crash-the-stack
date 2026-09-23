@@ -23,6 +23,7 @@ offline measurements and the additional game/album checks still needed.
 | Dead Sector | Watchful Minesweeper pulse with dry contacts and semitone tension | `assets/tunes/dead-sector.cts` |
 | Obsidian Index | Sustained sevenths over a moving bass pedal, rising glass theme and delicate wider chord support | `assets/tunes/obsidian-index.cts` |
 | Clock Edge | Firm rhythm-mode pulse with pitched claps and interlocking minor signals | `assets/tunes/clock-edge.cts` |
+| Fault Line | Fuzzy FM rock with a delicate clean theme; Defrag live trial | `assets/tunes/fault-line.cts` |
 
 Three older compositions also remain usable candidates. Separate treatments
 bring them closer to the newer sound without replacing their originals:
@@ -33,7 +34,7 @@ bring them closer to the newer sound without replacing their originals:
 | Groove | Dirty Cache | `assets/tunes/dirty-cache.cts` |
 | Breaker | Breach Vector | `assets/tunes/breach-vector.cts` |
 
-This makes **15 distinct compositions**, counting each legacy piece once and
+With the approved Fault Line addition, this makes **16 distinct compositions**, counting each legacy piece once and
 not counting alternate mixes as new songs. David accepted Quiet Array and
 Dead Sector enthusiastically, including both focused sections, with no changes
 requested; see [PUZZLE-PAIR.md](PUZZLE-PAIR.md). The last two planned originals,

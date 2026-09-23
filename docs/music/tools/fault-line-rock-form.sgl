@@ -1,0 +1,213 @@
+#!/usr/bin/env sigil
+;;; Composition II: rock-led form, two solos and a soft secondary melody.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASE "docs/music/alternates/fault-line-composition-i")
+;;; Guitar root, bass root, third, fourth.
+(define CHORDS
+  '(("D-3" "D-2" "F-3" "G-3")
+    ("A#2" "A#1" "D-3" "D#3")
+    ("G-2" "G-1" "A#2" "C-3")
+    ("A-2" "A-1" "C-3" "D-3")))
+;;; Row, guitar pitch role, gate, open chord?, bass/kick anchor?.
+(define DRIVE-CALL
+  '((0 0 3 #f #t) (6 0 1 #f #f) (12 0 3 #f #t)
+    (18 0 3 #t #t) (24 2 1 #f #f) (26 3 1 #f #f) (30 0 1 #f #t)))
+(define DRIVE-REPLY
+  '((0 0 3 #f #t) (8 0 2 #t #t) (14 2 1 #f #f)
+    (18 0 3 #f #t) (24 0 5 #t #t) (30 0 1 #f #f)))
+(define HALF-CALL
+  '((0 0 6 #f #t) (10 0 2 #f #t) (16 0 6 #t #t) (26 0 3 #f #t)))
+(define HALF-REPLY
+  '((0 0 3 #f #t) (12 2 2 #f #f) (16 0 10 #t #t) (28 0 3 #f #t)))
+
+(define (first-bars p bars)
+  (transform
+    (append (list 'pattern id: 0 rows: (* bars 32))
+      (filter (lambda (r) (< (cadr r) (* bars 32))) (skip p 5)))
+    unchanged))
+
+(define (new-riff base half?)
+  (let ((p (transform base
+             (lambda (row cell) (and (= (car cell) 8) cell)))))
+    (each bar '(0 1 2 3 4 5 6 7)
+      (let* ((chord (list-ref CHORDS (quotient bar 2)))
+             (offset (* bar 32))
+             (specs (if half?
+                        (if (even? bar) HALF-CALL HALF-REPLY)
+                        (if (even? bar) DRIVE-CALL DRIVE-REPLY))))
+        (each spec specs
+          (let ((row (+ offset (car spec)))
+                (pitch (list-ref chord (cadr spec)))
+                (gate (caddr spec))
+                (open? (list-ref spec 3)))
+            (set! p
+              (add-notes p
+                (list (list row 5 pitch (if open? 6 5) (if open? 31 28) gate)
+                      (list row 6 pitch (if open? 8 7) (if open? 21 17) gate))))
+            (when (list-ref spec 4)
+              (set! p
+                (add-notes p
+                  (list (list row 4 (cadr chord) 4 (if open? 33 32) gate)
+                        (list row 1 "C-2" 1 (if (= (car spec) 0) 40 35)
+                              (min gate 3))))))))
+        (each row (if half? '(24) '(8 24))
+          (set! p
+            (add-notes p (list (list (+ offset row) 2 "F#3" 2 31 3)))))
+        (each row (if half? '(0 8 16 24) '(0 4 8 12 16 20 24 28))
+          (set! p
+            (add-notes p
+              (list (list (+ offset row) 3 "C-8" 3
+                          (if (= (modulo row 8) 0) 17 11) 2)))))
+        ;; A restrained ghost gives alternate replies a small lift.
+        (when (and (not half?) (= (modulo bar 4) 3))
+          (set! p
+            (add-notes p (list (list (+ offset 20) 2 "F#3" 2 12 2)))))))
+    p))
+
+(define (copy-melody backing melody source-channel instrument factor start)
+  (let ((p (transform backing
+             (lambda (row cell) (and (not (= (car cell) 7)) cell)))))
+    (each row (skip melody 5)
+      (when (>= (cadr row) start)
+        (let ((cell (assoc source-channel (cddr row))))
+          (when cell
+            (set! p
+              (put-cell p (cadr row)
+                (if (attack? cell)
+                    (list 7 (cadr cell) instrument
+                          (round (* (list-ref cell 3) factor)) (list-ref cell 4))
+                    (append '(7) (cdr cell)))))))))
+    p))
+
+(define (harmonic-turn p)
+  (let ((result (empty-pattern 8)) (index 0))
+    (each source-pair '(2 1 0 3)
+      (each row (skip p 5)
+        (when (<= (* source-pair 64) (cadr row) (+ (* source-pair 64) 63))
+          (each cell (cddr row)
+            (set! result
+              (put-cell result (+ (* index 64) (- (cadr row) (* source-pair 64))) cell)))))
+      (set! index (+ index 1)))
+    (transform result unchanged)))
+
+(define ALT-SOLO
+  '((0 "D-4" 27 8) (10 "F-4" 27 4) (16 "G-4" 29 10)
+    (28 "A-4" 30 8) (38 "G-4" 27 4) (44 "F-4" 26 10) (56 "D-4" 25 6)
+    (64 "F-4" 28 12) (78 "A-4" 29 6) (88 "C-5" 30 10)
+    (102 "A-4" 27 4) (108 "G-4" 26 4) (116 "F-4" 27 10)
+    (128 "G-4" 28 8) (138 "A-4" 26 4) (144 "A#4" 30 12)
+    (160 "D-5" 30 10) (174 "C-5" 27 6) (184 "A#4" 28 6)
+    (192 "A-4" 29 12) (208 "G-4" 27 6) (218 "E-4" 26 4)
+    (224 "G-4" 28 8) (236 "A-4" 29 6) (248 "D-5" 28 6)))
+
+(define (alternate-solo p)
+  (let ((result (transform p (lambda (row cell) (and (not (= (car cell) 7)) cell)))))
+    (set! result
+      (add-notes result
+        (map (lambda (n) (list (car n) 7 (cadr n) 9 (caddr n) (list-ref n 3))) ALT-SOLO)))
+    ;; Connected whole-tone rise in the first phrase, with an explicit stop.
+    (set! result (put-cell result 18 '(7 "..." 0 0 "304")))
+    (set! result (put-cell result 22 '(7 "..." 0 0 "300")))
+    result))
+
+(define (strip-entry p)
+  (append (take p 5)
+    (filter (lambda (r) (pair? (cddr r)))
+      (map (lambda (r)
+             (append (take r 2)
+               (filter (lambda (c)
+                         (not (and (= (cadr r) 0) (equal? (cadr c) "==="))))
+                       (cddr r))))
+           (skip p 5)))))
+
+(define (flat form) (trim (score-text form)))
+(define (layout-text names arrangements)
+  (str "(song version: 1\n  (phrases\n"
+       (string-join (map (lambda (p) (str "    " (flat p))) names) "\n")
+       ")\n  (arrangements\n"
+       (string-join
+         (map (lambda (a)
+                (str "    (" (symbol->string (car a)) " destination: "
+                     (flat (field a destination:)) "\n"
+                     (string-join (map (lambda (s) (str "      " (flat s))) (skip a 3)) "\n")
+                     ")"))
+              arrangements)
+         "\n")
+       "))\n"))
+
+(cli "fault-line-rock-form" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (parts (read-score (path (root) BASE "parts.cts")))
+           (layout (read-score (path (root) BASE "arrangements.sgl")))
+           (riff (transform (pattern parts 3) unchanged))
+           (drive (new-riff riff #f))
+           (half (new-riff riff #t))
+           (new
+             (list
+               (list "Short clean invitation"
+                 (transform (first-bars (pattern parts 1) 4)
+                   (lambda (row cell)
+                     (and (or (member (car cell) '(5 6 7 8))
+                              (and (= (car cell) 4) (>= row 64))) cell))))
+               (list "Driving variation"
+                 (copy-melody drive (pattern parts 4) 7 13 1.05 128))
+               (list "Lower-register alternate solo" (alternate-solo drive))
+               (list "Rock harmonic turn"
+                 (copy-melody (harmonic-turn riff) (pattern parts 5) 5 13 0.9 0))
+               (list "Half-time weight"
+                 (copy-melody half (pattern parts 4) 7 13 0.95 0))
+               (list "Final driving theme"
+                 (copy-melody drive (pattern parts 10) 7 9 1 0))
+               (list "Rock coda" (first-bars drive 4))
+               (list "Final band chord"
+                 (pattern (read-score
+                            (path (root) "docs/music/alternates/fault-line-bass-lock-vii/fault-line-after.cts")) 4))))
+           (names (cdr (child layout 'phrases)))
+           (pool (cdr (child parts 'patterns)))
+           (ident 15))
+      (each spec new
+        (set! names (append names (list (list (car spec) ident))))
+        (set! pool (append pool (list (strip-entry (set-field (cadr spec) id: ident)))))
+        (set! ident (+ ident 1)))
+      (set! parts (replace-child parts 'patterns (cons 'patterns pool)))
+      (set! parts (replace-child parts 'order (cons 'order (map cadr names))))
+      (define (arrangement role ids)
+        (let* ((old (child (child layout 'arrangements) role))
+               (template (cadr (child old 'template)))
+               (refs '()) (labels '()) (index 0))
+          (each id ids
+            (let* ((p (transform (pattern parts id) unchanged))
+                   (name (car (list-find (lambda (n) (= (cadr n) id)) names)))
+                   (row0 (list-find (lambda (r) (= (cadr r) 0)) (skip p 5)))
+                   (offs (filter (lambda (c) (equal? (cadr c) "===")) (cddr row0)))
+                   (effects
+                     (cond ((and (eq? role 'game) (= index 1)) '((255 8 "B00")))
+                           ((and (eq? role 'game) (= index (- (length ids) 1))) '((255 8 "B03")))
+                           (else '()))))
+              (set! refs
+                (append refs (list (list index name (cons 'entry-offs offs) (cons 'effects effects)))))
+              (set! labels (append labels (list (list index name))))
+              (set! index (+ index 1))))
+          (set! template (replace-child template 'order (cons 'order (map car labels))))
+          (set! template
+            (replace-child template 'history
+              (append (child template 'history)
+                '(("codex" "2026-09-23"
+                   "Composition II: short clean intro and one interlude frame an extended rock form, contrasting solos, driving and half-time variations, retained soft secondary melody.")))))
+          (append (list role destination: (field old destination:)
+                        (list 'template template) (child old 'bank) (cons 'patterns refs))
+                  (if (eq? role 'album) (list (cons 'labels labels)) '()))))
+      (let ((arrangements
+              (list (arrangement 'game '(1 2 8 3 16 4 18 9 19 20))
+                    (arrangement 'album '(15 3 16 4 17 18 5 8 9 10 19 20 21 22 14)))))
+        (write-canonical motif (path output "parts.cts") parts)
+        (write-text (path output "arrangements.sgl") (layout-text names arrangements))
+        (println "Rock-led shared arrangement ready: ~a" output)))))

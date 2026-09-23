@@ -1,0 +1,199 @@
+#!/usr/bin/env sigil
+;;; Develop the shared melodic replies while preserving the snap-click groove.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define CHANGES '(3 4 9 10 13 14))
+
+;;; Pool phrases deliberately omit entry-offs; the arrangement owns those gates.
+(define (replace-line p channel start notes)
+  (add-notes
+    (append (take p 5)
+      (filter (lambda (row) (pair? (cddr row)))
+        (map (lambda (row)
+               (append (take row 2)
+                 (filter (lambda (cell)
+                           (not (and (= (car cell) channel)
+                                     (>= (cadr row) start))))
+                         (cddr row))))
+             (skip p 5))))
+    notes))
+
+(define (line-notes channel instrument specs)
+  (map (lambda (spec)
+         (list (car spec)
+               channel
+               (cadr spec)
+               instrument
+               (caddr spec)
+               (list-ref spec 3)))
+       specs))
+
+(define (develop p)
+  (let* ((id (field p id:))
+         (tense? (member id '(9 10 13)))
+         (pluck (if tense? 10 6))
+         (bell-level (if tense? 16 14)))
+    (cond
+      ;; Four-bar answer: rise from the initial cell, then follow the E-minor
+      ;; stab with E/B/G before resolving over the returning B bass.
+      ((member id '(3 9))
+       (replace-line
+         (replace-line p 6 128
+           (line-notes 6 pluck
+             '((128 "B-3" 23 3) (140 "D-4" 19 3) (148 "F#4" 19 3)
+               (164 "E-4" 21 3) (176 "D-4" 19 3) (188 "C#4" 18 3)
+               (192 "E-4" 23 3) (204 "B-3" 19 3) (212 "G-3" 18 3)
+               (228 "A-3" 21 3) (240 "F#3" 19 3) (252 "B-3" 18 3))))
+         7 128
+         (line-notes 7 7
+           (map (lambda (spec)
+                  (list (car spec) (cadr spec) bell-level 3))
+                '((136 "F#4") (156 "D-4") (168 "C#4") (184 "B-3")
+                  (200 "G-4") (216 "E-4") (232 "D-4") (248 "B-3"))))))
+      ;; The fifth phrase answers rather than repeating the fourth. The same
+      ;; change reaches the game loop and its album-specific final variant.
+      ((member id '(4 10 13))
+       (replace-line
+         (replace-line p 6 128
+           (line-notes 6 pluck
+             '((128 "B-3" 23 3) (140 "D-4" 19 3) (148 "F#4" 20 3)
+               (164 "E-4" 21 3) (176 "D-4" 19 3) (188 "B-3" 18 3)
+               (192 "F#3" 22 3) (204 "A-3" 19 3) (212 "C#4" 18 3)
+               (224 "D-4" 21 3) (236 "C#4" 18 3))))
+         7 128
+         (line-notes 7 7
+           (map (lambda (spec)
+                  (list (car spec) (cadr spec) bell-level 3))
+                '((136 "F#4") (152 "D-4") (168 "C#4") (184 "B-3")
+                  (200 "F#4") (216 "E-4") (232 "D-4") (244 "B-3"))))))
+      ;; Reverse the opening B/D/F# shape and let the last two instruments
+      ;; settle below it. The quiet ending and its full room tail remain.
+      ((= id 14)
+       (replace-line
+         (replace-line p 6 64
+           (line-notes 6 6
+             '((80 "F#4" 17 3) (88 "D-4" 17 3) (104 "C#4" 16 3)
+               (112 "B-3" 18 5))))
+         7 64
+         (line-notes 7 7
+           '((72 "F#4" 13 3) (96 "A-3" 12 3) (120 "F#3" 10 3)))))
+      (else p))))
+
+(define (channel-events p channel)
+  (filter (lambda (row) (pair? (cddr row)))
+    (map (lambda (row)
+           (append (take row 2)
+             (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+         (skip p 5))))
+
+(define (check-protected before after)
+  (each key '(name: tempo: speed: channels: meter:)
+    (check (equal? (field before key) (field after key))
+           "Header changed" key))
+  (each section '(instruments bus order history)
+    (check (equal? (child before section) (child after section))
+           "Protected section changed" section))
+  (each original (cdr (child before 'patterns))
+    (let* ((id (field original id:))
+           (revised (pattern after id)))
+      (check (equal? (take original 5) (take revised 5))
+             "Pattern clock changed" id)
+      (each channel CHANNELS
+        (unless (and (member id CHANGES) (member channel '(6 7)))
+          (check (equal? (channel-events original channel)
+                         (channel-events revised channel))
+                 "Protected channel changed" id channel))))))
+
+(cli "closed-loop-phrases" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/closed-loop-phrases-i"))
+           (frozen? (file? (path reference "parts-before.cts")))
+           (source
+             (if frozen? (path reference "parts-before.cts")
+                 (path (root) "docs/music/songs/closed-loop/parts.cts")))
+           (layout-file
+             (if frozen? (path reference "arrangements.sgl")
+                 (path (root) "docs/music/songs/closed-loop/arrangements.sgl")))
+           (parts (read-score source))
+           (layout (read-score layout-file))
+           (arrangements (child layout 'arrangements))
+           (combined-parts
+             (replace-child parts 'patterns
+               (cons 'patterns (map develop (cdr (child parts 'patterns))))))
+           (album (child arrangements 'album))
+           (base (build-song-score parts layout album))
+           (after (build-song-score combined-parts layout album))
+           (clips '()))
+      (ensure-directory output)
+      (unless frozen?
+        (apply-song-plans (list (song-plan "closed-loop" motif)) "check" #f))
+      (check-protected parts combined-parts)
+      (write-canonical motif (path output "parts-before.cts") parts)
+      (write-canonical motif (path output "parts-after.cts") combined-parts)
+      (let ((destination (path output "arrangements.sgl")))
+        (if (file? destination)
+            (check (equal? (read-text layout-file) (read-text destination))
+                   "Refusing to overwrite a differing layout")
+            (copy-file layout-file destination)))
+      (each spec '((album "closed-loop") (game "closed-loop-game"))
+        (let* ((arrangement (child arrangements (car spec)))
+               (before-file (path output (str (cadr spec) "-before.cts"))))
+          (write-canonical motif before-file
+            (build-song-score parts layout arrangement))
+          (unless frozen?
+            (check (equal? (read-text before-file)
+                           (read-text (path (root) (field arrangement destination:))))
+                   "Shared reference differs from accepted score" (car spec)))
+          (write-canonical motif (path output (str (cadr spec) "-after.cts"))
+            (build-song-score combined-parts layout arrangement))))
+      (each spec '(("calm" "Later calm replies" (4 5))
+                   ("tense" "Later energized replies" (11 12))
+                   ("ending" "Opening recalled in the ending" (13)))
+        (each variant '("before" "after")
+          (let* ((score (if (equal? variant "before") base after))
+                 (stem (str (car spec) "-" variant))
+                 (sections
+                   (append
+                     (map (lambda (id)
+                            (list (str "Album pattern " id) (pattern score id)))
+                          (caddr spec))
+                     (list (list "Two-bar release / comparison gap" (phrase-rows 64 '())))))
+                 (rows (apply + (map (lambda (s) (field (cadr s) rows:)) sections))))
+            (write-album motif output stem
+              (str "Closed Loop / " (cadr spec) " / " variant)
+              score sections
+              '("parts-before.cts" "parts-after.cts" "arrangements.sgl")
+              "Phrases I: shared melodic replies and album ending, awaiting listening approval."
+              "Same instruments, kit, bass, chords, bus and clock. Each comparison half starts from fresh engine state."
+              "2026-09-22")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ rows 16)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "closed-loop"
+              title: "Closed Loop"
+              audition: "phrases-i"
+              comment: "Each pair BEFORE then AFTER: later calm replies, energized replies, ending. Same monitoring gain; no new limiter."
+              full_duration_seconds: 196
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict source_sha256: (song-hash (path output "parts-before.cts"))
+              candidate_sha256: (song-hash (path output "parts-after.cts"))
+              layout_sha256: (song-hash (path output "arrangements.sgl"))
+              shared_pattern_ids: CHANGES
+              changed_channels: '(6 7)
+              protected_channels_identical: #t
+              instruments_bus_order_and_clock_identical: #t
+              game_and_album_from_same_candidate_parts: #t))
+      (display "Closed Loop comparisons and synchronized game/album candidates ready.\n"))))

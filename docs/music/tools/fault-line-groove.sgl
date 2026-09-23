@@ -1,0 +1,174 @@
+#!/usr/bin/env sigil
+;;; Style IV: a recurring syncopated riff, with locked bass/kick and clear space.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools) (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASELINE "docs/music/alternates/fault-line-heavy-iii/fault-line-after.cts")
+;;; Guitar root, bass root, guitar third/fourth, matching bass third/fourth.
+(define CHORDS
+  '(("D-3" "D-2" "F-3" "G-3" "F-2" "G-2")
+    ("A#2" "A#1" "D-3" "D#3" "D-2" "D#2")
+    ("G-2" "G-1" "A#2" "C-3" "A#1" "C-2")
+    ("A-2" "A-1" "C-3" "D-3" "C-2" "D-2")))
+
+;;; Row, pitch role (0=root, 1=third, 2=fourth), gate length, open chord?.
+;;; These are written two-bar calls/replies, not random timing or extra filler.
+(define CALL
+  '((0 0 3 #f) (6 0 1 #f) (10 0 3 #f) (16 0 2 #t)
+    (20 1 1 #f) (22 2 1 #f) (28 0 3 #f)))
+(define REPLY
+  '((0 0 2 #f) (4 0 2 #f) (12 0 5 #t)
+    (18 1 2 #f) (26 0 3 #f) (30 0 1 #f)))
+(define SPACE-REPLY
+  '((0 0 3 #f) (6 0 1 #f) (10 0 2 #f)
+    (18 0 5 #t) (28 0 3 #f)))
+(define TURNAROUND
+  '((0 0 3 #f) (6 0 1 #f) (10 0 3 #f)
+    (16 0 6 #t) (26 2 1 #f) (30 2 1 #f)))
+
+(define (clear-rhythm p)
+  (transform p
+    (lambda (row cell)
+      (and (not (member (car cell) '(1 4 5 6))) cell))))
+
+(define (strike p row guitar bass held open? heavy?)
+  (add-notes p
+    (list
+      (list row 4 bass 4 (if open? 36 32) (min held 4))
+      (list row 5 guitar (if open? 6 5)
+            (if heavy? (if open? 35 32) (if open? 31 28))
+            held)
+      (list row 6 guitar (if open? 8 7)
+            (if heavy? (if open? 26 24) (if open? 21 17))
+            held))))
+
+(define (riff-section p heavy? intro?)
+  (let ((result (clear-rhythm p))
+        (bars (quotient (field p rows:) 32)))
+    (let loop ((bar 0))
+      (when (< bar bars)
+        (let* ((chord (list-ref CHORDS (quotient bar 2)))
+               (kind (modulo bar 4))
+               (riff
+                 (cond ((= bar 7) TURNAROUND)
+                       ((= kind 3) SPACE-REPLY)
+                       ((odd? bar) REPLY)
+                       (else CALL)))
+               (kicks
+                 (cond ((= bar 7) '(0 10 16 30))
+                       ((= kind 3) '(0 10 18 28))
+                       ((odd? bar) '(0 12 18 26 30))
+                       (else '(0 10 16 28)))))
+          (each spec riff
+            (let* ((role (cadr spec))
+                   (guitar (list-ref chord (case role ((0) 0) ((1) 2) (else 3))))
+                   (bass (list-ref chord (case role ((0) 1) ((1) 4) (else 5)))))
+              (set! result
+                (strike result
+                        (+ (* bar 32) (car spec))
+                        guitar
+                        bass
+                        (caddr spec)
+                        (list-ref spec 3)
+                        heavy?))))
+          (unless (and intro? (< bar 2))
+            (each row kicks
+              (set! result
+                (add-notes result
+                  (list
+                    (list (+ (* bar 32) row) 1 "C-2" 1
+                          (if heavy? (if (= row 0) 48 42) (if (= row 0) 38 34))
+                          (if (= row 30) 1 3))))))))
+        (loop (+ bar 1))))
+    result))
+
+(define (transition p)
+  (let ((result (clear-rhythm p)))
+    (each spec '((0 "A-2" "A-1" 12 #t)
+                 (18 "A-2" "A-1" 4 #f)
+                 (26 "A-2" "A-1" 3 #f)
+                 (32 "A-2" "A-1" 2 #f)
+                 (38 "A-2" "A-1" 1 #f)
+                 (42 "A-2" "A-1" 3 #f)
+                 (50 "A-2" "A-1" 2 #f)
+                 (58 "D-3" "D-2" 1 #f)
+                 (62 "D-3" "D-2" 1 #f))
+      (set! result
+        (strike result
+                (car spec)
+                (cadr spec)
+                (caddr spec)
+                (list-ref spec 3)
+                (list-ref spec 4)
+                #f)))
+    (each row '(0 18 26 32 42 50 62)
+      (set! result
+        (add-notes result
+          (list (list row 1 "C-2" 1 (if (< row 32) 38 44)
+                      (if (= row 62) 1 3))))))
+    result))
+
+(define (revise before)
+  (let* ((patterns
+           (map (lambda (p)
+                  (case (field p id:)
+                    ((0) (riff-section p #f #t))
+                    ((1) (riff-section p #f #f))
+                    ((2) (transition p))
+                    ((3) (riff-section p #t #f))
+                    (else p)))
+                (cdr (child before 'patterns))))
+         (after (replace-child before 'patterns (cons 'patterns patterns))))
+    (check (equal? (child before 'instruments) (child after 'instruments))
+           "Accepted instrument bank changed")
+    (each p (cdr (child before 'patterns))
+      (check (equal? (clear-rhythm p) (clear-rhythm (pattern after (field p id:))))
+             "Lead or accepted kit performance changed"
+             (field p id:)))
+    (replace-child after 'history
+      (append (child after 'history)
+        '(("codex" "2026-09-23"
+           "Style IV: syncopated two-bar guitar/bass riff, aligned kick accents, stop spaces, varied replies and D pickups. Heavy patches, tom gain, bent lead, snare/hat/tom performance and finite layout retained."))))))
+
+(define (first-bars p bars)
+  (append (list 'pattern id: 0 rows: (* bars 32))
+          (filter (lambda (row) (< (cadr row) (* bars 32))) (skip p 5))))
+
+(define (context score)
+  (list
+    (list "Four bars of exposed pocket" (first-bars (pattern score 1) 4))
+    (list "Four bars beneath the bent solo" (first-bars (pattern score 3) 4))
+    (list "Released room" (empty-pattern 2))))
+
+(cli "fault-line-groove" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (before (read-score (path (root) BASELINE)))
+           (after (revise before)))
+      (each variant (list (list "before" before) (list "after" after))
+        (write-canonical motif (path output (str "fault-line-" (car variant) ".cts"))
+                         (cadr variant))
+        (write-album
+          motif output (str "fault-line-context-" (car variant)) "Fault Line"
+          (cadr variant) (context (cadr variant))
+          (list BASELINE "docs/music/tools/fault-line-groove.sgl")
+          "Style IV: four pocket bars, four lead bars, two release bars."
+          "Before is Style III; after changes groove only, preserving instruments and lead."
+          "2026-09-23"))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "fault-line"
+              title: "Fault Line"
+              audition: "style-iv"
+              full_duration_seconds: (/ (* 26 32 7.5) 126)
+              comment: "BEFORE Style III, then AFTER Style IV: syncopated guitar/bass riff and locked kick. Same patches and bent lead, equal gain."
+              clips:
+                (list->array
+                  (map (lambda (variant)
+                         (dict stem: (str "fault-line-context-" variant)
+                               label: variant
+                               duration_seconds: (/ (* 10 32 7.5) 126)))
+                       '("before" "after"))))))))

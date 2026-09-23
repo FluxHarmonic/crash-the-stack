@@ -1,0 +1,105 @@
+#!/usr/bin/env sigil
+;;; Render one contextual A/B without also exporting full arrangements.
+(import (sigil args) (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker)) (split text "\n"))))
+    (check (pair? matches) "Measurement missing" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(define (check-audio file expected)
+  (let* ((probe (json ffprobe -v error -show_format -show_streams -of json ,file))
+         (stream (array-ref (dict-ref probe streams:) 0))
+         (duration (string->number (dict-ref (dict-ref probe format:) duration:))))
+    (check (and (= (dict-ref stream channels:) 2)
+                (equal? (dict-ref stream sample_rate:) "44100")
+                (< (abs (- duration expected)) 0.001))
+           "Unexpected audio duration or format" file)))
+
+(cli "short-ab-render" (script-args)
+  (list (option name: 'input long: "input" value: "DIR"))
+  (lambda (options)
+    (let* ((input (option-ref options 'input))
+           (output (option-ref options 'output))
+           (motif (require-tool (option-ref options 'motif)))
+           (manifest (json-decode (read-text (path input "comparison.json"))))
+           (half (dict-ref manifest half_seconds:))
+           (stems (list (dict-ref manifest before_stem:)
+                        (dict-ref manifest after_stem:)))
+           (levels '())
+           (commands '())
+           (sequence (path output "sequence.txt"))
+           (ogg (path output "ogg/comparison.ogg")))
+      (check (and (starts-with? output "/") (not (file-exists? output)))
+             "Use a fresh absolute external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep audio outside the repository")
+      (ensure-directory (path output "ogg"))
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (write-text (path output "renderer.sha256") (str (out sha256sum ,motif) "\n"))
+      (copy-file (path input "comparison.json") (path output "comparison.json"))
+      (each stem stems
+        (let* ((source (path input (str stem ".cts")))
+               (snapshot (path output (str stem ".cts")))
+               (wav (path output (str stem ".wav"))))
+          (check (and (not (contains? stem "/")) (not (contains? stem "'")))
+                 "Use a plain score stem" stem)
+          ($ ,motif tune check ,source)
+          (copy-file source snapshot)
+          (run (list motif "tune" "render" snapshot "-r" "44100" "-o" wav))
+          (check-audio wav half)
+          (let ((measurement (measure wav (path output (str stem "-levels.txt")))))
+            (check (< (dict-ref measurement true_peak_dbtp:) 0) "Native render clips" stem)
+            (set! levels
+              (append levels
+                (list (dict stem: stem
+                            source_sha256: (out sha256sum ,snapshot)
+                            levels: measurement)))))))
+      (let* ((peak (apply max
+                     (map (lambda (entry) (dict-ref (dict-ref entry levels:) true_peak_dbtp:))
+                          levels)))
+             (gain (min -0.5 (- -2 peak))))
+        (write-text sequence
+          (str (string-join (map (lambda (stem) (str "file '" stem ".wav'")) stems) "\n") "\n"))
+        (run
+          (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                "-f" "concat" "-safe" "1" "-i" sequence
+                "-af" (str "volume=" (number->string gain) "dB")
+                "-c:a" "libvorbis" "-q:a" "7"
+                "-metadata" (str "title=" (dict-ref manifest title:) " A/B")
+                "-metadata" "artist=David Wilson"
+                "-metadata" "album=Crash The Stack - Auditions"
+                "-metadata" "comment=Before then after; fresh renderer state and equal monitoring gain."
+                ogg))
+        (check-audio ogg (* 2 half))
+        (let ((encoded (measure ogg (path output "encoded-levels.txt"))))
+          (check (<= (dict-ref encoded true_peak_dbtp:) -1) "Encoded peak exceeds ceiling")
+          ($ ffmpeg -hide_banner -nostats -sseof -1 -i ,ogg -af volumedetect -f null -
+             err: ,(path output "ending.txt"))
+          (let ((ending (last-number (read-text (path output "ending.txt")) "max_volume:")))
+            (check (<= ending -70) "Final tail has not decayed")
+            (write-json-file (path output "delivery-checks.json")
+              (dict native: (list->array levels)
+                    common_gain_db: gain
+                    after_starts_seconds: half
+                    duration_seconds: (* 2 half)
+                    encoded: encoded
+                    ending_peak_dbfs: ending
+                    ogg_sha256: (out sha256sum ,ogg)))))
+        (display "Short A/B passed duration, format, peak and ending checks.\n")))))

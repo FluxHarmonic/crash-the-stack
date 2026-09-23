@@ -1,0 +1,236 @@
+#!/usr/bin/env sigil
+;;; Style II: preserve the writing while revising the requested instrument bodies.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools) (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASELINE "docs/music/alternates/rock-wave-sketches-i")
+
+(define (fields form changes)
+  (fold-left (lambda (result entry)
+               (set-field result (car entry) (cadr entry)))
+             form
+             changes))
+
+(define (guitar-bite inst)
+  (let* ((id (field inst id:))
+         (open? (member id '(6 8 9)))
+         (lead? (= id 9))
+         (patch (field inst patch:))
+         (op2 (field patch op2:))
+         (op4 (field patch op4:))
+         (new-patch
+           (fields patch
+             (list (list fb: 0.52)
+                   (list index: (if open? 3.2 2.8))
+                   (list drive: 1.25)
+                   (list op2:
+                     (list (car op2) 0.72 0.001 0.12 0.42 0.04))
+                   (list op4:
+                     (list (car op4) 0.58 0.001 0.1 0.34 0.04)))))
+         (edge
+           (list 'chip-saw
+                 osc-amp: 0.22
+                 unison: 1
+                 cutoff: (if lead? 3400 3000)
+                 drive: 0.8
+                 attack: 0.001
+                 decay: (if open? 0.2 0.075)
+                 sustain: (if open? 0.5 0.04)
+                 release: (if open? 0.055 0.015)
+                 octave: 0
+                 volume: (if lead? 0.3 0.55))))
+    (append
+      (fields inst
+        (list (list patch: new-patch)
+              (list gain: (* 0.85 (field inst gain:)))))
+      (list layers: (list edge)))))
+
+(define (stick-tom inst)
+  (append
+    (fields inst
+      (list
+        (list name: "short-stick-tom")
+        (list gain: 0.95)
+        (list patch:
+          '(fm4-bass
+             alg: 4 fb: 0.08 index: 2.2 drive: 0.35
+             op1: (1 0.8 0.001 0.12 0 0.025)
+             op2: (2.32 0.5 0.001 0.028 0 0.012)
+             op3: (1.47 0.3 0.001 0.075 0 0.02)
+             op4: (3.3 0.28 0.001 0.022 0 0.012)
+             amp-attack: 0.001 amp-decay: 0.14
+             amp-sustain: 0 amp-release: 0.025))))
+    '(layers:
+       ((chip-noise
+          osc-amp: 0.45 hp: 1800 cutoff: 6500
+          attack: 0.001 decay: 0.016 sustain: 0 release: 0.008
+          octave: 0 volume: 0.3)))))
+
+(define (sub-pulse inst upper?)
+  (append
+    (fields inst
+      (list
+        (list id: (if upper? 12 4))
+        (list name: (if upper? "upper-pulse-low-sub" "root-pulse-low-sub"))
+        (list gain: 0.8)
+        (list patch:
+          '(chip-saw
+             osc-amp: 0.3 unison: 1 spread: 0 cutoff: 850 drive: 0.4
+             attack: 0.002 decay: 0.13 sustain: 0.4 release: 0.025))))
+    (list layers:
+      (list
+        (list 'chip-sub
+              osc-amp: 0.95 drive: 0.08
+              attack: 0.003 decay: 0.11 sustain: 0.65 release: 0.035
+              octave: (if upper? -2 -1)
+              volume: 0.8)))))
+
+(define (darker-wave inst)
+  (let* ((id (field inst id:))
+         (patch (field inst patch:)))
+    (if (= id 8)
+        (set-field inst patch:
+          (fields patch '((cutoff: 1450) (spread: 7))))
+        (let ((op2 (field patch op2:))
+              (op4 (field patch op4:)))
+          (set-field inst patch:
+            (fields patch
+              (list (list index: 0.65)
+                    (list op2: (append (take op2 1) '(0.23) (skip op2 2)))
+                    (list op4: (append (take op4 1) '(0.2) (skip op4 2))))))))))
+
+(define (shift-octave cell steps)
+  (let* ((pitch (cadr cell))
+         (octave (string->number (substring pitch 2 3))))
+    (append (list (car cell) (str (substring pitch 0 2) (+ octave steps)))
+            (skip cell 2))))
+
+(define (revise score rock?)
+  (let* ((bank (cdr (child score 'instruments)))
+         (bass (list-find (lambda (i) (= (field i id:) 4)) bank))
+         (bank
+           (map (lambda (inst)
+                  (let ((id (field inst id:)))
+                    (cond
+                      ((and rock? (member id '(5 6 7 8 9))) (guitar-bite inst))
+                      ((and rock? (= id 11)) (stick-tom inst))
+                      ((and (not rock?) (= id 4)) (sub-pulse inst #f))
+                      ((and (not rock?) (member id '(5 6 7 8))) (darker-wave inst))
+                      (else inst))))
+                bank))
+         (updated
+           (replace-child score 'instruments
+             (cons 'instruments
+               (if rock? bank (append bank (list (sub-pulse bass #t))))))))
+    (unless rock?
+      (set! updated
+        (replace-child updated 'patterns
+          (cons 'patterns
+            (map
+              (lambda (p)
+                (transform p
+                  (lambda (row cell)
+                    (cond
+                      ((and (= (car cell) 7) (attack? cell))
+                       (shift-octave cell -1))
+                      ((and (= (car cell) 4)
+                            (attack? cell)
+                            (member (cadr cell) '("F-3" "C#3" "A#2" "C-3")))
+                       (append (take cell 2) '(12) (skip cell 3)))
+                      (else cell)))))
+              (cdr (child score 'patterns)))))))
+    updated))
+
+(define (slice p start rows)
+  (append
+    (list 'pattern id: 0 rows: rows)
+    (map (lambda (row)
+           (append (list 'row (- (cadr row) start)) (cddr row)))
+         (filter (lambda (row)
+                   (and (>= (cadr row) start) (< (cadr row) (+ start rows))))
+                 (skip p 5)))))
+
+(define (context score)
+  (list
+    (list "Last two pocket bars" (slice (pattern score 1) 192 64))
+    (list "Full transition / tom fill" (pattern score 2))
+    (list "First two full bars" (slice (pattern score 3) 0 64))
+    (list "Released room" (empty-pattern 2))))
+
+(define (preserved? before after rock?)
+  (check (equal? (child before 'bus) (child after 'bus)) "Bus changed")
+  (check (equal? (child before 'order) (child after 'order)) "Order changed")
+  (each p (cdr (child before 'patterns))
+    (let* ((candidate (pattern after (field p id:)))
+           ;; Normalize the octave-lowered lead and upper-pulse sub selector.
+           (normalized
+             (if rock? candidate
+                 (transform candidate
+                   (lambda (row cell)
+                     (cond
+                       ((and (attack? cell) (= (car cell) 7))
+                        (shift-octave cell 1))
+                       ((and (attack? cell) (= (caddr cell) 12))
+                        (append (take cell 2) '(4) (skip cell 3)))
+                       (else cell)))))))
+      (check (equal? p normalized) "Writing changed" (field p id:))))
+  (each inst (cdr (child before 'instruments))
+    (unless (member (field inst id:) (if rock? '(5 6 7 8 9 11) '(4 5 6 7 8)))
+      (check
+        (equal? inst
+          (list-find (lambda (i) (= (field i id:) (field inst id:)))
+                     (cdr (child after 'instruments))))
+        "Untargeted instrument changed"
+        (field inst id:)))))
+
+(cli "rock-wave-refine" (script-args) '()
+  (lambda (options)
+    (let ((motif (require-tool (option-ref options 'motif)))
+          (output (option-ref options 'output)))
+      (each slug '("fault-line" "after-image")
+        (let* ((source (path (root) BASELINE (str slug ".cts")))
+               (before (read-score source))
+               (rock? (equal? slug "fault-line"))
+               (after (revise before rock?)))
+          (preserved? before after rock?)
+          (write-canonical motif (path output (str slug ".cts")) after)
+          ($ ,motif tune check ,(path output (str slug ".cts")))
+          (copy-file (path (root) BASELINE (str slug "-map.json"))
+                     (path output (str slug "-map.json")))
+          (each variant (list (list "before" before) (list "after" after))
+            (write-album
+              motif
+              output
+              (str slug "-context-" (car variant))
+              (field before name:)
+              (cadr variant)
+              (context (cadr variant))
+              (list (str BASELINE "/" slug ".cts")
+                    "docs/music/tools/rock-wave-refine.sgl")
+              "Style II context: preserved phrasing, revised guitar/tom or dark synthwave palette."
+              "Before and after use the same six-bar excerpt and two-bar release."
+              "2026-09-23"))
+          (let ((comparison (path output slug))
+                (half (/ (* 8 32 7.5) (field before tempo:))))
+            (ensure-directory comparison)
+            (write-canonical motif (path comparison (str slug "-before.cts")) before)
+            (write-canonical motif (path comparison (str slug "-after.cts")) after)
+            (each variant '("before" "after")
+              (copy-file (path output (str slug "-context-" variant ".cts"))
+                         (path comparison (str slug "-context-" variant ".cts"))))
+            (write-json-file (path comparison "comparison.json")
+              (dict slug: slug
+                    title: (field before name:)
+                    audition: "style-ii"
+                    full_duration_seconds: (/ (* 26 32 7.5) (field before tempo:))
+                    comment: "BEFORE then AFTER. Same phrasing and timing; revised guitars/tom, or deep bass with lower lead and darker pads. Equal monitoring gain."
+                    clips:
+                      (list->array
+                        (map (lambda (variant)
+                               (dict stem: (str slug "-context-" variant)
+                                     label: variant
+                                     duration_seconds: half))
+                             '("before" "after")))))))))))

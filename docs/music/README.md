@@ -1,9 +1,10 @@
 # Crash The Stack music library
 
 This directory preserves the soundtrack's musical decisions, authoring tools
-and review process. The collection contains fifteen compositions and a separate
-accepted Black Glass title arrangement. Historical versions remain available;
-no album arrangements or masters have been produced yet.
+and review process. The collection contains sixteen completed compositions and a separate
+accepted Black Glass title arrangement. Historical versions remain available.
+The published fifteen-track album and the new Fault Line composition/master
+are documented in [album/ALBUM.md](album/ALBUM.md).
 
 ## Start here
 

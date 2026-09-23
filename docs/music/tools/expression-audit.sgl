@@ -1,0 +1,48 @@
+#!/usr/bin/env sigil
+;;; A/B must compare the same performance, including gates and tracker effects.
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(cli "expression-audit" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (directory (path (root) "docs/music/alternates/relay-expression-i"))
+           (output (option-ref options 'output))
+           (before (path directory "relay-ghost-before.cts"))
+           (after (path directory "relay-ghost-after.cts"))
+           (count 0))
+      ;; Frozen album-I reference, independent of subsequent accepted revisions.
+      (check (starts-with? (out sha256sum ,before)
+                          "a8f796de68912ad5e22a18355f39bf88efd325869161501967c96244a6760f8c " )
+             "Historical album-I reference changed")
+      (each stem '("kit" "wire" "calm" "tense" "metal" "choir" "relay-ghost")
+        (let* ((a (path directory (str stem "-before.cts")))
+               (b (path directory (str stem "-after.cts")))
+               (old (read-score a))
+               (new (read-score b)))
+          (each file (list a b)
+            (check (equal? (read-text file) (canonical motif file))
+                   "Noncanonical audition" file)
+            ($ ,motif tune check ,file))
+          (each key '(tempo: speed: channels: meter:)
+            (check (equal? (field old key) (field new key))
+                   "Clock/grid differs between halves" stem key))
+          (each section '(patterns order bus)
+            (check (equal? (child old section) (child new section))
+                   "Performance or bus differs between halves" stem section))))
+      (each channel '(1 2 3 4 5 6 7 8)
+        (let ((old (ticks motif before channel))
+              (new (ticks motif after channel)))
+          (check (equal? old new)
+                 "Compiled ticks differ between full versions" channel)
+          (set! count
+            (+ count (length (filter (lambda (tick) (= (list-ref tick 5) 1)) old))))))
+      (ensure-directory output)
+      (write-json-file (path output "comparison-score-checks.json")
+        (dict compared_pairs: 7
+              full_compiled_attacks: count
+              all_full_ticks_identical: #t
+              baseline_matches_accepted_album_i: #t
+              all_pairs_have_identical_notes_gates_clock_bus: #t))
+      (display "Comparison source and compiled timing checks passed.\n"))))

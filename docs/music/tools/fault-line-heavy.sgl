@@ -1,0 +1,197 @@
+#!/usr/bin/env sigil
+;;; Style III: heavier rhythm guitars and an upper pentatonic solo with bends.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools) (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define BASELINE "docs/music/alternates/rock-wave-sketches-ii/fault-line.cts")
+(define (fields form changes)
+  (fold-left (lambda (result entry)
+               (set-field result (car entry) (cadr entry)))
+             form
+             changes))
+
+(define (heavy-guitar inst)
+  (let* ((id (field inst id:))
+         (open? (member id '(6 8)))
+         (patch (field inst patch:))
+         (op1 (field patch op1:))
+         (op3 (field patch op3:)))
+    (fields inst
+      (list
+        (list gain: (if (member id '(5 6)) 0.45 0.42))
+        (list patch:
+          (fields patch
+            (list (list drive: 3.5)
+                  (list index: 2.4)
+                  (list fb: 0.58)
+                  (list op1: (append (take op1 1) '(0.9) (skip op1 2)))
+                  (list op3: (append (take op3 1) '(0.6) (skip op3 2)))
+                  (list amp-decay: (if open? 0.28 0.11))
+                  (list amp-sustain: (if open? 0.78 0.24)))))
+        (list layers:
+          (list
+            (list 'chip-saw
+                  osc-amp: 0.45 unison: 2 spread: 4
+                  cutoff: 2300 drive: 2.3
+                  attack: 0.001 decay: (if open? 0.25 0.1)
+                  sustain: (if open? 0.65 0.16)
+                  release: (if open? 0.055 0.018)
+                  octave: 0 volume: 0.9)
+            (list 'chip-tri
+                  osc-amp: 0.5 drive: 1.8
+                  attack: 0.002 decay: (if open? 0.22 0.09)
+                  sustain: (if open? 0.5 0.1)
+                  release: 0.025
+                  octave: -1 volume: 0.22)))))))
+
+(define (singing-lead inst)
+  (fields inst
+    (list
+      (list gain: 0.42)
+      (list patch:
+        (fields (field inst patch:)
+          '((drive: 2.0)
+            (index: 1.8)
+            (fb: 0.32)
+            (op1: (1 0.65 0.002 0.3 0.78 0.09))
+            (op2: (1 0.45 0.001 0.12 0.22 0.04))
+            (op3: (2.002 0.13 0.003 0.25 0.6 0.09))
+            (amp-decay: 0.32)
+            (amp-sustain: 0.72)
+            (amp-release: 0.09)))))))
+
+;;; D-minor pentatonic: D F G A C. Calls, held bends, then short replies.
+;;; Gate lengths span bend commands; no note-off or retrigger at their targets.
+(define SOLO
+  '((0 7 "D-5" 9 28 6)
+    (8 7 "F-5" 9 26 4)
+    (12 7 "G-5" 9 29 18)
+    (32 7 "F-5" 9 26 6)
+    (40 7 "D-5" 9 27 4)
+    (44 7 "C-5" 9 24 4)
+    (48 7 "A-4" 9 26 8)
+    (60 7 "C-5" 9 24 3)
+    (64 7 "D-5" 9 28 8)
+    (76 7 "F-5" 9 29 14)
+    (96 7 "D-5" 9 27 4)
+    (100 7 "C-5" 9 26 22)
+    (124 7 "F-5" 9 24 3)
+    (128 7 "G-5" 9 28 6)
+    (136 7 "F-5" 9 26 4)
+    (140 7 "D-5" 9 27 4)
+    (144 7 "C-5" 9 24 4)
+    (148 7 "D-5" 9 26 6)
+    (160 7 "F-5" 9 27 6)
+    (168 7 "G-5" 9 28 14)
+    (184 7 "D-5" 9 26 6)
+    (192 7 "A-5" 9 28 10)
+    (204 7 "G-5" 9 26 4)
+    (208 7 "F-5" 9 25 4)
+    (212 7 "D-5" 9 27 8)
+    (224 7 "C-5" 9 26 18)
+    (244 7 "D-5" 9 28 10)))
+
+;;; Speed 3: 304 advances 1/4 semitone on ticks 1 and 2 of each row.
+;;; Four rows reach a whole-tone target in about 0.238 seconds, with no retrigger.
+(define BENDS '((14 "A-5") (104 "D-5") (172 "F-5")
+               (228 "D-5") (236 "C-5")))
+(define (bend p start target)
+  (let ((result (put-cell p start (list 7 target 0 0 "304"))))
+    (each offset '(1 2 3)
+      (set! result
+        (put-cell result (+ start offset) '(7 "..." 0 0 "300"))))
+    result))
+
+(define (without-lead p)
+  (transform p (lambda (row cell) (and (not (= (car cell) 7)) cell))))
+
+(define (revise before)
+  (let* ((bank
+           (map
+             (lambda (inst)
+               (let ((id (field inst id:)))
+                 (cond
+                   ((member id '(5 6 7 8)) (heavy-guitar inst))
+                   ((= id 9) (singing-lead inst))
+                   ((= id 11)
+                    (set-field inst gain: (* (field inst gain:) 1.188502227)))
+                   (else inst))))
+             (cdr (child before 'instruments))))
+         (solo (add-notes (without-lead (pattern before 3)) SOLO)))
+    (each spec BENDS
+      (set! solo (bend solo (car spec) (cadr spec))))
+    (let* ((ending
+             (add-notes (without-lead (pattern before 4))
+               '((8 7 "F-5" 9 24 12) (24 7 "D-5" 9 25 16))))
+           (patterns
+             (map (lambda (p)
+                    (case (field p id:)
+                      ((3) solo)
+                      ((4) ending)
+                      (else p)))
+                  (cdr (child before 'patterns))))
+           (after (replace-child before 'instruments (cons 'instruments bank)))
+           (after (replace-child after 'patterns (cons 'patterns patterns))))
+      (each p (cdr (child before 'patterns))
+        (check (equal? (without-lead p)
+                      (without-lead (pattern after (field p id:))))
+               "Backing notes or clock changed"
+               (field p id:)))
+      (check (equal? (child before 'bus) (child after 'bus)) "Bus changed")
+      (replace-child after 'history
+        (append (child after 'history)
+          '(("codex" "2026-09-23"
+             "Style III: thicker saturated rhythm guitars, tom +1.5 dB, upper D-minor pentatonic solo with five held whole-tone bends. Backing notes, rhythm and bus preserved.")))))))
+
+(define (context score)
+  (list (list "Held chord and tom fill" (pattern score 2))
+        (list "Full eight-bar solo section" (pattern score 3))
+        (list "Released room" (empty-pattern 2))))
+
+(cli "fault-line-heavy" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (before (read-score (path (root) BASELINE)))
+           (after (revise before)))
+      (each variant (list (list "before" before) (list "after" after))
+        (write-canonical motif (path output (str "fault-line-" (car variant) ".cts"))
+                         (cadr variant))
+        (write-album
+          motif
+          output
+          (str "fault-line-context-" (car variant))
+          "Fault Line"
+          (cadr variant)
+          (context (cadr variant))
+          (list BASELINE "docs/music/tools/fault-line-heavy.sgl")
+          "Style III: two-bar lead-in and eight-bar solo, then two release bars."
+          "Before is Style II; after thickens the guitars and adds an upper pentatonic solo with bends."
+          "2026-09-23"))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "fault-line"
+              title: "Fault Line"
+              audition: "style-iii"
+              full_duration_seconds: (/ (* 26 32 7.5) 126)
+              comment: "BEFORE (Style II), then AFTER (Style III): heavier guitars, tom +1.5 dB, upper pentatonic lead with held bends. Equal gain."
+              clips:
+                (list->array
+                  (map (lambda (variant)
+                         (dict stem: (str "fault-line-context-" variant)
+                               label: variant
+                               duration_seconds: (/ (* 12 32 7.5) 126)))
+                       '("before" "after")))))
+      (write-json-file (path output "bend-map.json")
+        (dict pattern: 3
+              channel: 7
+              start_row_absolute: 448
+              effect: "304"
+              rows_per_bend: 4
+              semitones_per_bend: 2
+              targets: (list->array
+                         (map (lambda (b)
+                                (dict row: (car b) target: (cadr b)))
+                              BENDS)))))))

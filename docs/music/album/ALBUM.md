@@ -15,20 +15,20 @@ process.
 | # | Title | Arrangement status | Initial duration guide |
 |---|---|---|---|
 | 1 | Black Glass | Composition liked; album-level trial promising | 4:24 actual |
-| 2 | Cold Boot | Composition liked; detail review open | 3:35 actual |
-| 3 | Relay Ghost | Composition liked; detail review open | 3:27 actual |
-| 4 | Closed Loop | Composition liked; detail review open | 3:16 actual |
+| 2 | Cold Boot | Album II mix approved, synchronized and published | 3:35 actual |
+| 3 | Relay Ghost | Album II mix approved; mastered for publication | 3:27 actual |
+| 4 | Closed Loop | Album II phrasing approved, synchronized and published | 3:16 actual |
 | 5 | Shadow Protocol | Composition liked; detail review open | 3:50 actual |
 | 6 | Blind Spot | Air pair I ready for listening | 3:15 actual |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
-| 8 | Sector Drift | Air pair I ready for listening | 3:36 actual |
-| 9 | Dirty Cache | Pocket pair I ready for listening | 3:43 actual |
-| 10 | Basement Circuit | Pocket pair I ready for listening | 3:41 actual |
+| 8 | Sector Drift | Album II approved, synchronized and published | 3:36 actual |
+| 9 | Dirty Cache | Album II phrasing approved, synchronized and published | 3:43 actual |
+| 10 | Basement Circuit | Album II approved, synchronized and published | 3:41 actual |
 | 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
-| 13 | Breach Vector | Edge pair I ready for listening | 3:30 actual |
+| 13 | Breach Vector | Phrases I and Percussion I approved; shared game/album source | 3:30 actual |
 | 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |
-| 15 | Glass Current | Closer I ready for listening | 3:57 actual |
+| 15 | Glass Current | Album II approved, synchronized and published | 3:57 actual |
 
 Durations guide the form, not the number of repetitions. First establish the
 quiet and heavy extremes with Quiet Array and Black Glass, then use listening
@@ -63,3 +63,14 @@ converting that file to 24-bit does not create a high-resolution master.
 Pilot arrangements and verification: [PILOT-I.md](PILOT-I.md).
 Mastering process and engine follow-ups: [MASTERING.md](MASTERING.md).
 Reproduction commands: [tools/ALBUM.md](../tools/ALBUM.md).
+
+2026-09-22: Obsidian Index now uses the approved Tension V details in its focused
+album phrases; see [album II](OBSIDIAN-II.md). Its sequence position and duration
+are unchanged. Previous album renders remain available for comparison.
+
+## New composition auditions
+
+Fault Line now has a 2:59.048 rock-led full composition and a shared calm/tense game draft.
+It is a candidate addition; the published fifteen-track sequence is unchanged.
+Composition III is approved; see [Fault Line III](FAULT-LINE-III.md) and its
+[mastered sharing version](FAULT-LINE-MASTER-I.md). After Image remains at the style-demo stage.

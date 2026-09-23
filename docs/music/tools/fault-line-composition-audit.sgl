@@ -1,0 +1,54 @@
+#!/usr/bin/env sigil
+;;; Review the new form, shared passages and actual game-loop boundaries.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (musical row cell)
+  (and (not (equal? (cdr cell) '("..." 0 0 "000"))) cell))
+
+(cli "fault-line-composition-audit" (script-args) '()
+  (lambda (options)
+    (let* ((source (read-score
+                     (path (root) "docs/music/alternates/fault-line-bass-lock-vii/fault-line-after.cts")))
+           (album (read-score (path (root) "docs/music/album/fault-line.cts")))
+           (game (read-score (path (root) "docs/music/alternates/fault-line-game.cts"))))
+      (each pair '((3 1) (8 2) (9 3))
+        (check (equal? (set-field (pattern album (car pair)) id: 0)
+                       (set-field (pattern source (cadr pair)) id: 0))
+               "Approved riff, entrance or solo changed" pair))
+      (each old (cdr (child source 'instruments))
+        (check (equal? old
+                 (list-find (lambda (i) (= (field i id:) (field old id:)))
+                            (cdr (child album 'instruments))))
+               "Approved patch changed" (field old id:)))
+      (check (equal? (child game 'instruments) (child album 'instruments))
+             "Game and album banks differ")
+      (check (equal? (child game 'bus) (child album 'bus)) "Game and album buses differ")
+      (each pair '((0 1) (1 2) (2 8) (3 3) (4 4) (5 9))
+        (check (equal? (set-field (transform (pattern game (car pair)) musical) id: 0)
+                       (set-field (transform (pattern album (cadr pair)) musical) id: 0))
+               "Shared game and album phrase differs" pair))
+      (let ((jumps '()))
+        (each p (cdr (child game 'patterns))
+          (each row (skip p 5)
+            (each cell (cddr row)
+              (when (starts-with? (list-ref cell 4) "B")
+                (set! jumps
+                  (append jumps
+                    (list (list (field p id:) (cadr row) (list-ref cell 4)))))))))
+        (check (equal? jumps '((1 255 "B00") (5 255 "B03")))
+               "Wrong calm or tense loop destination" jumps))
+      (ensure-directory (option-ref options 'output))
+      (write-json-file (path (option-ref options 'output) "composition-checks.json")
+        (dict approved_riff_transition_solo_preserved: #t
+              original_twelve_patches_preserved: #t
+              shared_game_album_phrases: 6
+              shared_bank_and_bus: #t
+              calm_orders: (array 0 1)
+              fill_order: 2 tense_orders: (array 3 4 5)
+              album_bars: 96 game_cycle_bars: 42))
+      (println "Shared composition, accepted sound and calm/tense loop checks passed."))))

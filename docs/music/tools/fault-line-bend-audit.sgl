@@ -1,0 +1,80 @@
+#!/usr/bin/env sigil
+;;; Check actual compiled pitch trajectories, not just written 3xx commands.
+(import (sigil list) (sigil math))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define BENDS '((14 79 2) (104 72 2) (172 79 -2) (228 72 2) (236 74 -2)))
+(define (sample row tick)
+  (round (* 44100 (/ 2.5 126) (+ (* row 3) tick))))
+(define (at-or-before ticks sample)
+  (fold-left (lambda (state tick)
+               (if (<= (car tick) (+ sample 1)) tick state))
+             #f
+             ticks))
+
+(cli "fault-line-bend-audit" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (source (path (root) "docs/music/alternates/fault-line-heavy-iii/fault-line-after.cts"))
+           (before (path (root) "docs/music/alternates/fault-line-heavy-iii/fault-line-before.cts"))
+           (output (option-ref options 'output))
+           (lead (ticks motif source 7))
+           (checks '()))
+      (each bend BENDS
+        (let* ((row (+ 448 (car bend)))
+               (midi (cadr bend))
+               (direction (if (> (caddr bend) 0) 1 -1))
+               (start (sample row 0))
+               (end (sample (+ row 4) 0))
+               (changes
+                 (filter (lambda (t) (and (>= (car t) (- start 1))
+                                         (< (car t) (- end 1))))
+                         lead)))
+          (check (and (= (length changes) 8)
+                      (every (lambda (t) (and (= (list-ref t 4) 1)
+                                              (= (list-ref t 5) 0)))
+                             changes))
+                 "Bend must contain eight pitch steps without release or retrigger"
+                 row)
+          (let loop ((step 1))
+            (when (<= step 8)
+              (let* ((time (sample (+ row (quotient (- step 1) 2))
+                                  (+ 1 (modulo (- step 1) 2))))
+                     (actual (at-or-before lead time))
+                     (pitch (+ midi (* direction step 0.25)))
+                     (expected (* 440 (expt 2 (/ (- pitch 69) 12)))))
+                (check (and actual
+                            (<= (abs (- (car actual) time)) 1)
+                            (< (abs (- (list-ref actual 2) expected)) 0.01))
+                       "Compiled bend trajectory differs"
+                       row
+                       step)
+                (loop (+ step 1)))))
+          (let* ((held (at-or-before lead (sample (+ row 5) 0)))
+                 (target (* 440 (expt 2 (/ (- (+ midi (caddr bend)) 69) 12)))))
+            (check (and (= (list-ref held 4) 1)
+                        (< (abs (- (list-ref held 2) target)) 0.01))
+                   "Bend does not hold target"
+                   row))
+          (set! checks
+            (append checks
+              (list (dict pattern_row: (car bend)
+                          semitones: (caddr bend)
+                          pitch_steps: 8
+                          no_retrigger: #t
+                          holds_target: #t))))))
+      (each ch '(1 2 3 4 5 6 8)
+        (let* ((a (ticks motif before ch))
+               (b (ticks motif source ch))
+               ;; Added layers alter voice indices, not performance values.
+               (performance
+                 (lambda (ts)
+                   (map (lambda (t) (cons (car t) (cddr t))) ts))))
+          (check (equal? (performance a) (performance b))
+                 "Backing compiled performance changed"
+                 ch)))
+      (ensure-directory output)
+      (write-json-file (path output "bend-checks.json") (list->array checks))
+      (println "Five held whole-tone bends and all backing channels passed."))))

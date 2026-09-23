@@ -1,0 +1,155 @@
+#!/usr/bin/env sigil
+;;; Audition shared patch changes without adopting either generated arrangement.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define (hat-patch open?)
+  (list 'chip-hat
+        crush-bits: 12
+        decay: (if open? 0.07 0.022)
+        hp: 4800
+        metal: (if open? 0.48 0.4)
+        noise: (if open? 0.14 0.13)))
+
+(define (pressure-patch instrument)
+  (let* ((id (field instrument id:))
+         (settings
+           (cadr (assoc id '((8 (140 380 0.07 0.58))
+                            (9 (260 900 0.08 0.58))
+                            (10 (560 2050 0.075 0.61))))))
+         (patch (field instrument patch:)))
+    (each pair (map list
+                    '(cutoff: cutoff-env: filter-decay: resonance:)
+                    settings)
+      (set! patch (set-field patch (car pair) (cadr pair))))
+    patch))
+
+(define (candidate parts hats? pressure?)
+  (replace-child parts 'instruments
+    (cons 'instruments
+      (map (lambda (instrument)
+             (let ((id (field instrument id:)))
+               (cond
+                 ((and hats? (member id '(3 13)))
+                  (set-field
+                    (set-field instrument name:
+                      (if (= id 13) "open-machine-tick" "closed-machine-tick"))
+                    patch: (hat-patch (= id 13))))
+                 ((and pressure? (member id '(8 9 10)))
+                  (set-field instrument patch: (pressure-patch instrument)))
+                 (else instrument))))
+           (cdr (child parts 'instruments))))))
+
+(define (same-performance before after)
+  (each key '(tempo: speed: channels: meter:)
+    (check (equal? (field before key) (field after key))
+           "Clock changed" key))
+  (each section '(patterns order bus)
+    (check (equal? (child before section) (child after section))
+           "Performance or mix bus changed" section)))
+
+(define (excerpt score ids channels limit)
+  (append
+    (map (lambda (id)
+           (let* ((p (pattern score id))
+                  (p (if limit
+                         (set-field
+                           (append (take p 5)
+                             (filter (lambda (row) (< (cadr row) limit))
+                                     (skip p 5)))
+                           rows: limit)
+                         p)))
+             (list (str "Original pattern " id)
+               (transform p
+                 (lambda (row cell)
+                   (and (member (car cell) channels) cell))))))
+         ids)
+    (list (list "Two-bar release / comparison gap" (phrase-rows 64 '())))))
+
+(cli "cold-boot-motion" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source "docs/music/songs/cold-boot/parts.cts")
+           (layout-file "docs/music/songs/cold-boot/arrangements.sgl")
+           (parts (read-score (path (root) source)))
+           (layout (read-score (path (root) layout-file)))
+           (arrangements (child layout 'arrangements))
+           (album (child arrangements 'album))
+           (base (build-song-score parts layout album))
+           (hats (build-song-score (candidate parts #t #f) layout album))
+           (pressure (build-song-score (candidate parts #f #t) layout album))
+           (combined-parts (candidate parts #t #t))
+           (after (build-song-score combined-parts layout album))
+           (clips '()))
+      (ensure-directory output)
+      ;; Reject outstanding edits before taking an audition snapshot.
+      (apply-song-plans (list (song-plan "cold-boot" motif)) "check" #f)
+      (copy-file (path (root) layout-file) (path output "arrangements.sgl"))
+      (write-canonical motif (path output "parts-after.cts") combined-parts)
+      (each spec (list (list 'album "cold-boot") (list 'game "cold-boot-game"))
+        (let* ((arrangement (child arrangements (car spec)))
+               (before (build-song-score parts layout arrangement))
+               (new (build-song-score combined-parts layout arrangement))
+               (reference (path (root) (field arrangement destination:)))
+               (before-file (path output (str (cadr spec) "-before.cts"))))
+          (same-performance before new)
+          (write-canonical motif before-file before)
+          (check (equal? (read-text before-file) (read-text reference))
+                 "Shared reference differs from accepted score" reference)
+          (write-canonical motif (path output (str (cadr spec) "-after.cts")) new)))
+      (each score (list hats pressure after) (same-performance base score))
+      (check
+        (equal?
+          (filter (lambda (i) (not (member (field i id:) '(3 8 9 10 13))))
+                  (cdr (child parts 'instruments)))
+          (filter (lambda (i) (not (member (field i id:) '(3 8 9 10 13))))
+                  (cdr (child combined-parts 'instruments))))
+        "Protected instrument changed")
+      (each spec
+        '(("ticks" "Exposed percussion / hats only" (8) (1 2 3) 128 hats)
+          ("calm" "Calm groove / hats only" (2) (1 2 3 4 5 6 7 8) #f hats)
+          ("pressure" "Tense groove / pressure filter only" (9) (1 2 3 4 5 6 7 8) #f pressure)
+          ("combined" "Accepted fill into tense / both changes" (7 8) (1 2 3 4 5 6 7 8) #f both))
+        (each variant '("before" "after")
+          (let* ((score
+                   (if (equal? variant "before") base
+                       (case (list-ref spec 5)
+                         ((hats) hats)
+                         ((pressure) pressure)
+                         (else after))))
+                 (stem (str (car spec) "-" variant))
+                 (sections (excerpt score (caddr spec) (list-ref spec 3) (list-ref spec 4)))
+                 (rows (apply + (map (lambda (s) (field (cadr s) rows:)) sections))))
+            (write-album motif output stem
+              (str "Cold Boot / " (cadr spec) " / " variant)
+              score sections (list source layout-file)
+              "Motion I audition from shared parts; no approved arrangement is replaced."
+              "Identical notes, velocities, gates, effects and bus; only the declared patches differ."
+              "2026-09-22")
+            (set! clips
+              (append clips
+                (list (dict stem: stem
+                            label: (str (cadr spec) " / " variant)
+                            duration_seconds: (/ (* rows 7.5) 132)
+                            audition_gain_db: 0)))))))
+      (write-json-file (path output "comparison.json")
+        (dict slug: "cold-boot"
+              title: "Cold Boot"
+              audition: "motion-i"
+              comment: "Each pair BEFORE then AFTER: exposed percussion, calm hats, tense filter contrast, fill into tense with both. Same monitoring gain; no new limiter."
+              full_duration_seconds: (/ (* 118 32 7.5) 132)
+              clips: (list->array clips)))
+      (write-json-file (path output "source-checks.json")
+        (dict source_sha256: (song-hash (path (root) source))
+              layout_sha256: (song-hash (path (root) layout-file))
+              shared_patch_ids: '(3 8 9 10 13)
+              identical_performance_bus_and_order: #t
+              protected_instruments_identical: #t
+              game_and_album_from_same_candidate_parts: #t))
+      (display "Cold Boot isolated comparisons and synchronized game/album candidates ready.\n"))))

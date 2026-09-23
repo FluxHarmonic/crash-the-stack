@@ -1,0 +1,133 @@
+#!/usr/bin/env sigil
+;;; A calm-context bell comparison with the preferred kit held constant.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/expression-patches.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack expression patches))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                         (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict integrated_lufs: (last-number text "    I:")
+          true_peak_dbtp: (last-number text "    Peak:"))))
+
+(cli "relay-bell-context" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (scores (path (root) "docs/music/alternates/relay-bell-calm-i"))
+           (reference "docs/music/album/relay-ghost.cts")
+           ;; Pin the accepted album-I source so auditions remain reproducible.
+           (source (read-score (path (root) "docs/music/alternates/relay-expression-i/relay-ghost-before.cts")))
+           ;; Retain the original pluck: only the drums have listener approval.
+           (base (replace-instruments source '(2 3 21)))
+           (candidate (replace-instruments base '(9)))
+           (sections
+             (list (list "Calm phrase 1" (pattern source 1))
+                   (list "Calm phrase 2" (pattern source 2))
+                   (list "Room release" (empty-pattern 2))))
+           (duration (/ (* (+ 256 256 64) 7.5) 132))
+           (stems '("original-bell" "metallic-bell"))
+           (commands '())
+           (measurements '())
+           (attacks 0))
+      (check (starts-with? output "/") "Supply an absolute external artifact directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep renders outside the repository")
+      (each stem stems
+        (check (not (file-exists? (path output (str stem ".wav"))))
+               "Use a fresh render directory" output))
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (each stem stems
+        (write-album motif scores stem
+          (str "Relay Ghost - Calm Bell I / " stem)
+          (if (equal? stem "original-bell") base candidate)
+          sections (list reference)
+          "Calm Bell I: sixteen calm bars with the preferred contact/dust kit in both halves."
+          "Only instrument 9 differs; original pluck, notes, dynamics, clock, placement and bus retained. Each half renders from fresh state with two release bars."
+          "2026-09-22")
+        (copy-file (path scores (str stem ".cts"))
+                   (path output (str stem ".cts"))))
+      (let* ((a (path output "original-bell.cts"))
+             (b (path output "metallic-bell.cts"))
+             (old (read-score a))
+             (new (read-score b)))
+        (each section '(patterns order bus)
+          (check (equal? (child old section) (child new section))
+                 "Non-patch change in comparison" section))
+        (define (without-bell score)
+          (filter (lambda (instrument) (not (= (field instrument id:) 9)))
+                  (cdr (child score 'instruments))))
+        (check (equal? (without-bell old) (without-bell new))
+               "Another instrument differs")
+        (each channel CHANNELS
+          (let ((old-ticks (ticks motif a channel))
+                (new-ticks (ticks motif b channel)))
+            (check (equal? old-ticks new-ticks) "Compiled performance differs" channel)
+            (set! attacks
+              (+ attacks
+                 (length (filter (lambda (tick) (= (list-ref tick 5) 1)) old-ticks)))))))
+      (each stem stems
+        (let* ((file (path output (str stem ".cts")))
+               (wav (path output (str stem ".wav"))))
+          (run (list motif "tune" "render" file "-r" "44100" "-o" wav))
+          (let ((levels (measure wav (path output (str stem "-levels.txt")))))
+            (check (< (dict-ref levels true_peak_dbtp:) 0) "Native clipping" stem)
+            (set! measurements
+              (append measurements (list (dict stem: stem levels: levels)))))))
+      (ensure-directory (path output "ogg"))
+      (write-text (path output "sequence.txt")
+                  "file 'original-bell.wav'\nfile 'metallic-bell.wav'\n")
+      (let* ((ogg (path output "ogg/relay-ghost-calm-bell-i-ab.ogg"))
+             (sequence (path output "sequence.txt"))
+             ;; Same gain as Expression I, with no solo boost or extra limiter.
+             (gain -1.1))
+        (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                   "-f" "concat" "-safe" "1" "-i" sequence
+                   "-af" "volume=-1.1dB" "-c:a" "libvorbis" "-q:a" "7"
+                   "-metadata" "title=Relay Ghost - Calm Bell I A/B"
+                   "-metadata" "artist=David Wilson"
+                   "-metadata" "album=Crash The Stack - Auditions"
+                   "-metadata" "comment=0:00 original bell; 0:32.727 metallic bell. Same sixteen calm bars, preferred quieter drums and original pluck in both halves."
+                   ogg))
+        (let* ((levels (measure ogg (path output "ogg-levels.txt")))
+               (probe (json ffprobe -v error -show_format -show_streams -of json ,ogg))
+               (stream (array-ref (dict-ref probe streams:) 0))
+               (actual (string->number (dict-ref (dict-ref probe format:) duration:))))
+          (check (and (= (dict-ref stream channels:) 2)
+                      (equal? (dict-ref stream sample_rate:) "44100")
+                      (< (abs (- actual (* 2 duration))) 0.001))
+                 "Encoded format/duration mismatch")
+          (check (<= (dict-ref levels true_peak_dbtp:) -1) "Encoded peak too high")
+          (write-json-file (path output "checks.json")
+            (dict duration_seconds: actual
+                  metallic_entry_seconds: duration
+                  compiled_attacks_per_half: attacks
+                  all_ticks_identical: #t
+                  only_bell_instrument_differs: #t
+                  common_gain_db: gain
+                  native: (list->array measurements)
+                  ogg: levels
+                  renderer_sha256: (out sha256sum ,motif)
+                  accepted_source_sha256:
+                    (out sha256sum ,(path (root) "docs/music/alternates/relay-expression-i/relay-ghost-before.cts"))
+                  ogg_sha256: (out sha256sum ,ogg)))))
+      (display "Calm bell comparison rendered and verified.\n"))))
