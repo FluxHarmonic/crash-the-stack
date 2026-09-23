@@ -453,5 +453,15 @@ calm answer. Both full candidates share a proposed phrase/patch pool.
 
 Retain the felt kick, woody rim, dusty hats, round sub, relay taps, minor-tine
 chords and answer bell. The opening hook, rhythm, transition and final G-minor
-landing remain. Four contextual before/after pairs and both full versions are
-being rendered; maintained sources and public audio await listening approval.
+landing remain. Five contextual before/after pairs and both full versions are
+being rendered, including an equally boosted exposed pluck pair because the
+patch change is subtle in the mix. Maintained sources and public audio await
+listening approval.
+
+Sector Drift's five-pair montage and both complete 3:36 versions were delivered
+as Telegram 1171–1173. The first pair exposes the pluck with equal +18 dB
+monitoring; contextual comparisons retain actual mix levels. Both full OGGs
+measure -21.6 LUFS-I/-6.0 dBTP with a common -0.5 dB base gain. Native timing,
+B05 game loop, encoded durations/peaks/endings, all fifteen maintained-source
+checks and reproduction of all 31 final audition files pass. Listening approval
+is pending before adoption, mastering or publication.

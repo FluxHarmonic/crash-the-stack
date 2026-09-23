@@ -44,15 +44,19 @@ Each pair plays BEFORE then AFTER, including two release bars per half:
 
 | Pair | Before | After |
 |---|---:|---:|
-| Pluck patch in calm mix | 0:00.000 | 0:14.400 |
-| Later calm answer | 0:28.800 | 0:52.800 |
-| Bell reflection | 1:16.800 | 1:31.200 |
-| Focused return | 1:45.600 | 2:09.600 |
+| Exposed pluck (+18 dB both halves) | 0:00.000 | 0:09.600 |
+| Pluck patch in calm mix | 0:19.200 | 0:33.600 |
+| Later calm answer | 0:48.000 | 1:12.000 |
+| Bell reflection | 1:36.000 | 1:50.400 |
+| Focused return | 2:04.800 | 2:28.800 |
 
-Montage duration: 2:33.600. Full before and after: 3:36 each. The patch pair
+Montage duration: 2:52.800. Full before and after: 3:36 each. The patch pair
 keeps the original performance; the phrase pairs use original patches. The
 full candidate combines the changes. Render each half from fresh state, with
 one common monitoring gain and no extra limiter or per-half normalization.
+The exposed pair receives equal +18 dB boosts for judging timbre; that boost
+is not applied to the patch or full mix. It was added because the patch
+change is subtle in context.
 
 ```sh
 sigil docs/music/tools/sector-expression.sgl \
@@ -71,5 +75,33 @@ sector-expression-i-delivery/. Timing, codec and reproduction checks and
 receipts will be recorded after rendering. Numerical checks do not establish
 subjective listening quality.
 
-All 27 generated files reproduce exactly from the frozen source and Sigil
-composer. All fifteen maintained-song regeneration checks pass.
+All 31 generated files reproduce exactly, including the exposed pair. All
+fifteen maintained-song regeneration checks pass.
+
+## Delivered validation
+
+Telegram acknowledged the montage as **1171**, full before as **1172**, and
+full candidate as **1173**. Listening approval is pending; maintained song
+sources and public audio remain unchanged.
+
+All twelve native renders pass source/renderer identity, stereo 44.1 kHz,
+duration and peak checks. The delivery applies one common -0.5 dB base gain.
+The montage measures -21.4 LUFS-I/-5.9 dBTP; both complete versions measure
+-21.6 LUFS-I/-6.0 dBTP. Both final seconds peak at -91.0 dBFS. The exposed
+pluck before/after measures -40.3/-39.4 LUFS-I before its equal +18 dB boost;
+the longer decay adds some body naturally, without a gain change. Its complete
+calm mix rounds to -21.0 LUFS-I on both sides before delivery gain.
+
+The candidate album has 1,264 attacks, zero sample-clock error, no 32nd-note
+attacks and all final gates released. The game has 1,057 compiled triggers,
+zero sample-clock error and the preserved B05 tense loop. Every channel's
+compiled ticks match between the contextual pluck comparison halves. Full
+score audits precede the added exposed pair; the full scores are unchanged.
+All 31 final sources reproduce exactly, and all fifteen maintained songs
+regenerate cleanly.
+
+Pinned native renderer: Motif 0.6.6, SHA-256
+f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842.
+The official expression renderer verifies exact source and renderer identity
+before reusing each completed native job. External directories retain argv,
+source and audio hashes, measurements, audit scripts, receipts and commands.

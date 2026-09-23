@@ -1,0 +1,31 @@
+(tune version: 1 name: "Sector Drift / Exposed pluck / equal +18 dB monitoring / before" tempo: 100 speed: 3 channels: 8 meter: (8 4)
+  (bus reverb: zitarev size: 0.5 damp: 0.7 mix: 0.2 comp: on threshold: -12 ratio: 3 attack: 8 release: 110 makeup: 1)
+  (instruments
+    (instrument id: 1 name: "felt-kick" patch: (chip-kick decay: 0.19 drive: 0.25 index: 0.8 sweep: 1.5 sweep-decay: 0.026) volume: 44 pan: 0)
+    (instrument id: 2 name: "wood-rim" patch: (chip-snare body: 0.4 crush-bits: 15 hp: 1100 noise: 0.16 noise-decay: 0.027) volume: 38 send: 0.045 pan: 0)
+    (instrument id: 3 name: "dust-hat" patch: (chip-noise attack: 0.001 crush-bits: 13 cutoff: 6200 decay: 0.045 hp: 3000 osc-amp: 0.48 release: 0.012 sustain: 0) volume: 20 pan: 0.23)
+    (instrument id: 4 name: "round-sub" patch: (chip-sub attack: 0.003 decay: 0.16 drive: 0.18 osc-amp: 0.8 release: 0.025 sustain: 0.7) volume: 34 pan: 0)
+    (instrument id: 6 name: "minor-tines" patch: (fm4-stab cutoff: 1100 decay: 0.48 index: 0.5 release: 0.15) volume: 23 send: 0.18 layers: ((fm4-stab cutoff: 1000 decay: 0.4 index: 0.4 ratio: 1.1892071 release: 0.15 octave: 0 volume: 0.5) (fm4-stab cutoff: 950 decay: 0.4 index: 0.4 ratio: 1.4983071 release: 0.15 octave: 0 volume: 0.35)) pan: -0.22)
+    (instrument id: 8 name: "signal-pluck" patch: (fm4-stab cutoff: 1450 decay: 0.32 index: 0.6 release: 0.085) volume: 24 send: 0.18 pan: 0.12)
+    (instrument id: 9 name: "answer-bell" patch: (fm4-bell amp-attack: 0.002 amp-decay: 0.7 amp-release: 0.18 amp-sustain: 0 index: 0.5) volume: 19 send: 0.23 pan: 0.3)
+    (instrument id: 21 name: "open-dust" patch: (chip-noise attack: 0.001 crush-bits: 13 cutoff: 6200 decay: 0.13 hp: 2800 osc-amp: 0.4 release: 0.025 sustain: 0) volume: 20 pan: 0.23)
+    (instrument id: 26 name: "relay-tap" patch: (chip-noise attack: 0.001 cutoff: 4500 decay: 0.018 hp: 1800 osc-amp: 0.5 release: 0.008 sustain: 0) volume: 18 send: 0.08 pan: -0.28))
+  (patterns
+    (pattern id: 0 rows: 64
+      (row 0 (1 "===" 0 0 "000") (2 "===" 0 0 "000") (3 "===" 0 0 "000") (4 "===" 0 0 "000") (5 "===" 0 0 "000") (6 "===" 0 0 "000") (7 "===" 0 0 "000") (8 "===" 0 0 "000"))
+      (row 4 (6 "D-4" 8 21 "000"))
+      (row 11 (6 "===" 0 0 "000"))
+      (row 16 (6 "F-4" 8 18 "000"))
+      (row 23 (6 "===" 0 0 "000"))
+      (row 24 (6 "D-4" 8 18 "000"))
+      (row 31 (6 "===" 0 0 "000"))
+      (row 40 (6 "A#3" 8 21 "000"))
+      (row 51 (6 "===" 0 0 "000"))
+      (row 56 (6 "A-3" 8 18 "000"))
+      (row 62 (6 "===" 0 0 "000")))
+    (pattern id: 1 rows: 64
+      (row 0 (1 "===" 0 0 "000") (2 "===" 0 0 "000") (3 "===" 0 0 "000") (4 "===" 0 0 "000") (5 "===" 0 0 "000") (6 "===" 0 0 "000") (7 "===" 0 0 "000") (8 "===" 0 0 "000"))))
+  (order 0 1)
+  (history
+    ("codex" "2026-09-23" "Expression I: isolated patch and phrasing auditions; no maintained score replaced.")
+    ("codex" "2026-09-23" "Patch pair keeps every note; phrase pairs keep original patches. Dust kit, sub, tine chords, opening theme and final landing remain intact.")))
