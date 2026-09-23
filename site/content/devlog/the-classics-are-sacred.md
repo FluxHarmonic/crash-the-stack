@@ -1,6 +1,6 @@
 ---
 title: The classics are sacred
-date: 2026-09-22T11:00:00Z
+date: 2026-09-16T18:00:00Z
 summary: The plan for the fourth try, what changed in the first day of comments, and why I chose to review everything instead of writing it.
 ---
 # The classics are sacred

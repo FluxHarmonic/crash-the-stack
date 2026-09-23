@@ -1,6 +1,6 @@
 ---
 title: The trace has phases
-date: 2026-09-22T12:00:00Z
+date: 2026-09-18T12:00:00Z
 summary: The first real play test, the counter-hack, Klondike without playing cards, and the year 2030.
 ---
 # The trace has phases

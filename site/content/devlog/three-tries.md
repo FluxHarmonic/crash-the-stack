@@ -1,6 +1,6 @@
 ---
 title: Three tries at the same game
-date: 2026-09-22T10:00:00Z
+date: 2026-09-16T10:00:00Z
 summary: Crash The Stack in 2020, again in 2022, a cousin in 2023, and why the fourth try is the one that shipped.
 ---
 # Three tries at the same game
