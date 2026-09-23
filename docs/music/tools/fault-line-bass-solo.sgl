@@ -1,0 +1,61 @@
+#!/usr/bin/env sigil
+;;; Isolate the full current bass performance without changing notes or patch.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(cli "fault-line-bass-solo" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference
+             (path (root)
+               "docs/music/alternates/fault-line-bass-focus-vi/fault-line-after.cts"))
+           (source (read-score reference))
+           (solo
+             (replace-child source 'patterns
+               (cons 'patterns
+                 (map (lambda (p)
+                        (transform p
+                          (lambda (row cell) (and (= (car cell) 4) cell))))
+                      (cdr (child source 'patterns))))))
+           (stem "fault-line-style-vi-bass-only")
+           (input (path output (str stem ".cts")))
+           (wav (path output (str stem ".wav")))
+           (ogg (path output "ogg" (str stem ".ogg")))
+           (commands '()))
+      (check (starts-with? output "/") "Supply an absolute external directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep audio outside the repository")
+      (check (not (file-exists? wav)) "Use a fresh render destination")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (write-canonical motif input solo)
+      (check (equal? (ticks motif reference 4) (ticks motif input 4))
+             "Bass performance changed during isolation")
+      (each channel '(1 2 3 5 6 7 8)
+        (check (not (any (lambda (t) (= (list-ref t 5) 1))
+                        (ticks motif input channel)))
+               "Unexpected non-bass attack" channel))
+      (ensure-directory (path output "ogg"))
+      (run (list motif "tune" "render" input "-r" "44100" "-o" wav))
+      (run (list "ffmpeg" "-v" "error" "-nostdin" "-n" "-i" wav
+                 "-af" "volume=6.1dB" "-c:a" "libvorbis" "-q:a" "7"
+                 "-metadata" "title=Fault Line - Style VI bass only"
+                 "-metadata" "artist=David Wilson"
+                 "-metadata" "album=Crash The Stack - Auditions"
+                 ogg))
+      ($ ffmpeg -hide_banner -nostats -i ,ogg
+         -af "ebur128=peak=true" -f null -
+         err: ,(path output "loudness.txt"))
+      (write-json-file (path output "probe.json")
+        (json ffprobe -v error -show_format -show_streams -of json ,ogg))
+      (write-text (path output "renderer.sha256") (str (out sha256sum ,motif) "\n"))
+      (write-text (path output "encoded.sha256") (str (out sha256sum ,ogg) "\n"))
+      (println "Bass-only render ready: ~a" ogg))))

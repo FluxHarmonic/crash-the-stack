@@ -81,3 +81,20 @@ peak and ending checks pass. These are audition copies, not album masters.
 Delivered 2026-09-23: Telegram acknowledged A/B message 1187 and full revised
 demo message 1188. Source/validation commit: 4373dac. Encoded file hashes are
 in encoded.sha256. The previous full reference is retained locally.
+
+## 2026-09-23: bass-only identification
+
+At David's request, the current complete 49.524-second bass performance is
+isolated using `docs/music/tools/fault-line-bass-solo.sgl`. Compiled bass ticks
+match Style VI exactly; all other channels have zero attacks. Both patch layers,
+notes, velocities, gates, arrangement and bus settings are preserved. Without
+the other instruments the shared compressor naturally responds differently.
+The listening copy uses +6.1 dB gain, 8 dB above the full-demo delivery gain,
+solely to make the solo part audible. No maintained song is changed.
+
+Decoded OGG: -24.6 LUFS-I, -7.0 dBTP, stereo 44.1 kHz. All fifteen maintained
+song regeneration checks pass. Telegram acknowledged message 1189.
+External audio, generated score, commands and checks: `~/Ops/artifacts/
+crash-the-stack-album/fault-line-bass-solo-vi/`.
+
+OGG SHA256: `deca674ee80ff1e8149b6086c3c762335e1ce4a17f0111b1625b3e0b8e6349e7`.
