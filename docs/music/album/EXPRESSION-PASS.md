@@ -375,3 +375,15 @@ descent reaches A with one trigger and an actual breath; all backing ticks match
 Native clocks, B06, all fifteen source checks, reproducibility and encoded audio
 checks pass. The OGG measures -16.4 LUFS-I/-4.2 dBTP with equal -0.5 dB gain.
 Keep both this experiment and Expression I intact pending the listening choice.
+
+David rejected Turnaround I: the two-beat interruption sounded abrupt and the
+held downward slide produced an unwanted low buzzing tail. Keep Expression I
+as the baseline. The next audition is a channel-volume fade of the original
+acid rhythm, delivered as one short clip without A/B at David's request.
+
+[Fade I](../alternates/basement-fade-i/README.md) preserves Expression I's acid
+rhythm and applies a two-bar reduction to its note volumes, leaving slides,
+gates, timing and backing intact. The velocity-sensitive filter softens with
+the notes; this is not independent post-filter gain automation. Telegram 1165
+contains only the requested 15.484-second clip. Compiled performance, all-song
+regeneration, reproduction and audio checks pass; listening approval is pending.

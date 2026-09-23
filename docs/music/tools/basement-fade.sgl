@@ -1,0 +1,123 @@
+#!/usr/bin/env sigil
+;;; Fade the existing acid phrase; preserve its pitches, timing and slides.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define (fade p)
+  (if (not (member (field p id:) '(10 13)))
+      p
+      (append (take p 5)
+        (map
+          (lambda (row)
+            (append (take row 2)
+              (map
+                (lambda (cell)
+                  (if (and (= (car cell) 6)
+                           (>= (cadr row) 192)
+                           (attack? cell))
+                      (let ((remaining (/ (- 256 (cadr row)) 64.0)))
+                        (append (take cell 3)
+                          (list (max 1 (round (* (list-ref cell 3) remaining remaining)))
+                                (list-ref cell 4))))
+                      cell))
+                (cddr row))))
+          (skip p 5)))))
+
+(define (performance p)
+  (append (take p 5)
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (map
+            (lambda (cell)
+              (if (and (member (field p id:) '(10 13))
+                       (= (car cell) 6)
+                       (>= (cadr row) 192)
+                       (attack? cell))
+                  (append (take cell 3) (list 0 (list-ref cell 4)))
+                  cell))
+            (cddr row))))
+      (skip p 5))))
+
+(define (slice p start end)
+  (transform
+    (set-field
+      (append (take p 5)
+        (map
+          (lambda (row)
+            (append (list 'row (- (cadr row) start)) (cddr row)))
+          (filter (lambda (row) (<= start (cadr row) (- end 1)))
+                  (skip p 5))))
+      rows: (- end start))
+    unchanged))
+
+(cli "basement-fade" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/basement-expression-i"))
+           (parts-file (path reference "parts-after.cts"))
+           (layout-file (path reference "arrangements.sgl"))
+           (parts (read-score parts-file))
+           (layout (read-score layout-file))
+           (arrangements (child layout 'arrangements))
+           (changed
+             (replace-child parts 'patterns
+               (cons 'patterns (map fade (cdr (child parts 'patterns)))))))
+      (ensure-directory output)
+      (each section '(instruments bus order history)
+        (check (equal? (child parts section) (child changed section))
+               "Protected section changed" section))
+      (each p (cdr (child parts 'patterns))
+        (check (equal? (performance p)
+                       (performance (pattern changed (field p id:))))
+               "Backing or preceding phrase changed" (field p id:)))
+      (write-canonical motif (path output "parts-before.cts") parts)
+      (write-canonical motif (path output "parts-after.cts") changed)
+      (let ((destination (path output "arrangements.sgl")))
+        (if (file? destination)
+            (check (equal? (read-text destination) (read-text layout-file))
+                   "Refusing to overwrite differing layout")
+            (copy-file layout-file destination)))
+      (each spec '((album "basement-circuit-after")
+                   (game "basement-circuit-game-after"))
+        (let ((arrangement (child arrangements (car spec))))
+          (write-canonical motif (path output (str (cadr spec) ".cts"))
+                           (build-song-score changed layout arrangement))))
+      (let* ((score (build-song-score changed layout (child arrangements 'album)))
+             (sections
+               (list
+                 (list "Two-bar lead-in, then two-bar acid fade"
+                       (slice (pattern score 12) 128 256))
+                 (list "First two bars of the calm reprise"
+                       (slice (pattern score 13) 0 64))
+                 (list "Two-bar release" (phrase-rows 64 '())))))
+        (write-album motif output "basement-circuit-fade" "Basement Circuit"
+          score sections
+          '("parts-before.cts" "parts-after.cts" "arrangements.sgl")
+          "Fade I: Expression I baseline with the existing acid rhythm gradually receding."
+          "Only acid note volumes change; no new gap, melody, held descent or patch."
+          "2026-09-23"))
+      (write-json-file (path output "clip.json")
+        (dict title: "Basement Circuit - Acid fade I"
+              stem: "basement-circuit-fade"
+              duration_seconds: (/ (* 256 7.5) 124)
+              fade_starts_seconds: (/ (* 64 7.5) 124)
+              reprise_seconds: (/ (* 128 7.5) 124)))
+      (write-json-file (path output "source-checks.json")
+        (dict expression_i_parts_sha256: (song-hash parts-file)
+              layout_sha256: (song-hash layout-file)
+              candidate_parts_sha256: (song-hash (path output "parts-after.cts"))
+              shared_phrase_ids: '(10 13)
+              changed_channel: 6
+              changed_rows: '(192 254)
+              pitches_gates_and_slide_effects_unchanged: #t
+              note_volume_floor: 1
+              patches_backing_bus_and_clock_unchanged: #t
+              game_and_album_candidates_synchronized: #t))
+      (display "Single fade clip and synchronized candidates ready.\n"))))

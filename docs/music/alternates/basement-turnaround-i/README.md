@@ -73,3 +73,10 @@ produces the 30.968-second OGG at -16.4 LUFS-I/-4.2 dBTP. Duration, stereo
 The descriptive delivery filename is a byte-identical copy of the renderer's
 comparison.ogg. Source snapshots, commands, renderer hash, pitch/audit scripts,
 raw logs and the Telegram receipt remain in the external artifact directory.
+
+## Rejected after listening
+
+David disliked the low sliding tail, describing it as flatulence, and found
+the preceding cutoff abrupt. Do not adopt this turnaround. Preserve it only as
+process history. He still wants the acid line to trail out, and requested a
+single short clip with a volume fade on the original Expression I rhythm.
