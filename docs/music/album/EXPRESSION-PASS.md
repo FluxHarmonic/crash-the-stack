@@ -405,3 +405,19 @@ as Telegram 1166. The fresh full render includes the approved fade; MP3 measures
 playback checks pass. [The release record](BASEMENT-CIRCUIT-II.md) retains
 commands, exports and deployment handoff. Glass Current is the next suggested
 review, preserving its melodic identity and closing role.
+
+## Glass Current: Expression I
+
+David requested the next review after Basement Circuit II was published.
+[Expression I](../alternates/glass-expression-i/README.md) auditions a shorter
+Reese amp envelope while preserving its approved tone, motion, accents and
+pitch pattern. Separate phrase comparisons develop the quiet reflection,
+later lead answers and receding calm return, with existing patches fixed.
+The complete candidate combines those ideas in one shared game/album pool.
+
+Review retains the paper kit and fill, kick/sub roles, quiet riser, minor pads,
+FM pluck and restrained lead. The opening theme and final D-minor harmony stay.
+Longer written gates leave the original percussive voices room to decay; they
+do not turn those patches into sustained instruments. Sources reproduce across
+all 27 generated files. Four contextual pairs and both full versions are being
+rendered for review; maintained scores and public audio await listening approval.
