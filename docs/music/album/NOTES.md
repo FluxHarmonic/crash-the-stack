@@ -223,3 +223,12 @@ syncopated two-bar guitar/bass call and reply, selected kick accents, deliberate
 stops and phrase-ending variations. It retains the Style III patches and exact
 bent-lead/snare/hat/tom performance. Short A/B and complete revised demo await
 feedback; full song development remains pending the chosen direction.
+
+## 2026-09-23 — Fault Line bass identity and continuous entrance
+
+David approved the syncopated groove and requested removal of the pre-solo stall,
+an independent bass line and more low-end body. [Style V](../alternates/fault-line-flow-v/README.md)
+preserves the established guitar writing outside the entrance, replaces the
+long-chord pause with forward motion, and gives the picked bass low D anchors,
+fifth/octave answers, passing notes and a clean fundamental layer. The bent solo
+and accepted kit performances remain exact. Full short demo and A/B await feedback.

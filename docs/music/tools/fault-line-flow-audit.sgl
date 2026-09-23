@@ -1,0 +1,78 @@
+#!/usr/bin/env sigil
+;;; Verify independent bass, the shorter entrance gaps and protected performances.
+(import (sigil list))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define DIRECTORY "docs/music/alternates/fault-line-flow-v")
+(define (attacks ts)
+  (filter (lambda (t) (= (list-ref t 5) 1)) ts))
+(define (transition-gap score)
+  (let* ((p (list-find (lambda (p) (= (field p id:) 2))
+                       (cdr (child score 'patterns))))
+         (positions
+           (append
+             (map cadr
+               (filter
+                 (lambda (row)
+                   (let ((c (assoc 5 (cddr row))))
+                     (and c (not (member (cadr c) '("..." "==="))))))
+                 (skip p 5)))
+             (list (field p rows:)))))
+    (check (= (car positions) 0) "Entrance does not start with the riff")
+    (let loop ((previous (car positions)) (rest (cdr positions)) (largest 0))
+      (if (null? rest)
+          largest
+          (loop (car rest) (cdr rest) (max largest (- (car rest) previous)))))))
+
+(cli "fault-line-flow-audit" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (before (path (root) DIRECTORY "fault-line-before.cts"))
+           (after (path (root) DIRECTORY "fault-line-after.cts"))
+           (old (read-score before))
+           (new (read-score after))
+           (output (option-ref options 'output))
+           (bass (attacks (ticks motif after 4)))
+           (guitar (attacks (ticks motif after 5)))
+           (independent
+             (filter (lambda (b)
+                       (not (any (lambda (g) (= (car b) (car g))) guitar)))
+                     bass))
+           (start (round (* 44100 (/ (* 384 7.5) 126))))
+           (end (round (* 44100 (/ (* 448 7.5) 126))))
+           (outside
+             (lambda (ts)
+               (filter (lambda (t) (or (< (car t) start) (>= (car t) end))) ts))))
+      (each channel '(2 3 7 8)
+        (check (equal? (ticks motif before channel) (ticks motif after channel))
+               "Protected lead or kit performance changed"
+               channel))
+      (each channel '(1 5 6)
+        (check (equal? (outside (ticks motif before channel))
+                      (outside (ticks motif after channel)))
+               "Approved groove changed outside the transition"
+               channel))
+      (each inst (cdr (child old 'instruments))
+        (unless (= (field inst id:) 4)
+          (check
+            (equal? inst
+              (list-find (lambda (i) (= (field i id:) (field inst id:)))
+                         (cdr (child new 'instruments))))
+            "Non-bass instrument changed"
+            (field inst id:))))
+      (check (> (length independent) (/ (length bass) 3))
+             "Bass still mostly shadows guitar attacks")
+      (check (<= (transition-gap new) 6) "Entrance still has a long riff gap")
+      (ensure-directory output)
+      (write-json-file (path output "flow-checks.json")
+        (dict bass_attacks: (length bass)
+              bass_attacks_between_guitar_strikes: (length independent)
+              lowest_bass_hz: (apply min (map (lambda (t) (list-ref t 2)) bass))
+              old_maximum_transition_gap_rows: (transition-gap old)
+              new_maximum_transition_gap_rows: (transition-gap new)
+              lead_and_kit_ticks_preserved: #t
+              kick_and_guitars_preserved_outside_transition: #t
+              non_bass_instruments_preserved: #t))
+      (println "Independent bass, moving entrance and protected performances passed."))))
