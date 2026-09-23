@@ -125,7 +125,7 @@ const results = [];
 // much (its first ping alone peaks near 0.1 at gain 0.35; a muted cue gives 0)
 const AUDIO_AMBIENT = 0.02;
 const AUDIO_RISE = 0.04;
-const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "hub", "code", "daily", "scores", "music", "manifest", "console"];
+const planned = ["imports", "boot", "render", "tap-select", "tap-match", "keys-match", "tools", "menu", "removed", "assets", "hud", "traced", "bar", "reload", "audio", "update", "title", "preload", "slow-link", "menu-return", "screens", "settings", "pause", "run", "jack-in-early", "hub", "code", "daily", "scores", "music", "manifest", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
@@ -2079,6 +2079,15 @@ async function downTo(order, id, at = 0) {
       const top = await menuOn("top", m0);
       if (!top) detail = "BACK TO MENU did not open the main menu";
       else {
+        // The fade asserted below is only a fact if something was playing to
+        // fade. Leaving the board fades the BOARD's tune, and the driver opens
+        // the next track only once that fade has finished, so on a fast machine
+        // the theme is still closed when the tap lands and "no fade" says
+        // nothing about the entry screen (the remote gate read exactly that,
+        // 2026-09-23). This leg waits for the theme and then holds the entry
+        // screen to silencing it; the other order — a tap that beats the theme
+        // open — is its own leg, jack-in-early.
+        const themeOn = await waitLine(/^crash: music open black-glass-title /, m0, 12000);
         m0 = consoleLines.length;
         await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
         // D65: JACK IN opens the difficulty pick (EASY NORMAL ELITE BACK), NORMAL preselected
@@ -2101,6 +2110,7 @@ async function downTo(order, id, at = 0) {
           const picked = opened && await waitLine(/^crash: music pick (\S+) seed (\d+) for hub$/, m0, 12000);
           if (!start) detail = "NORMAL on the pick started no run at normal";
           else if (!opened) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+          else if (!themeOn) detail = "the main menu never opened its theme, so the entry screen had nothing to fade (this leg needs it playing; the other order is jack-in-early)";
           else if (!faded) detail = "the entry screen did not fade the menu theme out (no \"crash: music fade out\")";
           else if (!picked) detail = "the hub picked no tune (no \"crash: music pick ... for hub\")";
           else if (!HUB_POOL.includes(picked.m[1])) detail = `the hub picked ${picked.m[1]}, which is not one of ${HUB_POOL.join(", ")}`;
@@ -2181,6 +2191,68 @@ async function downTo(order, id, at = 0) {
   }
   if (detail) fail("run", detail);
   else pass("run", `JACK IN opened the hub on ${hubTune} (picked from the run's seed, the menu theme faded first); DISCONNECT landed on CONTINUE, which resumed it; node 0's launch ${launch.m[1]} dealt the board of that code and its demo clear brought the hub back at beat ${back.m[1]} with the key; node 1 launches ${launch1.m[1]}`);
+}
+
+// jack-in-early (2026-09-23): a player taps JACK IN before the menu theme
+// has opened. Leaving the board fades the board's tune, and the driver opens
+// nothing while a fade is running, so on a fast machine the menu theme is
+// still WANTED but not open when the tap lands — the remote gate hit this
+// order by itself. What must then happen is that the want dies with the
+// screen: the hub gets its own tune and the menu theme never opens on top of
+// it. The driver recomputes `want` from the current screen every frame and
+// keeps no queue, so nothing can arrive late; this leg holds it to that.
+// If the theme did open before the tap, the case was not exercised (a slower
+// machine) and the leg says so rather than passing on the easy path — the
+// `run` leg above covers that order.
+{
+  let detail = "", note = "";
+  const from = consoleLines.length;
+  await navigate(`http://127.0.0.1:${PORT}/index.html?trace&stack&fresh&seed=1`);
+  const booted = await waitLine(BOOT_ANY, from, 20000);
+  if (!booted) detail = "no boot line";
+  else if (!(await waitLine(/^crash: boot done /, from, 20000))) detail = "no \"crash: boot done\"";
+  let hubOpen = null, picked = null, hubHeard = null, late = [];
+  if (!detail) {
+    let m0 = consoleLines.length;
+    await press("Escape");
+    const p = await menuOn("pause", m0);
+    if (!p) detail = "no overlay on the board";
+    else {
+      m0 = consoleLines.length;
+      await tap(p.rows["back-to-menu"].x, p.rows["back-to-menu"].y);
+      const top = await menuOn("top", m0);
+      if (!top) detail = "BACK TO MENU did not open the main menu";
+      else {
+        // no wait here: the point of the leg is to beat the theme open
+        const before = consoleLines.length;
+        await tap(top.rows["jack-in"].x, top.rows["jack-in"].y);
+        const pick = await menuOn("jack-in", before);
+        if (!pick) detail = "JACK IN opened no difficulty pick";
+        else {
+          await tap(pick.rows["normal"].x, pick.rows["normal"].y);
+          const start = await waitLine(/^crash: run start (\d+) ([0-9A-Z]{10}) normal$/, before, 5000);
+          hubOpen = start && await waitLine(/^crash: hub open 1 0 keys 0 cleared 0$/, before, 5000);
+          const themeFirst = hubOpen && consoleLines.slice(before, hubOpen.index)
+            .some((l) => /^crash: music open black-glass-title /.test(l));
+          picked = hubOpen && await waitLine(/^crash: music pick (\S+) seed (\d+) for hub$/, before, 12000);
+          hubHeard = picked && await waitLine(new RegExp(`^crash: music open ${picked.m[1]} `), picked.index, 12000);
+          // the theme's want is dead: give it longer than any fade or fetch
+          // would need and read what opened in that time
+          await sleep(6000);
+          late = hubOpen ? consoleLines.slice(hubOpen.index).filter((l) => /^crash: music open black-glass-title /.test(l)) : [];
+          if (!start) detail = "NORMAL on the pick started no run at normal";
+          else if (!hubOpen) detail = "JACK IN did not open the hub on layer 1 at beat 0";
+          else if (themeFirst) note = "the menu theme opened before the tap landed, so the pending case was not exercised on this machine (the `run` leg covers that order)";
+          else if (!picked) detail = "the hub picked no tune (no \"crash: music pick ... for hub\")";
+          else if (!hubHeard) detail = `the hub picked ${picked.m[1]} but never opened it`;
+          else if (late.length) detail = `the menu theme opened inside the hub after the entry screen dropped it: ${late[0]}`;
+        }
+      }
+    }
+  }
+  if (detail) fail("jack-in-early", detail);
+  else if (note) skip("jack-in-early", note);
+  else pass("jack-in-early", `JACK IN beat the menu theme open: the theme never opened, the hub opened on ${picked.m[1]} from the run's seed, and 6 s later no "crash: music open black-glass-title" had arrived (the pending open died with the screen)`);
 }
 
 // hub (P5, D60, D65): the world moves on the beat and takes one action per
