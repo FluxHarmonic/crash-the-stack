@@ -2,7 +2,7 @@
 
 David liked the Style VI bass in isolation but found it disconnected from the
 rhythm guitar in the mix. This pass changes only the bass performance. Every
-patch, instrument level, bus setting, drum part, guitar part and lead bend stays
+patch, instrument level, drum part, guitar part and lead bend stays
 as in VI. The moving entrance and finite 49.524-second layout remain intact.
 
 The previous bass often attacked during guitar releases and missed the open
@@ -45,7 +45,7 @@ sigil docs/music/tools/expression-render.sgl --stage native \
   --motif "$PWD/build/dev/bin/motif" --output /absolute/fresh/artifacts
 sigil docs/music/tools/expression-render.sgl --stage delivery \
   --input "$PWD/docs/music/alternates/fault-line-bass-lock-vii" \
-  --gain-db -1.9 --output /absolute/fresh/artifacts
+  --gain-db -0.9 --output /absolute/fresh/artifacts
 ```
 
 The audit compares all seven non-bass compiled tick streams, the complete
@@ -54,7 +54,7 @@ attacks, their octave relationship and matching note-offs in the changed
 sections. The finite-score audit checks the playback clock and released gates.
 
 Renders, source snapshots, command arrays, renderer identity and measurements:
-`~/Ops/artifacts/crash-the-stack-album/fault-line-bass-lock-vii/`.
+`~/Ops/artifacts/crash-the-stack-album/fault-line-bass-lock-vii-delivery/`.
 This is still an audition; maintained game/album arrangements and public files
 are unchanged.
 
@@ -62,8 +62,11 @@ Validation completed: all seven generated source/map/manifest files reproduce
 exactly; all fifteen maintained songs regenerate. The finite audit reports 719
 attacks, zero sample-clock error and all final gates released.
 
-Native preflight found one full-mix accent at 0.0 dBTP. Bass attack levels in
-the revised sections were reduced by two tracker units before final delivery.
-Patch gains and all other channels remain unchanged. The rejected render is
-retained separately; final renders use the `fault-line-bass-lock-vii-final/`
-artifact directory.
+For native render headroom, BOTH references use compressor makeup 0 dB
+instead of VI's +1 dB. This is common output attenuation; compressor threshold,
+ratio, timing, patches and instrument gains are unchanged. The final chord
+reached full scale in the first native preflight. An interim bass velocity
+reduction did not fix it and was reverted. Final bass velocities are those of
+the intended VII arrangement. The two rejected preflights remain in the
+external `fault-line-bass-lock-vii/` and `fault-line-bass-lock-vii-final/`
+folders; only `fault-line-bass-lock-vii-delivery/` is delivered.

@@ -1,5 +1,5 @@
 (tune version: 1 name: "Fault Line" tempo: 126 speed: 3 channels: 8 meter: (8 4)
-  (bus reverb: zitarev size: 0.38 damp: 0.65 mix: 0.12 comp: on threshold: -12 ratio: 2 attack: 12 release: 110 makeup: 1)
+  (bus reverb: zitarev size: 0.38 damp: 0.65 mix: 0.12 comp: on threshold: -12 ratio: 2 attack: 12 release: 110 makeup: 0)
   (instruments
     (instrument id: 1 name: "rock-kick" patch: (chip-kick decay: 0.19 drive: 0.35 index: 1.4 sweep: 2 sweep-decay: 0.025) volume: 40 gain: 0.9 send: 0.02 pan: 0)
     (instrument id: 2 name: "rock-snare" patch: (chip-snare body: 0.55 crush-bits: 15 hp: 1700 noise: 0.35 noise-decay: 0.095) volume: 40 gain: 0.85 send: 0.08 pan: 0)
