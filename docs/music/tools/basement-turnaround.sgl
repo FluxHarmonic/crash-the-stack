@@ -1,0 +1,133 @@
+#!/usr/bin/env sigil
+;;; One two-bar turnaround, compared against the liked Expression I candidate.
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define (turnaround p)
+  (if (not (member (field p id:) '(10 13)))
+      p
+      (let ((result
+              (append (take p 5)
+                (filter
+                  (lambda (row) (pair? (cddr row)))
+                  (map
+                    (lambda (row)
+                      (append (take row 2)
+                        (filter
+                          (lambda (cell)
+                            (not (and (= (car cell) 6) (>= (cadr row) 208))))
+                          (cddr row))))
+                    (skip p 5))))))
+        ;; Keep the first half-bar verbatim, then breathe for two beats.
+        (set! result (put-cell result 208 (off 6)))
+        (each spec
+          '((224 "E-2" 30 "000")
+            (228 "D-2" 27 "308")
+            (232 "C-2" 27 "308")
+            (236 "B-1" 24 "308")
+            (240 "A-1" 30 "308"))
+          (set! result
+            (put-cell result (car spec)
+              (list 6 (cadr spec) 11 (caddr spec) (list-ref spec 3)))))
+        (each row '(229 230 231 233 234 235 237 238 239 241 242 243 244)
+          (set! result (put-cell result row '(6 "..." 0 0 "300"))))
+        (put-cell result 255 (off 6)))))
+
+(define (protected-events p)
+  (append (take p 5)
+    (filter
+      (lambda (row) (pair? (cddr row)))
+      (map
+        (lambda (row)
+          (append (take row 2)
+            (filter
+              (lambda (cell)
+                (not (and (member (field p id:) '(10 13))
+                          (>= (cadr row) 208)
+                          (= (car cell) 6))))
+              (cddr row))))
+        (skip p 5)))))
+
+(define (slice p start end)
+  (transform
+    (set-field
+      (append (take p 5)
+        (map
+          (lambda (row)
+            (append (list 'row (- (cadr row) start)) (cddr row)))
+          (filter (lambda (row) (<= start (cadr row) (- end 1)))
+                  (skip p 5))))
+      rows: (- end start))
+    unchanged))
+
+(cli "basement-turnaround" (script-args) '()
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (reference (path (root) "docs/music/alternates/basement-expression-i"))
+           (parts-file (path reference "parts-after.cts"))
+           (layout-file (path reference "arrangements.sgl"))
+           (parts (read-score parts-file))
+           (layout (read-score layout-file))
+           (arrangements (child layout 'arrangements))
+           (changed
+             (replace-child parts 'patterns
+               (cons 'patterns (map turnaround (cdr (child parts 'patterns)))))))
+      (ensure-directory output)
+      (each section '(instruments bus order history)
+        (check (equal? (child parts section) (child changed section))
+               "Protected section changed" section))
+      (each p (cdr (child parts 'patterns))
+        (check (equal? (protected-events p)
+                       (protected-events (pattern changed (field p id:))))
+               "Backing or preceding phrase changed" (field p id:)))
+      (write-canonical motif (path output "parts-before.cts") parts)
+      (write-canonical motif (path output "parts-after.cts") changed)
+      (let ((destination (path output "arrangements.sgl")))
+        (if (file? destination)
+            (check (equal? (read-text destination) (read-text layout-file))
+                   "Refusing to overwrite differing layout")
+            (copy-file layout-file destination)))
+      (each spec '((album "basement-circuit-after")
+                   (game "basement-circuit-game-after"))
+        (let ((arrangement (child arrangements (car spec))))
+          (write-canonical motif (path output (str (cadr spec) ".cts"))
+                           (build-song-score changed layout arrangement))))
+      (each variant (list (list "before" parts) (list "after" changed))
+        (let* ((score (build-song-score (cadr variant) layout (child arrangements 'album)))
+               (sections
+                 (list
+                   (list "Two-bar lead-in, then two-bar turnaround"
+                         (slice (pattern score 12) 128 256))
+                   (list "First two bars of the calm reprise"
+                         (slice (pattern score 13) 0 64))
+                   (list "Two-bar release / comparison gap" (phrase-rows 64 '())))))
+          (write-album motif output (str "turn-" (car variant)) "Basement Circuit"
+            score sections
+            '("parts-before.cts" "parts-after.cts" "arrangements.sgl")
+            "Turnaround I: Expression I baseline, only the final acid call/breath/answer differs."
+            "Identical patches and backing; fresh renderer state and common gain per half."
+            "2026-09-23")))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Basement Circuit - Turnaround I"
+              before_stem: "turn-before"
+              after_stem: "turn-after"
+              half_seconds: (/ (* 256 7.5) 124)
+              changed_phrase_seconds: (/ (* 64 7.5) 124)
+              first_changed_event_seconds: (/ (* 80 7.5) 124)
+              reprise_seconds: (/ (* 128 7.5) 124)))
+      (write-json-file (path output "source-checks.json")
+        (dict expression_i_parts_sha256: (song-hash parts-file)
+              layout_sha256: (song-hash layout-file)
+              candidate_parts_sha256: (song-hash (path output "parts-after.cts"))
+              shared_phrase_ids: '(10 13)
+              changed_channel: 6
+              changed_rows: '(208 255)
+              patches_backing_bus_and_clock_unchanged: #t
+              game_and_album_candidates_synchronized: #t))
+      (display "Short turnaround A/B and synchronized candidates ready.\n"))))

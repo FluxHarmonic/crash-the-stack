@@ -358,3 +358,13 @@ measure -16.7 LUFS-I/-2.9 dBTP with one common -0.5 dB monitoring gain. Native
 timing, original fill grid, game loop, endings, encoded peaks and all fifteen
 source checks pass. All 28 generated audition files reproduce exactly. No
 maintained song or public release is replaced pending listening choices.
+
+## Basement Circuit: final turnaround audition
+
+David likes Expression I's full candidate and its more melodic phrasing. He
+requested a short comparison of a final acid turnaround into the calm reprise.
+[Turnaround I](../alternates/basement-turnaround-i/README.md) keeps Expression I
+as both halves' baseline. It preserves the opening figure, adds a two-beat breath,
+and descends E–D–C–B–A through a connected slide before the existing reprise.
+Only that late acid passage changes; the paired game/album candidates share it.
+This is a short listening experiment, not adoption or publication.
