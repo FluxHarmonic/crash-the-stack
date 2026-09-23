@@ -104,3 +104,6 @@ David approved these changes and the ending, then authorized release. The
 maintained shared pool and both generated arrangements now match this audition
 exactly. All fifteen source checks pass. See
 [Glass Current II](../../album/GLASS-CURRENT-II.md) for mastering and publication.
+
+Glass Current II is now mastered and published. Telegram 1170 contains the
+full master; the release record above preserves exports and verification.

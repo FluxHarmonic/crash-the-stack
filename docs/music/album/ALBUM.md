@@ -28,7 +28,7 @@ process.
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
 | 13 | Breach Vector | Phrases I and Percussion I approved; shared game/album source | 3:30 actual |
 | 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |
-| 15 | Glass Current | Album II approved and synchronized; release in progress | 3:57 actual |
+| 15 | Glass Current | Album II approved, synchronized and published | 3:57 actual |
 
 Durations guide the form, not the number of repetitions. First establish the
 quiet and heavy extremes with Quiet Array and Black Glass, then use listening

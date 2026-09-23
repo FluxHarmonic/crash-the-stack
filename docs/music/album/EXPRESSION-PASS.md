@@ -436,3 +436,9 @@ arrangements match the audition exactly, and all fifteen regeneration checks
 pass. Retain the existing mastering level; the musical pass is finished.
 [Glass Current II](GLASS-CURRENT-II.md) records release progress. Sector Drift
 is the next suggested review.
+
+Glass Current II is now mastered and published, with full OGG delivered as
+Telegram 1170. The existing 0 dB mastering gain is retained; MP3 measures
+-16.2 LUFS-I/-2.3 dBTP. Source checks, exports and fresh-browser playback pass.
+[The release record](GLASS-CURRENT-II.md) retains provenance and the next game
+deployment handoff. Sector Drift is the next suggested review.
