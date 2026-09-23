@@ -13,7 +13,7 @@ The first was the name. Crash The Stack stays. It's a nod to my favorite movie, 
 
 The second was the shape. Where the draft had a "collection with modes," I asked: what if the collection was the overworld of the game, the thing that ties everything together, and the stack games were the actual hacking mechanics? You're a hacker. The games are the hacks. That one sentence turned a bundle into a game, and everything since has been built on it.
 
-The third was about me. The draft assumed I'd hand-write the rules module myself, as I had three times before. I declined. I'd forgotten how I'd written it the previous times, and honestly I wasn't sure I had the mental energy to do it a fourth. What I chose instead was to review all of the code. Every line, every build, every decision about what stays. My thinking was: if I review and put my personal touch on everything, it will feel more like mine. That became the rule for every phase of the project, and it's the reason the [About page](/about/) says what it says about how this was made.
+The third was about me. I'd written this rules code three times already, and writing it a fourth time by hand was exactly the slog that killed the first three tries. So I chose not to. The agents type; I direct. I decide what the game is, I play every build, and I review all of the art and music myself. That became the rule for every phase of the project, and it's the reason the [About page](/about/) says what it says about how this was made.
 
 ## What I wouldn't change
 
@@ -25,9 +25,7 @@ Some smaller rulings from the same day that I still like: tap, not drag. Keep th
 
 The afternoon was the plan: phases, each with a gate the build has to pass before I look at it, and a review before anything counts as done. Two decisions from that afternoon shaped everything after.
 
-We went web first. Not because the web is the target (it is one of them), but because a hosted build meant I could test on my phone whenever I was away from the computer. Every phase since has ended with me playing it on the phone and sending notes back.
-
-And we picked 640 pixels wide as the first thing to try, without assuming it was right. It was.
+We went web first. Not because the web is the only target (it is one of them), but because a hosted build meant I could easily test on my phone whenever I was away from the computer. Every phase since has ended with me playing it on the phone and sending notes back.
 
 The keyboard was the one thing I refused to decide on paper. Three models for moving around a 2D tile layout: a cursor, typed coordinates, and typing the glyph on the tile you want. All three got built and I played them. Typing the glyph felt like cheating. Coordinates were too hard to scan. What survived is a hint mode that lights the pairs you can play, with a cursor as the backup. Played, not argued.
 

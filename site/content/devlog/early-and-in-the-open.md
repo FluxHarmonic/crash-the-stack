@@ -27,6 +27,6 @@ The music is three tunes written in the game's own tracker. The tracker ships in
 
 ## How it was made
 
-I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I review all of it, I play every build, and I decide what stays. The design, the art direction and the opinions are mine. If the use of AI is dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
+I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I direct every decision, I play every build, I review the art and the music, and I decide what stays. The design, the art direction and the opinions are mine. If the use of AI is dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
 
 The [About page](/about/) has the licences and the rest, and the earlier posts here tell the story of how it got to this point, starting with the version I wrote by hand in 2020. Thanks for playing.

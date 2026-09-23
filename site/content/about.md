@@ -14,7 +14,7 @@ Every mode keeps its classic's core rules exactly. If you know Mahjongg solitair
 
 ## How it was made
 
-I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I review all of it, I play every build, and I decide what stays. The design, the art direction and the opinions are mine. If the use of AI is dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
+I designed this game and I direct every part of how it's built. AI agents write most of the code from my direction; I direct every decision, I play every build, I review the art and the music, and I decide what stays. The design, the art direction and the opinions are mine. If the use of AI is dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.
 
 The game is written in [Sigil](https://usesigil.org), my own Scheme, for the desktop and the web from one codebase. The [devlog](/devlog/) tells the story from the first version in 2020 to this one.
 
