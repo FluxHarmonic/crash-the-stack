@@ -68,6 +68,11 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((r, j) => { ws.addEventListener("open", r); ws.addEventListener("error", j); });
 await send("Page.enable"); await send("Runtime.enable");
+if (process.env.PHONE) {   // PHONE=1: the viewport a phone player has
+  await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+  await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
+  await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "coarse" }, { name: "hover", value: "none" }] });
+}
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?${query}` });
 for (let i = 0; i < 400 && !hit; i++) await sleep(50);
 if (!hit) { console.log(`no line matching ${reIn}; saw ${lines.length} lines`); done(1); }
