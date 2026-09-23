@@ -183,3 +183,17 @@ instrument 19 output gain, plus Breach Vector's approved instrument 2. Verify
 Motif instrument-gain support in the game dependency before Relay's backport.
 Preserve the game's marks, loops, calm/tense behavior and SFX headroom. Album
 mastering gain/limiting belongs to the listening release, not this asset sync.
+
+## 2026-09-23 — New rock and synthwave style auditions
+
+David requested a guitar/bass/drum-kit rock track with optional polished retro
+FM character, plus a retrowave/synthwave track with big drums and thick pads.
+He chose **After Image** for the latter and explicitly requested short demos
+first. The rock working title is **Fault Line**. These new candidates do not
+change the fifteen-track album order or any maintained game/album song.
+
+The finite 26-bar sketches, section maps, instrument rationale and reproduction
+process are preserved in [rock-wave-sketches-i](../alternates/rock-wave-sketches-i/README.md).
+The Sigil composer and delivery tool are under docs/music/tools/. Rendered WAVs
+and OGGs live at ~/Ops/artifacts/crash-the-stack-album/rock-wave-sketches-i-final/.
+Full arrangements and synchronized game/album sources await style feedback.

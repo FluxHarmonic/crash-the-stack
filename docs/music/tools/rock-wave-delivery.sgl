@@ -1,0 +1,103 @@
+#!/usr/bin/env sigil
+;;; Encode the short style demos from verified native render snapshots.
+(import (sigil json))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+
+(define DEMOS
+  '(("fault-line" "Fault Line" 126)
+    ("after-image" "After Image" 108)))
+
+(define (last-number text marker)
+  (let ((matches
+          (filter (lambda (line) (contains? line marker))
+                  (split text "\n"))))
+    (check (pair? matches) "Missing audio measurement" marker)
+    (string->number
+      (car
+        (filter (lambda (s) (not (equal? s "")))
+                (split (trim (cadr (split (car (reverse matches)) marker)))
+                       " "))))))
+
+(define (measure file output stem)
+  (let ((levels (path output (str stem "-levels.txt")))
+        (ending (path output (str stem "-ending.txt"))))
+    ($ ffmpeg -hide_banner -nostats -i ,file
+       -af "ebur128=peak=true" -f null - err: ,levels)
+    ($ ffmpeg -hide_banner -nostats -sseof -1 -i ,file
+       -af volumedetect -f null - err: ,ending)
+    (list (last-number (read-text levels) "    I:")
+          (last-number (read-text levels) "    Peak:")
+          (last-number (read-text ending) "max_volume:"))))
+
+(define (check-format file bpm)
+  (let* ((probe
+           (json ffprobe -v error -show_format -show_streams -of json ,file))
+         (stream (array-ref (dict-ref probe streams:) 0))
+         (duration
+           (string->number (dict-ref (dict-ref probe format:) duration:))))
+    (check (and (= (dict-ref stream channels:) 2)
+                (equal? (dict-ref stream sample_rate:) "44100")
+                (< (abs (- duration (/ (* 26 32 7.5) bpm))) 0.001))
+           "Unexpected demo duration or format"
+           file)
+    duration))
+
+(define (encode output demo)
+  (let* ((stem (car demo))
+         (title (cadr demo))
+         (bpm (caddr demo))
+         (source
+           (path (root) "docs/music/alternates/rock-wave-sketches-i"
+                 (str stem ".cts")))
+         (snapshot (path output (str stem ".cts")))
+         (wav (path output (str stem ".wav")))
+         (ogg (path output "ogg" (str stem ".ogg"))))
+    (check (equal? (read-text source) (read-text snapshot))
+           "Native source differs from frozen demo"
+           stem)
+    (check (equal? (read-text (path output (str stem "-complete.sha256")))
+                  (str (out sha256sum ,wav) "\n"))
+           "Native render checksum mismatch"
+           stem)
+    (check-format wav bpm)
+    (let* ((native (measure wav output (str stem "-native")))
+           ;; Different compositions: monitor near -17 LUFS where peak room allows.
+           ;; Gain only. Leave transient behavior intact; do not add a limiter.
+           (gain (min (- -17 (car native)) (- -2 (cadr native)))))
+      (check (<= (cadr native) -0.1) "Native render clips" stem)
+      ($ ffmpeg -v error -nostdin -n -i ,wav
+         -af ,(str "volume=" (number->string gain) "dB")
+         -c:a libvorbis -q:a 7
+         -metadata ,(str "title=" title)
+         -metadata "artist=David Wilson"
+         -metadata "album=Crash The Stack - Style Demos"
+         -metadata "comment=Short style audition I; not a finished album arrangement."
+         ,ogg)
+      (let ((encoded (measure ogg output (str stem "-ogg")))
+            (duration (check-format ogg bpm)))
+        (check (<= (cadr encoded) -1) "Encoded true peak exceeds ceiling" stem)
+        (check (<= (caddr encoded) -70) "Ending has not decayed" stem)
+        (dict title: title
+              duration_seconds: duration
+              native_lufs: (car native)
+              native_true_peak_dbtp: (cadr native)
+              monitoring_gain_db: gain
+              integrated_lufs: (car encoded)
+              true_peak_dbtp: (cadr encoded)
+              ending_peak_dbfs: (caddr encoded)
+              source_sha256: (out sha256sum ,source)
+              ogg_sha256: (out sha256sum ,ogg))))))
+
+(cli "rock-wave-delivery" (script-args) '()
+  (lambda (options)
+    (let ((output (option-ref options 'output))
+          (motif (require-tool (option-ref options 'motif))))
+      (check (equal? (read-text (path output "renderer.sha256"))
+                    (str (out sha256sum ,motif) "\n"))
+             "Renderer identity changed")
+      (ensure-directory (path output "ogg"))
+      (write-json-file (path output "delivery-checks.json")
+                      (list->array (map (lambda (demo) (encode output demo)) DEMOS)))
+    (println "Both short demos passed delivery checks."))))
