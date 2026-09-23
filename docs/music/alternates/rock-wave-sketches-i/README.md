@@ -73,3 +73,21 @@ canonical score, sixteenth-note attack grid, source versus compiled attack
 positions, eight-voice channel budget, explicit final note-offs and a two-bar
 release tail. Numerical checks do not establish subjective listening quality.
 All fifteen maintained-song regeneration checks pass.
+
+## Delivered review copies
+
+Source commit: **306672e**. All four generated score/map files reproduce exactly.
+Fault Line has 585 compiled attacks; After Image has 468. Both have zero sample
+clock error, no 32nd-note attacks, released final gates and passing voice budgets.
+The OGGs retain the expected duration and stereo 44.1 kHz format.
+
+| Demo | Gain | OGG LUFS-I | OGG dBTP | Last-second peak | Telegram |
+|---|---:|---:|---:|---:|---:|
+| Fault Line | +0.1 dB | -19.6 | -2.1 | -91 dBFS | 1175 |
+| After Image | +2.7 dB | -18.4 | -2.0 | -91 dBFS | 1176 |
+
+Telegram acknowledged both complete short demos. The external final folder
+contains receipt log, render argv, score/WAV/renderer hashes, level and ending
+measurements, audit script and all fifteen maintained-song check logs.
+`delivery-checks.json` preserves source and delivered OGG hashes here as well.
+Listening feedback remains the next step; no public audio has changed.
