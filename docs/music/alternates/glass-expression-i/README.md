@@ -99,3 +99,8 @@ SHA-256 f68c6737ccd25946e3b6135c6a75c18ac4c5318f511faa9216084c8d12d1d842.
 The official expression renderer verifies exact source and renderer identity
 before reusing the completed native files. Source hashes, exact commands,
 measurements, audits, worker scripts and delivery receipts are preserved there.
+
+David approved these changes and the ending, then authorized release. The
+maintained shared pool and both generated arrangements now match this audition
+exactly. All fifteen source checks pass. See
+[Glass Current II](../../album/GLASS-CURRENT-II.md) for mastering and publication.

@@ -429,3 +429,10 @@ LUFS-I, both -2.6 dBTP, with one common -0.5 dB gain. Native timing, game B08,
 encoded peaks/durations/endings, all fifteen source checks and all 27 audition
 reproduction checks pass. Listening approval is pending; the maintained songs
 and public album remain unchanged.
+
+David approved Glass Current Expression I as more musically coherent, liked
+the ending and authorized release. The approved pool is adopted, both generated
+arrangements match the audition exactly, and all fifteen regeneration checks
+pass. Retain the existing mastering level; the musical pass is finished.
+[Glass Current II](GLASS-CURRENT-II.md) records release progress. Sector Drift
+is the next suggested review.
