@@ -328,3 +328,10 @@ approved candidates exactly, including the three reconciled reed entry gates.
 Basement Circuit is the suggested next review: consider its acid phrasing and
 patch articulation while preserving the restrained drums, softened transition
 swell and reduced late bass balance.
+
+Dirty Cache II is now mastered and published. The release retains its previous
+-1.5 dB mastering gain; MP3 measures -16.3 LUFS-I/-2.6 dBTP. Shared game/album
+sources, all fifteen regeneration checks and fresh-browser album playback pass.
+Telegram message 1160 contains the full master. [The release record](DIRTY-CACHE-II.md)
+retains provenance, exports, publication evidence and the next deployment handoff.
+Basement Circuit is next, with explicit instrument and phrase review.
