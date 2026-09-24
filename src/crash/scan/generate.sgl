@@ -121,7 +121,9 @@
       (try default: 0 mutable: #t)             ; placements dealt so far, minus one
       (perturbs default: 0 mutable: #t)        ; perturbations so far
       (rng default: 1 mutable: #t)             ; the perturbation stream's state
-      (fresh default: #f mutable: #t)          ; a placement dealt, its solver not started yet
+      (placed default: #f mutable: #t)         ; a placement's ICE vector, its segment not built yet
+      (fresh default: #f mutable: #t)          ; a placement's segment, its solver not started yet
+      (stuck? default: #f mutable: #t)         ; the solver is stuck: the next unit perturbs
       (solver default: #f mutable: #t)
       (pure? default: #t mutable: #t)          ; the solver's run has seen no perturbation
       (status default: 'running mutable: #t)   ; running | done | failed
@@ -181,28 +183,45 @@
                    (gen-version g)
                    (gen-suspects? g)))
 
-    ;; Deal placement k and start a pure run on it.
+    ;; Deal placement k (gen-try), a pure run on it to come. A placement
+    ;; comes in three units of its own (D81: the grain): the
+    ;; shuffle, the segment built from it, the solver started on it.
     (define (deal-placement! g)
-      (let ((seg (gen-segment g (place-from (gen-cands g)
-                                            (* (gen-w g) (gen-h g))
-                                            (gen-m g)
-                                            (gen-seed g)
-                                            (gen-try g)))))
-        (set-gen-fresh! g seg)
-        (set-gen-solver! g #f)
-        (set-gen-pure?! g #t)))
+      (set-gen-placed! g (place-from (gen-cands g)
+                                     (* (gen-w g) (gen-h g))
+                                     (gen-m g)
+                                     (gen-seed g)
+                                     (gen-try g)))
+      (set-gen-solver! g #f)
+      (set-gen-pure?! g #t))
 
-    ;; The placement's solver starts in a unit of its own (D81: the grain).
+    (define (build-placed! g)
+      (set-gen-fresh! g (gen-segment g (gen-placed g)))
+      (set-gen-placed! g #f))
+
     (define (start-fresh! g)
       (set-gen-solver! g (solve-start (gen-fresh g) (gen-first g)))
       (set-gen-fresh! g #f))
+
+    ;; A stuck solver's perturbation, a unit after the one that found it
+    ;; stuck; with nothing to move, the next placement, unless that would
+    ;; pass GEN-TRIES (no placement dealt to be dropped).
+    (define (unstick! g st)
+      (set-gen-stuck?! g #f)
+      (unless (perturb! g st)
+        (set-gen-try! g (+ 1 (gen-try g)))
+        (if (>= (scan-gen-try g) GEN-TRIES)
+            (set-gen-status! g 'failed)
+            (deal-placement! g))))
 
     ;; One unit of work.
     (define (scan-gen-step! g)
       (when (eq? (gen-status g) 'running)
         (set-gen-steps! g (+ 1 (gen-steps g)))
         (let ((st (gen-solver g)))
-          (cond ((gen-fresh g) (start-fresh! g))
+          (cond ((gen-placed g) (build-placed! g))
+                ((gen-fresh g) (start-fresh! g))
+                ((gen-stuck? g) (unstick! g st))
                 ((not st) (deal-placement! g))
                 ((>= (scan-gen-try g) GEN-TRIES) (set-gen-status! g 'failed))
                 (else
@@ -223,14 +242,7 @@
                         (begin
                           (set-gen-solver! g (solve-start (solver-seg st) (gen-first g)))
                           (set-gen-pure?! g #t))))
-                   ((stuck)
-                    (unless (perturb! g st)
-                      ;; nothing to move: the next placement, unless that
-                      ;; would pass GEN-TRIES (no placement dealt to be dropped)
-                      (set-gen-try! g (+ 1 (gen-try g)))
-                      (if (>= (scan-gen-try g) GEN-TRIES)
-                          (set-gen-status! g 'failed)
-                          (deal-placement! g))))
+                   ((stuck) (set-gen-stuck?! g #t))
                    (else #f))))))
       (gen-status g))
 

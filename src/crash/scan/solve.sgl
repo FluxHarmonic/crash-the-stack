@@ -202,6 +202,18 @@
         (record! st 'scan i rule)
         (reveal! st i)))
 
+    ;; Scan hosts in order, stopping once a scan has queued a flood (the
+    ;; flood is the next units' work, and the rest wait for it: a scan
+    ;; drains a pending flood first, which would put a whole flood back in
+    ;; one unit). #t when it stopped with hosts left.
+    (define (scan-each! st hosts rule)
+      (let loop ((hs hosts))
+        (cond ((null? hs) #f)
+              ((pair? (solver-flood st)) #t)
+              (else
+               (scan-step! st (car hs) rule)
+               (loop (cdr hs))))))
+
     (define (drain-flood! st)
       (let loop ()
         (when (pair? (solver-flood st))
@@ -265,7 +277,10 @@
              (hid (car c))
              (need (cdr c)))
         (cond ((null? hid) #f)
-              ((= need 0) (for-each (lambda (j) (scan-step! st j 'a)) hid))
+              ((= need 0)
+               ;; stopped by a flood: the rest after it drains
+               (when (scan-each! st hid 'a)
+                 (queue! st i)))
               ((= need (length hid)) (for-each (lambda (j) (flag-step! st j 'b)) hid))
               (else #f))))
 
@@ -318,7 +333,7 @@
                                 (diff (filter (lambda (c) (not (memv c (car a)))) (car b)))
                                 (d (- (caddr b) (caddr a))))
                            (cond ((= d 0)
-                                  (for-each (lambda (c) (scan-step! st c 'c)) diff)
+                                  (scan-each! st diff 'c)
                                   #t)
                                  ((= d (length diff))
                                   (for-each (lambda (c) (flag-step! st c 'c)) diff)
@@ -334,7 +349,7 @@
         (cond ((or (= left 0) (= left hidden))
                (let ((hs (filter (lambda (i) (hidden? st i)) (iota n))))
                  (if (= left 0)
-                     (for-each (lambda (i) (scan-step! st i 'd)) hs)
+                     (scan-each! st hs 'd)
                      (for-each (lambda (i) (flag-step! st i 'd)) hs))))
               (else (set-solver-status! st 'stuck)))))
 
