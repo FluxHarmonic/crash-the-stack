@@ -1,0 +1,33 @@
+;;; (crash scan open) - Open a SCAN board: the session, and a clear nursery.
+;;;
+;;; The deal runs on the first click, and a deal allocates enough to trigger
+;;; a minor collection mid-deal (it fills ~0.6 of the nursery at the median
+;;; and ~1.2 at p95 on the web release). A minor-GC pause was the long
+;;; frame of the first click: 50-64 ms on a desktop, 262-305 ms at a 6x
+;;; CPU throttle, against the 256 ms audio ring (D81). So a board opens
+;;; with a minor collection, before the uplink: the pause lands in the
+;;; board-open transition, and the click's deal starts on an empty nursery.
+;;; Measured on the web release, BACKBONE at 6x throttle: worst frame 47 ms
+;;; with it, 190 ms without (the leader approved this, 2026-09-25).
+;;;
+;;; Not in the rules family: it reads the collector. The shells open SCAN
+;;; boards through here, never through scan-session-new directly.
+
+(define-library (crash scan open)
+  (import (only (sigil gc) gc-minor-collect!)
+          (crash scan input))
+
+  (export scan-open scan-open-node)
+
+  (begin
+    ;; A FREE PLAY or daily board.
+    (define (scan-open preset seed version suspects? touch?)
+      (let ((s (scan-session-new preset seed version suspects? touch?)))
+        (gc-minor-collect!)
+        s))
+
+    ;; A node board (JACK IN).
+    (define (scan-open-node w h m seed touch?)
+      (let ((s (scan-session-node w h m seed touch?)))
+        (gc-minor-collect!)
+        s))))
