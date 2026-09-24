@@ -1,0 +1,130 @@
+#!/usr/bin/env sigil
+;;; Let the descending signal hand its last two notes to the existing vibes.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (channel-events p channel)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+      (skip p 5))))
+
+(define (melodic-outline p)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (map (lambda (cell) (take cell 3))
+            (filter attack? (cddr row)))))
+      (channel-events p 4))))
+
+(define (signal-reply p)
+  (let ((result
+          (transform p
+            (lambda (row cell)
+              (cond
+                ;; Remove old lead releases before installing the new gates.
+                ((and (= (car cell) 4)
+                      (member row '(12 20 28 36 60)))
+                 #f)
+                ;; Three brush ghosts and two watch ticks leave the answer room.
+                ((and (= (car cell) 3) (member row '(50 54 58))) #f)
+                ((and (= (car cell) 8) (member row '(50 58))) #f)
+                (else cell))))))
+    ;; Preserve the pitches/onsets. Broaden the opening, then articulate F-E-D.
+    (set! result
+      (add-notes result
+        '((8 4 "A-4" 9 28 6)
+          (16 4 "A#4" 9 27 5)
+          (24 4 "A-4" 9 25 3)
+          (32 4 "G-4" 9 27 6)
+          (40 4 "F-4" 9 29 3)
+          (44 4 "E-4" 9 25 3)
+          (48 4 "D-4" 9 29 3)
+          (56 4 "C#4" 9 22 3))))
+    ;; Echo F-E after the lead's descent; the original C#5 remains at row 62.
+    (add-notes result
+      '((52 5 "F-4" 5 18 2)
+        (56 5 "E-4" 5 17 2)))))
+
+(cli "shadow-protocol-audition" (script-args)
+  (list (option name: 'source long: "source" value: "FILE"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source
+             (or (option-ref options 'source)
+                 (path (root) "docs/music/album/shadow-protocol.cts")))
+           (score (read-score source))
+           (original (pattern score 12))
+           (following (pattern score 13))
+           (candidate (signal-reply original)))
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output)))
+             "Use a fresh external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Keep audition files outside the repository")
+      (check (and (= (field score tempo:) 96)
+                  (= (field score speed:) 6)
+                  (= (field original rows:) 64)
+                  (= (field following rows:) 64))
+             "Unexpected source phrase or clock")
+      (copy-file source (path output "source-album.cts"))
+      (each channel '(1 2 6 7)
+        (check (equal? (channel-events original channel)
+                       (channel-events candidate channel))
+               "Protected accompaniment changed" channel))
+      (check (equal? (melodic-outline original)
+                     (melodic-outline candidate))
+             "Lead pitches, onsets or instruments changed")
+      (each row (channel-events original 5)
+        (check (member row (channel-events candidate 5))
+               "Original vibes event changed" row))
+      (each variant '("before" "after")
+        (write-album motif output variant "Shadow Protocol"
+          score
+          (list
+            (list "Descending signal / four bars"
+                  (if (equal? variant "before") original candidate))
+            (list "Original lower-register return / four bars" following)
+            (list "Two release bars" (phrase-rows 32 '())))
+          '("source-album.cts")
+          "Signal reply I: shaped lead gates and accents, two vibes answers, five fewer percussion ghosts."
+          "Original melodic contour, onsets, unresolved ending, bass, kick, rim, pad, patches and mix retained."
+          "2026-09-24"))
+      (let ((before (read-score (path output "before.cts")))
+            (after (read-score (path output "after.cts"))))
+        (check
+          (equal? before
+            (replace-child after 'patterns (child before 'patterns)))
+          "Clock, instruments, bus or arrangement changed")
+        (each ident '(1 2)
+          (check (equal? (pattern before ident) (pattern after ident))
+                 "Following passage or release tail changed" ident)))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Shadow Protocol - Signal Reply I"
+              before_stem: "before"
+              after_stem: "after"
+              half_seconds: 25
+              source_album_pattern: 12
+              source_shared_phrase: 8
+              source_album_start_seconds: 125
+              changed_channels: '(3 4 5 8)
+              added_vibes_attacks: 2
+              removed_percussion_attacks: 5
+              first_changed_row: 12
+              first_change_in_ab_seconds: 26.875
+              vibes_reply_in_ab_seconds: 33.125
+              patch_changes: #f
+              maintained_sources_unchanged: #t))
+      (display "Shadow Protocol comparison ready outside the repository.\n"))))

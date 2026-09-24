@@ -19,12 +19,12 @@ process.
 | 3 | Relay Ghost | Album II mix approved; mastered for publication | 3:27 actual |
 | 4 | Closed Loop | Album II phrasing approved, synchronized and published | 3:16 actual |
 | 5 | Shadow Protocol | Composition liked; detail review open | 3:50 actual |
-| 6 | Blind Spot | Air pair I ready for listening | 3:15 actual |
+| 6 | Blind Spot | Album II approved; audio uploaded, ready for next site build | 3:15 actual |
 | 7 | Quiet Array | Composition liked; album-level trial promising | 4:05 actual |
 | 8 | Sector Drift | Album II approved, synchronized and published | 3:36 actual |
 | 9 | Dirty Cache | Album II phrasing approved, synchronized and published | 3:43 actual |
 | 10 | Basement Circuit | Album II approved, synchronized and published | 3:41 actual |
-| 11 | Dead Sector | Stone pair I ready for listening | 3:11 actual |
+| 11 | Dead Sector | Album II approved, synchronized and published | 3:29 actual |
 | 12 | Obsidian Index | Stone pair I ready for listening | 4:06 actual |
 | 13 | Breach Vector | Phrases I and Percussion I approved; shared game/album source | 3:30 actual |
 | 14 | Clock Edge | Edge pair I ready for listening | 3:34 actual |

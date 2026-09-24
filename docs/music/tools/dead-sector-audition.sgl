@@ -1,0 +1,233 @@
+#!/usr/bin/env sigil
+;;; Two independent short experiments; maintained arrangements are untouched.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (line p channel start instrument notes)
+  (let ((clean
+          (append (take p 5)
+            (filter
+              (lambda (row) (pair? (cddr row)))
+              (map
+                (lambda (row)
+                  (append (take row 2)
+                    (filter
+                      (lambda (cell)
+                        (not (and (= (car cell) channel)
+                                  (>= (cadr row) start))))
+                      (cddr row))))
+                (skip p 5))))))
+    (add-notes clean
+      (map
+        (lambda (note)
+          (list (car note) channel (cadr note) instrument
+                (caddr note) (list-ref note 3)))
+        notes))))
+
+(define (refine p)
+  ;; Preserve the opening four bars; connect the later answer and descent.
+  (line p 6 128 9
+    '((144 "G#3" 19 9)
+      (156 "B-3" 18 5)
+      (168 "C#4" 22 9)
+      (188 "B-3" 18 5)
+      (196 "G#3" 22 9)
+      (212 "F#3" 19 5)
+      (220 "E-3" 18 5)
+      (232 "D-3" 20 3)
+      (240 "C#3" 22 13))))
+
+(define (experiment p)
+  ;; A different call-and-response, preserving the existing kick/sub pulse.
+  (line
+    (line p 6 0 9
+      '((0 "C#4" 22 7)
+        (12 "G#3" 18 5)
+        (44 "E-4" 20 7)
+        (56 "D-4" 18 3)
+        (60 "C#4" 19 3)
+        (72 "G#3" 22 7)
+        (88 "B-3" 18 5)
+        (100 "D-4" 22 7)
+        (116 "C#4" 20 7)
+        (144 "G#3" 21 9)
+        (168 "B-3" 19 7)
+        (184 "C#4" 21 7)
+        (196 "E-4" 20 7)
+        (216 "D-4" 19 7)
+        (232 "C#4" 22 7)))
+    7 0 11
+    '((24 "C#5" 9 5)
+      (64 "C#5" 8 3)
+      (128 "C#5" 9 5)
+      (160 "G#4" 10 5)
+      (208 "E-4" 10 5)
+      (240 "C#4" 10 9))))
+
+(define (experimental-bank score)
+  (replace-child score 'instruments
+    (cons 'instruments
+      (append
+        (map
+          (lambda (instrument)
+            (case (field instrument id:)
+              ((2)
+               (append
+                 (set-field instrument patch:
+                   '(fm4-bell amp-attack: 0.001 amp-decay: 0.028
+                              amp-release: 0.008 amp-sustain: 0 index: 1.25))
+                 '(layers: ((chip-clap cutoff: 2400 decay: 0.012 gain: 0.24
+                                      hp: 1100 spacing: 0.004 volume: 0.3)))))
+              ((9)
+               (set-field instrument patch:
+                 '(fm4-stab cutoff: 1850 decay: 0.27 index: 2.1 release: 0.085)))
+              (else instrument)))
+          (cdr (child score 'instruments)))
+        '((instrument id: 11 name: "probe-reflection"
+            patch: (fm4-stab cutoff: 900 decay: 0.3 index: 1.6 release: 0.09)
+            volume: 23 gain: 0.65 send: 0.24 pan: -0.35))))))
+
+(define (channel-events p channel)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+      (skip p 5))))
+
+(define (context-bank score)
+  (let* ((original (cdr (child score 'instruments)))
+         (alternative (cdr (child (experimental-bank score) 'instruments))))
+    ;; Separate IDs keep the experimental patches local to their passage.
+    (replace-child score 'instruments
+      (cons 'instruments
+        (append original
+          (map
+            (lambda (mapping)
+              (set-field
+                (list-find
+                  (lambda (instrument)
+                    (= (field instrument id:) (car mapping)))
+                  alternative)
+                id:
+                (cadr mapping)))
+            '((11 11) (2 12) (9 13))))))))
+
+(define (context-experiment p)
+  (append (take p 5)
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (map
+            (lambda (cell)
+              (let ((mapping (assoc (caddr cell) '((2 12) (9 13)))))
+                (if mapping
+                    (append (take cell 2)
+                            (list (cadr mapping))
+                            (skip cell 3))
+                    cell)))
+            (cddr row))))
+      (skip p 5))))
+
+(define (write-context motif output score restrained experimental)
+  (let* ((corrected (put-cell restrained 232 '(6 "D#3" 9 20 "000")))
+         (bank (context-bank score))
+         (alternate (context-experiment experimental))
+         (return (pattern score 7)))
+    (write-album motif output "corrected-answer" "Dead Sector"
+      score
+      (list (list "Revised tense answer / D-sharp approach" corrected)
+            (list "Two release bars" (phrase-rows 64 '())))
+      '("source-parts.cts")
+      "Only the penultimate lead pitch differs from the restrained audition."
+      "D-sharp3 approaches C-sharp3; original bell and patches retained."
+      "2026-09-23")
+    (write-album motif output "alternate-context" "Dead Sector"
+      bank
+      (list (list "Revised second tense phrase" corrected)
+            (list "Proposed eight-bar experimental alternate" alternate)
+            (list "Return to original third tense phrase" return)
+            (list "Two release bars" (phrase-rows 64 '())))
+      '("source-parts.cts")
+      "One experimental passage between tense phrases two and three."
+      "Original patches return after the alternate; both maintained versions stay intact."
+      "2026-09-23")
+    (write-json-file (path output "context.json")
+      (dict title: "Dead Sector"
+            corrected_pitch_row: 232
+            corrected_pitch: "D#3"
+            standalone_duration_seconds: (/ 200.0 9)
+            context_duration_seconds: (/ 520.0 9)
+            alternate_start_seconds: (/ 160.0 9)
+            original_return_seconds: (/ 320.0 9)
+            proposed_album_insert_seconds: (/ 400.0 3)
+            added_bars: 8
+            maintained_sources_unchanged: #t))))
+
+(cli "dead-sector-audition" (script-args)
+  (list (option name: 'source long: "source" value: "FILE")
+        (option name: 'context long: "context"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source
+             (or (option-ref options 'source)
+                 (path (root) "docs/music/songs/dead-sector/parts.cts")))
+           (score (read-score source))
+           (original (pattern score 6))
+           (restrained (refine original))
+           (experimental (experiment original)))
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output)))
+             "Use a fresh external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Audition scores belong outside the repository")
+      (copy-file source (path output "source-parts.cts"))
+      (each channel '(1 2 3 4 5 8)
+        (each candidate (list restrained experimental)
+          (check (equal? (channel-events original channel)
+                         (channel-events candidate channel))
+                 "Backing performance changed" channel)))
+      (check (equal? (channel-events original 7)
+                     (channel-events restrained 7))
+             "Restrained bell changed")
+      (if (option-ref options 'context)
+          (write-context motif output score restrained experimental)
+          (each spec
+            (list (list "restrained" restrained score
+                        "Later answer: original patches, new final four-bar melody.")
+                  (list "experimental" experimental (experimental-bank score)
+                        "Metallic probe, contact backbeat and composed echo replies."))
+            (let ((directory (path output (car spec))))
+              (ensure-directory directory)
+              (each variant '("before" "after")
+                (let ((after? (equal? variant "after")))
+                  (write-album motif directory variant "Dead Sector"
+                    (if after? (list-ref spec 2) score)
+                    (list
+                      (list "Second tense phrase / eight bars"
+                            (if after? (cadr spec) original))
+                      (list "Two release bars" (phrase-rows 64 '())))
+                    '("source-parts.cts")
+                    (list-ref spec 3)
+                    "Original kick, bass, chord events, clock and bus retained."
+                    "2026-09-23")))
+              (write-json-file (path directory "comparison.json")
+                (dict title: (str "Dead Sector - " (car spec))
+                      before_stem: "before"
+                      after_stem: "after"
+                      half_seconds: (/ 200.0 9)
+                      source_phrase: 6
+                      changed_channels: (if (equal? (car spec) "restrained")
+                                            '(6) '(6 7))
+                      patch_ids: (if (equal? (car spec) "restrained")
+                                     '() '(2 9 11))
+                      description: (list-ref spec 3))))))
+      (display "External Dead Sector auditions are ready.\n"))))

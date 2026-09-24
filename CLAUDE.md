@@ -63,3 +63,21 @@ shared parts/layouts and both generated arrangements with their maps/receipts.
 Run the all-song regeneration check before completing music changes. Tracker
 edits are valid work: preserve and reconcile them, never overwrite them merely
 to make generation pass. Historical composers are retained for experiments.
+
+
+## Public music collateral
+
+Keep new audition scores, intermediate renders and measurement dumps outside the
+repository; do not add further audition snapshots under docs/music/alternates/.
+Keep maintained shared songs, generated game/album scores and concise process
+notes in Git. Existing audition notes may receive privacy corrections.
+
+Tracked documents and generated provenance use repository-relative paths or
+~/artifacts/<name>/ as a public artifact alias. Never record an operator's
+absolute home path or a private repository location. Actual local paths belong
+only in external working files.
+
+Before every commit, run scripts/history-scan --tree and read its final line.
+Zero secret lines and zero flagged file names are required. Fix any home-path
+or private artifact-location hits. The existing VPN address and interface
+references are permitted.

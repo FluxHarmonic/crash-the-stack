@@ -321,3 +321,167 @@ This supersedes the earlier candidate-only integration proposal: Defrag now
 includes it, with an existing tune override and short-trace developer option
 for immediate review. See ../FAULT-LINE-GAME.md. Album composition and mastering
 are unchanged; runtime integration is explicitly in scope for this step.
+
+## 2026-09-23: Clock Edge Expression I audition
+
+After the Fault Line game trial, David authorized resuming soundtrack polish
+with Clock Edge. The short [Expression I](../alternates/clock-expression-i/README.md)
+compares the original later tense phrase against a developed lead/bell answer,
+warmer held FM notes and shorter clap noise. The Room II ambience and backing
+performance are retained. Both halves measure -19.9 LUFS-I with no added gain;
+original starts at 0:00, candidate at 0:18.750. Telegram delivery is 1199.
+
+The candidate game and album share one proposed pool and explicit bank mapping.
+The first two bars of the selected phrase retain their notes; later answers
+resolve through the existing D-sharp minor, G-sharp minor and B harmony.
+Accepted sources stay unchanged pending listening feedback.
+
+David heard an unintended muted timbre during the first changed expression.
+[Expression II](../alternates/clock-expression-ii/README.md) removes the alternate
+anchor voice and restores the accepted focused lead patch on every note.
+Phrase development, gates, dynamics, bell replies and the proposed clap remain.
+Telegram delivery is 1200. Lesson: a darker patch on held notes can sound like
+a mistaken instrument change; preserve timbral identity while testing phrase
+articulation. Listening feedback on the correction is pending.
+
+David clarified that the audible change was the clap becoming a metallic click,
+and prefers the original clap because it sounds like a ticking clock. The earlier
+lead-anchor diagnosis was mistaken. Expression III restores the complete original
+instrument bank and retains only the proposed phrase edits, with the original
+opening two bars unchanged. Pending listening review; no accepted score changed.
+
+David finds Expression III less repetitive, but hears the line disappear after
+its rise. [Expression IV](../alternates/clock-expression-iv/README.md) keeps the
+answer above the bass/chord register and follows it through to a clearer cadence.
+Only the latter four bars of the lead differ from III; the original patches,
+ticking clap and bell replies remain. Register masking is a hypothesis to
+audition, not a confirmed cause. Both halves measure -19.9 LUFS-I; timing and
+release checks pass. Original at 0:00, candidate at 0:18.750, revised answer at
+0:26.250. Telegram delivery is 1202. No maintained or published track changed.
+
+David likes Expression IV's lead improvement, but the metallic fifth-to-root
+part loses its purpose toward the end. [Expression V](../alternates/clock-expression-v/README.md)
+retains that lead exactly and restores the bell's paired answers through the
+harmony, with a final fifth-third-root descent. Instrument patches and the
+ticking clap stay unchanged. Compare IV at 0:00 against V at 0:18.750; only the
+bell changes between halves. Timing, release and all-sixteen-song regeneration
+checks pass. Matched halves are -19.9 LUFS-I; Telegram delivery is 1203.
+Bell approval is pending. Maintained game/album scores and public audio are
+unchanged until the combined phrase is ready to adopt.
+
+David prefers the exact pre-audition bell with the liked Expression IV lead.
+[Expression VI](../alternates/clock-expression-vi/README.md) restores every
+original bell cell, including gates and dynamics, while retaining IV's lead.
+Expression V's bell rewrite is not selected. A single 18.75-second clip was
+delivered as Telegram message 1204, with no A/B repeat. Structural comparisons
+confirm original bell/backing/patches and IV lead; compiled timing and release
+checks pass. OGG is -19.8 LUFS-I, -5.7 dBTP. This is the selected combination
+to carry forward; maintained scores and published audio are not changed by
+this audition step.
+
+David heard dissonance near 12 seconds in VI and requested more lead with a
+slightly quieter bell. [Expression VII](../alternates/clock-expression-vii/README.md)
+changes the simultaneous A-sharp4/B4 at 12.65625 seconds to lead D-sharp5 over
+bell B4. Both calm/tense lead instruments receive +2 dB gain; the bell receives
+-1.5 dB. Its original notes and rhythm are untouched. A single checked excerpt
+was sent as Telegram 1205: -19.8 LUFS-I, -5.8 dBTP, with exact timing and final
+releases verified. Full candidates share the bank changes; maintained scores
+and publication remain unchanged pending listening. Review combined melodic
+lines for close intervals as well as checking their independent timing.
+
+David approves VII's levels but finds the D-sharp5 accent too high and requests
+unison with the bell. [Expression VIII](../alternates/clock-expression-viii/README.md)
+changes only that lead pitch to B4 at 12.65625 seconds. Original bell notes,
+approved +2 dB lead/-1.5 dB bell gains, timing and gates remain intact.
+Single excerpt delivered as Telegram 1206; -19.8 LUFS-I and -5.8 dBTP.
+The unison is intentional emphasis. Maintained scores and public audio are
+unchanged while the final combined phrase is auditioned.
+
+## Clock Edge approved integration
+
+David approved the B4 unison accent and the lead/bell levels, then authorized
+integration and a full render. The original bell and developed lead now live
+in the shared source and both maintained arrangements. See
+[CLOCK-EDGE-II.md](CLOCK-EDGE-II.md) for the transition review, regeneration
+checks and full-render measurements. No new audition snapshots were added.
+
+Clock Edge II is mastered and published as deployment 33c8d536. The MP3, live
+manifest and fresh-browser playback pass; Telegram 1208 contains the full
+master. The approved game and album sources remain synchronized.
+
+David authorized two Dead Sector experiments, while emphasizing his affection
+for the original and allowing either candidate to be rejected. The restrained
+phrase answer and more experimental metallic call/response are delivered as
+Telegram 1209 and 1210. See [the comparison record](DEAD-SECTOR-EXPERIMENTS-I.md).
+The current song stays untouched; no new audition snapshots are tracked.
+
+## Dead Sector approved integration
+
+David approved the corrected restrained answer and the experimental passage
+in context, then requested completion. Both now live in the shared game and
+album source. The alternate appears once between tense phrases two and three;
+original patches return afterward. See [Dead Sector II](DEAD-SECTOR-II.md).
+
+Dead Sector II is mastered and published as deployment 84887d2f. The full
+master was delivered as Telegram 1213. Timing, lossless/encoded checks, public
+MP3 checks and fresh-browser playback all pass; the album is now 3:28.889.
+
+## Obsidian glass-answer audition declined
+
+David preferred the original melody because it sounded more mysterious. Keep
+it in both game and album arrangements. The more connected, E-resolving answer
+was not adopted; preserve ambiguity and space in any future texture experiment.
+See [the listening decision](OBSIDIAN-PHRASE-I.md).
+
+## Obsidian pedal texture audition
+
+After retaining the original mysterious melody, David authorized a pedal-only
+experiment. Telegram 1215 contains the equal-gain calm-phrase A/B: only the
+existing upper additive layer changes; low core, every note and the side pads
+remain intact. See [Pedal Texture I](OBSIDIAN-PEDAL-I.md). Not yet adopted.
+
+## Obsidian retained after review
+
+David could not hear the pedal change even in the isolated comparison. Close
+that experiment without adoption. Together with his preference for the original
+melody, this leaves Obsidian unchanged for this pass, with the existing game
+and album sources and published master retained. Sample differences alone are
+not evidence of a worthwhile musical improvement.
+
+## Blind Spot watchful reply audition
+
+David authorized one focused improvement to another favorite. A short A/B adds
+an A–C–A muted signal and two latch replies around the third tense phrase's
+existing bass pause. Every original event and patch is retained. Telegram 1217
+contains the comparison; see [Watchful Reply I](BLIND-SPOT-WATCHFUL-I.md).
+The game and album sources remain unchanged pending feedback.
+
+## Blind Spot approved integration
+
+David liked the candidate because it fills out the idea while remaining minimal.
+The exact five added attacks are now in the shared game and album phrase. No
+additional patch, mix or compositional change is planned for this pass. See
+[Blind Spot II](BLIND-SPOT-II.md) for the full-render review and verification.
+
+## Blind Spot full master approved
+
+David approved the full track and called it done. The tagged MP3 is uploaded
+and verified; the exporter and release selection now use it. The next normal
+site build will publish that selection. No site deployment was made here,
+because production has a newer layout than the preserved music-worker bundle.
+See [Blind Spot II](BLIND-SPOT-II.md) for the release URL and checks.
+
+Stop this polish pass here for the next release: Dead Sector and Blind Spot
+have approved improvements, and Obsidian retains its preferred original.
+Shadow Protocol is a possible later review, with no concrete change yet
+proposed or approved.
+
+## Shadow Protocol signal reply audition
+
+The release delay leaves time for a focused Shadow Protocol experiment. David
+authorized a short A/B of the descending tense signal: shaped gates and accents,
+a two-note vibes answer and a few fewer percussion ghosts around it. Keep the
+original contour, unresolved ending, patches and quiet background identity.
+See [Signal Reply I](SHADOW-PROTOCOL-REPLY-I.md). No maintained score or published
+master is changed. David preferred the original after listening; close the
+experiment without adoption and keep Shadow Protocol as it is for this release.

@@ -199,3 +199,25 @@ renders just two excerpts from a manifest naming `before_stem`, `after_stem`,
 `half_seconds` and `title`. It concatenates before/after with one common gain,
 records source/renderer provenance, and checks encoded duration, format, peak
 and final decay. Excerpt scores must already include their release tails.
+
+
+### Public inventory paths
+
+The inventory records source_root as "." and artifact_root as
+~/artifacts/<directory-name>/. These are portable public references; the actual
+artifact path supplied at execution time is not written into the manifest.
+Individual entries stay relative to their respective roots. Use --manifest FILE
+to verify a generated inventory separately without replacing the historical
+handoff document.
+
+New audition scores and measurement reports belong in the external artifacts
+directory. Retain composers and concise decisions here, plus the maintained
+shared sources and generated game/album scores. Do not add more frozen audition
+trees under docs/music/alternates/.
+
+### Isolated A/B monitoring
+
+short-ab-render.sgl accepts --gain DB for quiet diagnostic clips, applying one
+common gain to both halves and capping it against the measured native peak.
+The default is still -0.5 dB. Encoded peak and decay checks remain mandatory;
+this monitoring boost is not adopted into the composition or album master.
