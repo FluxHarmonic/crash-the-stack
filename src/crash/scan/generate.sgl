@@ -2,20 +2,36 @@
 ;;;
 ;;; A segment is a function of (seed, first click): the ICE is placed after
 ;;; the uplink, never in its clipped 3x3, so the uplink reads zero and opens
-;;; an area. Try k places the ICE uniformly over the other hosts with the
-;;; game's MINSTD stream ((crash stack prng)) seeded from `hub-mix seed k 0`
-;;; (the hub generator's sub-seed scheme), a partial Fisher-Yates over those
-;;; hosts in index order. The solver in (crash scan solve) then plays it
-;;; from the uplink; a segment it declines is re-dealt from try k + 1, up to
-;;; GEN-TRIES. The deal keeps the solver's recorded line and the try that
-;;; built it (D68; the design note's section 3).
+;;; an area (D68; the design note's section 3).
+;;;
+;;; Placement 0 puts the ICE uniformly over the other hosts with the game's
+;;; MINSTD stream ((crash stack prng)) seeded from `hub-mix seed 0 0` (the
+;;; hub generator's sub-seed scheme), a partial Fisher-Yates over those
+;;; hosts in index order. The solver in (crash scan solve) plays it from the
+;;; uplink. Where it gets stuck, the deal is PERTURBED rather than re-dealt
+;;; (Simon Tatham's approach in mines.c): the ICE around one stuck frontier
+;;; reading is moved so that reading settles, and the solver carries on.
+;;; Re-dealing until the solver cleared a fresh placement cost BACKBONE a
+;;; median of 17 placements and p95 63 (measured 2026-09-24 on the web
+;;; release build: p95 0.7 s on a desktop, 3.2 s at a 4x CPU throttle),
+;;; which D81's first click cannot afford.
+;;;
+;;; A run that saw a perturbation ends on a segment its own knowledge may
+;;; not be derivable on (the moved ICE changed readings it had used), so it
+;;; proves nothing: the deal is played again from the uplink, and only the
+;;; line of a run that saw no perturbation is dealt. That run's line is a
+;;; pure derivation, the same guarantee as a placement cleared first time,
+;;; and (crash scan check) re-proves it in the gate. When nothing can be
+;;; moved, the next placement (`hub-mix seed k 0`) is dealt. `dealt-try`
+;;; counts the perturbations and placements past the first; a deal with
+;;; try 0 is exactly the reroll generator's first placement.
 ;;;
 ;;; The work is a stepper so a shell can slice it by milliseconds per frame
-;;; and never starve the audio (D81): scan-gen-step! does one unit (one
-;;; placement, or one solver pass), and scan-gen-run! steps while the
-;;; shell's (more?) thunk says yes. The rules family cannot read a clock,
-;;; so the budget lives in the thunk. Slicing never changes the result:
-;;; the tries run in the same order from the same sub-seeds.
+;;; and never starve the audio (D81): scan-gen-step! does one unit (a
+;;; placement, a solver unit, or a perturbation), and scan-gen-run! steps
+;;; while the shell's (more?) thunk says yes. The rules family cannot read
+;;; a clock, so the budget lives in the thunk. Slicing never changes the
+;;; result: the units run in the same order from the same streams.
 ;;;
 ;;; Rules family: no platform.
 
@@ -37,12 +53,12 @@
           extraction-steps deal-marks)
 
   (begin
-    ;; At EXPERT's 5% first-try rate a deal needs more than 1000 tries with
-    ;; probability 0.95^1000, about 5e-23. The sweep in the gate counts.
+    ;; Perturbations and placements past the first before a deal gives up
+    ;; (#f). The sweep in the gate counts what a deal takes.
     (define GEN-TRIES 1000)
 
     ;; A dealt segment: the uplink already scanned, the recorded line from
-    ;; it, and the try that built it.
+    ;; it, and how many perturbations and placements it took past the first.
     (define-struct dealt
       (segment default: #f)
       (line default: '())
@@ -50,30 +66,36 @@
       (seed default: 0)
       (first default: 0))
 
-    ;; The ICE vector of try k: m ICE over the hosts outside first's clipped
-    ;; 3x3.
+    ;; The ICE vector of placement k: m ICE over the hosts outside first's
+    ;; clipped 3x3, a partial Fisher-Yates from `hub-mix seed k 0`.
     (define (place-ice w h m first seed try)
-      (let* ((fx (modulo first w))
-             (fy (quotient first w))
-             (cands (list->vector
-                     (filter (lambda (i)
-                               (not (and (<= (abs (- (modulo i w) fx)) 1)
-                                         (<= (abs (- (quotient i w) fy)) 1))))
-                             (iota (* w h)))))
-             (n (vector-length cands))
-             (ice (make-vector (* w h) #f)))
-        (when (> m n)
-          (error "scan generate: more ICE than hosts outside the uplink" m n))
+      (place-from (candidates w h first) (* w h) m seed try))
+
+    (define (place-from cands0 n m seed try)
+      (let* ((cands (vector-copy cands0))
+             (c (vector-length cands))
+             (ice (make-vector n #f)))
         (let loop ((k 0) (s (prng-seed (hub-mix seed try 0))))
           (when (< k m)
             (let* ((s (prng-next s))
-                   (j (+ k (prng-index s (- n k))))
+                   (j (+ k (prng-index s (- c k))))
                    (a (vector-ref cands k)))
               (vector-set! cands k (vector-ref cands j))
               (vector-set! cands j a)
               (vector-set! ice (vector-ref cands k) #t)
               (loop (+ k 1) s))))
         ice))
+
+    ;; The hosts outside first's clipped 3x3, in index order: the only
+    ;; hosts ICE may occupy. The same for every try of a deal.
+    (define (candidates w h first)
+      (let ((fx (modulo first w))
+            (fy (quotient first w)))
+        (list->vector
+         (filter (lambda (i)
+                   (not (and (<= (abs (- (modulo i w) fx)) 1)
+                             (<= (abs (- (quotient i w) fy)) 1))))
+                 (iota (* w h))))))
 
     (define-struct gen
       (w default: 9)
@@ -84,9 +106,12 @@
       (suspects? default: #f)
       (seed default: 0)
       (first default: 0)
-      (try default: 0 mutable: #t)
-      (seg default: #f mutable: #t)
+      (cands default: (vector))
+      (try default: 0 mutable: #t)             ; placements dealt so far, minus one
+      (perturbs default: 0 mutable: #t)        ; perturbations so far
+      (rng default: 1 mutable: #t)             ; the perturbation stream's state
       (solver default: #f mutable: #t)
+      (pure? default: #t mutable: #t)          ; the solver's run has seen no perturbation
       (status default: 'running mutable: #t)   ; running | done | failed
       (result default: #f mutable: #t)
       (steps default: 0 mutable: #t))
@@ -94,53 +119,74 @@
     (define (scan-gen-start preset seed first version suspects?)
       (let ((d (preset-dims preset)))
         (unless d (error "scan generate: unknown preset" preset))
-        (gen w: (car d)
-             h: (cadr d)
-             m: (caddr d)
+        (gen-new (car d) (cadr d) (caddr d) preset version suspects? seed first)))
+
+    ;; A node board (JACK IN): the grid and ICE count from the launch.
+    (define (scan-gen-node-start w h m seed first)
+      (gen-new w h m 'node 'hacker #f seed first))
+
+    (define (gen-new w h m preset version suspects? seed first)
+      (let ((cands (candidates w h first)))
+        (when (> m (vector-length cands))
+          (error "scan generate: more ICE than hosts outside the uplink" m (vector-length cands)))
+        (gen w: w
+             h: h
+             m: m
              preset: preset
              version: version
              suspects?: suspects?
              seed: seed
-             first: first)))
-
-    ;; A node board (JACK IN): the grid and ICE count from the launch.
-    (define (scan-gen-node-start w h m seed first)
-      (gen w: w h: h m: m preset: 'node version: 'hacker seed: seed first: first))
+             first: first
+             cands: cands
+             rng: (prng-seed (hub-mix seed 0 1)))))
 
     (define (scan-gen-status g) (gen-status g))
     (define (scan-gen-result g) (gen-result g))
-    (define (scan-gen-try g) (gen-try g))
+    (define (scan-gen-try g) (+ (gen-try g) (gen-perturbs g)))
     (define (scan-gen-steps g) (gen-steps g))
+
+    (define (gen-segment g ice)
+      (segment-new (gen-w g) (gen-h g) ice (gen-preset g) (gen-version g) (gen-suspects? g)))
+
+    ;; Deal placement k and start a pure run on it.
+    (define (deal-placement! g)
+      (let ((seg (gen-segment g (place-from (gen-cands g)
+                                            (* (gen-w g) (gen-h g))
+                                            (gen-m g)
+                                            (gen-seed g)
+                                            (gen-try g)))))
+        (set-gen-solver! g (solve-start seg (gen-first g)))
+        (set-gen-pure?! g #t)))
 
     ;; One unit of work.
     (define (scan-gen-step! g)
       (when (eq? (gen-status g) 'running)
         (set-gen-steps! g (+ 1 (gen-steps g)))
-        (cond ((not (gen-solver g))
-               (if (>= (gen-try g) GEN-TRIES)
-                   (set-gen-status! g 'failed)
-                   (let ((seg (segment-new (gen-w g)
-                                           (gen-h g)
-                                           (place-ice (gen-w g) (gen-h g) (gen-m g) (gen-first g) (gen-seed g) (gen-try g))
-                                           (gen-preset g)
-                                           (gen-version g)
-                                           (gen-suspects? g))))
-                     (set-gen-seg! g seg)
-                     (set-gen-solver! g (solve-start seg (gen-first g))))))
-              (else
-               (case (solve-pass! (gen-solver g))
-                 ((solved)
-                  (set-gen-result! g (dealt segment: (segment-scan (gen-seg g) (gen-first g))
-                                            line: (reverse (solver-line (gen-solver g)))
-                                            try: (gen-try g)
-                                            seed: (gen-seed g)
-                                            first: (gen-first g)))
-                  (set-gen-status! g 'done))
-                 ((stuck)
-                  (set-gen-solver! g #f)
-                  (set-gen-seg! g #f)
-                  (set-gen-try! g (+ 1 (gen-try g))))
-                 (else #f)))))
+        (let ((st (gen-solver g)))
+          (cond ((not st) (deal-placement! g))
+                ((>= (scan-gen-try g) GEN-TRIES) (set-gen-status! g 'failed))
+                (else
+                 (case (solve-pass! st)
+                   ((solved)
+                    (if (gen-pure? g)
+                        (begin
+                          (set-gen-result! g (dealt segment: (segment-scan (solver-seg st) (gen-first g))
+                                                    line: (reverse (solver-line st))
+                                                    try: (scan-gen-try g)
+                                                    seed: (gen-seed g)
+                                                    first: (gen-first g)))
+                          (set-gen-status! g 'done))
+                        ;; a run that saw a perturbation proves nothing about
+                        ;; the segment it ended on: play it again from the uplink
+                        (begin
+                          (set-gen-solver! g (solve-start (solver-seg st) (gen-first g)))
+                          (set-gen-pure?! g #t))))
+                   ((stuck)
+                    (unless (perturb! g st)
+                      ;; nothing to move: the next placement
+                      (set-gen-try! g (+ 1 (gen-try g)))
+                      (deal-placement! g)))
+                   (else #f))))))
       (gen-status g))
 
     ;; Step at least once, then while (more?) says yes and the deal runs.
@@ -162,6 +208,84 @@
       (let ((g (scan-gen-node-start w h m seed first)))
         (scan-gen-run! g always)
         (gen-result g)))
+
+    ;; --- the perturbation (Tatham's, mines.c) ---------------------------------
+
+    ;; An index in [0, n) from the perturbation stream.
+    (define (draw! g n)
+      (let ((s (prng-next (gen-rng g))))
+        (set-gen-rng! g s)
+        (prng-index s n)))
+
+    ;; k distinct members of a list, drawn in order.
+    (define (pick! g xs k)
+      (let loop ((xs xs) (k k) (acc '()))
+        (if (= k 0)
+            (reverse acc)
+            (let ((x (list-ref xs (draw! g (length xs)))))
+              (loop (filter (lambda (y) (not (= y x))) xs) (- k 1) (cons x acc))))))
+
+    ;; A stuck solver: pick a frontier reading R (drawn), and make every
+    ;; hidden neighbor of R clean, moving their ICE to hidden hosts that
+    ;; touch nothing open (so no reading the solver has seen changes there);
+    ;; or, failing that, make them all ICE, taking ICE from such hosts; and
+    ;; failing both, the same with any hidden host outside R's set. Then R
+    ;; settles under rule (a) or (b). The solver continues on the new
+    ;; segment. #f when there is no frontier or nothing to move.
+    (define (perturb! g st)
+      (let* ((seg (solver-seg st))
+             (n (segment-size seg))
+             (open (solver-open st))
+             (flag (solver-flag st))
+             (around (solver-around st))
+             (frontier (solver-frontier st)))
+        (and (pair? frontier)
+             (let* ((r (list-ref frontier (draw! g (length frontier))))
+                    (set (filter (lambda (i) (not (or (vector-ref open i) (vector-ref flag i))))
+                                 (segment-neighbors seg r)))
+                    (pools (classify seg open flag around set n))
+                    (set-ice (filter (lambda (i) (segment-ice? seg i)) set))
+                    (set-clean (filter (lambda (i) (not (segment-ice? seg i))) set))
+                    (move (or (plan g set-ice (list-ref pools 0) 'clear)
+                              (plan g set-clean (list-ref pools 1) 'fill)
+                              (plan g set-ice (append (list-ref pools 0) (list-ref pools 2)) 'clear)
+                              (plan g set-clean (append (list-ref pools 1) (list-ref pools 3)) 'fill))))
+               (and move
+                    (begin
+                      (set-gen-perturbs! g (+ 1 (gen-perturbs g)))
+                      (set-gen-pure?! g #f)
+                      (solve-perturbed! st
+                                        (segment-move-ice seg (car move) (cadr move))
+                                        (append (car move) (cadr move)))
+                      #t))))))
+
+    ;; The hidden hosts outside `set`, in one pass, as four lists in index
+    ;; order: far clean, far ICE (far: no open neighbor, so no reading the
+    ;; solver has seen touches them), near clean, near ICE.
+    (define (classify seg open flag around set n)
+      (let loop ((i (- n 1)) (fc '()) (fi '()) (nc '()) (ni '()))
+        (cond ((< i 0) (list fc fi nc ni))
+              ((or (vector-ref open i) (vector-ref flag i) (memv i set))
+               (loop (- i 1) fc fi nc ni))
+              ((= 0 (vector-ref around i))
+               (if (segment-ice? seg i)
+                   (loop (- i 1) fc (cons i fi) nc ni)
+                   (loop (- i 1) (cons i fc) fi nc ni)))
+              ((segment-ice? seg i) (loop (- i 1) fc fi nc (cons i ni)))
+              (else (loop (- i 1) fc fi (cons i nc) ni)))))
+
+    ;; 'clear: the ICE of `hosts` moves to as many of `pool` (clean hosts).
+    ;; 'fill: `hosts` (clean) take the ICE of as many of `pool` (ICE hosts).
+    ;; #f when the pool is too small.
+    ;; An empty `hosts` is no plan: a move of nothing must never count as a
+    ;; perturbation.
+    (define (plan g hosts pool kind)
+      (and (pair? hosts)
+           (>= (length pool) (length hosts))
+           (let ((picked (pick! g pool (length hosts))))
+             (if (eq? kind 'clear)
+                 (list hosts picked)
+                 (list picked hosts)))))
 
     ;; --- marks (the node objective, D74) -------------------------------------
 

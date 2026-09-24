@@ -39,32 +39,30 @@
   (begin
     (define CHECK-BOUND 48)
 
-    ;; What the player sees. Built only from segment-state,
-    ;; segment-visible-reading and the counter's total.
+    ;; What the player sees, and nothing else: two procedures that answer
+    ;; segment-state and segment-visible-reading, the grid, and the
+    ;; counter's total. The segment itself is not in the view, so nothing
+    ;; below view-of can reach the ICE vector (the review's L1: the first
+    ;; cut kept the whole segment for its grid). Nothing is copied: a view
+    ;; is built before every step of every line in the gate.
     (define-struct view
-      (seg-shape default: #f)       ; the segment, for its grid only (neighbors, size)
-      (states default: (vector))    ; host -> hidden | scanned | flagged | suspect | tripped | defused
-      (readings default: (vector))  ; host -> the reading if scanned, else #f
+      (state-of default: #f)        ; host -> hidden | scanned | flagged | suspect | tripped | defused
+      (reading-of default: #f)      ; host -> the reading if scanned, else #f
+      (neighbors-of default: #f)    ; host -> its neighbors
+      (size default: 0)
       (total default: 0))           ; the ICE total
 
     (define (view-of s)
-      (let* ((n (segment-size s))
-             (states (make-vector n 'hidden))
-             (readings (make-vector n #f)))
-        (let loop ((i 0))
-          (when (< i n)
-            (vector-set! states i (segment-state s i))
-            (vector-set! readings i (segment-visible-reading s i))
-            (loop (+ i 1))))
-        (view seg-shape: s
-              states: states
-              readings: readings
-              total: (segment-ice-total s))))
+      (view state-of: (lambda (i) (segment-state s i))
+            reading-of: (lambda (i) (segment-visible-reading s i))
+            neighbors-of: (lambda (i) (segment-neighbors s i))
+            size: (segment-size s)
+            total: (segment-ice-total s)))
 
-    (define (v-state v i) (vector-ref (view-states v) i))
-    (define (v-reading v i) (vector-ref (view-readings v) i))
-    (define (v-neighbors v i) (segment-neighbors (view-seg-shape v) i))
-    (define (v-size v) (segment-size (view-seg-shape v)))
+    (define (v-state v i) ((view-state-of v) i))
+    (define (v-reading v i) ((view-reading-of v) i))
+    (define (v-neighbors v i) ((view-neighbors-of v) i))
+    (define (v-size v) (view-size v))
 
     (define (unknown? v i) (memq (v-state v i) '(hidden suspect)))
     (define (known-ice? v i) (memq (v-state v i) '(flagged tripped defused)))
@@ -132,9 +130,19 @@
                            (cond ((null? vals) #f)
                                  ((and (car vals) (>= placed left)) (try (cdr vals)))
                                  (else
-                                  (let ((ok (assign! vv var-cons need ice free k (car vals))))
+                                  (let ((ok (assign! vv
+                                                     var-cons
+                                                     need
+                                                     ice
+                                                     free
+                                                     k
+                                                     (car vals))))
                                     (let ((found (and ok (search (+ k 1) (if (car vals) (+ placed 1) placed)))))
-                                      (unassign! var-cons ice free k (car vals))
+                                      (unassign! var-cons
+                                                 ice
+                                                 free
+                                                 k
+                                                 (car vals))
                                       (or found (try (cdr vals)))))))))))))))
 
     (define (index-in vv x)
@@ -167,19 +175,30 @@
                   (when val (vector-set! ice c (- (vector-ref ice c) 1))))
                 (vector-ref var-cons k)))
 
+    ;; (unknown hosts . known ICE) over the whole view, in one walk.
+    (define (count-states v)
+      (let loop ((i (- (v-size v) 1)) (unknown 0) (known 0))
+        (cond ((< i 0) (cons unknown known))
+              ((unknown? v i) (loop (- i 1) (+ unknown 1) known))
+              ((known-ice? v i) (loop (- i 1) unknown (+ known 1)))
+              (else (loop (- i 1) unknown known)))))
+
     ;; #t when the view forces act (scan: clean, flag: ICE) on host h; else
     ;; the reason: not-hidden, undeducible, over-bound.
     (define (step-forced? v act h)
       (if (not (unknown? v h))
           'not-hidden
-          (let* ((n (v-size v))
-                 (known (length (filter (lambda (i) (known-ice? v i)) (iota n))))
-                 (hidden (length (filter (lambda (i) (unknown? v i)) (iota n))))
-                 (left (- (view-total v) known))
+          (let* ((counts (count-states v))
+                 (hidden (car counts))
+                 (left (- (view-total v) (cdr counts)))
                  (rs (readings-for v h))
                  (local (if (null? rs)
                             #t
-                            (layout-exists? v rs h (eq? act 'scan) left))))
+                            (layout-exists? v
+                                            rs
+                                            h
+                                            (eq? act 'scan)
+                                            left))))
             (cond ((eq? local 'over-bound) 'over-bound)
                   ((not local) #t)
                   ((and (eq? act 'scan) (= left 0)) #t)
@@ -196,8 +215,9 @@
           (let loop ((s (segment-scan seg (cadr (car line))))
                      (steps (cdr line))
                      (k 1))
-            (cond ((pair? (segment-tripped s))
-                   (list 'refused 'tripped (- k 1) (car (segment-tripped s))))
+            ;; a trip shows in the news of the step that caused it
+            (cond ((assq 'trip (segment-news s))
+                   (list 'refused 'tripped (- k 1) (cadr (assq 'trip (segment-news s)))))
                   ((null? steps)
                    (if (segment-won? s) 'ok (list 'refused 'unfinished k #f)))
                   (else

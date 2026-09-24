@@ -134,11 +134,11 @@
         (let ((sorted (list-sort < tries)))
           (display "  scan deal ") (display (car g)) (display " ")
           (display (list-ref g 1)) (display "x") (display (list-ref g 2)) (display "/") (display (list-ref g 3))
-          (display ": first-try ") (display (length (filter (lambda (t) (= t 0)) tries)))
+          (display ": placement 0 as dealt ") (display (length (filter (lambda (t) (= t 0)) tries)))
           (display "/") (display SEEDS)
-          (display ", tries median ") (display (+ 1 (quantile sorted 0.5)))
-          (display " p95 ") (display (+ 1 (quantile sorted 0.95)))
-          (display " max ") (display (+ 1 (car (reverse sorted))))
+          (display ", perturbations median ") (display (quantile sorted 0.5))
+          (display " p95 ") (display (quantile sorted 0.95))
+          (display " max ") (display (car (reverse sorted)))
           (newline)
           (reverse problems))
         (let* ((first (first-of seed (list-ref g 1) (list-ref g 2)))
@@ -207,6 +207,27 @@
             (loop (+ seed 1)
                   (if (and (pair? verdict) (eq? (cadr verdict) 'undeducible)) (+ refused 1) refused)
                   (if (segment-won? (replay-line s0 line)) (+ won 1) won))))))
+  ;; The index-order line is mostly refused on a host no reading touches,
+  ;; where only the global count is consulted (the review's M1: 18 of 20
+  ;; seeds). The frontier-order line scans the lowest clean hidden host
+  ;; that touches a reading, so its refusal comes from the layout search.
+  (test "the frontier-order line is refused by the layout search, at a host a reading touches"
+    (let loop ((seed 1) (refused 0) (touching 0))
+      (if (> seed 20)
+          (begin
+            (assert-equal 20 refused)
+            (assert-equal 20 touching))
+          (let* ((d (deal-segment 'wan seed (first-of seed 16 16) 'original #f))
+                 (s0 (segment-new 16 16 (segment-ice (dealt-segment d)) 'wan 'original #f))
+                 (line (frontier-order-line s0 (dealt-first d)))
+                 (verdict (check-line s0 line))
+                 (undeducible (and (pair? verdict) (eq? (cadr verdict) 'undeducible))))
+            (loop (+ seed 1)
+                  (if undeducible (+ refused 1) refused)
+                  (if (and undeducible
+                           (touches-reading? (replay-line s0 (list-head* line (caddr verdict))) (cadddr verdict)))
+                      (+ touching 1)
+                      touching))))))
   (test "the checker stands down: a forced flag passes, the same host's scan does not"
     ;; the 5x5 of test-scan-rules after the uplink at (0,0): (2,1) reads 1
     ;; with one hidden neighbor, (3,2), so (3,2) is forced ICE
@@ -226,6 +247,25 @@
       (if next
           (loop (segment-scan s next) (cons (list 'scan next 'index) line))
           (reverse line)))))
+
+;; The same, but each step the lowest-index clean hidden host that touches
+;; a scanned reading (the frontier), falling back to index order. Replays
+;; to a win; each step is on the frontier, where the checker must search.
+(define (frontier-order-line s0 first)
+  (let loop ((s (segment-scan s0 first)) (line (list (list 'scan first 'uplink))))
+    (let* ((clean-hidden (lambda (i) (and (not (segment-ice? s i)) (segment-hidden? s i))))
+           (next (or (find (lambda (i) (and (clean-hidden i) (touches-reading? s i)))
+                           (iota (segment-size s)))
+                     (find clean-hidden (iota (segment-size s))))))
+      (if next
+          (loop (segment-scan s next) (cons (list 'scan next 'frontier) line))
+          (reverse line)))))
+
+(define (touches-reading? s i)
+  (and (find (lambda (j) (segment-visible-reading s j)) (segment-neighbors s i)) #t))
+
+(define (list-head* l n)
+  (if (= n 0) '() (cons (car l) (list-head* (cdr l) (- n 1)))))
 
 (define (replay-line s0 line)
   (let loop ((s s0) (steps line))
@@ -253,12 +293,30 @@
                                 (assert-true (segment-equal? (dealt-segment whole) (dealt-segment sliced)))
                                 (assert-true (> (scan-gen-steps gen) 1)))))
                           (list 1 2 3))))
-            (list (list 'lan) (list 'backbone))))
+            (list (list 'lan 9 9 10) (list 'backbone 30 16 99))))
 
 (test-group "scan deal: a deal is a function of (seed, uplink)"
-  (test "the same inputs, the same deal; another uplink, another deal"
+  (test "the same inputs, the same deal; a distant uplink, another deal"
     (let ((a (deal-segment 'wan 42 100 'original #f))
           (b (deal-segment 'wan 42 100 'original #f))
-          (c (deal-segment 'wan 42 101 'original #f)))
+          (c (deal-segment 'wan 42 255 'original #f)))
       (assert-equal (segment-ice (dealt-segment a)) (segment-ice (dealt-segment b)))
       (assert-false (equal? (segment-ice (dealt-segment a)) (segment-ice (dealt-segment c)))))))
+
+;; A deal that needed no perturbation is placement 0 exactly: the boards
+;; the reroll generator dealt first time are unchanged by perturbation.
+(test-group "scan deal: try 0 is placement 0"
+  (for-each (lambda (g)
+              (test (symbol->string (car g))
+                (let loop ((seed 1) (zero 0))
+                  (if (> seed 30)
+                      (assert-true (> zero 0))
+                      (let* ((w (list-ref g 1))
+                             (h (list-ref g 2))
+                             (first (first-of seed w h))
+                             (d (deal-segment (car g) seed first 'original #f)))
+                        (when (= 0 (dealt-try d))
+                          (assert-equal (place-ice w h (list-ref g 3) first seed 0)
+                                        (segment-ice (dealt-segment d))))
+                        (loop (+ seed 1) (if (= 0 (dealt-try d)) (+ zero 1) zero)))))))
+            (list (list 'wan 16 16 40) (list 'backbone 30 16 99))))

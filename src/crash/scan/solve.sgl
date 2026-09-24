@@ -14,61 +14,69 @@
 ;;;       hidden host; as many ICE left as hidden hosts -> flag them all.
 ;;;
 ;;; Every rule is sound, so the solver never scans ICE; it throws if it
-;;; does (a soundness guard, not a test). A segment it cannot finish is
-;;; declined (#f), and the generator deals the next sub-seed. These are the
-;;; design probe's rules (noguess.mjs). Each rule only gains ground as more
-;;; is known, so the hosts they settle do not depend on the order they run
-;;; in: the solver declines exactly the segments the probe's solver
-;;; declines (the differential in the P6a evidence checks it seed by seed),
-;;; and the measured guess-free rates carry over. Only the line's order
-;;; differs.
+;;; does (a soundness guard, not a test). These are the design probe's
+;;; rules (noguess.mjs). Each rule only gains ground as more is known, so
+;;; the hosts they settle do not depend on the order they run in: on the
+;;; same segment this solver declines exactly what the probe's solver
+;;; declines (a differential checked it on 1200 seeds, P6a).
 ;;;
 ;;; The order is a WORKLIST: a reading is re-examined under (a) and (b)
 ;;; only when its neighborhood changes (a neighbor scanned or flagged).
-;;; When the worklist runs dry the solver builds every open reading's
-;;; constraint once and tries (c), then (d). Rescanning the whole segment
-;;; every pass cost a BACKBONE try 20 to 50 full scans on the bytecode
-;;; build (measured 2026-09-24: 4 to 10 ms each).
+;;; When the worklist runs dry, the solver builds the constraints of the
+;;; FRONTIER (open readings that still touch a hidden host) and tries (c),
+;;; then (d). Rescanning the whole segment every pass cost a BACKBONE try
+;;; 20 to 50 full scans on the bytecode build (measured 2026-09-24).
 ;;;
 ;;; The solver learns a reading only by scanning a host it has proved clean
 ;;; (`learn`): it never reads the ICE vector to decide. The independent
 ;;; checker in (crash scan check) holds it to that (gate leg 5, S3c).
 ;;;
+;;; The generator may PERTURB a stuck solver (solve-perturbed!): it moves
+;;; ICE among hidden hosts and hands the solver the new segment. Open hosts
+;;; stay clean and flags stay ICE, so what the solver knows stays true and
+;;; its rules stay sound; but what it knows may no longer be derivable on
+;;; the new segment, which is why the generator only deals the line of a
+;;; run that saw no perturbation.
+;;;
 ;;; The RECORDED LINE is the player's actions in order, uplink first:
 ;;; (scan i rule) and (flag i rule), rule one of uplink a b c d. Floods are
 ;;; not in the line: the rules produce them on replay.
 ;;;
-;;; The work comes in small units (solve-pass!: up to QUANTUM readings
-;;; from the worklist, or one application of (c) and (d)) so the generator
-;;; can slice a deal across frames by milliseconds (D81). The solver's
-;;; state is private and mutable.
+;;; The work comes in small units (solve-pass!) so the generator can slice
+;;; a deal across frames by milliseconds (D81). The solver's state is
+;;; private and mutable.
 ;;;
 ;;; Rules family: no platform.
 
 (define-library (crash scan solve)
   (import (sigil struct)
           (sigil math)
+          (sigil list)
           (crash scan rules))
 
   (export QUANTUM
-          solver solver? solver-status solver-line solver-passes
-          solve-start solve-pass! solve-run! solve-segment)
+          solver solver? solver-status solver-line solver-passes solver-seg
+          solver-open solver-flag solver-frontier solver-around
+          solve-start solve-pass! solve-run! solve-segment solve-perturbed!)
 
   (begin
     ;; Readings taken off the worklist per unit of work.
-    (define QUANTUM 24)
+    (define QUANTUM 8)
 
     (define-struct solver
-      (seg default: #f)                     ; the dealt segment, nothing scanned
-      (open default: (vector) mutable: #t)  ; host -> #t once scanned
-      (flag default: (vector) mutable: #t)  ; host -> #t once flagged
-      (queued default: (vector) mutable: #t) ; host -> #t while on the worklist
-      (work default: '() mutable: #t)       ; readings to re-examine
+      (seg default: #f mutable: #t)          ; the segment: the dealt one, or a perturbation's
+      (open default: (vector))   ; host -> #t once scanned
+      (flag default: (vector))   ; host -> #t once flagged
+      (queued default: (vector)) ; host -> #t while on the worklist
+      (work default: '() mutable: #t)        ; readings to re-examine
+      (fringe default: (vector)) ; host -> #t while listed in `border`
+      (around default: (vector)) ; host -> how many of its neighbors are open
+      (border default: '() mutable: #t)      ; open readings that may touch a hidden host
       (opened default: 0 mutable: #t)
       (flags default: 0 mutable: #t)
-      (clean default: 0)                    ; the clean-host total
-      (ice default: 0)                      ; the ICE total (public: the counter)
-      (line default: '() mutable: #t)       ; newest first while solving
+      (clean default: 0)                     ; the clean-host total
+      (ice default: 0)                       ; the ICE total (public: the counter)
+      (line default: '() mutable: #t)        ; newest first while solving
       (status default: 'running mutable: #t) ; running | solved | stuck
       (passes default: 0 mutable: #t))
 
@@ -80,6 +88,8 @@
                          open: (make-vector n #f)
                          flag: (make-vector n #f)
                          queued: (make-vector n #f)
+                         fringe: (make-vector n #f)
+                         around: (make-vector n 0)
                          clean: (- n ice)
                          ice: ice)))
         (scan-step! st first 'uplink)
@@ -101,19 +111,32 @@
     (define (done? st)
       (= (solver-opened st) (solver-clean st)))
 
-    ;; Put an open, nonzero reading on the worklist (once).
+    ;; Put an open, nonzero reading on the worklist (once), and on the
+    ;; border list.
+    ;; A zero is skipped: in play an open zero has flooded its neighbors,
+    ;; so it has no hidden one. (After a perturbation it can; see
+    ;; solve-perturbed!, which queues zeros too.)
     (define (enqueue! st i)
       (when (and (vector-ref (solver-open st) i)
-                 (not (vector-ref (solver-queued st) i))
                  (> (segment-reading (solver-seg st) i) 0))
-        (vector-set! (solver-queued st) i #t)
-        (set-solver-work! st (cons i (solver-work st)))))
+        (queue! st i)))
+
+    (define (queue! st i)
+      (when (vector-ref (solver-open st) i)
+        (unless (vector-ref (solver-queued st) i)
+          (vector-set! (solver-queued st) i #t)
+          (set-solver-work! st (cons i (solver-work st))))
+        (unless (vector-ref (solver-fringe st) i)
+          (vector-set! (solver-fringe st) i #t)
+          (set-solver-border! st (cons i (solver-border st))))))
 
     ;; The host and its open neighbors: their hidden sets just changed.
     (define (touch! st i)
       (enqueue! st i)
-      (for-each (lambda (j) (enqueue! st j))
-                (segment-neighbors (solver-seg st) i)))
+      (let loop ((nb (segment-neighbors (solver-seg st) i)))
+        (unless (null? nb)
+          (enqueue! st (car nb))
+          (loop (cdr nb)))))
 
     ;; Scan i and flood from zeros, the rules' flood exactly (flags skipped).
     (define (reveal! st i)
@@ -127,6 +150,9 @@
                     (vector-set! open c #t)
                     (set-solver-opened! st (+ 1 (solver-opened st)))
                     (touch! st c)
+                    (let ((around (solver-around st)))
+                      (for-each (lambda (j) (vector-set! around j (+ 1 (vector-ref around j))))
+                                (segment-neighbors seg c)))
                     (loop (if (= r 0)
                               (append (segment-neighbors seg c) (cdr todo))
                               (cdr todo))))
@@ -170,12 +196,18 @@
           (set-solver-status! st 'solved)))
       (solver-status st))
 
-    ;; The hidden neighbors of reading i and how many of them are ICE.
+    ;; The hidden neighbors of reading i and how many of them are ICE, in
+    ;; one walk: (hidden-hosts . need).
     (define (constraint-of st i)
-      (let* ((nb (segment-neighbors (solver-seg st) i))
-             (hid (filter (lambda (j) (hidden? st j)) nb))
-             (f (count-flags (solver-flag st) nb)))
-        (cons hid (- (segment-reading (solver-seg st) i) f))))
+      (let ((open (solver-open st))
+            (flag (solver-flag st)))
+        (let loop ((nb (segment-neighbors (solver-seg st) i))
+                   (hid '())
+                   (need (segment-reading (solver-seg st) i)))
+          (cond ((null? nb) (cons hid need))
+                ((vector-ref flag (car nb)) (loop (cdr nb) hid (- need 1)))
+                ((vector-ref open (car nb)) (loop (cdr nb) hid need))
+                (else (loop (cdr nb) (cons (car nb) hid) need))))))
 
     ;; (a) and (b) on reading i.
     (define (single-rules! st i)
@@ -187,33 +219,34 @@
               ((= need (length hid)) (for-each (lambda (j) (flag-step! st j 'b)) hid))
               (else #f))))
 
-    ;; Every open reading with hidden neighbors, as (hidden-hosts . need),
-    ;; in index order.
+    ;; The frontier's constraints, (hidden-hosts . need) per open reading
+    ;; that still touches a hidden host, in index order. Readings that no
+    ;; longer touch one leave the border list for good (a host never
+    ;; becomes hidden again, short of a perturbation, which re-lists them).
     (define (constraints st)
-      (let ((n (segment-size (solver-seg st)))
-            (open (solver-open st)))
-        (let loop ((i (- n 1)) (acc '()))
-          (if (< i 0)
-              acc
-              (loop (- i 1)
-                    (if (and (vector-ref open i)
-                             (> (segment-reading (solver-seg st) i) 0))
-                        (let ((c (constraint-of st i)))
-                          (if (null? (car c)) acc (cons c acc)))
-                        acc))))))
+      (let loop ((bs (solver-border st)) (keep '()) (acc '()))
+        (if (null? bs)
+            (begin
+              (set-solver-border! st keep)
+              (list-sort (lambda (a b) (< (cadr a) (cadr b))) acc))
+            (let* ((i (car bs))
+                   (c (constraint-of st i)))
+              (if (null? (car c))
+                  (begin
+                    (vector-set! (solver-fringe st) i #f)
+                    (loop (cdr bs) keep acc))
+                  (loop (cdr bs) (cons i keep) (cons (list (car c) i (cdr c)) acc)))))))
 
-    (define (count-flags flag cells)
-      (let loop ((cs cells) (k 0))
-        (cond ((null? cs) k)
-              ((vector-ref flag (car cs)) (loop (cdr cs) (+ k 1)))
-              (else (loop (cdr cs) k)))))
+    (define (solver-frontier st)
+      (map cadr (constraints st)))
 
     (define (subset? a b)
       (every (lambda (x) (memv x b)) a))
 
     ;; (c): the first pair (A strictly inside B) that settles something.
     ;; A B that holds A holds A's first host, so the candidates for B are
-    ;; the constraints indexed under that host, not every constraint.
+    ;; the constraints indexed under that host, not every constraint. A
+    ;; constraint here is (hidden-hosts reading need).
     (define (subset-rule! st pending)
       (let ((by-host (make-vector (segment-size (solver-seg st)) '())))
         (for-each (lambda (c)
@@ -233,7 +266,7 @@
                         (else
                          (let* ((b (car bs))
                                 (diff (filter (lambda (c) (not (memv c (car a)))) (car b)))
-                                (d (- (cdr b) (cdr a))))
+                                (d (- (caddr b) (caddr a))))
                            (cond ((= d 0)
                                   (for-each (lambda (c) (scan-step! st c 'c)) diff)
                                   #t)
@@ -242,15 +275,17 @@
                                   #t)
                                  (else (inner (cdr bs)))))))))))))
 
-    ;; (d): the global count, or stuck.
+    ;; (d): the global count, or stuck. The counts come from the counters;
+    ;; the hidden hosts are listed only when the rule fires.
     (define (global-rule! st)
       (let* ((n (segment-size (solver-seg st)))
-             (hidden (filter (lambda (i) (hidden? st i)) (iota n)))
+             (hidden (- n (solver-opened st) (solver-flags st)))
              (left (- (solver-ice st) (solver-flags st))))
-        (cond ((= left 0)
-               (for-each (lambda (i) (scan-step! st i 'd)) hidden))
-              ((= left (length hidden))
-               (for-each (lambda (i) (flag-step! st i 'd)) hidden))
+        (cond ((or (= left 0) (= left hidden))
+               (let ((hs (filter (lambda (i) (hidden? st i)) (iota n))))
+                 (if (= left 0)
+                     (for-each (lambda (i) (scan-step! st i 'd)) hs)
+                     (for-each (lambda (i) (flag-step! st i 'd)) hs))))
               (else (set-solver-status! st 'stuck)))))
 
     ;; Work until solved or stuck.
@@ -265,4 +300,21 @@
     (define (solve-segment seg first)
       (let ((st (solve-start seg first)))
         (and (eq? (solve-run! st) 'solved)
-             (reverse (solver-line st)))))))
+             (reverse (solver-line st)))))
+
+    ;; Continue a stuck solver on a perturbed segment: the same ICE total,
+    ;; ICE moved only among hosts it has not settled. The open readings
+    ;; around the changed hosts are re-examined.
+    ;; Every open neighbor of a changed host is queued, zeros included: a
+    ;; reading the move dropped to zero still touches hidden hosts (it was
+    ;; opened while nonzero, so it never flooded), and rule (a) settles
+    ;; them. Queuing only nonzero readings here left such a zero stuck
+    ;; forever (LAN seed 7, uplink 34: a thousand empty perturbations).
+    (define (solve-perturbed! st seg changed)
+      (set-solver-seg! st seg)
+      (set-solver-status! st 'running)
+      (for-each (lambda (i)
+                  (for-each (lambda (j) (queue! st j))
+                            (segment-neighbors seg i)))
+                changed)
+      st)))

@@ -46,7 +46,7 @@
           segment-size segment-ice-total segment-neighbors segment-sector
           segment-ice? segment-reading segment-state segment-visible-reading
           segment-hidden? segment-scanned? segment-flagged?
-          segment-scan segment-flag segment-sweep
+          segment-scan segment-flag segment-sweep segment-move-ice
           segment-won? segment-lost? segment-over? segment-counter
           segment-clean-left segment-extracted? segment-cell-state
           segment-tripped segment-equal?)
@@ -95,6 +95,8 @@
       (version default: 'original)      ; original (CLASSIC) | hacker
       (suspects? default: #f)           ; the SUSPECTS setting: a third flag state
       (ice default: (vector))           ; host -> #t when ICE; fixed at the deal
+      (ice-total default: 0)            ; how many (the counter's total)
+      (nb default: (vector))            ; host -> its neighbors: the grid's shared table
       (readings default: (vector))      ; host -> its ICE neighbor count
       (cells default: (vector))         ; host -> hidden | scanned | flagged | suspect | tripped | defused
       (first default: #f)               ; the uplink's host, once scanned
@@ -140,8 +142,11 @@
               t))))
 
     ;; The up to eight hosts around i, clipped at the edges, never i itself.
+    ;; The segment carries its grid's table (shared, never written), so the
+    ;; lookup is one vector-ref: the solver asks hundreds of thousands of
+    ;; times a deal.
     (define (segment-neighbors s i)
-      (vector-ref (neighbor-table (segment-w s) (segment-h s)) i))
+      (vector-ref (segment-nb s) i))
 
     ;; The clipped 3x3 around i, i included.
     (define (segment-sector s i)
@@ -153,25 +158,55 @@
     ;; --- construction --------------------------------------------------------
 
     ;; A dealt segment, nothing scanned, from its ICE vector (copied).
+    ;; The readings are built from the ICE out (each ICE host adds one to
+    ;; its neighbors), not by counting around every host: a deal builds
+    ;; one segment per placement and per perturbation.
     (define (segment-new w h ice preset version suspects?)
       (let* ((n (* w h))
              (ice (vector-copy ice))
              (nb (neighbor-table w h))
              (readings (make-vector n 0)))
-        (let loop ((i 0))
-          (when (< i n)
-            (vector-set! readings
-                         i
-                         (count-true ice (vector-ref nb i)))
-            (loop (+ i 1))))
-        (segment w: w
-                 h: h
-                 preset: preset
-                 version: version
-                 suspects?: suspects?
-                 ice: ice
-                 readings: readings
-                 cells: (make-vector n 'hidden))))
+        (let loop ((i 0) (total 0))
+          (if (< i n)
+              (if (vector-ref ice i)
+                  (begin
+                    (bump! readings (vector-ref nb i) 1)
+                    (loop (+ i 1) (+ total 1)))
+                  (loop (+ i 1) total))
+              (segment w: w
+                       h: h
+                       preset: preset
+                       version: version
+                       suspects?: suspects?
+                       ice: ice
+                       ice-total: total
+                       readings: readings
+                       nb: nb
+                       cells: (make-vector n 'hidden))))))
+
+    (define (bump! readings cells d)
+      (let loop ((cs cells))
+        (unless (null? cs)
+          (vector-set! readings (car cs) (+ d (vector-ref readings (car cs))))
+          (loop (cdr cs)))))
+
+    ;; The same segment with the ICE on hosts `off` moved to hosts `on`
+    ;; (the generator's perturbation, before anything is scanned): the
+    ;; readings change only around the moved hosts. `off` must be ICE and
+    ;; `on` clean, the same number of each.
+    (define (segment-move-ice s off on)
+      (let ((ice (vector-copy (segment-ice s)))
+            (readings (vector-copy (segment-readings s)))
+            (nb (segment-nb s)))
+        (for-each (lambda (i)
+                    (vector-set! ice i #f)
+                    (bump! readings (vector-ref nb i) -1))
+                  off)
+        (for-each (lambda (i)
+                    (vector-set! ice i #t)
+                    (bump! readings (vector-ref nb i) 1))
+                  on)
+        (segment s ice: ice readings: readings)))
 
     (define (count-true v cells)
       (let loop ((cs cells) (k 0))
@@ -194,8 +229,6 @@
     (define (segment-scanned? s i) (eq? (segment-state s i) 'scanned))
     (define (segment-flagged? s i) (eq? (segment-state s i) 'flagged))
 
-    (define (segment-ice-total s)
-      (count-true (segment-ice s) (iota (segment-size s))))
 
     ;; The tripped hosts, in index order.
     (define (segment-tripped s)
@@ -277,7 +310,10 @@
              (segment s news: (list (list 'refused 'flagged i))))
             ((memq (segment-state s i) '(hidden suspect))
              (let ((state (vector-copy (segment-cells s))))
-               (finish s state (open! s state (list i) '()) (or (segment-first s) i))))
+               (finish s
+                       state
+                       (open! s state (list i) '())
+                       (or (segment-first s) i))))
             (else (segment s news: '()))))
 
     ;; Sweep (chord) on a reading: when its flagged neighbors (tripped and
@@ -295,7 +331,10 @@
                     (null? targets))
                 (segment s news: '())
                 (let ((state (vector-copy (segment-cells s))))
-                  (finish s state (open! s state targets '()) (segment-first s)))))))
+                  (finish s
+                          state
+                          (open! s state targets '())
+                          (segment-first s)))))))
 
     ;; Flag host i: hidden -> flagged -> hidden, or hidden -> flagged ->
     ;; suspect -> hidden with SUSPECTS on. Scanned, tripped and defused hosts
