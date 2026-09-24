@@ -1,0 +1,111 @@
+;;; Gate leg 12, the data half (P6b): every SCAN cell state has its own
+;;; look, and every look is readable.
+;;;
+;;;   1. The table's keys are exactly CELL-STATES: a state with no entry, or
+;;;      an entry with no state, is red, naming it.
+;;;   2. Every (glyph . pattern) is unique: two states that differ only in
+;;;      colour are red, naming both (0.1.2's rule: glyph first).
+;;;   3. Every foreground clears its minimum WCAG contrast against its
+;;;      ground in normal vision and under simulated protanopia,
+;;;      deuteranopia and tritanopia (Machado 2009, severity 1.0, on linear
+;;;      RGB: the method of the design's contrast probe, which this file
+;;;      must reproduce: C-TRACE-HOT on C-BG is 6.35 / 4.68 / 7.44 / 5.40).
+;;;
+;;; Colours come from (crash palette)'s PALETTE, 8-bit as the style bible's
+;;; hexes are, so the palette's own retune (0.1.2) is re-checked here. The
+;;; only roles allowed to be missing are D77's two digit colours, pending
+;;; their palette slots; the list of them is itself asserted, so it cannot
+;;; grow quietly. The pixel half of leg 12 (each state renders to its own
+;;; pixels) comes with the draw.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash palette)
+        (crash scan rules)
+        (crash scan cells))
+
+(define PENDING-ROLES (list 'C-SCAN-1 'C-SCAN-2))
+
+(define (rgb8 role)
+  (let ((e (assq role PALETTE)))
+    (and e (map (lambda (c) (/ (round (* 255 c)) 255)) (cdr e)))))
+
+(define (lin c) (if (<= c 0.04045) (/ c 12.92) (expt (/ (+ c 0.055) 1.055) 2.4)))
+(define (lum-lin l) (+ (* 0.2126 (car l)) (* 0.7152 (cadr l)) (* 0.0722 (caddr l))))
+(define (contrast a b) (/ (+ (max a b) 0.05) (+ (min a b) 0.05)))
+
+(define MACHADO
+  (list (cons 'normal #f)
+        (cons 'protan '((0.152286 1.052583 -0.204868) (0.114503 0.786281 0.099216) (-0.003882 -0.048116 1.051998)))
+        (cons 'deutan '((0.367322 0.860646 -0.227968) (0.280085 0.672501 0.047413) (-0.011820 0.042940 0.968881)))
+        (cons 'tritan '((1.255528 -0.076749 -0.178779) (-0.078411 0.930809 0.147602) (0.004733 0.691367 0.303900)))))
+
+;; The luminance of an 8-bit colour as seen with vision `m` (#f: normal).
+(define (seen rgb m)
+  (let ((l (map lin rgb)))
+    (lum-lin (if m
+                 (map (lambda (row)
+                        (min 1 (max 0 (+ (* (car row) (car l)) (* (cadr row) (cadr l)) (* (caddr row) (caddr l))))))
+                      m)
+                 l))))
+
+;; ((vision . ratio) ...) of fg on ground.
+(define (ratios fg ground)
+  (map (lambda (v) (cons (car v) (contrast (seen fg (cdr v)) (seen ground (cdr v))))) MACHADO))
+
+(define (near? a b) (< (abs (- a b)) 0.006))
+
+(define (distinct xs)
+  (let loop ((xs xs) (acc '()))
+    (cond ((null? xs) (reverse acc))
+          ((member (car xs) acc) (loop (cdr xs) acc))
+          (else (loop (cdr xs) (cons (car xs) acc))))))
+
+(test-group "scan cells: every state has its own look (leg 12)"
+  (test "the table's keys are exactly CELL-STATES"
+    (let ((keys (map car CELL-LOOK)))
+      (for-each (lambda (s) (unless (memq s keys) (display "  PROBLEM no look for ") (display s) (newline))) CELL-STATES)
+      (for-each (lambda (k) (unless (memq k CELL-STATES) (display "  PROBLEM a look for no state: ") (display k) (newline))) keys)
+      (assert-equal (length CELL-STATES) (length keys))
+      (assert-true (every (lambda (s) (memq s keys)) CELL-STATES))
+      (assert-true (every (lambda (k) (memq k CELL-STATES)) keys))))
+  (test "every (glyph . pattern) is unique"
+    (let* ((ids (map (lambda (e) (cons (list-ref e 1) (list-ref e 2))) CELL-LOOK))
+           (dups (filter (lambda (id) (> (length (filter (lambda (x) (equal? x id)) ids)) 1)) (distinct ids))))
+      (for-each (lambda (d)
+                  (display "  PROBLEM shared look ") (display d) (display ": ")
+                  (display (map car (filter (lambda (e) (equal? (cons (list-ref e 1) (list-ref e 2)) d)) CELL-LOOK))) (newline))
+                dups)
+      (assert-equal '() dups))))
+
+(test-group "scan cells: every look is readable (leg 12)"
+  (test "the method reproduces the design's contrast probe"
+    (let ((r (ratios (rgb8 'C-TRACE-HOT) (rgb8 'C-BG))))
+      (assert-true (near? 6.35 (cdr (assq 'normal r))))
+      (assert-true (near? 4.68 (cdr (assq 'protan r))))
+      (assert-true (near? 7.44 (cdr (assq 'deutan r))))
+      (assert-true (near? 5.40 (cdr (assq 'tritan r)))))
+    ;; and the case D77 was ruled on: C-COLD, the old blue, is 4.18 on C-BG
+    (assert-true (near? 4.18 (cdr (assq 'normal (ratios (rgb8 'C-COLD) (rgb8 'C-BG)))))))
+  (test "only D77's two digit colours may be missing from the palette"
+    (let ((missing (distinct (filter (lambda (role) (and role (not (rgb8 role))))
+                                     (apply append (map (lambda (e) (list (list-ref e 3) (list-ref e 4))) CELL-LOOK))))))
+      (assert-true (every (lambda (m) (memq m PENDING-ROLES)) missing))))
+  (test "every foreground clears its minimum on its ground, in all four visions"
+    (let ((problems
+           (apply append
+                  (map (lambda (e)
+                         (let ((fg (rgb8 (list-ref e 3)))
+                               (ground (rgb8 (list-ref e 4)))
+                               (min-ratio (list-ref e 5)))
+                           (if (and fg ground)
+                               (filter (lambda (x) x)
+                                       (map (lambda (r)
+                                              (and (< (cdr r) min-ratio)
+                                                   (list (car e) (car r) (cdr r) 'under min-ratio)))
+                                            (ratios fg ground)))
+                               '())))
+                       CELL-LOOK))))
+      (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+      (assert-equal '() problems))))
