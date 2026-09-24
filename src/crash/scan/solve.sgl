@@ -78,6 +78,9 @@
       (around default: (vector)) ; host -> how many of its neighbors are open
       (pending default: (vector)) ; host -> #t while a flood has it queued (known clean)
       (flood default: '() mutable: #t)       ; hosts a flood still has to open
+      (dry default: #f mutable: #t)          ; the subset search's A constraints still to try, or #f
+      (by-host default: (vector))            ; host -> the constraints holding it (the search's index)
+      (indexed default: '() mutable: #t)     ; hosts with entries in by-host
       (border default: '() mutable: #t)      ; open readings that may touch a hidden host
       (opened default: 0 mutable: #t)
       (flags default: 0 mutable: #t)
@@ -98,6 +101,7 @@
                          fringe: (make-vector n #f)
                          around: (make-vector n 0)
                          pending: (make-vector n #f)
+                         by-host: (make-vector n '())
                          clean: (- n ice)
                          ice: ice)))
         (scan-step! st first 'uplink)
@@ -229,7 +233,8 @@
 
     ;; One unit of work, then the status: up to FLOOD-QUANTUM hosts of a
     ;; flood; with no flood, up to QUANTUM readings from the worklist under
-    ;; (a) and (b); with both empty, one application of (c), else of (d),
+    ;; (a) and (b); with both empty, a piece of the (c) search (its first
+    ;; unit builds and indexes the frontier), and when that runs out (d),
     ;; else stuck. So the solver is stuck only with no flood queued.
     (define (solve-pass! st)
       (when (eq? (solver-status st) 'running)
@@ -248,9 +253,8 @@
                   (vector-set! (solver-queued st) i #f)
                   (single-rules! st i)
                   (loop (+ k 1))))))
-          (else
-           (unless (subset-rule! st (constraints st))
-             (global-rule! st))))
+          ((solver-dry st) (dry-chunk! st))
+          (else (start-dry! st)))
         (when (done? st)
           (set-solver-status! st 'solved)))
       (solver-status st))
@@ -312,33 +316,65 @@
     ;; A B that holds A holds A's first host, so the candidates for B are
     ;; the constraints indexed under that host, not every constraint. A
     ;; constraint here is (hidden-hosts reading need).
-    (define (subset-rule! st pending)
-      (let ((by-host (make-vector (segment-size (solver-seg st)) '())))
+    ;;
+    ;; The work is split (D81: the grain): one unit builds the frontier's
+    ;; constraints and indexes them (start-dry!), then units search DRY-CHUNK
+    ;; of them each as A (dry-chunk!). Nothing changes between the pieces:
+    ;; a dry unit runs only with no flood and no worklist. The index is a
+    ;; vector the solver keeps, cleared by the hosts it touched, not a new
+    ;; one per search (the dry unit allocated ~45 KB each on bytecode).
+    (define DRY-CHUNK 16)
+
+    (define (start-dry! st)
+      (clear-index! st)
+      (let ((pending (constraints st))
+            (by-host (solver-by-host st)))
         (for-each (lambda (c)
-                    (for-each (lambda (h) (vector-set! by-host h (cons c (vector-ref by-host h))))
+                    (for-each (lambda (h)
+                                (when (null? (vector-ref by-host h))
+                                  (set-solver-indexed! st (cons h (solver-indexed st))))
+                                (vector-set! by-host h (cons c (vector-ref by-host h))))
                               (car c)))
                   pending)
-        (let outer ((as pending))
-          (if (null? as)
-              #f
-              (let ((a (car as)))
-                (let inner ((bs (vector-ref by-host (car (car a)))))
-                  (cond ((null? bs) (outer (cdr as)))
-                        ((or (eq? (car bs) a)
-                             (<= (length (car (car bs))) (length (car a)))
-                             (not (subset? (car a) (car (car bs)))))
-                         (inner (cdr bs)))
-                        (else
-                         (let* ((b (car bs))
-                                (diff (filter (lambda (c) (not (memv c (car a)))) (car b)))
-                                (d (- (caddr b) (caddr a))))
-                           (cond ((= d 0)
-                                  (scan-each! st diff 'c)
-                                  #t)
-                                 ((= d (length diff))
-                                  (for-each (lambda (c) (flag-step! st c 'c)) diff)
-                                  #t)
-                                 (else (inner (cdr bs)))))))))))))
+        (if (null? pending)
+            (global-rule! st)
+            (set-solver-dry! st pending))))
+
+    (define (clear-index! st)
+      (for-each (lambda (h) (vector-set! (solver-by-host st) h '()))
+                (solver-indexed st))
+      (set-solver-indexed! st '()))
+
+    ;; DRY-CHUNK constraints as A. A settle ends the search (the board has
+    ;; changed); a search that runs out falls to (d).
+    (define (dry-chunk! st)
+      (let outer ((as (solver-dry st)) (k 0))
+        (cond ((null? as)
+               (set-solver-dry! st #f)
+               (global-rule! st))
+              ((= k DRY-CHUNK) (set-solver-dry! st as))
+              ((settle-subset! st (car as)) (set-solver-dry! st #f))
+              (else (outer (cdr as) (+ k 1))))))
+
+    ;; The first B strictly holding A that settles something: act, #t.
+    (define (settle-subset! st a)
+      (let inner ((bs (vector-ref (solver-by-host st) (car (car a)))))
+        (cond ((null? bs) #f)
+              ((or (eq? (car bs) a)
+                   (<= (length (car (car bs))) (length (car a)))
+                   (not (subset? (car a) (car (car bs)))))
+               (inner (cdr bs)))
+              (else
+               (let* ((b (car bs))
+                      (diff (filter (lambda (c) (not (memv c (car a)))) (car b)))
+                      (d (- (caddr b) (caddr a))))
+                 (cond ((= d 0)
+                        (scan-each! st diff 'c)
+                        #t)
+                       ((= d (length diff))
+                        (for-each (lambda (c) (flag-step! st c 'c)) diff)
+                        #t)
+                       (else (inner (cdr bs)))))))))
 
     ;; (d): the global count, or stuck. The counts come from the counters;
     ;; the hidden hosts are listed only when the rule fires.
@@ -359,6 +395,7 @@
     (define (solve-phase st)
       (cond ((pair? (solver-flood st)) (quote flood))
             ((pair? (solver-work st)) (quote worklist))
+            ((solver-dry st) (quote search))
             (else (quote dry))))
 
     (define (solve-run! st)
@@ -385,6 +422,8 @@
     (define (solve-perturbed! st seg changed)
       (set-solver-seg! st seg)
       (set-solver-status! st 'running)
+      (set-solver-dry! st #f)   ; the search's constraints read the old readings
+      (clear-index! st)
       (for-each (lambda (i)
                   (for-each (lambda (j) (queue! st j))
                             (segment-neighbors seg i)))
