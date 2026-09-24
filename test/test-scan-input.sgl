@@ -1,0 +1,242 @@
+;;; SCAN's input (P6b, gate leg 10; D70, D71, D80): one script, three
+;;; devices, identical segments.
+;;;
+;;; A script is abstract: the uplink, then (scan i) (flag i) (sweep i). The
+;;; expected segment is the rules' own, the script applied straight to the
+;;; dealt ICE. Each device gets the script translated into its raw events:
+;;;   mouse     clicks, right-press flags, left+right chords for sweeps;
+;;;   touch     taps, FLAG mode and long-presses taking turns for flags,
+;;;             taps on readings for sweeps;
+;;;   keyboard  cursor keys to the host, then Return, f, or Space;
+;;;   touch on a WAN map (cells under 30 px): every action first zooms
+;;;             (the map key, then a tap) when its host is outside the
+;;;             window.
+;;; Then the particular rules: a tap on a flagged host in SCAN mode is
+;;; refused, a long press flags once with a buzz, a finger that moves
+;;; cancels, a map tap only zooms, a flag before the uplink is refused.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash stack prng)
+        (crash scan rules)
+        (crash scan generate)
+        (crash scan input))
+
+(define (always) #t)
+
+;; A session after its uplink, the deal run to the end.
+(define (dealt-session s)
+  (let loop ((s s))
+    (if (scan-session-dealing? s) (loop (scan-session-deal! s always)) s)))
+
+;; The script: the deal's recorded line, with a sweep on the latest reading
+;; after every fifth step.
+(define (script-of preset seed first)
+  (let* ((d (deal-segment preset seed first 'original #f))
+         (seg (dealt-segment d)))
+    (let loop ((steps (cdr (dealt-line d))) (k 1) (acc '()))
+      (if (null? steps)
+          (cons d (reverse acc))
+          (let* ((step (car steps))
+                 (acc (cons (list (car step) (cadr step)) acc))
+                 (acc (if (and (= 0 (modulo k 5)) (eq? (car step) 'scan))
+                          (cons (list 'sweep (cadr step)) acc)
+                          acc)))
+            (loop (cdr steps) (+ k 1) acc))))))
+
+;; The rules' own result of the script.
+(define (expected d first script)
+  (let loop ((s (segment-scan (segment-new (segment-w (dealt-segment d))
+                                           (segment-h (dealt-segment d))
+                                           (segment-ice (dealt-segment d))
+                                           (segment-preset (dealt-segment d))
+                                           'original
+                                           #f)
+                              first))
+             (script script))
+    (if (null? script)
+        s
+        (let ((a (car script)))
+          (loop (case (car a)
+                  ((scan) (if (and (segment-scanned? s (cadr a)) (> (segment-reading s (cadr a)) 0))
+                              (segment-sweep s (cadr a))
+                              (segment-scan s (cadr a))))
+                  ((flag) (segment-flag s (cadr a)))
+                  (else (segment-sweep s (cadr a))))
+                (cdr script))))))
+
+(define (frame pressed held pointer dt) (make-scan-frame pressed held pointer dt))
+
+;; The center of host i in the session's active layout.
+(define (center s i)
+  (let ((r (scan-host-rect s i)))
+    (and r (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2))))))
+
+(define (run-frames s frames)
+  (let loop ((s s) (fs frames))
+    (if (null? fs) s (loop (dealt-session (scan-step s (car fs))) (cdr fs)))))
+
+;; --- the devices ------------------------------------------------------------------
+
+(define (mouse s a)
+  (let ((c (center s (cadr a))))
+    (case (car a)
+      ((scan) (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'left) (list 'up (car c) (cdr c) 'left)) 16))))
+      ((flag) (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'right) (list 'up (car c) (cdr c) 'right)) 16))))
+      (else (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'left)
+                                                     (list 'down (car c) (cdr c) 'right)
+                                                     (list 'up (car c) (cdr c) 'right)
+                                                     (list 'up (car c) (cdr c) 'left))
+                                      16)))))))
+
+(define *flag-by-mode* #t)   ; touch flags alternate FLAG mode and long-press
+
+(define (touch s a)
+  (let* ((s (if (and (scan-map? s)
+                     (or (not (scan-session-zoom s)) (not (scan-host-rect s (cadr a)))))
+                ;; back to the map, then a tap there zooms onto the host
+                (let* ((s (run-frames s (list (frame '(map) '() '() 16))))
+                       (c (center s (cadr a))))
+                  (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'touch) (list 'up (car c) (cdr c) 'touch)) 16))))
+                s))
+         (c (center s (cadr a)))
+         (tap (list (list 'down (car c) (cdr c) 'touch) (list 'up (car c) (cdr c) 'touch))))
+    (case (car a)
+      ((flag)
+       (set! *flag-by-mode* (not *flag-by-mode*))
+       (if *flag-by-mode*
+           (run-frames s (list (frame '(flag-mode) '() '() 16)
+                               (frame '() '() tap 16)
+                               (frame '(flag-mode) '() '() 16)))
+           (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'touch)) 16)
+                               (frame '() '() '() (+ LONG-PRESS-MS 20))
+                               (frame '() '() (list (list 'up (car c) (cdr c) 'touch)) 16)))))
+      (else (run-frames s (list (frame '() '() tap 16)))))))
+
+(define (keyboard s a)
+  (let* ((w (scan-session-w s))
+         (c (scan-session-cursor s))
+         (dx (- (modulo (cadr a) w) (modulo c w)))
+         (dy (- (quotient (cadr a) w) (quotient c w)))
+         (moves (append (make-list (abs dx) (if (< dx 0) 'left 'right))
+                        (make-list (abs dy) (if (< dy 0) 'up 'down))))
+         (s (run-frames s (map (lambda (k) (frame (list k) '() '() 16)) moves))))
+    (assert-equal (cadr a) (scan-session-cursor s))
+    (run-frames s (list (frame (list (case (car a) ((scan) 'return) ((flag) 'f) (else 'space))) '() '() 16)))))
+
+(define (make-list n x) (if (= n 0) '() (cons x (make-list (- n 1) x))))
+
+(define (drive device preset seed first touch? script)
+  (let* ((s (scan-session-new preset seed 'original #f touch?))
+         (s (device s (list 'scan first))))
+    (let loop ((s s) (script script))
+      (if (null? script) s (loop (device s (car script)) (cdr script))))))
+
+(define (parity-problems preset seed)
+  (let* ((d0 (preset-dims preset))
+         (first (prng-index (prng-next (prng-seed (* seed 7919))) (* (car d0) (cadr d0))))
+         (ds (script-of preset seed first))
+         (want (expected (car ds) first (cdr ds))))
+    (filter (lambda (x) x)
+            (map (lambda (dev)
+                   (let ((got (scan-session-segment (drive (cadr dev) preset seed first (caddr dev) (cdr ds)))))
+                     (and (not (and got (segment-equal? want got)))
+                          (string-append (symbol->string preset) " seed " (number->string seed)
+                                         ": " (symbol->string (car dev)) " differs"))))
+                 (list (list 'mouse mouse #f)
+                       (list 'touch touch #t)
+                       (list 'keyboard keyboard #f))))))
+
+(test-group "scan input: one script, three devices, identical segments (leg 10)"
+  (test "LAN, seeds 1..6"
+    (let ((problems (apply append (map (lambda (seed) (parity-problems 'lan seed)) (iota 6 1)))))
+      (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+      (assert-equal '() problems)))
+  (test "WAN on touch opens as a map, and the zoomed taps act (D71); seeds 1..3"
+    (assert-true (scan-map? (scan-session-new 'wan 1 'original #f #t)))
+    (assert-false (scan-map? (scan-session-new 'lan 1 'original #f #t)))
+    (assert-false (scan-map? (scan-session-new 'wan 1 'original #f #f)))
+    (let ((problems (apply append (map (lambda (seed) (parity-problems 'wan seed)) (iota 3 1)))))
+      (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+      (assert-equal '() problems))))
+
+;; --- the particular rules ---------------------------------------------------------
+
+(define (lan-after-uplink touch?)
+  (let* ((s (scan-session-new 'lan 3 'original #f touch?))
+         (c (center s 40)))
+    (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) (if touch? 'touch 'left))
+                                             (list 'up (car c) (cdr c) (if touch? 'touch 'left)))
+                               16)))))
+
+(define (hidden-host s)
+  (let ((seg (scan-session-segment s)))
+    (find (lambda (i) (segment-hidden? seg i)) (iota (segment-size seg)))))
+
+(test-group "scan input: the particular rules"
+  (test "the first scan is the uplink; the deal runs; the uplink reads zero"
+    (let ((s (lan-after-uplink #f)))
+      (assert-equal 40 (scan-session-first s))
+      (assert-true (segment-scanned? (scan-session-segment s) 40))
+      (assert-equal 0 (segment-reading (scan-session-segment s) 40))))
+  (test "a flag before the uplink is refused"
+    (let* ((s (scan-session-new 'lan 3 'original #f #f))
+           (c (center s 10))
+           (s2 (scan-step s (frame '() '() (list (list 'down (car c) (cdr c) 'right)) 16))))
+      (assert-false (scan-session-segment s2))
+      (assert-true (and (member (list 'refused 'no-uplink 10) (scan-session-news s2)) #t))))
+  (test "touch: a tap on a flagged host in SCAN mode is refused"
+    (let* ((s (lan-after-uplink #t))
+           (i (hidden-host s))
+           (c (center s i))
+           (tap (list (list 'down (car c) (cdr c) 'touch) (list 'up (car c) (cdr c) 'touch)))
+           (s (run-frames s (list (frame '(flag-mode) '() '() 16) (frame '() '() tap 16) (frame '(flag-mode) '() '() 16))))
+           (s2 (scan-step s (frame '() '() tap 16))))
+      (assert-equal 'flagged (segment-state (scan-session-segment s) i))
+      (assert-equal 'flagged (segment-state (scan-session-segment s2) i))
+      (assert-true (and (member (list 'refused 'flagged i) (scan-session-news s2)) #t))))
+  (test "touch: a long press flags once, with a buzz, and its release does nothing more"
+    (let* ((s (lan-after-uplink #t))
+           (i (hidden-host s))
+           (c (center s i))
+           (s1 (scan-step s (frame '() '() (list (list 'down (car c) (cdr c) 'touch)) 16)))
+           (s2 (scan-step s1 (frame '() '() '() 390)))
+           (s3 (scan-step s2 (frame '() '() '() 30)))
+           (s4 (scan-step s3 (frame '() '() '() 500)))
+           (s5 (scan-step s4 (frame '() '() (list (list 'up (car c) (cdr c) 'touch)) 16))))
+      (assert-equal 'hidden (segment-state (scan-session-segment s2) i))
+      (assert-equal 'flagged (segment-state (scan-session-segment s3) i))
+      (assert-true (and (memq 'buzz (scan-session-requests s3)) #t))
+      (assert-false (memq 'buzz (scan-session-requests s4)))
+      (assert-equal 'flagged (segment-state (scan-session-segment s5) i))))
+  (test "touch: a finger that moves cancels the tap"
+    (let* ((s (lan-after-uplink #t))
+           (i (hidden-host s))
+           (c (center s i))
+           (s2 (run-frames s (list (frame '() '() (list (list 'down (car c) (cdr c) 'touch)
+                                                        (list 'move (+ (car c) 12) (cdr c))
+                                                        (list 'up (+ (car c) 12) (cdr c) 'touch))
+                                          16)))))
+      (assert-true (segment-equal? (scan-session-segment s) (scan-session-segment s2)))))
+  (test "touch on a map: a tap zooms and acts on nothing"
+    (let* ((s (scan-session-new 'wan 2 'original #f #t))
+           (c (center s 100))
+           (s2 (scan-step s (frame '() '() (list (list 'down (car c) (cdr c) 'touch) (list 'up (car c) (cdr c) 'touch)) 16))))
+      (assert-false (scan-session-first s2))
+      (assert-true (and (scan-session-zoom s2) #t))
+      (assert-true (and (scan-host-rect s2 100) #t))
+      (assert-equal 32 (caddr (scan-host-rect s2 100)))))
+  (test "keyboard: Space scans like Return (D80); ctrl+Space asks for the tools, not a scan"
+    (let* ((s (scan-session-new 'lan 3 'original #f #f))
+           (s1 (scan-step s (frame '(space) '(ctrl) '() 16)))
+           (s2 (dealt-session (scan-step s (frame '(space) '() '() 16)))))
+      (assert-true (and (memq 'tools (scan-session-requests s1)) #t))
+      (assert-false (scan-session-first s1))
+      (assert-equal 0 (scan-session-first s2))))
+  (test "the cell sizes of the design note's section 2"
+    (assert-equal 36 (car (scan-layout 9 9)))
+    (assert-equal 20 (car (scan-layout 16 16)))
+    (assert-equal 20 (car (scan-layout 30 16)))
+    (assert-equal 32 (car (scan-layout 16 10)))
+    (assert-equal 30 (car (scan-layout 20 11)))))

@@ -1,0 +1,445 @@
+;;; (crash scan input) - A frame of input becomes a SCAN action.
+;;;
+;;; The shell hands in one scan-frame per frame: the keys that went down,
+;;; the modifiers held, the pointer events of the frame in VIRTUAL
+;;; coordinates, and the milliseconds since the last frame (for the
+;;; long-press). scan-step turns that into a new session. Nothing here
+;;; reads a platform or a clock, so the web shell and the native one drive
+;;; it unchanged, and a test can script it.
+;;;
+;;; Every device ends in the same three actions on the segment, through
+;;; `act`: scan, flag, sweep (the design note's section 8, D70, D71, D80):
+;;;
+;;;   mouse     left RELEASE scans the host under the pointer (the pressed
+;;;             host follows the pointer while the button is held; Windows);
+;;;             right PRESS flags, unless the left is already down, which
+;;;             starts a chord; releasing either button of a chord sweeps;
+;;;             the middle button sweeps; a plain left click on a reading
+;;;             sweeps (the one departure: the phone needs it).
+;;;   touch     every action on RELEASE at the pressed host, so a long press
+;;;             never scans first; a finger that moves more than MOVE-CANCEL
+;;;             virtual px cancels. A tap scans, or flags in FLAG mode (the
+;;;             mode button: the `flag-mode` pseudo-key). LONG-PRESS-MS
+;;;             still flags in either mode (`buzz` in the requests, for the
+;;;             page's vibrate). A tap on a reading sweeps. A tap on a
+;;;             flagged host in SCAN mode is refused (a shake: `refused`).
+;;;             A board whose cells come out under MIN-TAP-CELL opens as a
+;;;             MAP: a tap there never acts, it zooms to a ZOOM-W x ZOOM-H
+;;;             window of ZOOM-CELL hosts centered on the tap, and taps in
+;;;             the window act; the `map` pseudo-key goes back.
+;;;   keyboard  arrows or hjkl move the cursor (shift: five hosts); Return
+;;;             and Space scan the cursor's host, or sweep it if it is a
+;;;             reading (D80); f flags; n / shift+n jump to the next / previous
+;;;             frontier host; ctrl+Space asks for the tool stack, Escape
+;;;             for the menu, ctrl+n for a new segment; ? shows the keys.
+;;;
+;;; The first scan is the UPLINK: it names the host the deal is built
+;;; around, and starts the deal ((crash scan generate)); the session holds
+;;; the generator and the shell steps it with its own clock and budget
+;;; (scan-session-deal!, D81), after which the uplink is scanned. Until
+;;; then there is no segment, so a flag is refused.
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash scan input)
+  (import (sigil struct)
+          (sigil math)
+          (crash scan rules)
+          (crash scan generate))
+
+  (export BAND-W BAND-H MARGIN MIN-TAP-CELL ZOOM-CELL ZOOM-W ZOOM-H
+          LONG-PRESS-MS MOVE-CANCEL
+          scan-frame scan-frame? make-scan-frame
+          scan-session scan-session?
+          scan-session-segment scan-session-deal scan-session-first
+          scan-session-w scan-session-h scan-session-preset scan-session-seed
+          scan-session-version scan-session-mode scan-session-cursor
+          scan-session-press scan-session-zoom scan-session-touch?
+          scan-session-requests scan-session-news scan-session-keys?
+          scan-session-new scan-session-node
+          scan-step scan-session-dealing? scan-session-deal!
+          scan-layout scan-map? scan-host-at scan-host-rect)
+
+  (begin
+    ;; The board band: 640x400 less the 48 px bar (the note's section 2).
+    (define BAND-W 640)
+    (define BAND-H 352)
+    (define MARGIN 8)
+    (define MIN-TAP-CELL 30)   ; the phone's floor: STACK's 30 px tile (P0b)
+    (define ZOOM-CELL 32)      ; the hub's cell
+    (define ZOOM-W 20)         ; the hub's view
+    (define ZOOM-H 11)
+    (define LONG-PRESS-MS 400)
+    (define MOVE-CANCEL 8)
+
+    (define-struct scan-frame
+      (pressed default: '())   ; keys down this frame
+      (held default: '())      ; modifiers held (shift, ctrl)
+      (pointer default: '())   ; (down x y button) (up x y button) (move x y), in order
+      (dt default: 0))         ; ms since the last frame
+
+    (define (make-scan-frame pressed held pointer dt)
+      (scan-frame pressed: pressed held: held pointer: pointer dt: dt))
+
+    (define-struct scan-session
+      (w default: 9)
+      (h default: 9)
+      (m default: 10)
+      (preset default: 'lan)
+      (seed default: 1)
+      (version default: 'original)
+      (suspects? default: #f)
+      (touch? default: #f)
+      (segment default: #f)     ; #f until the deal is done
+      (deal default: #f)        ; the generator, while dealing
+      (first default: #f)       ; the uplink, once picked
+      (mode default: 'scan)     ; scan | flag (touch)
+      (cursor default: 0)
+      (press default: #f)       ; (host button x y ms long?) while a press is held
+      (buttons default: '())    ; mouse buttons down
+      (chord? default: #f)      ; a chord began with this press
+      (zoom default: #f)        ; the map view's window (col . row), or #f on the map
+      (keys? default: #f)       ; the keys line shows
+      (requests default: '())   ; for the shell, this frame: menu tools new buzz
+      (news default: '()))      ; what this frame did, for cues and motion
+
+    ;; A FREE PLAY or daily segment: a preset, a seed, nothing dealt yet.
+    (define (scan-session-new preset seed version suspects? touch?)
+      (let ((d (preset-dims preset)))
+        (scan-session w: (car d)
+                      h: (cadr d)
+                      m: (caddr d)
+                      preset: preset
+                      seed: seed
+                      version: version
+                      suspects?: suspects?
+                      touch?: touch?)))
+
+    ;; A node board (JACK IN): the grid and ICE count from the launch.
+    (define (scan-session-node w h m seed touch?)
+      (scan-session w: w h: h m: m preset: 'node seed: seed version: 'hacker touch?: touch?))
+
+    ;; --- geometry ----------------------------------------------------------------
+
+    ;; (cell x0 y0): the host size and the board's top-left in the band, the
+    ;; board centered. Cells are the largest even size that fits.
+    (define (scan-layout w h)
+      (let* ((fit (min (quotient (- BAND-W (* 2 MARGIN)) w)
+                       (quotient (- BAND-H (* 2 MARGIN)) h)))
+             (cell (- fit (modulo fit 2))))
+        (list cell
+              (quotient (- BAND-W (* w cell)) 2)
+              (quotient (- BAND-H (* h cell)) 2))))
+
+    ;; On a touch device, a board too fine to tap opens as a map (D71).
+    (define (scan-map? s)
+      (and (scan-session-touch? s)
+           (< (car (scan-layout (scan-session-w s) (scan-session-h s))) MIN-TAP-CELL)))
+
+    ;; The layout taps act in: the zoomed window when zoomed, else the board.
+    ;; (cell x0 y0 col0 row0 cols rows)
+    (define (active-layout s)
+      (let ((z (scan-session-zoom s))
+            (w (scan-session-w s))
+            (h (scan-session-h s)))
+        (if (and z (scan-map? s))
+            (let ((cols (min ZOOM-W w))
+                  (rows (min ZOOM-H h)))
+              (list ZOOM-CELL
+                    (quotient (- BAND-W (* cols ZOOM-CELL)) 2)
+                    (quotient (- BAND-H (* rows ZOOM-CELL)) 2)
+                    (car z)
+                    (cdr z)
+                    cols
+                    rows))
+            (let ((l (scan-layout w h)))
+              (list (car l) (cadr l) (caddr l) 0 0 w h)))))
+
+    ;; The host under a virtual point, or #f.
+    (define (scan-host-at s x y)
+      (let* ((l (active-layout s))
+             (cell (list-ref l 0))
+             (cx (floor-div (- x (list-ref l 1)) cell))
+             (cy (floor-div (- y (list-ref l 2)) cell)))
+        (and (>= cx 0)
+             (< cx (list-ref l 5))
+             (>= cy 0)
+             (< cy (list-ref l 6))
+             (+ (* (+ cy (list-ref l 4)) (scan-session-w s))
+                (+ cx (list-ref l 3))))))
+
+    ;; (x y size) of a host in the active layout, or #f when it is outside
+    ;; the zoomed window. The draw and the tests share it with scan-host-at.
+    (define (scan-host-rect s i)
+      (let* ((l (active-layout s))
+             (w (scan-session-w s))
+             (cx (- (modulo i w) (list-ref l 3)))
+             (cy (- (quotient i w) (list-ref l 4))))
+        (and (>= cx 0)
+             (< cx (list-ref l 5))
+             (>= cy 0)
+             (< cy (list-ref l 6))
+             (list (+ (list-ref l 1) (* cx (list-ref l 0)))
+                   (+ (list-ref l 2) (* cy (list-ref l 0)))
+                   (list-ref l 0)))))
+
+    (define (floor-div a b)
+      (if (>= a 0) (quotient a b) (- (quotient (- (+ a b) 1) b))))
+
+    ;; The zoomed window centered on host i, clamped to the board.
+    (define (window-at s i)
+      (let* ((w (scan-session-w s))
+             (h (scan-session-h s))
+             (cols (min ZOOM-W w))
+             (rows (min ZOOM-H h)))
+        (cons (clamp (- (modulo i w) (quotient cols 2)) 0 (- w cols))
+              (clamp (- (quotient i w) (quotient rows 2)) 0 (- h rows)))))
+
+    (define (clamp x lo hi) (max lo (min hi x)))
+
+    ;; --- the deal ------------------------------------------------------------------
+
+    (define (scan-session-dealing? s) (and (scan-session-deal s) #t))
+
+    ;; Step the deal while (more?) says yes (the shell's budget, D81). When
+    ;; it is done the segment is the dealt one, the uplink scanned. #f
+    ;; (the deal gave up) leaves no segment and a `failed` request.
+    (define (scan-session-deal! s more?)
+      (let ((g (scan-session-deal s)))
+        (if (not g)
+            s
+            (case (scan-gen-run! g more?)
+              ((done)
+               (scan-session s
+                             segment: (dealt-segment (scan-gen-result g))
+                             deal: #f
+                             news: (list (list 'uplink (scan-session-first s)))))
+              ((failed)
+               (scan-session s deal: #f requests: (cons 'failed (scan-session-requests s))))
+              (else s)))))
+
+    (define (start-deal s i)
+      (scan-session s
+                    first: i
+                    cursor: i
+                    deal: (if (eq? (scan-session-preset s) 'node)
+                              (scan-gen-node-start (scan-session-w s)
+                                                   (scan-session-h s)
+                                                   (scan-session-m s)
+                                                   (scan-session-seed s)
+                                                   i)
+                              (scan-gen-start (scan-session-preset s)
+                                              (scan-session-seed s)
+                                              i
+                                              (scan-session-version s)
+                                              (scan-session-suspects? s)))))
+
+    ;; --- the three actions ---------------------------------------------------------
+
+    ;; act: 'scan, 'flag or 'sweep on host i. Before the deal, a scan picks
+    ;; the uplink and anything else is refused; during it, nothing acts. A
+    ;; scan on a reading sweeps (the design's departure). News collects.
+    (define (act s kind i)
+      (cond ((not i) s)
+            ((scan-session-deal s) s)
+            ((not (scan-session-segment s))
+             (if (eq? kind 'scan)
+                 (start-deal s i)
+                 (say s (list 'refused 'no-uplink i))))
+            (else
+             (let* ((seg (scan-session-segment s))
+                    (reading? (and (segment-scanned? seg i) (> (segment-reading seg i) 0)))
+                    (seg2 (case kind
+                            ((scan) (if reading? (segment-sweep seg i) (segment-scan seg i)))
+                            ((flag) (segment-flag seg i))
+                            ((sweep) (segment-sweep seg i))
+                            (else seg))))
+               (scan-session s
+                             segment: seg2
+                             news: (append (reverse (segment-news seg2)) (scan-session-news s)))))))
+
+    (define (say s item)
+      (scan-session s news: (cons item (scan-session-news s))))
+
+    (define (request s r)
+      (scan-session s requests: (cons r (scan-session-requests s))))
+
+    ;; --- the frame -----------------------------------------------------------------
+
+    (define (scan-step s f)
+      (let* ((s (scan-session s requests: '() news: '()))
+             (s (keys s f))
+             (s (pointer s f))
+             (s (long-press s f)))
+        (scan-session s news: (reverse (scan-session-news s)))))
+
+    (define (pressed? f k) (and (memq k (scan-frame-pressed f)) #t))
+    (define (held? f k) (and (memq k (scan-frame-held f)) #t))
+
+    (define (keys s f)
+      (let loop ((ks (scan-frame-pressed f)) (s s))
+        (if (null? ks) s (loop (cdr ks) (key s (car ks) f)))))
+
+    (define (key s k f)
+      (let ((ctrl (held? f 'ctrl))
+            (step (if (held? f 'shift) 5 1)))
+        (cond ((eq? k 'escape) (request s 'menu))
+              ((and ctrl (eq? k 'space)) (request s 'tools))
+              ((and ctrl (eq? k 'n)) (request s 'new))
+              ((eq? k 'flag-mode)
+               (scan-session s mode: (if (eq? (scan-session-mode s) 'scan) 'flag 'scan)))
+              ((eq? k 'map) (scan-session s zoom: #f))
+              ((eq? k '?) (scan-session s keys?: (not (scan-session-keys? s))))
+              (ctrl s)
+              ((memq k '(left h)) (move s (- step) 0))
+              ((memq k '(right l)) (move s step 0))
+              ((memq k '(up k)) (move s 0 (- step)))
+              ((memq k '(down j)) (move s 0 step))
+              ((memq k '(return space)) (act s 'scan (scan-session-cursor s)))
+              ((eq? k 'f) (act s 'flag (scan-session-cursor s)))
+              ((eq? k 'n) (jump s (if (held? f 'shift) -1 1)))   ; shift+n: back
+              (else s))))
+
+    (define (move s dx dy)
+      (let* ((w (scan-session-w s))
+             (c (scan-session-cursor s))
+             (x (clamp (+ (modulo c w) dx) 0 (- w 1)))
+             (y (clamp (+ (quotient c w) dy) 0 (- (scan-session-h s) 1))))
+        (scan-session s cursor: (+ (* y w) x))))
+
+    ;; The next (dir 1) or previous (-1) frontier host after the cursor, in
+    ;; index order, wrapping: a hidden host next to a scanned reading.
+    (define (jump s dir)
+      (let ((seg (scan-session-segment s)))
+        (if (not seg)
+            s
+            (let* ((n (segment-size seg))
+                   (c (scan-session-cursor s)))
+              (let loop ((k 1))
+                (if (> k n)
+                    s
+                    (let ((i (modulo (+ c (* dir k)) n)))
+                      (if (frontier? seg i)
+                          (scan-session s cursor: i)
+                          (loop (+ k 1))))))))))
+
+    (define (frontier? seg i)
+      (and (segment-hidden? seg i)
+           (let loop ((nb (segment-neighbors seg i)))
+             (and (pair? nb)
+                  (or (and (segment-visible-reading seg (car nb))
+                           (> (segment-visible-reading seg (car nb)) 0))
+                      (loop (cdr nb)))))))
+
+    (define (pointer s f)
+      (let loop ((es (scan-frame-pointer f)) (s s))
+        (if (null? es)
+            s
+            (loop (cdr es)
+                  (let ((e (car es)))
+                    (case (car e)
+                      ((down) (down s (cadr e) (caddr e) (cadddr e)))
+                      ((up) (up s (cadr e) (caddr e) (cadddr e)))
+                      ((move) (moved s (cadr e) (caddr e)))
+                      (else s)))))))
+
+    ;; A press: (host button x y ms long?)
+    (define (press-host p) (list-ref p 0))
+    (define (press-button p) (list-ref p 1))
+
+    (define (down s x y button)
+      (let ((i (scan-host-at s x y))
+            (buttons (cons button (scan-session-buttons s))))
+        (case button
+          ((touch)
+           ;; ms #f: the press began this frame, whose dt ran before it
+           (scan-session s press: (list i 'touch x y #f #f) buttons: buttons))
+          ((right)
+           (if (memq 'left (scan-session-buttons s))
+               (scan-session s chord?: #t buttons: buttons)
+               (act (scan-session s buttons: buttons) 'flag i)))
+          ((left)
+           (scan-session s
+                         press: (list i 'left x y 0 #f)
+                         buttons: buttons
+                         chord?: (and (memq 'right (scan-session-buttons s)) #t)))
+          ((middle) (scan-session s press: (list i 'middle x y 0 #f) buttons: buttons))
+          (else s))))
+
+    (define (moved s x y)
+      (let ((p (scan-session-press s)))
+        (cond ((not p) s)
+              ((eq? (press-button p) 'touch)
+               ;; a finger that moves cancels: no action on its release
+               (if (> (+ (abs (- x (list-ref p 2))) (abs (- y (list-ref p 3)))) MOVE-CANCEL)
+                   (scan-session s press: #f)
+                   s))
+              ;; the mouse's pressed host follows the pointer (Windows)
+              (else
+               (scan-session s press: (list (scan-host-at s x y)
+                                            (press-button p)
+                                            x
+                                            y
+                                            (list-ref p 4)
+                                            #f))))))
+
+    (define (up s x y button)
+      (let* ((p (scan-session-press s))
+             (buttons (remove-one button (scan-session-buttons s)))
+             (s (scan-session s buttons: buttons)))
+        (case button
+          ((touch)
+           (let ((s (scan-session s press: #f)))
+             (cond ((not p) s)                       ; cancelled by a move
+                   ((list-ref p 5) s)                ; the long press already flagged
+                   (else (tap s (press-host p))))))
+          ((left right)
+           (cond ((scan-session-chord? s)
+                  ;; either button's release ends a chord with a sweep; the
+                  ;; other release then does nothing
+                  (let ((i (if p (press-host p) (scan-host-at s x y))))
+                    (act (scan-session s chord?: #f press: #f) 'sweep i)))
+                 ((eq? button 'left)
+                  (let ((s (scan-session s press: #f)))
+                    (if (and p (eq? (press-button p) 'left))
+                        (act s 'scan (scan-host-at s x y))
+                        s)))
+                 (else s)))
+          ((middle)
+           (act (scan-session s press: #f) 'sweep (scan-host-at s x y)))
+          (else s))))
+
+    (define (remove-one x xs)
+      (cond ((null? xs) '())
+            ((eq? (car xs) x) (cdr xs))
+            (else (cons (car xs) (remove-one x (cdr xs))))))
+
+    ;; A touch tap on host i: the map zooms; else by mode.
+    (define (tap s i)
+      (cond ((not i) s)
+            ((and (scan-map? s) (not (scan-session-zoom s)))
+             (scan-session s zoom: (window-at s i)))
+            (else
+             (let ((seg (scan-session-segment s)))
+               (cond ((and seg (segment-scanned? seg i) (> (segment-reading seg i) 0))
+                      (act s 'sweep i))
+                     ((eq? (scan-session-mode s) 'flag) (act s 'flag i))
+                     ((and seg (eq? (segment-state seg i) 'flagged))
+                      (say s (list 'refused 'flagged i)))
+                     (else (act s 'scan i)))))))
+
+    ;; A touch held still for LONG-PRESS-MS flags, once, with a buzz.
+    (define (long-press s f)
+      (let ((p (scan-session-press s)))
+        (if (or (not p)
+                (not (eq? (press-button p) 'touch))
+                (list-ref p 5)
+                (and (scan-map? s) (not (scan-session-zoom s))))
+            s
+            (let ((ms (if (list-ref p 4) (+ (list-ref p 4) (scan-frame-dt f)) 0)))
+              (if (< ms LONG-PRESS-MS)
+                  (scan-session s press: (list (list-ref p 0) 'touch (list-ref p 2) (list-ref p 3) ms #f))
+                  (request (act (scan-session s press: (list (list-ref p 0) 'touch (list-ref p 2) (list-ref p 3) ms #t))
+                                'flag
+                                (list-ref p 0))
+                           'buzz))))))))
