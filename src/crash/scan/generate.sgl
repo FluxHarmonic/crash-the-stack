@@ -44,7 +44,7 @@
           (crash scan solve)
           (sigil list))
 
-  (export GEN-TRIES
+  (export GEN-TRIES GEN-BUDGET-MS
           dealt dealt? dealt-segment dealt-line dealt-try dealt-perturbs dealt-placements
           dealt-seed dealt-first
           place-ice
@@ -57,6 +57,12 @@
     ;; Perturbations and placements past the first before a deal gives up
     ;; (#f). The sweep in the gate counts what a deal takes.
     (define GEN-TRIES 1000)
+
+    ;; Generation per frame, in ms, for the shell's (more?) thunk: half a 60 fps
+    ;; frame (the leader, 2026-09-24, after David's flagship read), so a slow
+    ;; device takes more frames rather than longer ones. A frame is this plus
+    ;; at most one unit; the audio rings hold 256 ms (cues) and 341 ms (music).
+    (define GEN-BUDGET-MS 8)
 
     ;; A dealt segment: the uplink already scanned, the recorded line from
     ;; it, and what it took: `try` is perturbations plus placements past the
@@ -115,6 +121,7 @@
       (try default: 0 mutable: #t)             ; placements dealt so far, minus one
       (perturbs default: 0 mutable: #t)        ; perturbations so far
       (rng default: 1 mutable: #t)             ; the perturbation stream's state
+      (fresh default: #f mutable: #t)          ; a placement dealt, its solver not started yet
       (solver default: #f mutable: #t)
       (pure? default: #t mutable: #t)          ; the solver's run has seen no perturbation
       (status default: 'running mutable: #t)   ; running | done | failed
@@ -181,15 +188,22 @@
                                             (gen-m g)
                                             (gen-seed g)
                                             (gen-try g)))))
-        (set-gen-solver! g (solve-start seg (gen-first g)))
+        (set-gen-fresh! g seg)
+        (set-gen-solver! g #f)
         (set-gen-pure?! g #t)))
+
+    ;; The placement's solver starts in a unit of its own (D81: the grain).
+    (define (start-fresh! g)
+      (set-gen-solver! g (solve-start (gen-fresh g) (gen-first g)))
+      (set-gen-fresh! g #f))
 
     ;; One unit of work.
     (define (scan-gen-step! g)
       (when (eq? (gen-status g) 'running)
         (set-gen-steps! g (+ 1 (gen-steps g)))
         (let ((st (gen-solver g)))
-          (cond ((not st) (deal-placement! g))
+          (cond ((gen-fresh g) (start-fresh! g))
+                ((not st) (deal-placement! g))
                 ((>= (scan-gen-try g) GEN-TRIES) (set-gen-status! g 'failed))
                 (else
                  (case (solve-pass! st)

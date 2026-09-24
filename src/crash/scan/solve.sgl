@@ -63,6 +63,11 @@
     ;; Readings taken off the worklist per unit of work.
     (define QUANTUM 8)
 
+    ;; Hosts a flood opens per unit of work. A flood is drained in pieces so
+    ;; no unit grows with the size of an opening (D81: on a slow phone a
+    ;; whole BACKBONE uplink flood in one unit ran to ~200 ms).
+    (define FLOOD-QUANTUM 16)
+
     (define-struct solver
       (seg default: #f mutable: #t)          ; the segment: the dealt one, or a perturbation's
       (open default: (vector))   ; host -> #t once scanned
@@ -71,6 +76,8 @@
       (work default: '() mutable: #t)        ; readings to re-examine
       (fringe default: (vector)) ; host -> #t while listed in `border`
       (around default: (vector)) ; host -> how many of its neighbors are open
+      (pending default: (vector)) ; host -> #t while a flood has it queued (known clean)
+      (flood default: '() mutable: #t)       ; hosts a flood still has to open
       (border default: '() mutable: #t)      ; open readings that may touch a hidden host
       (opened default: 0 mutable: #t)
       (flags default: 0 mutable: #t)
@@ -90,6 +97,7 @@
                          queued: (make-vector n #f)
                          fringe: (make-vector n #f)
                          around: (make-vector n 0)
+                         pending: (make-vector n #f)
                          clean: (- n ice)
                          ice: ice)))
         (scan-step! st first 'uplink)
@@ -104,9 +112,13 @@
         (error "scan solver: a rule scanned ICE" i))
       (segment-reading (solver-seg st) i))
 
+    ;; Neither scanned, flagged, nor queued by a flood (a queued host is
+    ;; known clean: no rule may scan it again, or the line would scan a host
+    ;; the replay's flood has already opened).
     (define (hidden? st i)
       (not (or (vector-ref (solver-open st) i)
-               (vector-ref (solver-flag st) i))))
+               (vector-ref (solver-flag st) i)
+               (vector-ref (solver-pending st) i))))
 
     (define (done? st)
       (= (solver-opened st) (solver-clean st)))
@@ -138,25 +150,41 @@
           (enqueue! st (car nb))
           (loop (cdr nb)))))
 
-    ;; Scan i and flood from zeros, the rules' flood exactly (flags skipped).
+    ;; Scan i: open it now, and queue a flood from it if it is a zero. The
+    ;; flood opens the rules' flood exactly (flags skipped), in pieces:
+    ;; flood-step! drains it FLOOD-QUANTUM hosts a unit, before any rule
+    ;; runs again.
     (define (reveal! st i)
-      (let ((open (solver-open st))
-            (seg (solver-seg st)))
-        (let loop ((todo (list i)))
-          (unless (null? todo)
-            (let ((c (car todo)))
-              (if (hidden? st c)
-                  (let ((r (learn st c)))
-                    (vector-set! open c #t)
-                    (set-solver-opened! st (+ 1 (solver-opened st)))
-                    (touch! st c)
-                    (let ((around (solver-around st)))
-                      (for-each (lambda (j) (vector-set! around j (+ 1 (vector-ref around j))))
-                                (segment-neighbors seg c)))
-                    (loop (if (= r 0)
-                              (append (segment-neighbors seg c) (cdr todo))
-                              (cdr todo))))
-                  (loop (cdr todo))))))))
+      (when (= 0 (open-host! st i))
+        (spread! st i)))
+
+    (define (open-host! st c)
+      (let ((r (learn st c)))
+        (vector-set! (solver-open st) c #t)
+        (set-solver-opened! st (+ 1 (solver-opened st)))
+        (touch! st c)
+        (let ((around (solver-around st)))
+          (for-each (lambda (j) (vector-set! around j (+ 1 (vector-ref around j))))
+                    (segment-neighbors (solver-seg st) c)))
+        r))
+
+    ;; Queue c's hidden neighbors for the flood.
+    (define (spread! st c)
+      (for-each (lambda (j)
+                  (when (hidden? st j)
+                    (vector-set! (solver-pending st) j #t)
+                    (set-solver-flood! st (cons j (solver-flood st)))))
+                (segment-neighbors (solver-seg st) c)))
+
+    (define (flood-step! st)
+      (let loop ((k 0))
+        (when (and (< k FLOOD-QUANTUM) (pair? (solver-flood st)))
+          (let ((c (car (solver-flood st))))
+            (set-solver-flood! st (cdr (solver-flood st)))
+            (vector-set! (solver-pending st) c #f)
+            (when (= 0 (open-host! st c))
+              (spread! st c))
+            (loop (+ k 1))))))
 
     (define (record! st act i rule)
       (set-solver-line! st (cons (list act i rule) (solver-line st))))
@@ -164,10 +192,21 @@
     ;; Nothing is recorded once every clean host is scanned: the rules
     ;; auto-flag the rest of the ICE on the win (Windows), so a flag after
     ;; the last scan would land on a host that is no longer hidden.
+    ;; A scan is recorded only with no flood pending: the replay floods in
+    ;; full at each scan, so a host the pending flood would still reach must
+    ;; be opened by it, not scanned again (the checker refused 90 of 200
+    ;; LAN lines as `not-hidden` when this drain was missing).
     (define (scan-step! st i rule)
+      (drain-flood! st)
       (when (and (hidden? st i) (not (done? st)))
         (record! st 'scan i rule)
         (reveal! st i)))
+
+    (define (drain-flood! st)
+      (let loop ()
+        (when (pair? (solver-flood st))
+          (flood-step! st)
+          (loop))))
 
     (define (flag-step! st i rule)
       (when (and (hidden? st i) (not (done? st)))
@@ -176,37 +215,48 @@
         (set-solver-flags! st (+ 1 (solver-flags st)))
         (touch! st i)))
 
-    ;; One unit of work, then the status: up to QUANTUM readings from the
-    ;; worklist under (a) and (b); with the worklist empty, one application
-    ;; of (c), else of (d), else stuck.
+    ;; One unit of work, then the status: up to FLOOD-QUANTUM hosts of a
+    ;; flood; with no flood, up to QUANTUM readings from the worklist under
+    ;; (a) and (b); with both empty, one application of (c), else of (d),
+    ;; else stuck. So the solver is stuck only with no flood queued.
     (define (solve-pass! st)
       (when (eq? (solver-status st) 'running)
         (set-solver-passes! st (+ 1 (solver-passes st)))
-        (if (pair? (solver-work st))
+        (cond
+          ((pair? (solver-flood st)) (flood-step! st))
+          ((pair? (solver-work st))
             (let loop ((k 0))
-              (when (and (< k QUANTUM) (pair? (solver-work st)))
+              ;; the unit ends when a scan queues a flood: the flood is the
+              ;; next units' work, in pieces
+              (when (and (< k QUANTUM)
+                         (pair? (solver-work st))
+                         (null? (solver-flood st)))
                 (let ((i (car (solver-work st))))
                   (set-solver-work! st (cdr (solver-work st)))
                   (vector-set! (solver-queued st) i #f)
                   (single-rules! st i)
-                  (loop (+ k 1)))))
-            (unless (subset-rule! st (constraints st))
-              (global-rule! st)))
+                  (loop (+ k 1))))))
+          (else
+           (unless (subset-rule! st (constraints st))
+             (global-rule! st))))
         (when (done? st)
           (set-solver-status! st 'solved)))
       (solver-status st))
 
     ;; The hidden neighbors of reading i and how many of them are ICE, in
-    ;; one walk: (hidden-hosts . need).
+    ;; one walk: (hidden-hosts . need). A host a flood has queued is known
+    ;; clean, like an open one.
     (define (constraint-of st i)
       (let ((open (solver-open st))
-            (flag (solver-flag st)))
+            (flag (solver-flag st))
+            (pending (solver-pending st)))
         (let loop ((nb (segment-neighbors (solver-seg st) i))
                    (hid '())
                    (need (segment-reading (solver-seg st) i)))
           (cond ((null? nb) (cons hid need))
                 ((vector-ref flag (car nb)) (loop (cdr nb) hid (- need 1)))
-                ((vector-ref open (car nb)) (loop (cdr nb) hid need))
+                ((or (vector-ref open (car nb)) (vector-ref pending (car nb)))
+                 (loop (cdr nb) hid need))
                 (else (loop (cdr nb) (cons (car nb) hid) need))))))
 
     ;; (a) and (b) on reading i.
