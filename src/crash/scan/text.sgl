@@ -1,0 +1,81 @@
+;;; (crash scan text) - SCAN as ASCII, for hand-built fixtures, the gate's
+;;; messages and the sheet of boards for David.
+;;;
+;;; segment->text, what the player sees, one row per line:
+;;;   #  hidden          F  flagged        ?  suspect
+;;;   .  scanned zero    1..8  a reading
+;;;   X  tripped ICE     D  defused ICE
+;;;   *  ICE shown at a CLASSIC loss      x  a wrong flag at a loss
+;;;
+;;; segment->truth-text, the deal: `*` ICE, `.` clean, `@` the uplink.
+;;;
+;;; text->segment reads a truth map (`*` ICE, anything else clean) into a
+;;; fresh segment, nothing scanned, preset 'node, so a test can build the
+;;; exact board it needs. line->text writes a recorded line as
+;;; "scan 3,4 (a)" per step, x then y.
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash scan text)
+  (import (sigil struct)
+          (sigil math)
+          (crash scan rules))
+
+  (export segment->text segment->truth-text text->segment
+          step->text line->text host->text)
+
+  (begin
+    (define (cell-char s i)
+      (case (segment-cell-state s i)
+        ((hidden) #\#)
+        ((flagged) #\F)
+        ((suspect) #\?)
+        ((zero) #\.)
+        ((tripped) #\X)
+        ((defused) #\D)
+        ((ice) #\*)
+        ((wrong-flag) #\x)
+        (else (string-ref (number->string (segment-reading s i)) 0))))
+
+    (define (rows s char-of)
+      (let ((w (segment-w s)))
+        (map (lambda (y)
+               (list->string (map (lambda (x) (char-of (+ (* y w) x))) (iota w))))
+             (iota (segment-h s)))))
+
+    (define (segment->text s)
+      (string-join (rows s (lambda (i) (cell-char s i))) "\n"))
+
+    (define (segment->truth-text s)
+      (string-join (rows s (lambda (i)
+                             (cond ((segment-ice? s i) #\*)
+                                   ((eqv? i (segment-first s)) #\@)
+                                   (else #\.))))
+                   "\n"))
+
+    ;; lines: a list of equal-length strings.
+    (define (text->segment lines version suspects?)
+      (let* ((h (length lines))
+             (w (string-length (car lines)))
+             (ice (list->vector
+                   (apply append
+                          (map (lambda (row)
+                                 (map (lambda (c) (char=? c #\*)) (string->list row)))
+                               lines)))))
+        (segment-new w h ice 'node version suspects?)))
+
+    (define (host->text s i)
+      (string-append (number->string (modulo i (segment-w s)))
+                     ","
+                     (number->string (quotient i (segment-w s)))))
+
+    (define (step->text s step)
+      (string-append (symbol->string (car step))
+                     " "
+                     (host->text s (cadr step))
+                     (if (pair? (cddr step))
+                         (string-append " (" (symbol->string (caddr step)) ")")
+                         "")))
+
+    (define (line->text s line)
+      (string-join (map (lambda (step) (step->text s step)) line) "\n"))))

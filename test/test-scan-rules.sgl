@@ -1,0 +1,190 @@
+;;; SCAN's rules on hand-built segments (P6a, gate legs 1, 3 and 4 by
+;;; fixture; the seeded sweeps are test-scan-deal.sgl).
+;;;
+;;; Every expected value below was worked out by hand from the ICE map, not
+;;; read back from the module: the readings grid of the 4x4, the flood sets
+;;; of the 5x5, and the hosts a sweep scans.
+
+(import (sigil test)
+        (sigil list)
+        (crash scan rules)
+        (crash scan text))
+
+;; the list without repeats (equal?), first occurrence kept
+(define (distinct xs)
+  (let loop ((xs xs) (acc (quote ())))
+    (cond ((null? xs) (reverse acc))
+          ((member (car xs) acc) (loop (cdr xs) acc))
+          (else (loop (cdr xs) (cons (car xs) acc))))))
+
+;; (x, y) on a w-wide grid
+(define (at w x y) (+ (* y w) x))
+
+(define (readings-text s)
+  (string-join (map (lambda (y)
+                      (list->string (map (lambda (x) (string-ref (number->string (segment-reading s (at (segment-w s) x y))) 0))
+                                         (iota (segment-w s)))))
+                    (iota (segment-h s)))
+               "\n"))
+
+;; ICE at the four corners' region and both edges: a reading that counts
+;; its own host, or wraps a row or column, changes this grid.
+(define CORNERS
+  (list "*..*"
+        "...."
+        "*..."
+        "..**"))
+
+(define FLOOD
+  (list "....."
+        "....."
+        "...*."
+        "....."
+        "*...."))
+
+(test-group "scan rules: readings (leg 1, the edge fixture)"
+  (test "every host's reading, ICE hosts included, is its ICE neighbor count"
+    (let ((s (text->segment CORNERS 'original #f)))
+      (assert-equal "0110\n2211\n0222\n1211" (readings-text s))))
+  (test "a corner host has three neighbors, an edge host five, an inside host eight"
+    (let ((s (text->segment CORNERS 'original #f)))
+      (assert-equal 3 (length (segment-neighbors s (at 4 0 0))))
+      (assert-equal 3 (length (segment-neighbors s (at 4 3 3))))
+      (assert-equal 5 (length (segment-neighbors s (at 4 0 1))))
+      (assert-equal 5 (length (segment-neighbors s (at 4 2 0))))
+      (assert-equal 8 (length (segment-neighbors s (at 4 1 1))))
+      (assert-false (memv (at 4 1 1) (segment-neighbors s (at 4 1 1))))))
+  (test "a reading is visible only once its host is scanned"
+    (let* ((s (text->segment CORNERS 'original #f))
+           (s2 (segment-scan s (at 4 1 0))))
+      (assert-false (segment-visible-reading s (at 4 1 0)))
+      (assert-equal 1 (segment-visible-reading s2 (at 4 1 0))))))
+
+(test-group "scan rules: flood fill (leg 3)"
+  (test "scanning a zero opens exactly the pinned area"
+    (let ((s (segment-scan (text->segment FLOOD 'original #f) (at 5 0 0))))
+      (assert-equal ".....\n..111\n..1##\n111##\n#####" (segment->text s))
+      (assert-equal (list (list 'scanned 16)) (segment-news s))))
+  (test "a flagged host inside the area stays hidden, and what only it led to stays hidden"
+    (let* ((s (text->segment FLOOD 'original #f))
+           (s (segment-flag s (at 5 1 2)))
+           (s (segment-scan s (at 5 0 0))))
+      (assert-equal ".....\n..111\n.F1##\n11###\n#####" (segment->text s))))
+  (test "a scan on a flagged host is refused and changes nothing"
+    (let* ((s (segment-flag (text->segment FLOOD 'original #f) (at 5 4 4)))
+           (s2 (segment-scan s (at 5 4 4))))
+      (assert-equal 'flagged (segment-state s2 (at 5 4 4)))
+      (assert-equal (list (list 'refused 'flagged (at 5 4 4))) (segment-news s2))))
+  (test "the first scan is the uplink"
+    (let ((s (segment-scan (text->segment FLOOD 'original #f) (at 5 0 0))))
+      (assert-equal 0 (segment-first s))
+      (assert-equal 0 (segment-first (segment-scan s (at 5 4 4)))))))
+
+(define (opened-flood version)
+  (segment-scan (text->segment FLOOD version #f) (at 5 0 0)))
+
+(test-group "scan rules: sweep (leg 4)"
+  (test "right flags: the sweep scans the pinned host and nothing else"
+    (let* ((s (segment-flag (opened-flood 'original) (at 5 3 2)))
+           (s2 (segment-sweep s (at 5 2 2))))
+      (assert-equal ".....\n..111\n..1F#\n1111#\n#####" (segment->text s2))))
+  (test "a wrong flag count does nothing"
+    (let* ((s (opened-flood 'original))
+           (s2 (segment-sweep s (at 5 2 2))))
+      (assert-true (segment-equal? s s2))
+      (assert-equal '() (segment-news s2))))
+  (test "a sweep on a hidden host or a zero does nothing"
+    (let ((s (opened-flood 'original)))
+      (assert-true (segment-equal? s (segment-sweep s (at 5 4 4))))
+      (assert-true (segment-equal? s (segment-sweep s (at 5 0 0))))))
+  (test "CLASSIC: a wrong flag trips the ICE it uncovers and ends the segment"
+    (let* ((s (segment-flag (opened-flood 'original) (at 5 3 3)))
+           (s2 (segment-sweep s (at 5 2 2))))
+      (assert-true (segment-lost? s2))
+      (assert-equal 'tripped (segment-cell-state s2 (at 5 3 2)))
+      (assert-equal 'wrong-flag (segment-cell-state s2 (at 5 3 3)))
+      (assert-equal 'ice (segment-cell-state s2 (at 5 0 4)))
+      (assert-equal ".....\n..111\n..1X#\n111x#\n*####" (segment->text s2))
+      ;; nothing moves after a loss
+      (assert-true (segment-equal? s2 (segment-scan s2 (at 5 4 4))))
+      (assert-true (segment-equal? s2 (segment-flag s2 (at 5 4 4))))))
+  (test "HACKER: the same wrong flag trips the ICE and the segment plays on"
+    (let* ((s (segment-flag (opened-flood 'hacker) (at 5 3 3)))
+           (s2 (segment-sweep s (at 5 2 2))))
+      (assert-false (segment-lost? s2))
+      (assert-equal 'tripped (segment-cell-state s2 (at 5 3 2)))
+      (assert-true (and (member (list 'trip (at 5 3 2)) (segment-news s2)) #t))
+      (assert-equal 0 (segment-counter s2))
+      ;; the tripped ICE counts as a flag for a sweep: unflag the wrong
+      ;; flag, and the sweep on (2,2) now scans it
+      (let* ((s3 (segment-flag s2 (at 5 3 3)))
+             (s4 (segment-sweep s3 (at 5 2 2))))
+        (assert-equal 'hidden (segment-state s3 (at 5 3 3)))
+        (assert-equal 'scanned (segment-state s4 (at 5 3 3)))))))
+
+(test-group "scan rules: flags, the counter, the win"
+  (test "flag cycles hidden -> flagged -> hidden without SUSPECTS"
+    (let* ((s (text->segment FLOOD 'original #f))
+           (a (segment-flag s 0))
+           (b (segment-flag a 0)))
+      (assert-equal 'flagged (segment-state a 0))
+      (assert-equal 'hidden (segment-state b 0))))
+  (test "with SUSPECTS: hidden -> flagged -> suspect -> hidden, and a suspect host scans"
+    (let* ((s (text->segment FLOOD 'original #t))
+           (a (segment-flag s 0))
+           (b (segment-flag a 0))
+           (c (segment-flag b 0)))
+      (assert-equal (list 'flagged 'suspect 'hidden)
+                    (list (segment-state a 0) (segment-state b 0) (segment-state c 0)))
+      (assert-equal 'suspect (segment-cell-state b 0))
+      (assert-equal 'scanned (segment-state (segment-scan b 0) 0))))
+  (test "a scanned host does not flag"
+    (let ((s (opened-flood 'original)))
+      (assert-true (segment-equal? s (segment-flag s 0)))))
+  (test "the counter is ICE minus flags, and goes negative"
+    (let* ((s (text->segment FLOOD 'original #f))
+           (s (segment-flag s 0))
+           (s (segment-flag s 1))
+           (s (segment-flag s 2)))
+      (assert-equal 2 (segment-ice-total s))
+      (assert-equal -1 (segment-counter s))))
+  (test "the win: every clean host scanned, flags not required, the ICE auto-flags"
+    (let* ((s (text->segment (list "*.." "..." "...") 'original #f))
+           (s2 (segment-scan s (at 3 2 2))))
+      (assert-true (segment-won? s2))
+      (assert-equal 'flagged (segment-state s2 0))
+      (assert-equal 0 (segment-counter s2))
+      (assert-equal (list 'mapped) (car (segment-news s2)))))
+  (test "not won while a clean host is hidden"
+    (assert-false (segment-won? (opened-flood 'original)))))
+
+(test-group "scan rules: extraction (the node objective, D74)"
+  (test "a mark counts when every clean host of its 3x3 is scanned, and only then"
+    (let* ((s (opened-flood 'original)))
+      ;; (2,2) reads 1; its 3x3 holds ICE (3,2) and hidden clean (3,3)
+      (assert-false (segment-extracted? s (at 5 2 2)))
+      (assert-true (segment-extracted? (segment-scan s (at 5 3 3)) (at 5 2 2)))
+      ;; (1,1)'s 3x3 is all scanned already
+      (assert-true (segment-extracted? s (at 5 1 1)))))
+  (test "a flag never counts toward extraction"
+    (let ((s (segment-flag (opened-flood 'original) (at 5 3 3))))
+      (assert-false (segment-extracted? s (at 5 2 2))))))
+
+(test-group "scan rules: the cell states (the population P6b's accessibility leg keys on)"
+  (test "twenty-three states, no duplicates"
+    (assert-equal 23 (length CELL-STATES))
+    (assert-equal 23 (length (distinct CELL-STATES))))
+  (test "every state the segment answers is a member of CELL-STATES"
+    (let* ((s (segment-flag (opened-flood 'original) (at 5 3 3)))
+           (lost (segment-sweep s (at 5 2 2))))
+      (for-each (lambda (seg)
+                  (for-each (lambda (i) (assert-true (and (memq (segment-cell-state seg i) CELL-STATES) #t)))
+                            (iota (segment-size seg))))
+                (list s lost)))))
+
+(test-group "scan rules: presets (D72)"
+  (test "Windows' three, exactly"
+    (assert-equal (list 9 9 10) (preset-dims 'lan))
+    (assert-equal (list 16 16 40) (preset-dims 'wan))
+    (assert-equal (list 30 16 99) (preset-dims 'backbone))
+    (assert-false (preset-dims 'custom))))

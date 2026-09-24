@@ -1,0 +1,365 @@
+;;; (crash scan rules) - SCAN: Minesweeper, the rules and nothing else.
+;;;
+;;; A SEGMENT is a grid of HOSTS, some of them ICE. Scanning a host shows
+;;; its READING, the count of ICE among its eight neighbors; a zero opens
+;;; its neighbors in turn (the flood fill), skipping flagged hosts. A host
+;;; can be FLAGGED (believed ICE) and, with the SUSPECTS setting on, marked
+;;; SUSPECT (`?`). A SWEEP on a reading whose flagged neighbors equal it
+;;; scans every other hidden neighbor. The segment is MAPPED (won) when
+;;; every clean host is scanned; flags are never required.
+;;;
+;;; Scanning ICE TRIPS it. On the ORIGINAL version (CLASSIC) that ends the
+;;; segment: every ICE shows, the tripped one inverted, and wrong flags are
+;;; struck through (Windows' end state). On the HACKER version the segment
+;;; plays on: the ICE stays tripped (shown, counted by the counter, and
+;;; counted as a flag by sweeps) and the trip is reported in the segment's
+;;; news for the trace to charge (P6c). The ICE never moves after the deal.
+;;;
+;;; The ICE is placed by (crash scan generate), after the first scan (the
+;;; UPLINK), never in the uplink's 3x3, so the uplink reads zero and opens
+;;; an area; this module takes the ICE as given. See
+;;; topics/crash-the-stack-scan-design sections 2 and 3 (D68, D72, D79).
+;;;
+;;; Segments are immutable by convention: every action copies and returns a
+;;; new segment. `news` is what the last action did, newest first:
+;;; (scanned n) hosts it scanned, (trip i) for every ICE it tripped,
+;;; (refused flagged i) for a scan on a flagged host, (mapped) on the win.
+;;;
+;;; What a player can see is `segment-state` and `segment-visible-reading`;
+;;; the solver and the checker read only those. `segment-ice?` and
+;;; `segment-reading` are the truth, for the end-of-segment draw, the
+;;; generator and the tests.
+;;;
+;;; Rules family: no rendering, windowing or platform import
+;;; (test/test-imports.sgl).
+
+(define-library (crash scan rules)
+  (import (sigil struct)
+          (sigil math))
+
+  (export PRESETS preset-dims preset-index
+          CELL-STATES
+          segment segment?
+          segment-w segment-h segment-preset segment-version segment-suspects?
+          segment-first segment-news segment-cells segment-ice
+          segment-new
+          segment-size segment-ice-total segment-neighbors segment-sector
+          segment-ice? segment-reading segment-state segment-visible-reading
+          segment-hidden? segment-scanned? segment-flagged?
+          segment-scan segment-flag segment-sweep
+          segment-won? segment-lost? segment-over? segment-counter
+          segment-clean-left segment-extracted? segment-cell-state
+          segment-tripped segment-equal?)
+
+  (begin
+    ;; Windows' three, exactly (D72). A node board (JACK IN) gives its own
+    ;; grid and ICE count and has no entry here.
+    (define PRESETS
+      (list (list 'lan 9 9 10)
+            (list 'wan 16 16 40)
+            (list 'backbone 30 16 99)))
+
+    ;; (w h ice) of a preset, or #f.
+    (define (preset-dims p)
+      (let ((e (assq p PRESETS)))
+        (and e (cdr e))))
+
+    (define (preset-index p)
+      (let loop ((ps PRESETS) (i 0))
+        (cond ((null? ps) #f)
+              ((eq? (car (car ps)) p) i)
+              (else (loop (cdr ps) (+ i 1))))))
+
+    ;; Every state a host can be drawn in, one per row of the design note's
+    ;; section 6 table. P6b's glyph table is keyed by exactly this list (its
+    ;; accessibility leg asserts the key sets are equal). segment-cell-state
+    ;; answers the ones the segment determines; pressed, cursor, cursor-flag
+    ;; and marked are overlays the input layer and the node add, and the
+    ;; firewall and masked states are the HACKER counter-hacks' (P6c).
+    (define CELL-STATES
+      (list 'hidden 'pressed 'zero
+            'reading-1 'reading-2 'reading-3 'reading-4
+            'reading-5 'reading-6 'reading-7 'reading-8
+            'flagged 'suspect 'tripped 'ice 'defused 'wrong-flag
+            'firewall-strong 'firewall-weak 'masked 'marked
+            'cursor 'cursor-flag))
+
+    (define READING-STATES
+      (list 'zero 'reading-1 'reading-2 'reading-3 'reading-4
+            'reading-5 'reading-6 'reading-7 'reading-8))
+
+    (define-struct segment
+      (w default: 9)
+      (h default: 9)
+      (preset default: 'lan)            ; lan | wan | backbone | node
+      (version default: 'original)      ; original (CLASSIC) | hacker
+      (suspects? default: #f)           ; the SUSPECTS setting: a third flag state
+      (ice default: (vector))           ; host -> #t when ICE; fixed at the deal
+      (readings default: (vector))      ; host -> its ICE neighbor count
+      (cells default: (vector))         ; host -> hidden | scanned | flagged | suspect | tripped | defused
+      (first default: #f)               ; the uplink's host, once scanned
+      (lost default: #f)                ; CLASSIC: the tripped host that ended it
+      (news default: '()))              ; what the last action did, newest first
+
+    ;; --- the grid ------------------------------------------------------------
+
+    ;; Neighbor lists per grid size, built once: the solver asks for them
+    ;; hundreds of thousands of times.
+    (define *neighbor-cache* '())
+
+    (define (build-neighbors w h)
+      (let ((v (make-vector (* w h) '())))
+        (let loop ((i 0))
+          (when (< i (* w h))
+            (vector-set! v i (neighbors-of w h i))
+            (loop (+ i 1))))
+        v))
+
+    (define (neighbors-of w h i)
+      (let ((x (modulo i w))
+            (y (quotient i w)))
+        (let loop ((dy -1) (dx -1) (acc '()))
+          (cond ((> dy 1) (reverse acc))
+                ((> dx 1) (loop (+ dy 1) -1 acc))
+                ((and (= dx 0) (= dy 0)) (loop dy (+ dx 1) acc))
+                (else
+                 (let ((nx (+ x dx))
+                       (ny (+ y dy)))
+                   (loop dy
+                         (+ dx 1)
+                         (if (and (>= nx 0) (< nx w) (>= ny 0) (< ny h))
+                             (cons (+ (* ny w) nx) acc)
+                             acc))))))))
+
+    (define (neighbor-table w h)
+      (let ((hit (assoc (cons w h) *neighbor-cache*)))
+        (if hit
+            (cdr hit)
+            (let ((t (build-neighbors w h)))
+              (set! *neighbor-cache* (cons (cons (cons w h) t) *neighbor-cache*))
+              t))))
+
+    ;; The up to eight hosts around i, clipped at the edges, never i itself.
+    (define (segment-neighbors s i)
+      (vector-ref (neighbor-table (segment-w s) (segment-h s)) i))
+
+    ;; The clipped 3x3 around i, i included.
+    (define (segment-sector s i)
+      (cons i (segment-neighbors s i)))
+
+    (define (segment-size s)
+      (* (segment-w s) (segment-h s)))
+
+    ;; --- construction --------------------------------------------------------
+
+    ;; A dealt segment, nothing scanned, from its ICE vector (copied).
+    (define (segment-new w h ice preset version suspects?)
+      (let* ((n (* w h))
+             (ice (vector-copy ice))
+             (nb (neighbor-table w h))
+             (readings (make-vector n 0)))
+        (let loop ((i 0))
+          (when (< i n)
+            (vector-set! readings
+                         i
+                         (count-true ice (vector-ref nb i)))
+            (loop (+ i 1))))
+        (segment w: w
+                 h: h
+                 preset: preset
+                 version: version
+                 suspects?: suspects?
+                 ice: ice
+                 readings: readings
+                 cells: (make-vector n 'hidden))))
+
+    (define (count-true v cells)
+      (let loop ((cs cells) (k 0))
+        (cond ((null? cs) k)
+              ((vector-ref v (car cs)) (loop (cdr cs) (+ k 1)))
+              (else (loop (cdr cs) k)))))
+
+    ;; --- queries -------------------------------------------------------------
+
+    (define (segment-ice? s i) (vector-ref (segment-ice s) i))
+    (define (segment-reading s i) (vector-ref (segment-readings s) i))
+    (define (segment-state s i) (vector-ref (segment-cells s) i))
+
+    ;; The reading as the player sees it: a number on a scanned host, else #f.
+    (define (segment-visible-reading s i)
+      (and (eq? (segment-state s i) 'scanned)
+           (segment-reading s i)))
+
+    (define (segment-hidden? s i) (eq? (segment-state s i) 'hidden))
+    (define (segment-scanned? s i) (eq? (segment-state s i) 'scanned))
+    (define (segment-flagged? s i) (eq? (segment-state s i) 'flagged))
+
+    (define (segment-ice-total s)
+      (count-true (segment-ice s) (iota (segment-size s))))
+
+    ;; The tripped hosts, in index order.
+    (define (segment-tripped s)
+      (filter (lambda (i) (eq? (segment-state s i) 'tripped))
+              (iota (segment-size s))))
+
+    ;; Clean hosts not yet scanned.
+    (define (segment-clean-left s)
+      (let loop ((i 0) (k 0))
+        (cond ((= i (segment-size s)) k)
+              ((and (not (segment-ice? s i))
+                    (not (eq? (segment-state s i) 'scanned)))
+               (loop (+ i 1) (+ k 1)))
+              (else (loop (+ i 1) k)))))
+
+    (define (segment-won? s)
+      (and (not (segment-lost s))
+           (= 0 (segment-clean-left s))))
+
+    (define (segment-lost? s)
+      (and (segment-lost s) #t))
+
+    (define (segment-over? s)
+      (or (segment-lost? s) (segment-won? s)))
+
+    ;; The ICE counter: total ICE minus flags minus tripped and defused ICE.
+    ;; It goes negative on too many flags, as in Windows.
+    (define (segment-counter s)
+      (let loop ((i 0) (k (segment-ice-total s)))
+        (if (= i (segment-size s))
+            k
+            (loop (+ i 1)
+                  (if (memq (segment-state s i) '(flagged tripped defused))
+                      (- k 1)
+                      k)))))
+
+    ;; A marked host (the node objective, D74) is extracted when every clean
+    ;; host of its clipped 3x3 is scanned, itself included. Scans only,
+    ;; never flags, so flagging cannot query it.
+    (define (segment-extracted? s i)
+      (every (lambda (j)
+               (or (segment-ice? s j)
+                   (eq? (segment-state s j) 'scanned)))
+             (segment-sector s i)))
+
+    ;; The drawn state of a host, a member of CELL-STATES.
+    (define (segment-cell-state s i)
+      (let ((st (segment-state s i)))
+        (case st
+          ((scanned) (list-ref READING-STATES (segment-reading s i)))
+          ((tripped) 'tripped)
+          ((defused) 'defused)
+          ((flagged)
+           (if (and (segment-lost? s) (not (segment-ice? s i)))
+               'wrong-flag
+               'flagged))
+          ((suspect)
+           (if (and (segment-lost? s) (segment-ice? s i)) 'ice 'suspect))
+          (else
+           (if (and (segment-lost? s) (segment-ice? s i)) 'ice 'hidden)))))
+
+    (define (segment-equal? a b)
+      (and (= (segment-w a) (segment-w b))
+           (= (segment-h a) (segment-h b))
+           (eq? (segment-version a) (segment-version b))
+           (equal? (segment-ice a) (segment-ice b))
+           (equal? (segment-cells a) (segment-cells b))
+           (eqv? (segment-first a) (segment-first b))
+           (eqv? (segment-lost a) (segment-lost b))))
+
+    ;; --- actions -------------------------------------------------------------
+
+    ;; Scan host i. A hidden or suspect host is scanned: ICE trips (CLASSIC:
+    ;; the segment is lost), a zero floods. A flagged host refuses. Anything
+    ;; else, or a segment that is over, is unchanged (with no news).
+    (define (segment-scan s i)
+      (cond ((segment-over? s) (segment s news: '()))
+            ((eq? (segment-state s i) 'flagged)
+             (segment s news: (list (list 'refused 'flagged i))))
+            ((memq (segment-state s i) '(hidden suspect))
+             (let ((state (vector-copy (segment-cells s))))
+               (finish s state (open! s state (list i) '()) (or (segment-first s) i))))
+            (else (segment s news: '()))))
+
+    ;; Sweep (chord) on a reading: when its flagged neighbors (tripped and
+    ;; defused ICE count as flags) equal its reading, scan every other
+    ;; hidden or suspect neighbor. Anything else does nothing.
+    (define (segment-sweep s i)
+      (if (or (segment-over? s)
+              (not (eq? (segment-state s i) 'scanned))
+              (= 0 (segment-reading s i)))
+          (segment s news: '())
+          (let* ((nb (segment-neighbors s i))
+                 (flags (count-states s nb '(flagged tripped defused)))
+                 (targets (filter (lambda (j) (memq (segment-state s j) '(hidden suspect))) nb)))
+            (if (or (not (= flags (segment-reading s i)))
+                    (null? targets))
+                (segment s news: '())
+                (let ((state (vector-copy (segment-cells s))))
+                  (finish s state (open! s state targets '()) (segment-first s)))))))
+
+    ;; Flag host i: hidden -> flagged -> hidden, or hidden -> flagged ->
+    ;; suspect -> hidden with SUSPECTS on. Scanned, tripped and defused hosts
+    ;; are unchanged.
+    (define (segment-flag s i)
+      (if (segment-over? s)
+          (segment s news: '())
+          (let ((next (case (segment-state s i)
+                        ((hidden) 'flagged)
+                        ((flagged) (if (segment-suspects? s) 'suspect 'hidden))
+                        ((suspect) 'hidden)
+                        (else #f))))
+            (if next
+                (let ((state (vector-copy (segment-cells s))))
+                  (vector-set! state i next)
+                  (segment s cells: state news: (list (list next i))))
+                (segment s news: '())))))
+
+    (define (count-states s cells states)
+      (let loop ((cs cells) (k 0))
+        (cond ((null? cs) k)
+              ((memq (segment-state s (car cs)) states) (loop (cdr cs) (+ k 1)))
+              (else (loop (cdr cs) k)))))
+
+    ;; Scan the hosts in todo into state, flooding from zeros; flagged hosts
+    ;; are skipped. Returns (scanned-count . tripped-hosts).
+    (define (open! s state todo trips)
+      (let ((ice (segment-ice s))
+            (readings (segment-readings s)))
+        (let loop ((todo todo) (n 0) (trips trips))
+          (if (null? todo)
+              (cons n (reverse trips))
+              (let ((i (car todo)))
+                (cond ((not (memq (vector-ref state i) '(hidden suspect)))
+                       (loop (cdr todo) n trips))
+                      ((vector-ref ice i)
+                       (vector-set! state i 'tripped)
+                       (loop (cdr todo) n (cons i trips)))
+                      (else
+                       (vector-set! state i 'scanned)
+                       (loop (if (= 0 (vector-ref readings i))
+                                 (append (segment-neighbors s i) (cdr todo))
+                                 (cdr todo))
+                             (+ n 1)
+                             trips))))))))
+
+    ;; The segment after an open: CLASSIC loses on the first trip; a win
+    ;; auto-flags the ICE still hidden (Windows).
+    (define (finish s state result first)
+      (let* ((n (car result))
+             (trips (cdr result))
+             (news (append (map (lambda (t) (list 'trip t)) (reverse trips))
+                           (list (list 'scanned n))))
+             (lost (and (eq? (segment-version s) 'original)
+                        (pair? trips)
+                        (car trips)))
+             (s2 (segment s cells: state first: first lost: lost news: news)))
+        (if (and (not lost) (= 0 (segment-clean-left s2)))
+            (let ((state (vector-copy state)))
+              (let loop ((i 0))
+                (when (< i (vector-length state))
+                  (when (and (vector-ref (segment-ice s) i)
+                             (memq (vector-ref state i) '(hidden suspect)))
+                    (vector-set! state i 'flagged))
+                  (loop (+ i 1))))
+              (segment s2 cells: state news: (cons (list 'mapped) news)))
+            s2)))))
