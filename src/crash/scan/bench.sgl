@@ -9,14 +9,24 @@
 ;;; a run of seeds with an uplink drawn per seed:
 ;;;   tries      dealt-try plus one: 1 when placement 0 cleared as dealt,
 ;;;              else perturbations and placements past the first, plus one;
-;;;   ms         the deal's generation time, unsliced;
-;;;   step-ms    the longest single scan-gen-step! (the slicing grain: no
-;;;              frame can be shorter than its longest step);
-;;;   frames     how many frames the deal takes at BUDGET-MS;
-;;;   frame-ms   the longest frame's generation time at BUDGET-MS.
-;;; Each as median, p95 and max. The clock is the caller's (`now` returns
-;;; milliseconds as a real), so the native bench and the web door
-;;; (?scanbench=PRESET) run this same code; the module reads no platform.
+;;;   ms           the deal's generation time, unsliced;
+;;;   collections  units during which a minor GC ran;
+;;;   step-ms      the longest single scan-gen-step! (the slicing grain: no
+;;;                frame can be shorter than its longest step);
+;;;   step-quiet   the longest step with no GC inside it: what splitting a
+;;;                unit can shorten (a pause it cannot);
+;;;   frames       how many frames the deal takes at BUDGET-MS;
+;;;   frame-ms     the longest frame's generation time at BUDGET-MS.
+;;; Each as median, p95 and max. Then one line per kind of unit
+;;; (scan-gen-phase) over every unsliced deal: count, mean ms, max ms, max
+;;; ms of a quiet unit, mean KB allocated, and how many ran a GC.
+;;;
+;;; The probes are the caller's: `now` returns milliseconds, and `gc`
+;;; returns (bytes-allocated . young-occupancy), which cost microseconds
+;;; to read ((sigil gc)'s gc-allocated-bytes and gc-young-occupancy; the
+;;; full gc-stats costs ~34 ms a read). So the native bench and the web
+;;; door (?scanbench=) run this same code, and the module reads no
+;;; platform.
 
 (define-library (crash scan bench)
   (import (sigil struct)
@@ -41,18 +51,56 @@
              (at (lambda (p) (list-ref s (min (- n 1) (exact (floor (* p n))))))))
         (list (at 0.5) (at 0.95) (list-ref s (- n 1)))))
 
-    ;; One deal, unsliced, timing every step: (tries ms step-ms).
-    (define (time-whole preset seed first now)
+    ;; Per kind of unit: (kind count total-ms max-ms max-quiet-ms bytes
+    ;; collections), over every unsliced deal of a run. A unit is QUIET when
+    ;; no minor collection ran inside it (the young generation's occupancy
+    ;; did not drop). A kind whose max is far above its max-quiet is being
+    ;; paused by GC, which splitting cannot shorten.
+    (define *units* '())
+
+    (define (note-unit! kind dt bytes collected?)
+      (let ((e (assq kind *units*))
+            (quiet (if collected? 0 dt))
+            (c (if collected? 1 0)))
+        (if e
+            (set-cdr! e (list (+ 1 (list-ref e 1))
+                              (+ dt (list-ref e 2))
+                              (max dt (list-ref e 3))
+                              (max quiet (list-ref e 4))
+                              (+ bytes (list-ref e 5))
+                              (+ c (list-ref e 6))))
+            (set! *units* (cons (list kind 1 dt dt quiet bytes c) *units*)))))
+
+    ;; One deal, unsliced, timing every step:
+    ;; (tries ms collections step-ms step-quiet-ms). `gc` returns
+    ;; (bytes-allocated . young-occupancy); both reads cost microseconds
+    ;; (gc-stats costs ~34 ms a read on the bytecode build, which is why
+    ;; it is not used per unit).
+    (define (time-whole preset seed first now gc)
       (let ((g (scan-gen-start preset seed first 'original #f)))
-        (let loop ((worst 0) (total 0))
-          (let* ((t0 (now))
+        (let loop ((worst 0) (worst-quiet 0) (total 0) (collections 0))
+          (let* ((kind (scan-gen-phase g))
+                 (m0 (gc))
+                 (t0 (now))
                  (status (scan-gen-step! g))
-                 (dt (- (now) t0)))
-            (if (eq? status 'running)
-                (loop (max worst dt) (+ total dt))
-                ;; a deal that gave up (#f) counts as GEN-TRIES + 1
-                (let ((d (scan-gen-result g)))
-                  (list (+ 1 (if d (dealt-try d) GEN-TRIES)) (+ total dt) (max worst dt))))))))
+                 (dt (- (now) t0))
+                 (m1 (gc))
+                 (collected? (< (cdr m1) (cdr m0)))
+                 (quiet (if collected? 0 dt)))
+            (note-unit! kind dt (max 0 (- (car m1) (car m0))) collected?)
+            (let ((worst (max worst dt))
+                  (worst-quiet (max worst-quiet quiet))
+                  (total (+ total dt))
+                  (collections (+ collections (if collected? 1 0))))
+              (if (eq? status 'running)
+                  (loop worst worst-quiet total collections)
+                  ;; a deal that gave up (#f) counts as GEN-TRIES + 1
+                  (let ((d (scan-gen-result g)))
+                    (list (+ 1 (if d (dealt-try d) GEN-TRIES))
+                          total
+                          collections
+                          worst
+                          worst-quiet))))))))
 
     ;; The same deal sliced at BUDGET-MS: (frames worst-frame-ms).
     (define (time-sliced preset seed first now)
@@ -65,19 +113,41 @@
                 (loop (+ frames 1) (max worst dt))
                 (list (+ frames 1) (max worst dt)))))))
 
-    ;; An alist of quantile triples for one preset over seeds 1..n.
-    (define (scan-bench preset n now)
+    ;; (unit-KIND count mean-ms max-ms max-quiet-ms mean-kb collections),
+    ;; in a fixed order.
+    (define (unit-entries)
+      (filter (lambda (e) e)
+              (map (lambda (kind)
+                     (let ((e (assq kind *units*)))
+                       (and e
+                            (list (string->symbol (string-append "unit-" (symbol->string kind)))
+                                  (list-ref e 1)
+                                  (/ (list-ref e 2) (list-ref e 1))
+                                  (list-ref e 3)
+                                  (list-ref e 4)
+                                  (/ (list-ref e 5) (* 1024.0 (list-ref e 1)))
+                                  (list-ref e 6)))))
+                   (list 'place 'build 'start 'flood 'worklist 'dry 'perturb))))
+
+    ;; An alist of quantile triples for one preset over seeds 1..n, then
+    ;; the per-kind unit lines.
+    (define (scan-bench preset n now gc)
+      (set! *units* '())
       (let* ((d (preset-dims preset))
              (rows (map (lambda (seed)
                           (let ((first (first-of seed (car d) (cadr d))))
-                            (append (time-whole preset seed first now)
+                            (append (time-whole preset seed first now gc)
                                     (time-sliced preset seed first now))))
-                        (iota n 1))))
-        (list (cons 'tries (quantiles (map car rows)))
-              (cons 'ms (quantiles (map cadr rows)))
-              (cons 'step-ms (quantiles (map caddr rows)))
-              (cons 'frames (quantiles (map (lambda (r) (list-ref r 3)) rows)))
-              (cons 'frame-ms (quantiles (map (lambda (r) (list-ref r 4)) rows))))))
+                        (iota n 1)))
+             (col (lambda (k) (quantiles (map (lambda (r) (list-ref r k)) rows)))))
+        (append (list (cons 'tries (col 0))
+                      (cons 'ms (col 1))
+                      (cons 'collections (col 2))
+                      (cons 'step-ms (col 3))
+                      (cons 'step-quiet (col 4))
+                      (cons 'frames (col 5))
+                      (cons 'frame-ms (col 6)))
+                (unit-entries))))
 
     ;; x to two decimals, as text: exact arithmetic on hundredths, so no
     ;; float tail ("218.95", not "218.94591503590345").
@@ -92,8 +162,9 @@
                        (number->string frac))))
 
     ;; The doors' entry: "backbone" or "backbone:50" (seeds 1..N, 200 by
-    ;; default) to the printable lines, or a one-line refusal.
-    (define (scan-bench-run arg now)
+    ;; default) to the printable lines, or a one-line refusal. `gc` returns
+    ;; the milliseconds spent in GC so far.
+    (define (scan-bench-run arg now gc)
       (let* ((colon (let loop ((i 0))
                       (cond ((= i (string-length arg)) #f)
                             ((char=? (string-ref arg i) #\:) i)
@@ -101,7 +172,7 @@
              (preset (string->symbol (if colon (substring arg 0 colon) arg)))
              (n (if colon (string->number (substring arg (+ colon 1) (string-length arg))) 200)))
         (if (and (preset-dims preset) n (integer? n) (> n 0))
-            (scan-bench-lines preset n (scan-bench preset n now))
+            (scan-bench-lines preset n (scan-bench preset n now gc))
             (list (string-append "refused " arg " (want lan, wan or backbone, optionally :N)")))))
 
     ;; One printable line per measure: "backbone 200 tries 5.00 12.00 25.00".
