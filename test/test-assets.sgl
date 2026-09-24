@@ -239,3 +239,46 @@
         ;; the copy is ours to remove: call-with-temp-directory's own
         ;; delete-directory is not recursive and leaves it behind
         (remove-tree root)))))
+
+;; --- the tracker's bundled tunes, named in two places ---------------------------
+;;
+;; The tracker's page fetches its tunes from beside itself (assets/tunes/ under
+;; /tracker/), and package.sgl's tracker-page copies them there. Which tunes is
+;; therefore written down TWICE: as BUNDLED-TUNES in (crash tracker web), which
+;; decides what the tracker offers, and as the copy list in package.sgl, which
+;; decides what exists to be fetched.
+;;
+;; Drift between them fails in production only: a fifth bundled tune would be
+;; offered by the tracker, never copied by the build, and 404 for a player while
+;; every local tree a developer runs is fine. So the two lists are read from the
+;; files themselves — not imported, because BUNDLED-TUNES is not exported and a
+;; test should hold what SHIPS rather than what a module chooses to expose.
+(define (quoted-names text after)
+  (let* ((at (string-find text after))
+         (rest (and at (substring text (+ at (string-length after)) (string-length text))))
+         (close (and rest (string-find rest ")")))
+         (list-text (and close (substring rest 0 close))))
+    (if (not list-text)
+        '()
+        (let loop ((s list-text) (acc '()))
+          (let ((open (string-find s "\"")))
+            (if (not open)
+                (reverse acc)
+                (let* ((tail (substring s (+ open 1) (string-length s)))
+                       (shut (string-find tail "\"")))
+                  (if (not shut)
+                      (reverse acc)
+                      (loop (substring tail (+ shut 1) (string-length tail))
+                            (cons (substring tail 0 shut) acc))))))))))
+
+(test-group "the tracker's bundled tunes are the ones the build copies"
+  (test "BUNDLED-TUNES in (crash tracker web) and package.sgl's copy list name the same tunes, and each one exists"
+    (let* ((web (read-file-string "src/crash/tracker/web.sgl"))
+           (pkg (read-file-string "package.sgl"))
+           (offered (quoted-names web "(define BUNDLED-TUNES '("))
+           (copied (quoted-names pkg "(let ((keep (list ")))
+      (assert-true (> (length offered) 0))
+      (assert-equal offered copied)
+      (for-each (lambda (name)
+                  (assert-true (file-exists? (string-append "assets/tunes/" name ".cts"))))
+                offered))))

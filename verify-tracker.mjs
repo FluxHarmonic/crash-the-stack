@@ -59,6 +59,46 @@ const CDP = parseInt(opt("--cdp", "9236"), 10);
 const PHONE = flag("--phone");
 const TUNE_URL_MAX = 16384;
 
+// Which layout is this tree? A build/web tree has the game at its root; the
+// STAGED tree scripts/stage-web builds has it under /jack-in/ with the site at
+// the root, and the wasm at a content-addressed path (P4b's D20 move, and the
+// R2 move after it). The arm reads the shape rather than taking a flag,
+// because a flag is a thing a release gate can forget: a staged tree that was
+// measured as an unstaged one would answer questions about a layout nobody
+// ships.
+//
+// It matters for more than tidiness. sw.js now answers EVERY in-scope
+// navigation with the game's page, on the stated assumption that its scope is
+// /jack-in/ and "the tracker at /tracker/ is outside it". In a build/web tree
+// the game sits at the root, so that scope swallows /tracker/ and the worker
+// serves the game's page for the tracker's URL — which is not a defect in the
+// game, only in where it was asked. The `worker` leg therefore runs on a
+// staged tree and says so when it cannot.
+const STAGED = fs.existsSync(path.join(ROOT, "jack-in", "index.html"));
+const GAME = STAGED ? "/jack-in/" : "/";
+const GAME_PAGE = `${GAME}index.html`;
+// the tracker's wasm: a plain file unstaged, content-addressed once staged
+function trackerWasmPath() {
+  if (!STAGED) return path.join(ROOT, "tracker", "crash-tracker.wasm");
+  const w = path.join(ROOT, "tracker", "w");
+  const dirs = fs.existsSync(w) ? fs.readdirSync(w) : [];
+  for (const d of dirs) {
+    const p = path.join(w, d, "crash-tracker.wasm");
+    if (fs.existsSync(p)) return p;
+  }
+  return path.join(w, "<none>", "crash-tracker.wasm");
+}
+function gameWasmPath() {
+  if (!STAGED) return path.join(ROOT, "crash-the-stack.wasm");
+  const w = path.join(ROOT, "jack-in", "w");
+  const dirs = fs.existsSync(w) ? fs.readdirSync(w) : [];
+  for (const d of dirs) {
+    const p = path.join(w, d, "crash-the-stack.wasm");
+    if (fs.existsSync(p)) return p;
+  }
+  return path.join(w, "<none>", "crash-the-stack.wasm");
+}
+
 const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;charset=utf-8",
   ".mjs": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".css": "text/css",
   ".json": "application/json", ".png": "image/png", ".pcm": "application/octet-stream", ".cts": "text/plain;charset=utf-8" };
@@ -66,6 +106,10 @@ const results = [];
 const planned = ["imports", "sizes", "open", "render", "play", "focus", "edit", "share", "fragment", "missing", "door", "menu", "worker", "bar", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
+// A leg that cannot be asked here, with the reason. It is not a pass: a run
+// that skips something must say so in its own line and in the RESULT count,
+// or "all green" starts meaning "all green among whatever ran".
+function skip(name, detail) { results.push([name, "SKIP"]); console.log(`SKIP ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
 
 const server = http.createServer((req, res) => {
@@ -216,8 +260,8 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
 
 // ---- imports + sizes ------------------------------------------------------------
 {
-  const wasmPath = path.join(ROOT, "tracker", "crash-tracker.wasm");
-  const gamePath = path.join(ROOT, "crash-the-stack.wasm");
+  const wasmPath = trackerWasmPath();
+  const gamePath = gameWasmPath();
   try {
     const mod = await WebAssembly.compile(fs.readFileSync(wasmPath));
     const mods = {};
@@ -402,7 +446,7 @@ if (firstURL) {
 // ?tracker link; /tracker/ is the one entry. So /?tracker=spy is the game.
 {
   const from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&tracker=spy` });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}${GAME_PAGE}?trace&tracker=spy` });
   const game = await waitLine(/^crash: literal-check ok$/, from, 40000);
   await sleep(1500);
   const opened = consoleLines.slice(from).some((l) => /^crash: tracker open /.test(l));
@@ -418,7 +462,7 @@ if (firstURL) {
 {
   const rowCenter = (line, id) => { const m = new RegExp(`(?:^| )${id} (-?[\\d.]+) (-?[\\d.]+)`).exec(line); return m ? [Number(m[1]), Number(m[2])] : null; };
   let from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}${GAME_PAGE}?trace` });
   const gate = await waitLine(/^crash: literal-check ok$/, from, 40000);
   await sleep(1500);
   await press("Enter");   // the title gate
@@ -435,16 +479,24 @@ if (firstURL) {
       from = consoleLines.length;
       await tap(c[0], c[1]);
       const free = await waitLine(/^crash: menu free /, from, 5000);
+      // The tracker is NOT in the game's menu, and that is the assertion now.
+      // David, 2026-09-22 (commit 342d9d0, reversing the morning's move to the
+      // top screen): "the tracker belongs at /tracker/ and in the site's nav,
+      // not in the game." That commit updated test-menu, verify.mjs's menu and
+      // screens legs and verify-cards' menu leg, and missed this arm, so this
+      // leg went on tapping a row that no longer exists until 2026-09-24.
+      // Asserting its ABSENCE is what keeps the ruling from being undone by
+      // accident; the door itself is checked by walking to it directly.
       const t = free && rowCenter(consoleLines[free.index], "tracker");
-      if (!t) detail = free ? "no tracker row on the FREE PLAY screen: " + consoleLines[free.index] : "FREE PLAY did not open";
+      if (!free) detail = "FREE PLAY did not open";
+      else if (t) detail = "a tracker row is back on the FREE PLAY screen (D, 2026-09-22: the tracker left the game's menu): " + consoleLines[free.index];
       else {
         from = consoleLines.length;
-        await tap(t[0], t[1]);
-        const said = await waitLine(/^crash: open tracker$/, from, 5000);
-        const opened = said && await waitLine(/^crash: tracker open untitled$/, from, 40000);
+        await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/tracker/?trace` });
+        const opened = await waitLine(/^crash: tracker open untitled$/, from, 40000);
         const where = await evalJS("location.pathname");
-        if (said && opened && /\/tracker\/$/.test(where)) pass("menu", `FREE PLAY > TRACKER tapped at ${t.join(",")}: the page went to ${where} and the tracker opened`);
-        else detail = `open line ${!!said}, tracker opened ${!!opened}, at ${where}`;
+        if (opened && /\/tracker\/$/.test(where)) pass("menu", `no tracker row on FREE PLAY (${consoleLines[free.index].replace(/^crash: menu free /, "")}), and /tracker/ opens the tracker directly`);
+        else detail = `tracker opened ${!!opened}, at ${where}`;
       }
     }
   }
@@ -452,15 +504,22 @@ if (firstURL) {
 }
 
 // ---- worker -------------------------------------------------------------------
-// sw.js answers every navigation with the cached root page (its fix is
-// proposed with P4a); the game page, landed at /tracker/ that way, fetches
-// the real tracker page and writes it in place. The game page just booted
-// registers the worker once its reveal is over (a key passes the gate) and
-// the menu is live ("crash: sw registered"); a fresh navigation is then
-// controlled; /tracker/ after that must still be the tracker.
-{
+// Under the game's controlling worker, /tracker/ must still be the TRACKER.
+//
+// sw.js answers every navigation in its scope with the game's cached page, and
+// since P4b's move it says why: "the scope is /jack-in/; the tracker at
+// /tracker/ is outside it". That is only true in the STAGED layout. In a
+// build/web tree the game sits at the root, the scope is /, and the worker
+// swallows /tracker/ — the page then asks for crash-the-stack.wasm under
+// /tracker/ and gets a 404. That is the arm asking the question in a place
+// where it cannot have the right answer, not a defect in the game, so this leg
+// runs on a staged tree and SKIPS with the reason on an unstaged one rather
+// than reporting a failure nobody should act on (2026-09-24).
+if (!STAGED) {
+  skip("worker", "unstaged tree: sw.js scopes to /jack-in/ and the game is at the root here, so the worker would answer /tracker/ itself — run against scripts/stage-web's tree to test this");
+} else {
   let from = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });   // the game page, whatever the menu leg left
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}${GAME_PAGE}?trace` });   // the game page, whatever the menu leg left
   await waitLine(/^crash: literal-check ok$/, from, 40000);
   await sleep(1500);
   await press("Enter");   // the title gate
@@ -473,7 +532,7 @@ if (firstURL) {
       active = await evalJS("navigator.serviceWorker.getRegistration().then(function (r) { return !!(r && r.active); })");
       if (!active) await sleep(250);
     }
-    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}${GAME_PAGE}?trace` });
     for (let i = 0; i < 120 && !controlled; i++) {
       controlled = await evalJS("!!(navigator.serviceWorker && navigator.serviceWorker.controller)");
       if (!controlled) await sleep(250);
