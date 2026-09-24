@@ -45,7 +45,8 @@
           (sigil list))
 
   (export GEN-TRIES
-          dealt dealt? dealt-segment dealt-line dealt-try dealt-seed dealt-first
+          dealt dealt? dealt-segment dealt-line dealt-try dealt-perturbs dealt-placements
+          dealt-seed dealt-first
           place-ice
           scan-gen-start scan-gen-node-start scan-gen-step! scan-gen-run!
           scan-gen-status scan-gen-result scan-gen-try scan-gen-steps
@@ -58,11 +59,15 @@
     (define GEN-TRIES 1000)
 
     ;; A dealt segment: the uplink already scanned, the recorded line from
-    ;; it, and how many perturbations and placements it took past the first.
+    ;; it, and what it took: `try` is perturbations plus placements past the
+    ;; first (0: placement 0 cleared as dealt), counted apart in `perturbs`
+    ;; and `placements`.
     (define-struct dealt
       (segment default: #f)
       (line default: '())
       (try default: 0)
+      (perturbs default: 0)
+      (placements default: 0)          ; placements past the first
       (seed default: 0)
       (first default: 0))
 
@@ -119,16 +124,32 @@
     (define (scan-gen-start preset seed first version suspects?)
       (let ((d (preset-dims preset)))
         (unless d (error "scan generate: unknown preset" preset))
-        (gen-new (car d) (cadr d) (caddr d) preset version suspects? seed first)))
+        (gen-new (car d)
+                 (cadr d)
+                 (caddr d)
+                 preset
+                 version
+                 suspects?
+                 seed
+                 first)))
 
     ;; A node board (JACK IN): the grid and ICE count from the launch.
     (define (scan-gen-node-start w h m seed first)
-      (gen-new w h m 'node 'hacker #f seed first))
+      (gen-new w
+               h
+               m
+               'node
+               'hacker
+               #f
+               seed
+               first))
 
     (define (gen-new w h m preset version suspects? seed first)
       (let ((cands (candidates w h first)))
         (when (> m (vector-length cands))
-          (error "scan generate: more ICE than hosts outside the uplink" m (vector-length cands)))
+          (error "scan generate: more ICE than hosts outside the uplink"
+                 m
+                 (vector-length cands)))
         (gen w: w
              h: h
              m: m
@@ -146,7 +167,12 @@
     (define (scan-gen-steps g) (gen-steps g))
 
     (define (gen-segment g ice)
-      (segment-new (gen-w g) (gen-h g) ice (gen-preset g) (gen-version g) (gen-suspects? g)))
+      (segment-new (gen-w g)
+                   (gen-h g)
+                   ice
+                   (gen-preset g)
+                   (gen-version g)
+                   (gen-suspects? g)))
 
     ;; Deal placement k and start a pure run on it.
     (define (deal-placement! g)
@@ -173,6 +199,8 @@
                           (set-gen-result! g (dealt segment: (segment-scan (solver-seg st) (gen-first g))
                                                     line: (reverse (solver-line st))
                                                     try: (scan-gen-try g)
+                                                    perturbs: (gen-perturbs g)
+                                                    placements: (gen-try g)
                                                     seed: (gen-seed g)
                                                     first: (gen-first g)))
                           (set-gen-status! g 'done))
@@ -183,9 +211,12 @@
                           (set-gen-pure?! g #t))))
                    ((stuck)
                     (unless (perturb! g st)
-                      ;; nothing to move: the next placement
+                      ;; nothing to move: the next placement, unless that
+                      ;; would pass GEN-TRIES (no placement dealt to be dropped)
                       (set-gen-try! g (+ 1 (gen-try g)))
-                      (deal-placement! g)))
+                      (if (>= (scan-gen-try g) GEN-TRIES)
+                          (set-gen-status! g 'failed)
+                          (deal-placement! g))))
                    (else #f))))))
       (gen-status g))
 
@@ -243,13 +274,22 @@
              (let* ((r (list-ref frontier (draw! g (length frontier))))
                     (set (filter (lambda (i) (not (or (vector-ref open i) (vector-ref flag i))))
                                  (segment-neighbors seg r)))
-                    (pools (classify seg open flag around set n))
+                    (pools (classify seg
+                                     open
+                                     flag
+                                     around
+                                     set
+                                     n))
                     (set-ice (filter (lambda (i) (segment-ice? seg i)) set))
                     (set-clean (filter (lambda (i) (not (segment-ice? seg i))) set))
-                    (move (or (plan g set-ice (list-ref pools 0) 'clear)
-                              (plan g set-clean (list-ref pools 1) 'fill)
-                              (plan g set-ice (append (list-ref pools 0) (list-ref pools 2)) 'clear)
-                              (plan g set-clean (append (list-ref pools 1) (list-ref pools 3)) 'fill))))
+                    (far-clean (list-ref pools 0))
+                    (far-ice (list-ref pools 1))
+                    (any-clean (append far-clean (list-ref pools 2)))
+                    (any-ice (append far-ice (list-ref pools 3)))
+                    (move (or (plan g set-ice far-clean 'clear)
+                              (plan g set-clean far-ice 'fill)
+                              (plan g set-ice any-clean 'clear)
+                              (plan g set-clean any-ice 'fill))))
                (and move
                     (begin
                       (set-gen-perturbs! g (+ 1 (gen-perturbs g)))
