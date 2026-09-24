@@ -182,3 +182,58 @@
                                   (let loop ((f 0) (acc '()))
                                     (if (= f FACE-COUNT) (reverse acc) (loop (+ f 1) (cons (sheet-name name f) acc)))))))))
             SHEETS))
+
+
+
+;; --- the distance rule ACROSS suits (0.1.2's accessibility pass) ---------------
+;;
+;; The readability rule above holds every pair of faces WITHIN a suit at least
+;; MIN-DISTANCE cells apart. Across suits it says nothing, because the suits
+;; were told apart by colour: C-SUIT-0 (#1A73D9, MEM) against C-SUIT-3
+;; (#8C40B3, DSK), which the palette calls "cold" and "cold".
+;;
+;; That is the assumption trev cannot use. He reports the blue and purple faces
+;; as the same, so for him a MEM face and a DSK face two cells apart are two
+;; tiles to match by shape alone — with LESS shape to go on than the rule
+;; already demands of two faces in the same suit.
+;;
+;; So the rule extends across suits, and each offending pair gets its own named
+;; failure, exactly as the within-suit rule does: "the sheet fails" tells an
+;; artist nothing about which two glyphs to redraw.
+(define (all-faces)
+  (let loop ((f (- FACE-COUNT 1)) (acc '()))
+    (if (< f 0) acc (loop (- f 1) (cons f acc)))))
+
+(define (cross-suit-offenders name)
+  (let ((sheet (sheet-ref name)))
+    (let outer ((fs (all-faces)) (acc '()))
+      (if (null? fs)
+          (reverse acc)
+          (outer (cdr fs)
+                 (let inner ((gs (cdr fs)) (acc acc))
+                   (if (null? gs)
+                       acc
+                       (inner (cdr gs)
+                              (let ((d (distance (vector-ref sheet (car fs)) (vector-ref sheet (car gs))))) 
+                                (if (and (< d MIN-DISTANCE)
+                                         (not (= (face-suit (car fs)) (face-suit (car gs)))))
+                                    (cons (list (car fs) (car gs) d) acc)
+                                    acc))))))))))
+
+(test-group "glyphs: the distance rule holds ACROSS suits too, so colour is never the only difference"
+  (for-each
+    (lambda (entry)
+      (let* ((name (car entry))
+             (offenders (cross-suit-offenders name)))
+        (test (string-append "sheet " (symbol->string name) ": how many cross-suit pairs are closer than " (number->string MIN-DISTANCE) " cells")
+          (assert-equal 0 (length offenders)))
+        ;; one named failure per pair, so the output says which glyphs to redraw
+        (for-each
+          (lambda (o)
+            (test (string-append "sheet " (symbol->string name) ": "
+                                 (or (sheet-name name (car o)) "?") " vs " (or (sheet-name name (cadr o)) "?")
+                                 " (suits " (number->string (face-suit (car o))) " and " (number->string (face-suit (cadr o)))
+                                 ") differ by " (number->string (caddr o)) " cells, want " (number->string MIN-DISTANCE))
+              (assert-true (>= (caddr o) MIN-DISTANCE))))
+          offenders)))
+    SHEETS))

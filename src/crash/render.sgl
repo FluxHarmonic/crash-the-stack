@@ -368,20 +368,58 @@
                     (else FACE-COLOR)))
       (draw-filled-rect x y w h)
       (color! (if selected? C-SELECTED FACE-EDGE-COLOR))
-      (draw-filled-rect x y w 1)
-      (draw-filled-rect x y 1 h)
-      (when right-open?
-        (color! (if selected? C-SELECTED C-SIDE-DARK))
+      ;; A SELECTED tile is framed on all four sides, two cells thick; an
+      ;; unselected one keeps its one-cell top-left highlight. Until
+      ;; 2026-09-24 selection was a tint and a hue swap on that same
+      ;; one-cell edge, so "which tile did I pick" was a colour question.
+      ;; The frame is drawn INSIDE the tile's own rect: tiles overlap in a
+      ;; mahjong layout, and a border that spilled outside would be painted
+      ;; over by whichever neighbour drew next.
+      (if selected?
+          (let ((t 2))
+            (draw-filled-rect x y w t)
+            (draw-filled-rect x (+ y h (- t)) w t)
+            (draw-filled-rect x y t h)
+            (draw-filled-rect (+ x w (- t)) y t h))
+          (begin
+            (draw-filled-rect x y w 1)
+            (draw-filled-rect x y 1 h)))
+      (when (and right-open? (not selected?))
+        (color! C-SIDE-DARK)
         (draw-filled-rect (+ x w -1) y 1 h)))
 
     (define (draw-face-glyph-part g look face x y w h selected? scramble)
       (when face (draw-glyph-on g look face x y w h selected? scramble)))
 
+    ;; The lock's MARK says which lock it is; the colour only agrees with it.
+    ;; Both states drew the same two bars until 2026-09-24 and differed by hue
+    ;; alone (C-TRACE-HOT against C-LABEL-LIT), so a player who cannot separate
+    ;; those two colours could see that a tile was locked and not how. They
+    ;; differ in lightness (L* 61 against 84), which is exactly why the mark
+    ;; matters: a pair can pass a lightness test and still be unreadable as two
+    ;; different things.
+    ;;
+    ;;   STRONG  two solid bars, top and bottom  ▔▔▔▔▔ / ▁▁▁▁▁
+    ;;   WEAK    one broken bar, top only        ▔ ▔ ▔
+    ;;
+    ;; Two differences rather than one — the COUNT of bars and whether a bar is
+    ;; continuous — because a single difference survives less as the tile
+    ;; shrinks, and the phone draws this at 32 px.
+    (define WEAK-DASH 3)      ; cells of bar
+    (define WEAK-GAP 2)       ; cells of air between them
     (define (draw-face-lock x y w h lock)
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
-        (draw-filled-rect x (+ y 3) w 2)
-        (draw-filled-rect x (+ y h -5) w 2)))
+        (if (eq? lock 'strong)
+            (begin
+              (draw-filled-rect x (+ y 3) w 2)
+              (draw-filled-rect x (+ y h -5) w 2))
+            ;; one bar, broken: it stops short of the tile's right edge rather
+            ;; than running a part-dash off it
+            (let loop ((dx 0))
+              (when (<= (+ dx WEAK-DASH) w)
+                (draw-filled-rect (+ x dx) (+ y 3) WEAK-DASH 2)
+                (loop (+ dx WEAK-DASH WEAK-GAP)))))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -646,8 +684,18 @@
         (let* ((entry (car labels))
                (label (cdr entry))
                (w (label-w label)))
-          (color! (if (label-prefix? typed label) C-HIGHLIGHT C-LABEL-LIT))
-          (text-mini! label (+ (label-x g (car entry) w) 2) (+ (label-y g (car entry)) 1) 1))
+          ;; A label the typed letters still match is UNDERLINED as well as
+          ;; lit. Until 2026-09-24 "you are part way into this tag" was
+          ;; C-HIGHLIGHT against C-LABEL-LIT and nothing else, so the feedback
+          ;; that tells you whether to keep typing was a colour a player may
+          ;; not have. The rule stays the same; only how it shows changed.
+          (let* ((matching? (label-prefix? typed label))
+                 (lx (+ (label-x g (car entry) w) 2))
+                 (ly (+ (label-y g (car entry)) 1)))
+            (color! (if matching? C-HIGHLIGHT C-LABEL-LIT))
+            (text-mini! label lx ly 1)
+            (when matching?
+              (draw-filled-rect lx (+ ly MINI-H 1) (label-w label) 1))))
         (label-texts! g (cdr labels) typed)))
 
     ;; typed is a non-empty prefix of label.
