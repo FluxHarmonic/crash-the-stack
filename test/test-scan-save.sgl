@@ -1,0 +1,98 @@
+;;; A SCAN board saves as one datum and loads back equal (P6b: CONTINUE),
+;;; and anything play could not have produced is refused whole.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash scan rules)
+        (crash scan generate)
+        (crash scan input)
+        (crash scan save))
+
+(define (always) #t)
+
+(define (settle s)
+  (let loop ((s s)) (if (scan-session-dealing? s) (loop (scan-session-deal! s always)) s)))
+
+(define (click s i button)
+  (let* ((r (scan-host-rect s i))
+         (x (+ (car r) (quotient (caddr r) 2)))
+         (y (+ (cadr r) (quotient (caddr r) 2))))
+    (settle (scan-step s (make-scan-frame '() '() (list (list 'down x y button) (list 'up x y button)) 16)))))
+
+;; A LAN board after its uplink and the first `k` steps of its own line.
+(define (played k)
+  (let* ((s (click (scan-session-new 'lan 4 'original #f #f) 40 'left))
+         (d (deal-segment 'lan 4 40 'original #f)))
+    (let loop ((s s) (steps (cdr (dealt-line d))) (k k))
+      (if (or (= k 0) (null? steps))
+          s
+          (loop (click s (cadr (car steps)) (if (eq? (car (car steps)) 'scan) 'left 'right))
+                (cdr steps)
+                (- k 1))))))
+
+(define (same? a b)
+  (and (segment-equal? (scan-session-segment a) (scan-session-segment b))
+       (equal? (scan-session-first a) (scan-session-first b))
+       (eq? (scan-session-mode a) (scan-session-mode b))
+       (= (scan-session-cursor a) (scan-session-cursor b))))
+
+;; The datum with one field replaced.
+(define (with d k v)
+  (let loop ((d d) (i 0))
+    (if (null? d) '() (cons (if (= i k) v (car d)) (loop (cdr d) (+ i 1))))))
+
+(test-group "scan save: the round trip"
+  (test "run-length encoding round-trips"
+    (let ((cells (vector 'hidden 'hidden 'scanned 'flagged 'flagged 'flagged 'tripped 'suspect 'defused)))
+      (assert-equal (list 'h 2 's 1 'f 3 't 1 'q 1 'd 1) (cells->rle cells))
+      (assert-equal cells (rle->cells (cells->rle cells) 9))))
+  (test "a board mid-play loads back equal"
+    (let* ((s (played 12))
+           (back (scan-load (scan-save s) #f)))
+      (assert-true (and back (same? s back)))
+      (assert-false (segment-won? (scan-session-segment back)))))
+  (test "a board played out loads back won"
+    (let* ((s (played 999))
+           (back (scan-load (scan-save s) #f)))
+      (assert-true (segment-won? (scan-session-segment s)))
+      (assert-true (and back (same? s back) (segment-won? (scan-session-segment back))))))
+  (test "a CLASSIC board lost to a sweep keeps the trip that ended it"
+    ;; flag a wrong host next to a reading, then sweep it
+    (let* ((s (played 0))
+           (seg (scan-session-segment s))
+           (r (find (lambda (i) (and (segment-scanned? seg i) (= 1 (segment-reading seg i)))) (iota (segment-size seg))))
+           (clean (find (lambda (j) (and (segment-hidden? seg j) (not (segment-ice? seg j)))) (segment-neighbors seg r)))
+           (s (click s clean 'right))
+           (s (click s r 'middle)))
+      (assert-true (segment-lost? (scan-session-segment s)))
+      (let ((back (scan-load (scan-save s) #f)))
+        (assert-true (and back (same? s back)))
+        (assert-equal (segment-lost (scan-session-segment s)) (segment-lost (scan-session-segment back))))))
+  (test "a board before its uplink, and a node board"
+    (let* ((s (scan-session-new 'wan 9 'hacker #t #t))
+           (back (scan-load (scan-save s) #t)))
+      (assert-true (and back (not (scan-session-segment back)) (eq? 'wan (scan-session-preset back)))))
+    (let* ((s (click (scan-session-node 16 10 20 77 #f) 30 'left))
+           (back (scan-load (scan-save s) #f)))
+      (assert-true (and back (same? s back))))))
+
+(test-group "scan save: malformed data is refused whole"
+  (let ((d (scan-save (played 8))))
+    (test "the positive control: the untouched datum loads"
+      (assert-true (and (scan-load d #f) #t)))
+    (test "another version, another tag, a missing field"
+      (assert-false (scan-load (with d 1 2) #f))
+      (assert-false (scan-load (with d 0 'stack-board) #f))
+      (assert-false (scan-load (reverse (cdr (reverse d))) #f)))
+    (test "a grid that is not the preset's, a mode or version that does not exist"
+      (assert-false (scan-load (with d 3 10) #f))
+      (assert-false (scan-load (with d 11 'dig) #f))
+      (assert-false (scan-load (with d 7 'twist) #f)))
+    (test "cells that do not decode to the grid"
+      (assert-false (scan-load (with d 13 (list 'h 80)) #f))
+      (assert-false (scan-load (with d 13 (list 'h 81 's 1)) #f))
+      (assert-false (scan-load (with d 13 (list 'x 81)) #f)))
+    (test "states play cannot produce: every host scanned (ICE included), a lost host that is not tripped"
+      (assert-false (scan-load (with d 13 (list 's 81)) #f))
+      (assert-false (scan-load (with d 10 5) #f)))))

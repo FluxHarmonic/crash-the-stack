@@ -1,0 +1,164 @@
+;;; (crash scan save) - A SCAN board as one datum, and back (CONTINUE).
+;;;
+;;; A board is a function of (seed, uplink) (D68, D76), so the datum stores
+;;; what the deal was made from and what play did to it, not the ICE:
+;;;
+;;;   (scan-board 1 PRESET W H M SEED VERSION SUSPECTS? FIRST LOST MODE CURSOR CELLS)
+;;;
+;;; PRESET lan | wan | backbone | node (a node carries its grid in W H M);
+;;; FIRST the uplink, or #f before it; LOST the trip that ended a CLASSIC
+;;; board, or #f; MODE scan | flag; CELLS the host states run-length
+;;; encoded, a flat list of code and count (h hidden, s scanned, f flagged,
+;;; q suspect, t tripped, d defused), or #f before the uplink.
+;;;
+;;; scan-load re-deals from the seed and the uplink (the deal is
+;;; deterministic) and lays the cells over it through segment-restore,
+;;; which refuses states play cannot produce. Anything malformed (another
+;;; version, a field out of range, cells that do not decode to the grid) is
+;;; refused whole, #f, never half a board. Re-dealing costs what the first
+;;; click's deal did, on CONTINUE rather than on a click.
+;;;
+;;; Rules family: no platform (the shell writes the datum to the store).
+
+(define-library (crash scan save)
+  (import (sigil struct)
+          (sigil math)
+          (crash scan rules)
+          (crash scan generate)
+          (crash scan input))
+
+  (export SCAN-SAVE-VERSION scan-save scan-load cells->rle rle->cells)
+
+  (begin
+    (define SCAN-SAVE-VERSION 1)
+
+    (define CODES
+      (list (cons 'hidden 'h)
+            (cons 'scanned 's)
+            (cons 'flagged 'f)
+            (cons 'suspect 'q)
+            (cons 'tripped 't)
+            (cons 'defused 'd)))
+
+    (define (code-of state) (cdr (assq state CODES)))
+
+    (define (state-of code)
+      (let loop ((cs CODES))
+        (cond ((null? cs) #f)
+              ((eq? (cdr (car cs)) code) (car (car cs)))
+              (else (loop (cdr cs))))))
+
+    ;; A cells vector as a flat list of code and count, in index order.
+    (define (cells->rle cells)
+      (let ((n (vector-length cells)))
+        (if (= n 0)
+            '()
+            (let loop ((i 1) (cur (vector-ref cells 0)) (run 1) (acc '()))
+              (cond ((= i n) (reverse (cons run (cons (code-of cur) acc))))
+                    ((eq? (vector-ref cells i) cur) (loop (+ i 1) cur (+ run 1) acc))
+                    (else (loop (+ i 1)
+                                (vector-ref cells i)
+                                1
+                                (cons run (cons (code-of cur) acc)))))))))
+
+    ;; The cells vector of n hosts, or #f when the list does not decode to
+    ;; exactly n hosts of known states.
+    (define (rle->cells rle n)
+      (let ((cells (make-vector n 'hidden)))
+        (let loop ((r rle) (i 0))
+          (cond ((null? r) (and (= i n) cells))
+                ((or (null? (cdr r))
+                     (not (state-of (car r)))
+                     (not (integer? (cadr r)))
+                     (< (cadr r) 1)
+                     (> (+ i (cadr r)) n))
+                 #f)
+                (else
+                 (let fill ((k 0))
+                   (when (< k (cadr r))
+                     (vector-set! cells (+ i k) (state-of (car r)))
+                     (fill (+ k 1))))
+                 (loop (cddr r) (+ i (cadr r))))))))
+
+    ;; The datum of a session.
+    (define (scan-save s)
+      (let ((seg (scan-session-segment s)))
+        (list 'scan-board
+              SCAN-SAVE-VERSION
+              (scan-session-preset s)
+              (scan-session-w s)
+              (scan-session-h s)
+              (scan-session-m s)
+              (scan-session-seed s)
+              (scan-session-version s)
+              (scan-session-suspects? s)
+              (and seg (scan-session-first s))
+              (and seg (segment-lost seg))
+              (scan-session-mode s)
+              (scan-session-cursor s)
+              (and seg (cells->rle (segment-cells seg))))))
+
+    ;; A session from a datum, or #f.
+    (define (scan-load d touch?)
+      (and (list? d)
+           (= (length d) 14)
+           (eq? (list-ref d 0) 'scan-board)
+           (eqv? (list-ref d 1) SCAN-SAVE-VERSION)
+           (let ((preset (list-ref d 2))
+                 (w (list-ref d 3))
+                 (h (list-ref d 4))
+                 (m (list-ref d 5))
+                 (seed (list-ref d 6))
+                 (version (list-ref d 7))
+                 (suspects? (list-ref d 8))
+                 (first (list-ref d 9))
+                 (lost (list-ref d 10))
+                 (mode (list-ref d 11))
+                 (cursor (list-ref d 12))
+                 (rle (list-ref d 13)))
+             (and (memq version '(original hacker))
+                  (boolean? suspects?)
+                  (memq mode '(scan flag))
+                  (index? seed 2147483648)
+                  (grid-ok? preset w h m)
+                  (index? cursor (* w h))
+                  (let ((s (if (eq? preset 'node)
+                               (scan-session-node w h m seed touch?)
+                               (scan-session-new preset seed version suspects? touch?))))
+                    (if (not first)
+                        (and (not rle) (scan-session s mode: mode cursor: cursor))
+                        (and (index? first (* w h))
+                             (list? rle)
+                             (restored s first lost mode cursor rle))))))))
+
+    (define (restored s first lost mode cursor rle)
+      (let* ((w (scan-session-w s))
+             (h (scan-session-h s))
+             (cells (rle->cells rle (* w h)))
+             (d (and cells
+                     (if (eq? (scan-session-preset s) 'node)
+                         (deal-node w h (scan-session-m s) (scan-session-seed s) first)
+                         (deal-segment (scan-session-preset s)
+                                       (scan-session-seed s)
+                                       first
+                                       (scan-session-version s)
+                                       (scan-session-suspects? s)))))
+             (seg (and d (segment-restore (dealt-segment d) cells first lost))))
+        (and seg
+             (scan-session s segment: seg first: first mode: mode cursor: cursor))))
+
+    (define (index? x n)
+      (and (integer? x) (exact? x) (>= x 0) (< x n)))
+
+    ;; A preset's own grid, or a node grid that fits the band.
+    (define (grid-ok? preset w h m)
+      (let ((dims (preset-dims preset)))
+        (if dims
+            (and (eqv? w (car dims)) (eqv? h (cadr dims)) (eqv? m (caddr dims)))
+            (and (eq? preset 'node)
+                 (index? w 41)
+                 (index? h 23)
+                 (> w 3)
+                 (> h 3)
+                 (index? m (- (* w h) 9))
+                 (> m 0)))))))

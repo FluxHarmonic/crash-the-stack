@@ -46,7 +46,7 @@
           segment-size segment-ice-total segment-neighbors segment-sector
           segment-ice? segment-reading segment-state segment-visible-reading
           segment-hidden? segment-scanned? segment-flagged?
-          segment-scan segment-flag segment-sweep segment-move-ice
+          segment-scan segment-flag segment-sweep segment-move-ice segment-restore segment-lost
           segment-won? segment-lost? segment-over? segment-counter
           segment-clean-left segment-extracted? segment-cell-state
           segment-tripped segment-equal?)
@@ -198,6 +198,34 @@
         (unless (null? cs)
           (vector-set! readings (car cs) (+ d (vector-ref readings (car cs))))
           (loop (cdr cs)))))
+
+    ;; The dealt segment `s` (nothing scanned) with saved host states laid
+    ;; over it, or #f when the states are not ones play can produce: the
+    ;; wrong length, an unknown state, a scanned host that is ICE, or a
+    ;; tripped or defused host that is not, or a `lost` host (the trip that
+    ;; ended a CLASSIC segment, #f for none) that is not tripped. `first` is
+    ;; the uplink. A save's loader, (crash scan save).
+    (define (segment-restore s cells first lost)
+      (let ((n (segment-size s)))
+        (and (vector? cells)
+             (= n (vector-length cells))
+             (or (not lost)
+                 (and (integer? lost) (>= lost 0) (< lost n) (eq? (vector-ref cells lost) (quote tripped))))
+             (let loop ((i 0) (left 0))
+               (if (= i n)
+                   (segment s
+                            cells: (vector-copy cells)
+                            left: left
+                            first: first
+                            lost: lost
+                            news: '())
+                   (let ((st (vector-ref cells i))
+                         (ice (segment-ice? s i)))
+                     (and (memq st '(hidden scanned flagged suspect tripped defused))
+                          (not (and ice (eq? st 'scanned)))
+                          (not (and (not ice) (memq st '(tripped defused))))
+                          (loop (+ i 1)
+                                (if (and (not ice) (not (eq? st 'scanned))) (+ left 1) left)))))))))
 
     ;; The same segment with the ICE on hosts `off` moved to hosts `on`
     ;; (the generator's perturbation, before anything is scanned): the
