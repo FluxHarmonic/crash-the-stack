@@ -9,11 +9,32 @@
 ;;; alphabet), shown XXXXX-XXXXX; decode reads them back, case-free, with
 ;;; dashes and spaces ignored, and answers #f for anything else.
 ;;;
-;;; The payload is 40 bits in eight digits, most significant first:
-;;;   format 2 (0; a nonzero format is refused), table 2 (0 stack, 1 cards,
-;;;   2 run, 3 refused), version 1 (0 original, 1 hacker), draw 1 (0 one,
-;;;   1 three), scoring 1 (0 standard, 1 vegas), layout 2 (0 turtle; else
-;;;   refused), seed 31.
+;;; The payload is 40 bits in eight digits, most significant first. Its
+;;; first two bits are the FORMAT.
+;;;
+;;; Format 0 (every code before SCAN, unchanged):
+;;;   format 2 (0), table 2 (0 stack, 1 cards, 2 run, 3 refused), version 1
+;;;   (0 original, 1 hacker), draw 1 (0 one, 1 three), scoring 1 (0
+;;;   standard, 1 vegas), layout 2 (0 turtle; else refused), seed 31.
+;;;
+;;; Format 1 (D76, SCAN and the drops after it):
+;;;   format 2 (1), table 4, then the table's own 34 bits. The table field
+;;;   shares format 0's numbering: 0 stack, 1 cards, 2 run, 3 scan, 4..15
+;;;   refused; a format-1 code naming stack, cards or run is refused too,
+;;;   so no board has two codes. SCAN's 34 bits:
+;;;     version 1 (0 original, 1 hacker), preset 2 (0 lan, 1 wan,
+;;;     2 backbone, 3 refused), first 9 (the uplink's host, below the
+;;;     preset's width x height, or 511 for none yet; anything else
+;;;     refused), seed 22.
+;;;   A SCAN board is a function of (seed, uplink), so the code carries
+;;;   both. A node board (JACK IN) is never a SCAN code: its run's code names
+;;;   it, and its seed is 31 bits; encode answers #f for a `node` preset or a
+;;;   seed over SCAN-SEED-MAX. Format 2 and 3 are refused.
+;;;
+;;; decode answers only tables the game can open today (DECODE-TABLES):
+;;; until SCAN is playable (P6b), a SCAN code must never reach a shell,
+;;; which would open a STACK board from its seed. decode-any answers every
+;;; valid code, and the gate round-trips through it.
 ;;; The check is two digits: c = sum over i of (i + 1) * d_i, mod 1021, c
 ;;; < 1024 in two base-32 digits. A single substituted payload digit
 ;;; changes the sum by (i + 1) * delta with |delta| <= 31 and i + 1 <= 8,
@@ -27,12 +48,14 @@
 
 (define-library (crash code)
   (import (sigil struct)
-          (sigil math))
+          (sigil math)
+          (crash scan rules))
 
   (export spec spec? spec-table spec-version spec-draw spec-scoring spec-layout spec-seed
-          spec-new spec-equal?
-          encode decode code-display code-valid?
-          ALPHABET CODE-LENGTH SEED-MAX CHECK-MODULUS)
+          spec-preset spec-first
+          spec-new scan-spec-new spec-equal?
+          encode decode decode-any code-display code-valid?
+          ALPHABET CODE-LENGTH SEED-MAX SCAN-SEED-MAX CHECK-MODULUS DECODE-TABLES)
 
   (begin
     (define ALPHABET "0123456789ABCDEFGHJKMNPQRSTVWXYZ")
@@ -40,10 +63,18 @@
     (define PAYLOAD-DIGITS 8)
     (define CHECK-MODULUS 1021)
     (define SEED-MAX (- (expt 2 31) 1))
+    (define SCAN-SEED-MAX (- (expt 2 22) 1))
+    (define FORMAT-BITS (expt 2 38))    ; the payload below the format's two bits
+    (define TABLE-BITS (expt 2 34))     ; a format-1 table's own bits
+    (define NO-UPLINK 511)
 
     ;; built with list, not quoted: the wasm literal hazard (crash shell)'s
     ;; literal-check exists for
-    (define TABLES (list 'stack 'cards 'run))
+    (define TABLES (list 'stack 'cards 'run))        ; format 0's table field
+    (define FORMAT1-TABLES (list 'stack 'cards 'run 'scan))
+    (define SCAN-PRESETS (list 'lan 'wan 'backbone))
+    ;; The tables decode answers: the ones a shell can open. P6b adds scan.
+    (define DECODE-TABLES (list 'stack 'cards 'run))
     (define VERSIONS (list 'original 'hacker))
     (define SCORINGS (list 'standard 'vegas))
     (define LAYOUTS (list 'turtle))
@@ -55,7 +86,9 @@
       (draw default: 1)
       (scoring default: 'vegas)
       (layout default: 'turtle)
-      (seed default: 1))
+      (seed default: 1)
+      (preset default: #f)     ; SCAN: lan | wan | backbone | node
+      (first default: #f))     ; SCAN: the uplink's host, or #f before it
 
     ;; A spec from its parts, or #f when a part is out of range.
     (define (spec-new table version draw scoring layout seed)
@@ -70,13 +103,37 @@
            (<= seed SEED-MAX)
            (spec table: table version: version draw: draw scoring: scoring layout: layout seed: seed)))
 
+    ;; A SCAN spec, or #f when a part is out of range: a preset (node
+    ;; included: JACK IN builds these), the uplink's host within the
+    ;; preset's grid or #f, and a 31-bit seed. A node's grid rides in the
+    ;; launch, so its uplink is only checked for being a host index.
+    (define (scan-spec-new version preset first seed)
+      (and (memq version VERSIONS)
+           (or (memq preset SCAN-PRESETS) (eq? preset 'node))
+           (or (not first)
+               (and (integer? first)
+                    (exact? first)
+                    (>= first 0)
+                    (or (eq? preset 'node) (< first (preset-hosts preset)))))
+           (integer? seed)
+           (exact? seed)
+           (>= seed 0)
+           (<= seed SEED-MAX)
+           (spec table: 'scan version: version seed: seed preset: preset first: first)))
+
+    (define (preset-hosts p)
+      (let ((d (preset-dims p)))
+        (* (car d) (cadr d))))
+
     (define (spec-equal? a b)
       (and (eq? (spec-table a) (spec-table b))
            (eq? (spec-version a) (spec-version b))
            (= (spec-draw a) (spec-draw b))
            (eq? (spec-scoring a) (spec-scoring b))
            (eq? (spec-layout a) (spec-layout b))
-           (= (spec-seed a) (spec-seed b))))
+           (= (spec-seed a) (spec-seed b))
+           (eq? (spec-preset a) (spec-preset b))
+           (eqv? (spec-first a) (spec-first b))))
 
     (define (index-of x lst)
       (let loop ((l lst) (i 0))
@@ -86,8 +143,25 @@
 
     ;; --- bits <-> digits ---------------------------------------------------------
 
-    ;; The 40-bit payload as one integer.
+    ;; The 40-bit payload as one integer, or #f for a spec no code names.
     (define (spec->payload s)
+      (if (eq? (spec-table s) 'scan)
+          (scan->payload s)
+          (format0->payload s)))
+
+    ;; Format 1, table scan: #f for a node board or a seed over 22 bits.
+    (define (scan->payload s)
+      (and (memq (spec-preset s) SCAN-PRESETS)
+           (<= (spec-seed s) SCAN-SEED-MAX)
+           (let* ((v 1)                                            ; format 1
+                  (v (+ (* v 16) (index-of 'scan FORMAT1-TABLES)))
+                  (v (+ (* v 2) (index-of (spec-version s) VERSIONS)))
+                  (v (+ (* v 4) (index-of (spec-preset s) SCAN-PRESETS)))
+                  (v (+ (* v 512) (or (spec-first s) NO-UPLINK)))
+                  (v (+ (* v (+ SCAN-SEED-MAX 1)) (spec-seed s))))
+             v)))
+
+    (define (format0->payload s)
       (let* ((v (index-of (spec-table s) TABLES))
              (v (+ (* v 2) (index-of (spec-version s) VERSIONS)))
              (v (+ (* v 2) (if (= (spec-draw s) 3) 1 0)))
@@ -98,6 +172,35 @@
 
     ;; The spec of a payload, or #f when a field is out of range.
     (define (payload->spec p)
+      (case (quotient p FORMAT-BITS)
+        ((0) (format0->spec p))
+        ((1) (format1->spec (modulo p FORMAT-BITS)))
+        (else #f)))
+
+    ;; Format 1: the table, then its own bits. Only scan so far.
+    (define (format1->spec q)
+      (let ((table (quotient q TABLE-BITS))
+            (bits (modulo q TABLE-BITS)))
+        (and (< table (length FORMAT1-TABLES))
+             (eq? (list-ref FORMAT1-TABLES table) 'scan)
+             (scan-bits->spec bits))))
+
+    (define (scan-bits->spec b)
+      (let* ((seed (modulo b (+ SCAN-SEED-MAX 1)))
+             (b (quotient b (+ SCAN-SEED-MAX 1)))
+             (first (modulo b 512))
+             (b (quotient b 512))
+             (preset (modulo b 4))
+             (version (quotient b 4)))
+        (and (< preset (length SCAN-PRESETS))
+             (or (= first NO-UPLINK)
+                 (< first (preset-hosts (list-ref SCAN-PRESETS preset))))
+             (scan-spec-new (list-ref VERSIONS version)
+                            (list-ref SCAN-PRESETS preset)
+                            (if (= first NO-UPLINK) #f first)
+                            seed))))
+
+    (define (format0->spec p)
       (let* ((seed (modulo p (expt 2 31)))
              (p (quotient p (expt 2 31)))
              (layout (modulo p 4))
@@ -151,11 +254,14 @@
 
     ;; --- the two doors -----------------------------------------------------------
 
-    ;; The ten characters of a spec, no dash.
+    ;; The ten characters of a spec, no dash; #f for a spec no code names
+    ;; (a SCAN node board, or a SCAN seed over 22 bits).
     (define (encode s)
-      (let* ((payload (number->digits (spec->payload s) PAYLOAD-DIGITS))
-             (check (number->digits (check-of payload) 2)))
-        (list->string (map digit->char (append payload check)))))
+      (let ((p (spec->payload s)))
+        (and p
+             (let* ((payload (number->digits p PAYLOAD-DIGITS))
+                    (check (number->digits (check-of payload) 2)))
+               (list->string (map digit->char (append payload check)))))))
 
     ;; XXXXX-XXXXX for the menu and the URL.
     (define (code-display code)
@@ -168,10 +274,18 @@
       (filter (lambda (c) (not (or (char=? c #\-) (char=? c #\space))))
               (string->list text)))
 
+    ;; The spec of a code the game can open today, or #f: decode-any's
+    ;; answer when its table is in DECODE-TABLES.
+    (define (decode text)
+      (let ((sp (decode-any text)))
+        (and sp
+             (memq (spec-table sp) DECODE-TABLES)
+             sp)))
+
     ;; The spec of a code, or #f: wrong length, a character outside the
     ;; alphabet, a check that does not match, or a payload with a field
     ;; out of range. Never a different board.
-    (define (decode text)
+    (define (decode-any text)
       (and (string? text)
            (let ((cs (strip text)))
              (and (= (length cs) CODE-LENGTH)

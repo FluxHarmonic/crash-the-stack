@@ -1,0 +1,183 @@
+;;; Gate leg 11 (P6a, D76): share-code format 1, and format 0 unchanged.
+;;;
+;;; test/fixtures/codes-format0.txt was written by master's (crash code) at
+;;; 7724b9c, BEFORE format 1 existed: every table x version x draw x
+;;; scoring over thirty seeds (edges of the 22- and 31-bit ranges and
+;;; twenty MINSTD draws). Every line must decode to exactly its fields and
+;;; re-encode to the same ten characters. That is what keeps every code
+;;; already shared meaning the board it meant.
+;;;
+;;; Crafted payloads (format 1 with a refused table, preset or uplink;
+;;; formats 2 and 3) are built here with the test's own digit and check
+;;; arithmetic, not the module's, and must all be refused.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (sigil io)
+        (sigil string)
+        (crash code)
+        (crash stack prng))
+
+;; the list without repeats (equal?), first occurrence kept
+(define (distinct xs)
+  (let loop ((xs xs) (acc (quote ())))
+    (cond ((null? xs) (reverse acc))
+          ((member (car xs) acc) (loop (cdr xs) acc))
+          (else (loop (cdr xs) (cons (car xs) acc))))))
+
+(define FIXTURE "test/fixtures/codes-format0.txt")
+
+(define (read-lines path)
+  (filter (lambda (l) (> (string-length l) 0))
+          (string-split (call-with-input-file path
+                          (lambda (port)
+                            (let loop ((acc '()))
+                              (let ((line (read-line port)))
+                                (if (eof-object? line)
+                                    (string-join (reverse acc) "\n")
+                                    (loop (cons line acc)))))))
+                        "\n")))
+
+(define (fixture-spec fields)
+  (spec-new (string->symbol (list-ref fields 1))
+            (string->symbol (list-ref fields 2))
+            (string->number (list-ref fields 3))
+            (string->symbol (list-ref fields 4))
+            (string->symbol (list-ref fields 5))
+            (string->number (list-ref fields 6))))
+
+(test-group "code format 0: every code of the pre-SCAN fixture decodes unchanged"
+  (let ((lines (map (lambda (l) (string-split l " ")) (read-lines FIXTURE))))
+    (test "the fixture holds 720 codes"
+      (assert-equal 720 (length lines)))
+    (test "each decodes to exactly its fields, through decode and decode-any"
+      (let ((bad (filter (lambda (f)
+                           (let ((want (fixture-spec f))
+                                 (a (decode (car f)))
+                                 (b (decode-any (car f))))
+                             (not (and want a b (spec-equal? want a) (spec-equal? want b)
+                                       (not (spec-preset a)) (not (spec-first a))))))
+                         lines)))
+        (for-each (lambda (f) (display "  PROBLEM ") (display (car f)) (newline)) bad)
+        (assert-equal '() bad)))
+    (test "each re-encodes to the same ten characters"
+      (let ((bad (filter (lambda (f) (not (equal? (car f) (encode (fixture-spec f))))) lines)))
+        (for-each (lambda (f) (display "  PROBLEM ") (display (car f)) (newline)) bad)
+        (assert-equal '() bad)))))
+
+;; --- format 1: SCAN ------------------------------------------------------------
+
+(define PRESET-HOSTS (list (cons 'lan 81) (cons 'wan 256) (cons 'backbone 480)))
+
+(define SCAN-SPECS
+  (apply append
+         (map (lambda (p)
+                (let ((hosts (cdr (assq p PRESET-HOSTS))))
+                  (apply append
+                         (map (lambda (version)
+                                (apply append
+                                       (map (lambda (first)
+                                              (map (lambda (seed) (scan-spec-new version p first seed))
+                                                   (list 0 1 280 1234567 SCAN-SEED-MAX)))
+                                            (list #f 0 (quotient hosts 2) (- hosts 1)))))
+                              (list 'original 'hacker)))))
+              (list 'lan 'wan 'backbone))))
+
+(test-group "code format 1: SCAN round-trips"
+  (test "120 specs, all built"
+    (assert-equal 120 (length SCAN-SPECS))
+    (assert-true (every (lambda (s) (and s #t)) SCAN-SPECS)))
+  (test "decode-any (encode s) is s, uplink or none"
+    (for-each (lambda (s)
+                (let ((back (decode-any (encode s))))
+                  (assert-true (and back (spec-equal? s back)))))
+              SCAN-SPECS))
+  (test "no two specs share a code, across both formats"
+    (let* ((codes (append (map encode SCAN-SPECS)
+                          (map car (map (lambda (l) (string-split l " ")) (read-lines FIXTURE))))))
+      (assert-equal (length codes) (length (distinct codes)))))
+  (test "a code taken before the uplink and one after it are different codes"
+    (assert-false (equal? (encode (scan-spec-new 'hacker 'wan #f 42))
+                          (encode (scan-spec-new 'hacker 'wan 17 42))))))
+
+(test-group "code format 1: a SCAN code never reaches a shell before P6b"
+  (test "decode refuses every SCAN code that decode-any reads"
+    (for-each (lambda (s)
+                (assert-true (and (decode-any (encode s)) #t))
+                (assert-false (decode (encode s)))
+                (assert-false (code-valid? (encode s))))
+              SCAN-SPECS))
+  (test "decode's tables are the three a shell opens"
+    (assert-equal (list 'stack 'cards 'run) DECODE-TABLES)))
+
+(test-group "code format 1: encode refuses what no code names"
+  (test "a node board"
+    (assert-false (encode (scan-spec-new 'hacker 'node 5 1789923677)))
+    (assert-false (encode (scan-spec-new 'hacker 'node 5 7))))
+  (test "a seed over 22 bits"
+    (assert-false (encode (scan-spec-new 'hacker 'lan 5 (+ SCAN-SEED-MAX 1)))))
+  (test "scan-spec-new refuses an uplink outside the grid, a bad preset or version"
+    (assert-false (scan-spec-new 'hacker 'lan 81 1))
+    (assert-false (scan-spec-new 'hacker 'backbone 480 1))
+    (assert-false (scan-spec-new 'hacker 'custom 0 1))
+    (assert-false (scan-spec-new 'twist 'lan 0 1))
+    (assert-false (scan-spec-new 'hacker 'lan -1 1))
+    (assert-false (scan-spec-new 'hacker 'lan 0 (+ SEED-MAX 1)))))
+
+;; --- crafted payloads, with the test's own arithmetic ---------------------------
+
+(define (digits n count)
+  (let loop ((n n) (k count) (acc '()))
+    (if (= k 0) acc (loop (quotient n 32) (- k 1) (cons (modulo n 32) acc)))))
+
+(define (code-of payload)
+  (let* ((ds (digits payload 8))
+         (sum (let loop ((ds ds) (i 1) (s 0)) (if (null? ds) s (loop (cdr ds) (+ i 1) (+ s (* i (car ds)))))))
+         (check (digits (modulo sum 1021) 2)))
+    (list->string (map (lambda (d) (string-ref ALPHABET d)) (append ds check)))))
+
+;; format f, table t, then the 34 bits of a SCAN payload
+(define (scan-payload format table version preset first seed)
+  (+ (* format (expt 2 38))
+     (* table (expt 2 34))
+     (* version (expt 2 33))
+     (* preset (expt 2 31))
+     (* first (expt 2 22))
+     seed))
+
+(test-group "code format 1: crafted payloads"
+  (test "the test's arithmetic agrees with encode on a valid SCAN code (the control)"
+    (assert-equal (encode (scan-spec-new 'hacker 'wan 17 42))
+                  (code-of (scan-payload 1 3 1 1 17 42))))
+  (test "format 1 naming stack, cards or run is refused (one code per board)"
+    (for-each (lambda (t) (assert-false (decode-any (code-of (scan-payload 1 t 1 1 17 42)))))
+              (list 0 1 2)))
+  (test "tables 4..15 are refused"
+    (for-each (lambda (t) (assert-false (decode-any (code-of (scan-payload 1 t 1 1 17 42)))))
+              (iota 12 4)))
+  (test "preset 3 is refused"
+    (assert-false (decode-any (code-of (scan-payload 1 3 1 3 17 42)))))
+  (test "an uplink outside the preset's grid is refused, 511 is none"
+    (assert-false (decode-any (code-of (scan-payload 1 3 1 0 81 42))))
+    (assert-false (decode-any (code-of (scan-payload 1 3 1 2 480 42))))
+    (assert-false (decode-any (code-of (scan-payload 1 3 1 2 510 42))))
+    (assert-true (and (decode-any (code-of (scan-payload 1 3 1 2 479 42))) #t))
+    (assert-false (spec-first (decode-any (code-of (scan-payload 1 3 1 2 511 42))))))
+  (test "formats 2 and 3 are refused"
+    (assert-false (decode-any (code-of (scan-payload 2 3 1 1 17 42))))
+    (assert-false (decode-any (code-of (scan-payload 3 3 1 1 17 42))))))
+
+(test-group "code format 1: positive control, corruption"
+  (test "every single substituted character of a SCAN code is refused"
+    (for-each (lambda (s)
+                (let ((code (encode s)))
+                  (for-each (lambda (pos)
+                              (for-each (lambda (c)
+                                          (unless (char=? c (string-ref code pos))
+                                            (let ((bad (string-append (substring code 0 pos) (string c) (substring code (+ pos 1) 10))))
+                                              (assert-false (decode-any bad)))))
+                                        (string->list ALPHABET)))
+                            (iota 10))))
+              (list (scan-spec-new 'hacker 'backbone 479 SCAN-SEED-MAX)
+                    (scan-spec-new 'original 'lan #f 0)))))
