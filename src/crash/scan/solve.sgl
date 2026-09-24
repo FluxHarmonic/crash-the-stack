@@ -275,18 +275,37 @@
                  (loop (cdr nb) hid need))
                 (else (loop (cdr nb) (cons (car nb) hid) need))))))
 
-    ;; (a) and (b) on reading i.
+    ;; (a) and (b) on reading i. Counted first, without allocating: most
+    ;; readings examined settle nothing, and the list of hidden neighbors
+    ;; is built only when a rule fires (the worklist was ~0.85 MB a
+    ;; BACKBONE deal on bytecode; allocation is what triggers the GC pauses
+    ;; D81 cares about).
     (define (single-rules! st i)
-      (let* ((c (constraint-of st i))
-             (hid (car c))
-             (need (cdr c)))
-        (cond ((null? hid) #f)
+      (let* ((counts (hidden-and-need st i))
+             (hidden (car counts))
+             (need (cdr counts)))
+        (cond ((= hidden 0) #f)
               ((= need 0)
                ;; stopped by a flood: the rest after it drains
-               (when (scan-each! st hid 'a)
+               (when (scan-each! st (car (constraint-of st i)) 'a)
                  (queue! st i)))
-              ((= need (length hid)) (for-each (lambda (j) (flag-step! st j 'b)) hid))
+              ((= need hidden)
+               (for-each (lambda (j) (flag-step! st j 'b)) (car (constraint-of st i))))
               (else #f))))
+
+    ;; (hidden-count . need) of reading i: one cons.
+    (define (hidden-and-need st i)
+      (let ((open (solver-open st))
+            (flag (solver-flag st))
+            (pending (solver-pending st)))
+        (let loop ((nb (segment-neighbors (solver-seg st) i))
+                   (hidden 0)
+                   (need (segment-reading (solver-seg st) i)))
+          (cond ((null? nb) (cons hidden need))
+                ((vector-ref flag (car nb)) (loop (cdr nb) hidden (- need 1)))
+                ((or (vector-ref open (car nb)) (vector-ref pending (car nb)))
+                 (loop (cdr nb) hidden need))
+                (else (loop (cdr nb) (+ hidden 1) need))))))
 
     ;; The frontier's constraints, (hidden-hosts . need) per open reading
     ;; that still touches a hidden host, in index order. Readings that no
@@ -310,7 +329,9 @@
       (map cadr (constraints st)))
 
     (define (subset? a b)
-      (every (lambda (x) (memv x b)) a))
+      ;; a loop, not (every (lambda ...)): no closure a call
+      (or (null? a)
+          (and (memv (car a) b) (subset? (cdr a) b))))
 
     ;; (c): the first pair (A strictly inside B) that settles something.
     ;; A B that holds A holds A's first host, so the candidates for B are
