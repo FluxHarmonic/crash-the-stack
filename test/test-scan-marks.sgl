@@ -1,0 +1,100 @@
+;;; SCAN's node objective (P6a, gate leg 9; D74): EXTRACT n OF K. Marks
+;;; come from the recorded line's middle third, and a mark counts exactly
+;;; when every clean host of its 3x3 is scanned.
+;;;
+;;; The extraction step of each mark is recomputed here with the test's own
+;;; 3x3 arithmetic and its own replay, not with segment-extracted?, so a
+;;; rule that counts the mark alone (S7) disagrees with this file.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash stack prng)
+        (crash scan rules)
+        (crash scan generate))
+
+(define SEEDS 50)
+(define K 3)
+
+(define NODE-GRIDS
+  (list (list 16 10 20)
+        (list 16 10 24)
+        (list 20 11 33)))
+
+(define (first-of seed w h)
+  (prng-index (prng-next (prng-seed (* seed 7919))) (* w h)))
+
+(define (own-sector w h i)
+  (let ((x (modulo i w))
+        (y (quotient i w)))
+    (filter (lambda (j)
+              (and (<= (abs (- (modulo j w) x)) 1)
+                   (<= (abs (- (quotient j w) y)) 1)))
+            (iota (* w h)))))
+
+;; The segments after each step of the line: index 0 is the dealt segment.
+(define (states-along d)
+  (let loop ((s (dealt-segment d)) (steps (cdr (dealt-line d))) (acc (list (dealt-segment d))))
+    (if (null? steps)
+        (reverse acc)
+        (let ((s2 (if (eq? (car (car steps)) 'scan)
+                      (segment-scan s (cadr (car steps)))
+                      (segment-flag s (cadr (car steps))))))
+          (loop s2 (cdr steps) (cons s2 acc))))))
+
+;; The first index in states at which every clean host of i's 3x3 is scanned.
+(define (own-extraction-step states w h i)
+  (let loop ((ss states) (k 0))
+    (cond ((null? ss) #f)
+          ((every (lambda (j) (or (segment-ice? (car ss) j) (segment-scanned? (car ss) j)))
+                  (own-sector w h i))
+           k)
+          (else (loop (cdr ss) (+ k 1))))))
+
+(define (mark-problems w h m seed)
+  (let* ((first (first-of seed w h))
+         (d (deal-node w h m seed first))
+         (marks (deal-marks d K))
+         (states (states-along d))
+         (steps (- (length states) 1))
+         (tag (string-append (number->string w) "x" (number->string h) "/" (number->string m)
+                             " seed " (number->string seed)))
+         (problems '())
+         (add! (lambda (p) (set! problems (cons (string-append tag ": " p) problems)))))
+    (unless (equal? marks (deal-marks (deal-node w h m seed first) K)) (add! "marks not deterministic"))
+    (when (null? marks) (add! "no marks"))
+    (when (> (length marks) K) (add! "too many marks"))
+    (for-each (lambda (i)
+                (let ((s0 (dealt-segment d))
+                      (t (own-extraction-step states w h i)))
+                  (when (segment-ice? s0 i) (add! "a mark on ICE"))
+                  (when (= 0 (segment-reading s0 i)) (add! "a mark with no ICE neighbor"))
+                  (unless (and t (>= (* 3 t) steps) (< (* 3 t) (* 2 steps)))
+                    (add! (string-append "mark " (number->string i) " extracted at step "
+                                         (if t (number->string t) "never") " of " (number->string steps))))
+                  ;; segment-extracted? agrees with the own arithmetic at t and t - 1
+                  (when (and t (> t 0))
+                    (unless (segment-extracted? (list-ref states t) i) (add! "extracted? false at its step"))
+                    (when (segment-extracted? (list-ref states (- t 1)) i) (add! "extracted? true a step early")))))
+              marks)
+    (reverse problems)))
+
+(test-group "scan marks: from the line's middle third, extracted by the 3x3 (leg 9)"
+  (for-each (lambda (g)
+              (test (string-append (number->string (car g)) "x" (number->string (cadr g)) "/" (number->string (caddr g)))
+                (let ((problems (apply append
+                                       (map (lambda (seed) (mark-problems (car g) (cadr g) (caddr g) seed))
+                                            (iota SEEDS 1)))))
+                  (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+                  (assert-equal '() problems))))
+            NODE-GRIDS))
+
+(test-group "scan marks: the objective reads done exactly on the last mark"
+  (test "all marks extracted at the last mark's step, not the step before"
+    (let* ((d (deal-node 16 10 20 5 (first-of 5 16 10)))
+           (marks (deal-marks d K))
+           (states (states-along d))
+           (last (apply max (map (lambda (i) (own-extraction-step states 16 10 i)) marks))))
+      (assert-equal K (length marks))
+      (assert-true (every (lambda (i) (segment-extracted? (list-ref states last) i)) marks))
+      (assert-false (every (lambda (i) (segment-extracted? (list-ref states (- last 1)) i)) marks)))))

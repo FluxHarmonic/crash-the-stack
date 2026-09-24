@@ -1,0 +1,264 @@
+;;; SCAN's deals over many seeds (P6a, gate legs 1, 2 and 5; D68).
+;;;
+;;; Every deal of the sweep is checked four ways, each by the test's own
+;;; arithmetic or by a module other than the one that built the deal:
+;;;   leg 2  no ICE in the uplink's clipped 3x3 (the test's own
+;;;          coordinates), the uplink reads zero, and its whole clipped
+;;;          3x3 is scanned by the first action;
+;;;   leg 5  the recorded line replays through (crash scan rules) to a win,
+;;;          and (crash scan check), which sees only what a player would,
+;;;          finds every step forced;
+;;;   leg 1  at the win, every scanned reading equals the test's own count
+;;;          of ICE among the host's neighbors;
+;;;   and every host's drawn state is a member of CELL-STATES.
+;;; The try that built each deal is recorded and the spread printed.
+;;;
+;;; Positive controls: a hand-built forced 50/50 the solver declines and the
+;;; checker refuses, a grid on which no guess-free deal exists (the
+;;; generator answers #f), and the index-order line, which replays to a
+;;; win through the rules and which the checker must refuse. That last one
+;;; is what shows leg 5 is not a mirror of the solver.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash stack prng)
+        (crash scan rules)
+        (crash scan solve)
+        (crash scan generate)
+        (crash scan check)
+        (crash scan text))
+
+(define SEEDS 200)
+
+;; The sweep: the three presets and the three node sizes of the note's
+;; section 5.
+(define GRIDS
+  (list (list 'lan 9 9 10)
+        (list 'wan 16 16 40)
+        (list 'backbone 30 16 99)
+        (list 'node 16 10 20)
+        (list 'node 16 10 24)
+        (list 'node 20 11 33)))
+
+;; A first click per seed, from its own stream.
+(define (first-of seed w h)
+  (prng-index (prng-next (prng-seed (* seed 7919))) (* w h)))
+
+(define (deal-of g seed first)
+  (if (eq? (car g) 'node)
+      (deal-node (list-ref g 1) (list-ref g 2) (list-ref g 3) seed first)
+      (deal-segment (car g) seed first 'original #f)))
+
+;; The test's own neighbor arithmetic, independent of segment-neighbors.
+(define (own-ice-count s w h i)
+  (let ((x (modulo i w))
+        (y (quotient i w)))
+    (let loop ((dy -1) (dx -1) (k 0))
+      (cond ((> dy 1) k)
+            ((> dx 1) (loop (+ dy 1) -1 k))
+            ((and (= dx 0) (= dy 0)) (loop dy (+ dx 1) k))
+            (else
+             (let ((nx (+ x dx)) (ny (+ y dy)))
+               (loop dy
+                     (+ dx 1)
+                     (if (and (>= nx 0) (< nx w) (>= ny 0) (< ny h)
+                              (segment-ice? s (+ (* ny w) nx)))
+                         (+ k 1)
+                         k))))))))
+
+(define (own-sector w h i)
+  (let ((x (modulo i w))
+        (y (quotient i w)))
+    (filter (lambda (j)
+              (and (<= (abs (- (modulo j w) x)) 1)
+                   (<= (abs (- (quotient j w) y)) 1)))
+            (iota (* w h)))))
+
+(define (replay d)
+  (let loop ((s (dealt-segment d)) (steps (cdr (dealt-line d))))
+    (if (null? steps)
+        s
+        (loop (if (eq? (car (car steps)) 'scan)
+                  (segment-scan s (cadr (car steps)))
+                  (segment-flag s (cadr (car steps))))
+              (cdr steps)))))
+
+;; Every problem with one deal, as strings naming the seed and host; '()
+;; when it is sound.
+(define (deal-problems g seed first d)
+  (let* ((w (list-ref g 1))
+         (h (list-ref g 2))
+         (m (list-ref g 3))
+         (tag (string-append (symbol->string (car g)) " "
+                             (number->string w) "x" (number->string h)
+                             " seed " (number->string seed)
+                             " uplink " (number->string first))))
+    (if (not d)
+        (list (string-append tag ": no deal"))
+        (let* ((s0 (dealt-segment d))
+               (sector (own-sector w h first))
+               (problems '())
+               (add! (lambda (p) (set! problems (cons (string-append tag ": " p) problems)))))
+          (unless (= m (segment-ice-total s0)) (add! "wrong ICE count"))
+          (unless (every (lambda (j) (not (segment-ice? s0 j))) sector)
+            (add! "ICE in the uplink's 3x3"))
+          (unless (= 0 (segment-reading s0 first)) (add! "the uplink does not read zero"))
+          (unless (every (lambda (j) (segment-scanned? s0 j)) sector)
+            (add! "the uplink's 3x3 is not all scanned"))
+          (let ((verdict (check-line (segment-new w h (segment-ice s0) (car g) 'original #f)
+                                     (dealt-line d))))
+            (unless (eq? verdict 'ok)
+              (add! (string-append "checker refused: " (symbol->string (cadr verdict))
+                                   " at step " (number->string (caddr verdict))
+                                   (if (cadddr verdict)
+                                       (string-append " host " (host->text s0 (cadddr verdict)))
+                                       "")))))
+          (let ((won (replay d)))
+            (unless (segment-won? won) (add! "the line does not replay to a win"))
+            (for-each (lambda (i)
+                        (when (and (segment-scanned? won i)
+                                   (not (= (segment-reading won i) (own-ice-count won w h i))))
+                          (add! (string-append "reading wrong at " (host->text won i))))
+                        (unless (memq (segment-cell-state won i) CELL-STATES)
+                          (add! (string-append "state outside CELL-STATES at " (host->text won i)))))
+                      (iota (* w h))))
+          (reverse problems)))))
+
+(define (quantile sorted p)
+  (list-ref sorted (min (- (length sorted) 1) (exact (floor (* p (length sorted)))))))
+
+(define (sweep g)
+  (let loop ((seed 1) (problems '()) (tries '()))
+    (if (> seed SEEDS)
+        (let ((sorted (list-sort < tries)))
+          (display "  scan deal ") (display (car g)) (display " ")
+          (display (list-ref g 1)) (display "x") (display (list-ref g 2)) (display "/") (display (list-ref g 3))
+          (display ": first-try ") (display (length (filter (lambda (t) (= t 0)) tries)))
+          (display "/") (display SEEDS)
+          (display ", tries median ") (display (+ 1 (quantile sorted 0.5)))
+          (display " p95 ") (display (+ 1 (quantile sorted 0.95)))
+          (display " max ") (display (+ 1 (car (reverse sorted))))
+          (newline)
+          (reverse problems))
+        (let* ((first (first-of seed (list-ref g 1) (list-ref g 2)))
+               (d (deal-of g seed first)))
+          (loop (+ seed 1)
+                (append (reverse (deal-problems g seed first d)) problems)
+                (if d (cons (dealt-try d) tries) tries))))))
+
+(test-group "scan deal: every seed guess-free, uplink clean and open, readings true (legs 1, 2, 5)"
+  (for-each (lambda (g)
+              (test (string-append (symbol->string (car g)) " "
+                                   (number->string (list-ref g 1)) "x" (number->string (list-ref g 2))
+                                   "/" (number->string (list-ref g 3)) ", seeds 1.." (number->string SEEDS))
+                (let ((problems (sweep g)))
+                  (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+                  (assert-equal '() problems))))
+            GRIDS))
+
+(test-group "scan deal: the uplink at the corners, the edges and the center (leg 2)"
+  (for-each (lambda (g)
+              (test (symbol->string (car g))
+                (let* ((w (list-ref g 1))
+                       (h (list-ref g 2))
+                       (spots (list 0 (- w 1) (* (- h 1) w) (- (* w h) 1)
+                                    (quotient w 2)                        ; top edge
+                                    (* (quotient h 2) w)                  ; left edge
+                                    (+ (* (quotient h 2) w) (quotient w 2)))) ; center
+                       (problems (apply append
+                                        (map (lambda (first)
+                                               (apply append
+                                                      (map (lambda (seed) (deal-problems g seed first (deal-of g seed first)))
+                                                           (iota 10 1))))
+                                             spots))))
+                  (for-each (lambda (p) (display "  PROBLEM ") (display p) (newline)) problems)
+                  (assert-equal '() problems))))
+            (list (list 'lan 9 9 10) (list 'wan 16 16 40) (list 'backbone 30 16 99))))
+
+;; --- positive controls -------------------------------------------------------
+
+;; Two hidden hosts at the bottom, one of them ICE, and every reading that
+;; touches one touches the other: no deduction separates them.
+(define FIFTY-FIFTY (list ".." ".." ".." "*."))
+
+(test-group "scan deal: positive controls"
+  (test "the solver declines a forced 50/50"
+    (let ((s (text->segment FIFTY-FIFTY 'original #f)))
+      (assert-false (solve-segment s 0))))
+  (test "the checker refuses either side of the 50/50"
+    (let* ((s (text->segment FIFTY-FIFTY 'original #f))
+           (open (segment-scan s 0)))
+      (assert-equal "..\n..\n11\n##" (segment->text open))
+      (assert-equal 'undeducible (step-forced? (view-of open) 'scan 7))
+      (assert-equal 'undeducible (step-forced? (view-of open) 'flag 6))))
+  (test "on a grid where every deal is a 50/50 the generator answers #f"
+    (assert-false (deal-node 2 4 1 1 0)))
+  (test "the index-order line replays to a win through the rules, and the checker refuses it"
+    (let loop ((seed 1) (refused 0) (won 0))
+      (if (> seed 20)
+          (begin
+            (assert-equal 20 won)
+            (assert-equal 20 refused))
+          (let* ((d (deal-segment 'wan seed (first-of seed 16 16) 'original #f))
+                 (s0 (segment-new 16 16 (segment-ice (dealt-segment d)) 'wan 'original #f))
+                 (line (index-order-line s0 (dealt-first d)))
+                 (verdict (check-line s0 line)))
+            (loop (+ seed 1)
+                  (if (and (pair? verdict) (eq? (cadr verdict) 'undeducible)) (+ refused 1) refused)
+                  (if (segment-won? (replay-line s0 line)) (+ won 1) won))))))
+  (test "the checker stands down: a forced flag passes, the same host's scan does not"
+    ;; the 5x5 of test-scan-rules after the uplink at (0,0): (2,1) reads 1
+    ;; with one hidden neighbor, (3,2), so (3,2) is forced ICE
+    (let* ((s (text->segment (list "....." "....." "...*." "....." "*....") 'original #f))
+           (open (segment-scan s 0)))
+      (assert-equal #t (step-forced? (view-of open) 'flag 13))
+      (assert-equal 'undeducible (step-forced? (view-of open) 'scan 13))
+      (assert-equal 'not-hidden (step-forced? (view-of open) 'scan 0)))))
+
+;; The clean hosts in index order, from the ICE vector: each step the
+;; lowest-index clean host still hidden. Replays to a win; forced by
+;; nothing a player can see.
+(define (index-order-line s0 first)
+  (let loop ((s (segment-scan s0 first)) (line (list (list 'scan first 'uplink))))
+    (let ((next (find (lambda (i) (and (not (segment-ice? s i)) (segment-hidden? s i)))
+                      (iota (segment-size s)))))
+      (if next
+          (loop (segment-scan s next) (cons (list 'scan next 'index) line))
+          (reverse line)))))
+
+(define (replay-line s0 line)
+  (let loop ((s s0) (steps line))
+    (if (null? steps)
+        s
+        (loop (if (eq? (car (car steps)) 'scan)
+                  (segment-scan s (cadr (car steps)))
+                  (segment-flag s (cadr (car steps))))
+              (cdr steps)))))
+
+(test-group "scan deal: slicing never changes the deal (D81)"
+  (for-each (lambda (g)
+              (test (symbol->string (car g))
+                (for-each (lambda (seed)
+                            (let* ((first (first-of seed (list-ref g 1) (list-ref g 2)))
+                                   (whole (deal-segment (car g) seed first 'original #f))
+                                   (gen (scan-gen-start (car g) seed first 'original #f)))
+                              ;; one unit per call: the finest slicing there is
+                              (let loop ()
+                                (when (eq? (scan-gen-run! gen (lambda () #f)) 'running)
+                                  (loop)))
+                              (let ((sliced (scan-gen-result gen)))
+                                (assert-equal (dealt-try whole) (dealt-try sliced))
+                                (assert-equal (dealt-line whole) (dealt-line sliced))
+                                (assert-true (segment-equal? (dealt-segment whole) (dealt-segment sliced)))
+                                (assert-true (> (scan-gen-steps gen) 1)))))
+                          (list 1 2 3))))
+            (list (list 'lan) (list 'backbone))))
+
+(test-group "scan deal: a deal is a function of (seed, uplink)"
+  (test "the same inputs, the same deal; another uplink, another deal"
+    (let ((a (deal-segment 'wan 42 100 'original #f))
+          (b (deal-segment 'wan 42 100 'original #f))
+          (c (deal-segment 'wan 42 101 'original #f)))
+      (assert-equal (segment-ice (dealt-segment a)) (segment-ice (dealt-segment b)))
+      (assert-false (equal? (segment-ice (dealt-segment a)) (segment-ice (dealt-segment c)))))))

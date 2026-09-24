@@ -1,0 +1,212 @@
+;;; (crash scan check) - The independent deducibility checker (gate leg 5).
+;;;
+;;; Replaying a recorded line through the rules proves only that every step
+;;; was safe, which a line built from the ICE vector would also pass. This
+;;; checker proves every step was FORCED by what the player could see at
+;;; that moment, with an algorithm that is deliberately not the solver's.
+;;;
+;;; Before each step it takes a VIEW of the segment that holds only visible
+;;; things: each host's state, the readings of scanned hosts, and the ICE
+;;; total (the counter shows it). The ICE vector never enters the view. The
+;;; flags in the view are the line's own, each proved by an earlier step.
+;;;
+;;; A step on host h is forced when no ICE layout consistent with the view
+;;; gives h the other value. The search takes the readings next to h and
+;;; the readings next to their hidden neighbors (two hops, which is what
+;;; the solver's subset rule can reach), and looks for one layout of the
+;;; hidden hosts around those readings, with h set to the other value,
+;;; that satisfies every one of them and the ICE total. Using only some of
+;;; the readings is sound: fewer constraints only admit more layouts. If
+;;; such a layout exists, the step is still forced when the global count
+;;; settles it (no ICE left for a scan; as many ICE left as hidden hosts
+;;; for a flag). Otherwise the line is refused at that step.
+;;;
+;;; A search over more than CHECK-BOUND hidden hosts is refused as
+;;; 'over-bound rather than passed: the checker never guesses either.
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash scan check)
+  (import (sigil struct)
+          (sigil math)
+          (crash scan rules))
+
+  (export CHECK-BOUND
+          view view? view-of
+          step-forced?
+          check-line)
+
+  (begin
+    (define CHECK-BOUND 48)
+
+    ;; What the player sees. Built only from segment-state,
+    ;; segment-visible-reading and the counter's total.
+    (define-struct view
+      (seg-shape default: #f)       ; the segment, for its grid only (neighbors, size)
+      (states default: (vector))    ; host -> hidden | scanned | flagged | suspect | tripped | defused
+      (readings default: (vector))  ; host -> the reading if scanned, else #f
+      (total default: 0))           ; the ICE total
+
+    (define (view-of s)
+      (let* ((n (segment-size s))
+             (states (make-vector n 'hidden))
+             (readings (make-vector n #f)))
+        (let loop ((i 0))
+          (when (< i n)
+            (vector-set! states i (segment-state s i))
+            (vector-set! readings i (segment-visible-reading s i))
+            (loop (+ i 1))))
+        (view seg-shape: s
+              states: states
+              readings: readings
+              total: (segment-ice-total s))))
+
+    (define (v-state v i) (vector-ref (view-states v) i))
+    (define (v-reading v i) (vector-ref (view-readings v) i))
+    (define (v-neighbors v i) (segment-neighbors (view-seg-shape v) i))
+    (define (v-size v) (segment-size (view-seg-shape v)))
+
+    (define (unknown? v i) (memq (v-state v i) '(hidden suspect)))
+    (define (known-ice? v i) (memq (v-state v i) '(flagged tripped defused)))
+    (define (reading? v i) (and (v-reading v i) #t))
+
+    (define (add-new xs acc)
+      (let loop ((xs xs) (acc acc))
+        (cond ((null? xs) acc)
+              ((memv (car xs) acc) (loop (cdr xs) acc))
+              (else (loop (cdr xs) (cons (car xs) acc))))))
+
+    ;; The readings the search uses for host h: next to h, and next to the
+    ;; unknown neighbors of those.
+    (define (readings-for v h)
+      (let* ((r1 (filter (lambda (j) (reading? v j)) (v-neighbors v h)))
+             (h1 (add-new (apply append
+                                 (map (lambda (r) (filter (lambda (j) (unknown? v j)) (v-neighbors v r)))
+                                      r1))
+                          '()))
+             (r2 (apply append
+                        (map (lambda (u) (filter (lambda (j) (reading? v j)) (v-neighbors v u)))
+                             h1))))
+        (reverse (add-new r2 (reverse (add-new r1 '()))))))
+
+    ;; Is there a layout with h = value, consistent with the readings rs and
+    ;; with at most `left` ICE among the variables? The variables are the
+    ;; unknown neighbors of rs, h first. Returns #t, #f, or 'over-bound.
+    (define (layout-exists? v rs h value left)
+      (let* ((vars (cons h
+                         (filter (lambda (x) (not (= x h)))
+                                 (reverse (add-new (apply append
+                                                          (map (lambda (r) (filter (lambda (j) (unknown? v j)) (v-neighbors v r)))
+                                                               rs))
+                                                   '())))))
+             (nv (length vars)))
+        (if (> nv CHECK-BOUND)
+            'over-bound
+            (let* ((vv (list->vector vars))
+                   (nc (length rs))
+                   (need (make-vector nc 0))
+                   (ice (make-vector nc 0))
+                   (free (make-vector nc 0))
+                   ;; var index -> the constraint indices it appears in
+                   (var-cons (make-vector nv '())))
+              (let loop ((rs rs) (c 0))
+                (unless (null? rs)
+                  (let* ((r (car rs))
+                         (nb (v-neighbors v r))
+                         (flags (length (filter (lambda (j) (known-ice? v j)) nb)))
+                         (us (filter (lambda (j) (unknown? v j)) nb)))
+                    (vector-set! need c (- (v-reading v r) flags))
+                    (vector-set! free c (length us))
+                    (for-each (lambda (u)
+                                (let ((k (index-in vv u)))
+                                  (vector-set! var-cons k (cons c (vector-ref var-cons k)))))
+                              us)
+                    (loop (cdr rs) (+ c 1)))))
+              ;; every constraint must be satisfiable before anything is set
+              (and (every-index nc (lambda (c) (and (>= (vector-ref need c) 0)
+                                                    (<= (vector-ref need c) (vector-ref free c)))))
+                   (let search ((k 0) (placed 0))
+                     (if (= k nv)
+                         #t
+                         (let try ((vals (if (= k 0) (list value) (list #f #t))))
+                           (cond ((null? vals) #f)
+                                 ((and (car vals) (>= placed left)) (try (cdr vals)))
+                                 (else
+                                  (let ((ok (assign! vv var-cons need ice free k (car vals))))
+                                    (let ((found (and ok (search (+ k 1) (if (car vals) (+ placed 1) placed)))))
+                                      (unassign! var-cons ice free k (car vals))
+                                      (or found (try (cdr vals)))))))))))))))
+
+    (define (index-in vv x)
+      (let loop ((i 0))
+        (if (= (vector-ref vv i) x) i (loop (+ i 1)))))
+
+    (define (every-index n pred)
+      (let loop ((i 0))
+        (or (= i n)
+            (and (pred i) (loop (+ i 1))))))
+
+    ;; Set variable k to val in every constraint it touches; #f when one of
+    ;; them can no longer be met (the counts are updated either way, and
+    ;; unassign! undoes them).
+    (define (assign! vv var-cons need ice free k val)
+      (let loop ((cs (vector-ref var-cons k)) (ok #t))
+        (if (null? cs)
+            ok
+            (let ((c (car cs)))
+              (vector-set! free c (- (vector-ref free c) 1))
+              (when val (vector-set! ice c (+ (vector-ref ice c) 1)))
+              (loop (cdr cs)
+                    (and ok
+                         (<= (vector-ref ice c) (vector-ref need c))
+                         (>= (+ (vector-ref ice c) (vector-ref free c)) (vector-ref need c))))))))
+
+    (define (unassign! var-cons ice free k val)
+      (for-each (lambda (c)
+                  (vector-set! free c (+ (vector-ref free c) 1))
+                  (when val (vector-set! ice c (- (vector-ref ice c) 1))))
+                (vector-ref var-cons k)))
+
+    ;; #t when the view forces act (scan: clean, flag: ICE) on host h; else
+    ;; the reason: not-hidden, undeducible, over-bound.
+    (define (step-forced? v act h)
+      (if (not (unknown? v h))
+          'not-hidden
+          (let* ((n (v-size v))
+                 (known (length (filter (lambda (i) (known-ice? v i)) (iota n))))
+                 (hidden (length (filter (lambda (i) (unknown? v i)) (iota n))))
+                 (left (- (view-total v) known))
+                 (rs (readings-for v h))
+                 (local (if (null? rs)
+                            #t
+                            (layout-exists? v rs h (eq? act 'scan) left))))
+            (cond ((eq? local 'over-bound) 'over-bound)
+                  ((not local) #t)
+                  ((and (eq? act 'scan) (= left 0)) #t)
+                  ((and (eq? act 'flag) (= left hidden)) #t)
+                  (else 'undeducible)))))
+
+    ;; Check a recorded line from the dealt segment (nothing scanned). The
+    ;; first step must scan the uplink; every later step must be forced, and
+    ;; the line must end mapped with nothing tripped. Returns 'ok, or
+    ;; (refused reason step-index host).
+    (define (check-line seg line)
+      (if (or (null? line) (not (eq? (car (car line)) 'scan)))
+          (list 'refused 'no-uplink 0 #f)
+          (let loop ((s (segment-scan seg (cadr (car line))))
+                     (steps (cdr line))
+                     (k 1))
+            (cond ((pair? (segment-tripped s))
+                   (list 'refused 'tripped (- k 1) (car (segment-tripped s))))
+                  ((null? steps)
+                   (if (segment-won? s) 'ok (list 'refused 'unfinished k #f)))
+                  (else
+                   (let* ((step (car steps))
+                          (act (car step))
+                          (h (cadr step))
+                          (forced (step-forced? (view-of s) act h)))
+                     (if (eq? forced #t)
+                         (loop (if (eq? act 'scan) (segment-scan s h) (segment-flag s h))
+                               (cdr steps)
+                               (+ k 1))
+                         (list 'refused forced k h))))))))))
