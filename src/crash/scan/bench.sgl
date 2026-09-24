@@ -15,6 +15,10 @@
 ;;;                frame can be shorter than its longest step);
 ;;;   step-quiet   the longest step with no GC inside it: what splitting a
 ;;;                unit can shorten (a pause it cannot);
+;;;   nursery      how much of the young generation the deal fills, as a
+;;;                fraction of its trigger: under 1.0, a deal that starts on
+;;;                an empty nursery (the `collect` option, or a shell that
+;;;                collects when the board opens) runs no collection;
 ;;;   frames       how many frames the deal takes at BUDGET-MS;
 ;;;   frame-ms     the longest frame's generation time at BUDGET-MS.
 ;;; Each as median, p95 and max. Then one line per kind of unit
@@ -78,7 +82,7 @@
     ;; it is not used per unit).
     (define (time-whole preset seed first now gc)
       (let ((g (scan-gen-start preset seed first 'original #f)))
-        (let loop ((worst 0) (worst-quiet 0) (total 0) (collections 0))
+        (let loop ((worst 0) (worst-quiet 0) (total 0) (collections 0) (young 0))
           (let* ((kind (scan-gen-phase g))
                  (m0 (gc))
                  (t0 (now))
@@ -86,21 +90,26 @@
                  (dt (- (now) t0))
                  (m1 (gc))
                  (collected? (< (cdr m1) (cdr m0)))
-                 (quiet (if collected? 0 dt)))
+                 (quiet (if collected? 0 dt))
+                 ;; the nursery this unit filled: its rise, or after a
+                 ;; collection inside it, what it filled since
+                 (rise (if collected? (cdr m1) (- (cdr m1) (cdr m0)))))
             (note-unit! kind dt (max 0 (- (car m1) (car m0))) collected?)
             (let ((worst (max worst dt))
                   (worst-quiet (max worst-quiet quiet))
                   (total (+ total dt))
-                  (collections (+ collections (if collected? 1 0))))
+                  (collections (+ collections (if collected? 1 0)))
+                  (young (+ young rise)))
               (if (eq? status 'running)
-                  (loop worst worst-quiet total collections)
+                  (loop worst worst-quiet total collections young)
                   ;; a deal that gave up (#f) counts as GEN-TRIES + 1
                   (let ((d (scan-gen-result g)))
                     (list (+ 1 (if d (dealt-try d) GEN-TRIES))
                           total
                           collections
                           worst
-                          worst-quiet))))))))
+                          worst-quiet
+                          young))))))))
 
     ;; The same deal sliced at BUDGET-MS: (frames worst-frame-ms).
     (define (time-sliced preset seed first now)
@@ -130,14 +139,19 @@
                    (list 'place 'build 'start 'flood 'worklist 'dry 'search 'perturb))))
 
     ;; An alist of quantile triples for one preset over seeds 1..n, then
-    ;; the per-kind unit lines.
-    (define (scan-bench preset n now gc)
+    ;; the per-kind unit lines. `prep`, when given, runs before each deal,
+    ;; outside the timing: the door passes a minor collection for the
+    ;; `collect` option, which stands for the shell collecting when a board
+    ;; opens, so the first click's deal starts on an empty nursery (D81).
+    (define (scan-bench preset n now gc prep)
       (set! *units* '())
       (let* ((d (preset-dims preset))
              (rows (map (lambda (seed)
                           (let ((first (first-of seed (car d) (cadr d))))
-                            (append (time-whole preset seed first now gc)
-                                    (time-sliced preset seed first now))))
+                            (when prep (prep))
+                            (let ((whole (time-whole preset seed first now gc)))
+                              (when prep (prep))
+                              (append whole (time-sliced preset seed first now)))))
                         (iota n 1)))
              (col (lambda (k) (quantiles (map (lambda (r) (list-ref r k)) rows)))))
         (append (list (cons 'tries (col 0))
@@ -145,8 +159,9 @@
                       (cons 'collections (col 2))
                       (cons 'step-ms (col 3))
                       (cons 'step-quiet (col 4))
-                      (cons 'frames (col 5))
-                      (cons 'frame-ms (col 6)))
+                      (cons 'nursery (col 5))
+                      (cons 'frames (col 6))
+                      (cons 'frame-ms (col 7)))
                 (unit-entries))))
 
     ;; x to two decimals, as text: exact arithmetic on hundredths, so no
@@ -161,19 +176,27 @@
                        (if (< frac 10) ".0" ".")
                        (number->string frac))))
 
-    ;; The doors' entry: "backbone" or "backbone:50" (seeds 1..N, 200 by
-    ;; default) to the printable lines, or a one-line refusal. `gc` returns
-    ;; the milliseconds spent in GC so far.
-    (define (scan-bench-run arg now gc)
-      (let* ((colon (let loop ((i 0))
-                      (cond ((= i (string-length arg)) #f)
-                            ((char=? (string-ref arg i) #\:) i)
-                            (else (loop (+ i 1))))))
-             (preset (string->symbol (if colon (substring arg 0 colon) arg)))
-             (n (if colon (string->number (substring arg (+ colon 1) (string-length arg))) 200)))
-        (if (and (preset-dims preset) n (integer? n) (> n 0))
-            (scan-bench-lines preset n (scan-bench preset n now gc))
-            (list (string-append "refused " arg " (want lan, wan or backbone, optionally :N)")))))
+    ;; The doors' entry: "PRESET[:N][:collect]" (seeds 1..N, 200 by
+    ;; default; `collect` runs `collect` before each deal) to the printable
+    ;; lines, or a one-line refusal. `gc` returns (bytes . young-occupancy).
+    (define (scan-bench-run arg now gc collect)
+      (let* ((parts (split-colons arg))
+             (preset (string->symbol (car parts)))
+             (n (if (and (pair? (cdr parts)) (string->number (cadr parts)))
+                    (string->number (cadr parts))
+                    200))
+             (prep (and (member "collect" parts) collect)))
+        (if (and (preset-dims preset) (integer? n) (> n 0))
+            (scan-bench-lines preset n (scan-bench preset n now gc prep))
+            (list (string-append "refused " arg " (want lan, wan or backbone, optionally :N and :collect)")))))
+
+    (define (split-colons s)
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond ((= i (string-length s))
+               (reverse (cons (substring s start i) acc)))
+              ((char=? (string-ref s i) #\:)
+               (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
+              (else (loop (+ i 1) start acc)))))
 
     ;; One printable line per measure: "backbone 200 tries 5.00 12.00 25.00".
     (define (scan-bench-lines preset n result)
