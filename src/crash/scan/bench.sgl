@@ -1,0 +1,103 @@
+;;; (crash scan bench) - What dealing a SCAN segment costs (D81).
+;;;
+;;; The deal lands on the first click, and on the web the game's own main
+;;; thread fills the audio buffer, so a long frame is a dropout. This runs
+;;; the generator the way the shell will: sliced into frames of at most
+;;; BUDGET-MS of generation (a frame steps until the budget is spent, then
+;;; yields), and reports per preset, over a run of seeds with an uplink
+;;; drawn per seed:
+;;;   tries      the try that built the deal, plus one;
+;;;   ms         the deal's generation time, unsliced;
+;;;   step-ms    the longest single scan-gen-step! (the slicing grain: no
+;;;              frame can be shorter than its longest step);
+;;;   frames     how many frames the deal takes at BUDGET-MS;
+;;;   frame-ms   the longest frame's generation time at BUDGET-MS.
+;;; Each as median, p95 and max. The clock is the caller's (`now` returns
+;;; milliseconds as a real), so the native bench and the web door
+;;; (?scanbench=PRESET) run this same code; the module reads no platform.
+
+(define-library (crash scan bench)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash stack prng)
+          (crash scan rules)
+          (crash scan generate))
+
+  (export BUDGET-MS scan-bench scan-bench-lines scan-bench-run)
+
+  (begin
+    (define BUDGET-MS 4)
+
+    (define (first-of seed w h)
+      (prng-index (prng-next (prng-seed (* seed 7919))) (* w h)))
+
+    (define (quantiles xs)
+      (let* ((s (list-sort < xs))
+             (n (length s))
+             (at (lambda (p) (list-ref s (min (- n 1) (exact (floor (* p n))))))))
+        (list (at 0.5) (at 0.95) (list-ref s (- n 1)))))
+
+    ;; One deal, unsliced, timing every step: (tries ms step-ms).
+    (define (time-whole preset seed first now)
+      (let ((g (scan-gen-start preset seed first 'original #f)))
+        (let loop ((worst 0) (total 0))
+          (let* ((t0 (now))
+                 (status (scan-gen-step! g))
+                 (dt (- (now) t0)))
+            (if (eq? status 'running)
+                (loop (max worst dt) (+ total dt))
+                (list (+ 1 (dealt-try (scan-gen-result g))) (+ total dt) (max worst dt)))))))
+
+    ;; The same deal sliced at BUDGET-MS: (frames worst-frame-ms).
+    (define (time-sliced preset seed first now)
+      (let ((g (scan-gen-start preset seed first 'original #f)))
+        (let loop ((frames 0) (worst 0))
+          (let* ((t0 (now))
+                 (status (scan-gen-run! g (lambda () (< (- (now) t0) BUDGET-MS))))
+                 (dt (- (now) t0)))
+            (if (eq? status 'running)
+                (loop (+ frames 1) (max worst dt))
+                (list (+ frames 1) (max worst dt)))))))
+
+    ;; An alist of quantile triples for one preset over seeds 1..n.
+    (define (scan-bench preset n now)
+      (let* ((d (preset-dims preset))
+             (rows (map (lambda (seed)
+                          (let ((first (first-of seed (car d) (cadr d))))
+                            (append (time-whole preset seed first now)
+                                    (time-sliced preset seed first now))))
+                        (iota n 1))))
+        (list (cons 'tries (quantiles (map car rows)))
+              (cons 'ms (quantiles (map cadr rows)))
+              (cons 'step-ms (quantiles (map caddr rows)))
+              (cons 'frames (quantiles (map (lambda (r) (list-ref r 3)) rows)))
+              (cons 'frame-ms (quantiles (map (lambda (r) (list-ref r 4)) rows))))))
+
+    (define (fmt x)
+      (if (integer? x)
+          (number->string x)
+          (number->string (/ (round (* 100 x)) 100))))
+
+    ;; The doors' entry: "backbone" or "backbone:50" (seeds 1..N, 200 by
+    ;; default) to the printable lines, or a one-line refusal.
+    (define (scan-bench-run arg now)
+      (let* ((colon (let loop ((i 0))
+                      (cond ((= i (string-length arg)) #f)
+                            ((char=? (string-ref arg i) #\:) i)
+                            (else (loop (+ i 1))))))
+             (preset (string->symbol (if colon (substring arg 0 colon) arg)))
+             (n (if colon (string->number (substring arg (+ colon 1) (string-length arg))) 200)))
+        (if (and (preset-dims preset) n (integer? n) (> n 0))
+            (scan-bench-lines preset n (scan-bench preset n now))
+            (list (string-append "refused " arg " (want lan, wan or backbone, optionally :N)")))))
+
+    ;; One printable line per measure: "backbone 200 tries 14 77 145".
+    (define (scan-bench-lines preset n result)
+      (map (lambda (e)
+             (string-join (cons (symbol->string preset)
+                                (cons (number->string n)
+                                      (cons (symbol->string (car e))
+                                            (map fmt (cdr e)))))
+                          " "))
+           result))))
