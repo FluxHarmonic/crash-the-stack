@@ -1154,18 +1154,84 @@
 
     ;; The web build's waiting update (ruling D14): the mark in the HUD
     ;; while a version waits, the prompt's two boxes above the HUD.
-    (define (draw-update-mark g layout)
-      (draw-box (cdr (assq 'update (update-controls g layout))) "UPDATE" C-BAR-C C-SELECTED C-SELECTED))
+    ;; The HUD's mark: UPDATE at scale 2 as it always was, and the version it
+    ;; would take you to after it, in the mini set on the same baseline. The
+    ;; word keeps the prominence it had; the version reads as an annotation.
+    ;;
+    ;; Whole string at scale 2 would be 166 px for "UPDATE > 0.1.3", against a
+    ;; 78 px box and a 640 px screen: a quarter of the HUD for something only
+    ;; visible while an update waits. This costs 32 px instead.
+    ;;
+    ;; No version means no annotation: the fetch failed, or /version.json had
+    ;; no version field, and the mark says UPDATE alone rather than guessing.
+    (define (draw-update-mark g layout . rest)
+      (let* ((r (cdr (assq 'update (update-controls g layout))))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (version (and (pair? rest) (string? (car rest)) (> (string-length (car rest)) 0) (car rest)))
+             (word "UPDATE")
+             (ww (text-width word 2))
+             (tail (and version (string-append " " (string TRI) " " version)))
+             (tw (if tail (text-width-mini tail 1) 0))
+             (lead (exact (floor (/ (- w ww tw) 2)))))
+        (color! C-BAR-C)
+        (draw-filled-rect x y w h)
+        (color! C-SELECTED)
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (text! word (+ x lead) (+ y (exact (floor (/ (- h 14) 2)))) 2)
+        (when tail
+          ;; the mini set sits on the scale-2 baseline: 14 tall against 5, so
+          ;; it drops by the difference less one, which is where the caps line
+          ;; up rather than the box's middle
+          (text-mini! tail (+ x lead ww) (+ y (exact (floor (/ (- h 14) 2))) (- 14 MINI-H 1)) 1))))
 
-    (define (draw-update-prompt g)
+    ;; The panel's summary line: what the waiting release says about itself,
+    ;; from /version.json, which took it from that release's News post.
+    ;;
+    ;; It lives HERE and not in the HUD (David, 2026-09-25): the HUD keeps the
+    ;; compact "UPDATE > 0.1.3" mark so play stays uncluttered, and the sentence
+    ;; appears where the player has already stopped to read.
+    ;;
+    ;; PANEL-SUMMARY-CHARS is the panel's width in characters at scale 1: the
+    ;; 300 px box less an 8 px margin each side is 284, and text-width is
+    ;; 6n - 1, so 47 fit. Two lines of it hold every summary written so far
+    ;; (83, 91 and 90 characters) without touching a word. verify-site asserts
+    ;; the wrap rather than a flat length, because a summary that fits in total
+    ;; and splits badly is still wrong on the screen.
+    (define PANEL-SUMMARY-CHARS 47)
+
+    ;; One line if it fits, else two, broken at the space that balances them.
+    ;; split-point is the same helper draw-line-2 uses for the HUD's second
+    ;; row, so the panel and the HUD break a sentence the same way rather than
+    ;; each having their own idea of it.
+    (define (summary-lines text width)
+      (if (<= (string-length text) width)
+          (list text)
+          (let ((at (split-point text width)))
+            (if at
+                (list (substring text 0 at) (substring text (+ at 1) (string-length text)))
+                (list text)))))
+
+    (define (draw-update-prompt g . rest)
       (let* ((vw (geometry-vw g))
              (top (- (geometry-vh g) (geometry-hud-h g)))
              (title "NEW VERSION READY")
-             (tw (text-width title 2)))
+             (tw (text-width title 2))
+             (summary (and (pair? rest) (string? (car rest)) (> (string-length (car rest)) 0) (car rest)))
+             (lines (if summary (summary-lines summary PANEL-SUMMARY-CHARS) '())))
         (color-alpha! C-BG 0.9)
-        (draw-filled-rect (- (half vw) 150) (- top 74) 300 62)
+        ;; ten pixels taller than it was, for the two summary lines; the
+        ;; buttons moved down with it (update-controls' 'apply and 'later)
+        (draw-filled-rect (- (half vw) 150) (- top 84) 300 72)
         (color! C-SELECTED)
-        (text! title (- (half vw) (half tw)) (- top 68) 2)
+        (text! title (- (half vw) (half tw)) (- top 78) 2)
+        (color! C-TEXT)
+        (let rows ((ls lines) (y (- top 62)))
+          (when (pair? ls)
+            (text! (car ls) (- (half vw) (half (text-width (car ls) 1))) y 1)
+            (rows (cdr ls) (+ y 9))))
         (draw-box (cdr (assq 'apply (update-controls g 'zones))) "APPLY" C-BAR-C C-SELECTED C-TEXT)
         (draw-box (cdr (assq 'later (update-controls g 'zones))) "NOT NOW" C-BAR-C C-TEXT-DIM C-TEXT)))
 
@@ -1265,7 +1331,7 @@
                            (and (eq? (trace-phase tr) 'counter) (trace-ice-string tr))
                            (cached-text *seed-text* (session-seed s) seed-text))
         (when (or (eq? (session-update s) 'waiting) (eq? (session-update s) 'prompt))
-          (draw-update-mark g layout))
+          (draw-update-mark g layout (session-update-version s)))
         (draw-keys-button (control-rect g layout 'keys) (session-keys-shown s))
         ;; line 2: the keys line when asked for, else the phase line, else
         ;; the instruction (David, 2026-09-17: centered)
@@ -1566,4 +1632,4 @@
         (when glitch (draw-glitch g x glitch))
         (when (trace-severed? (session-trace s)) (draw-severed g x))
         (draw-hud s g x)
-        (when (eq? (session-update s) 'prompt) (draw-update-prompt g))))))
+        (when (eq? (session-update s) 'prompt) (draw-update-prompt g (session-update-summary s)))))))
