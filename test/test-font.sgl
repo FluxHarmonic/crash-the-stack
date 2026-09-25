@@ -17,6 +17,15 @@
 ;;; is still worth having: it covers the constants that carry the game's
 ;;; fixed vocabulary, which is where a missing glyph has historically come
 ;;; from. Add a line when you add a drawable constant.
+;;;
+;;; THERE ARE TWO FONTS, and checking a string against the wrong one proves
+;;; nothing. GLYPHS is the 5x7 set (text!, draw-text); MINI-GLYPHS is the
+;;; 3x5 set (text-mini!, draw-text-mini), and it is a different table with a
+;;; different, much smaller alphabet. This file checked the update mark
+;;; against GLYPHS and passed, while the RC on screen read "UPDATE   0 1 2":
+;;; the mark's tail is drawn in MINI, which had no triangle, no middle dot
+;;; and no full stop. Every string below therefore says which set draws it,
+;;; and a string split across both -- the update mark is -- is two entries.
 
 (import (sigil test)
         (sigil list)
@@ -53,8 +62,10 @@
    (cons "the tool stack's labels" "UNDO SHUFFLE HINT NEXT")
    (cons "the update prompt" "NEW VERSION READY")
    ;; the update readout (2026-09-25): the triangle and the middle dot are
-   ;; the reason the font grew, so they are the reason this file exists
-   (cons "the update mark" (string-append "UPDATE " (string TRI) " 0.1.2"))
+   ;; the reason the font grew, so they are the reason this file exists.
+   ;; The mark's WORD is 5x7 (render.sgl's text!); its tail is 3x5 and is
+   ;; checked in DRAWABLE-MINI below, not here.
+   (cons "the update mark's word" "UPDATE")
    (cons "the update stamp" (string-append (string MIDDOT) " update ready"))
    ;; literals drawn inline, found by scanning the draw-text/text! call sites
    (cons "the editor keys line" "ARROWS/HJKL MOVE  SHIFT HALF  U/D LAYER  SPACE PLACE/REMOVE  TAB DIM  1/2 TRACE  3/4 ICE  ^S SAVE  ^P PLAY  ESC QUIT")
@@ -69,8 +80,37 @@
    (cons "the layer-lost consolation" "TOOLS KEPT, LAYER CREDITS GONE.")
    (cons "the scores columns" "CLEARS MOVES TIME TABLE NEW OK VERSION")))
 
+;; Every string the game draws in the 3x5 set instead, found by grepping
+;; text-mini! and draw-text-mini across src/. Curated like DRAWABLE, with
+;; the same weakness, and worth more: MINI-GLYPHS holds 39 characters to
+;; the 5x7 set's full alphabet, so a string moved into it is far likelier
+;; to hit a hole.
+(define DRAWABLE-MINI
+  (list
+   ;; render.sgl's draw-update-mark: the word is 5x7, this tail is 3x5.
+   ;; The RC that read "UPDATE   0 1 2" is why this list exists -- the
+   ;; same string was in DRAWABLE, checked against the set that does not
+   ;; draw it, and passed.
+   (cons "the update mark's tail" (string-append " " (string TRI) " 0.1.2"))
+   ;; the key under a HUD button (render.sgl:834)
+   (cons "the corner button's key" "SPC")
+   (cons "the menu button's key" "ESC")
+   (cons "the keys button's key" "?")
+   ;; a tool's price and its banked count (render.sgl:926, :931)
+   (cons "a tool's price" "40")
+   (cons "a tool's banked count" "X3")))
+
 (define (missing-chars s)
   (filter (lambda (c) (not (assv (char-downcase c) GLYPHS)))
+          (filter (lambda (c) (not (char=? c #\space)))
+                  (string->list s))))
+
+;; The space is excluded on purpose, in both sets: it has no entry and is
+;; MEANT to advance a blank cell. That is also why the hole went unseen --
+;; draw-text-mini's silent skip does the right thing for the one character
+;; that should be blank, so nothing ever looked wrong until a dot vanished.
+(define (missing-chars-mini s)
+  (filter (lambda (c) (not (assv (char-downcase c) MINI-GLYPHS)))
           (filter (lambda (c) (not (char=? c #\space)))
                   (string->list s))))
 
@@ -85,6 +125,30 @@
                                                (list->string missing))))
          (assert-equal '() missing))))
    DRAWABLE))
+
+(test-group "font: every string drawn in the 3x5 set is drawable IN THAT SET"
+  (for-each
+   (lambda (entry)
+     (let ((missing (missing-chars-mini (cdr entry))))
+       (test (string-append (car entry)
+                            (if (null? missing)
+                                " uses only characters the mini set has"
+                                (string-append " is missing a MINI glyph for "
+                                               (list->string missing))))
+         (assert-equal '() missing))))
+   DRAWABLE-MINI))
+
+;; Sabotage: drop the mini full stop and the group above names it, which is
+;; the check the RC did not have. The 5x7 group stays green through that
+;; edit, which is the whole point of splitting them.
+(test-group "font: the mini set has the three characters the update mark needs"
+  (for-each
+   (lambda (named)
+     (test (string-append "the mini set draws " (car named))
+       (assert-true (and (assv (cdr named) MINI-GLYPHS) #t))))
+   (list (cons "the triangle" TRI)
+         (cons "the middle dot" MIDDOT)
+         (cons "the full stop" #\.))))
 
 ;; The special glyphs -- the note, the triangle, the middle dot -- are
 ;; mapped onto low codes for the baked atlas. Those codes must be ones
