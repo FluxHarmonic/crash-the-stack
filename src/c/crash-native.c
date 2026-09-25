@@ -191,7 +191,7 @@ static Value native_fatal(SigilVM *vm, int argc, Value *args)
  * (%open-url url) -> #t or #f
  *   The platform's own "open this": ShellExecute on Windows, xdg-open on
  *   Linux and the BSDs, open on macOS; the NEWS menu's way of showing a
- *   devlog post outside the game (P4b, ruling D20). Native only: on the
+ *   news post outside the game (P4b, ruling D20). Native only: on the
  *   web the page opens the post itself (window.open) on the game's
  *   "crash: open URL" line, and this native answers #f. Only http(s) URLs
  *   are handed to the platform.

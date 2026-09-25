@@ -13,14 +13,14 @@
 //
 // Legs, PASS / FAIL <name>: <detail>; any FAIL exits 1:
 //   landing        / with no query is the landing page: the title, the JACK IN
-//                  link to /jack-in/, the newest devlog post, the feed links;
+//                  link to /jack-in/, the newest news post, the feed links;
 //                  no redirect happened
 //   pages          /about/ carries the approved disclosure (test/fixtures/
-//                  disclosure.txt) verbatim; /devlog/ lists every post newest
+//                  disclosure.txt) verbatim; /news/ lists every post newest
 //                  first; /docs/tracker/ is the tracker manual; /tracker/ is
 //                  the tracker page; the game's old files are not at the root
-//   feeds          /devlog/feed.xml parses as RSS 2.0 with the same posts as
-//                  /devlog/feed.json (JSON Feed 1.1), the same URLs, dates in
+//   feeds          /news/feed.xml parses as RSS 2.0 with the same posts as
+//                  /news/feed.json (JSON Feed 1.1), the same URLs, dates in
 //                  RFC 822 and RFC 3339, absolute links under the site's URL
 //   manifest       /jack-in/assets/manifest.webmanifest resolves its scope and
 //                  start_url to /jack-in/ and carries id /jack-in/
@@ -52,7 +52,7 @@ const CDP = parseInt(opt("--cdp", "9236"), 10);
 const SITE_URL = "https://crashthestack.com";
 const CODE = "380000010V";   // verify.mjs's cards seed 1 share code
 
-for (const f of ["index.html", "jack-in/index.html", "jack-in/sw.js", "tracker/index.html", "sw.js", "_headers", "_redirects", "devlog/feed.xml", "devlog/feed.json"]) {
+for (const f of ["index.html", "jack-in/index.html", "jack-in/sw.js", "tracker/index.html", "sw.js", "_headers", "_redirects", "news/feed.xml", "news/feed.json"]) {
   if (!fs.existsSync(path.join(STAGED, f))) { console.log(`SETUP-FAILED: ${STAGED}/${f} missing (scripts/stage-web builds the tree)`); process.exit(2); }
 }
 // the wasm is not a staged file any more: stage-web's --local run puts it at
@@ -199,9 +199,9 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   const cta = await evalJS(`(document.querySelector('a.cta') || {}).getAttribute ? document.querySelector('a.cta').getAttribute('href') : null`);
   if (cta !== "/jack-in/") detail.push(`the JACK IN link points at ${cta}`);
   const latest = await evalJS(`(() => { const a = document.querySelector('.latest a'); return a ? [a.getAttribute('href'), a.textContent] : null; })()`);
-  if (!latest || !/^\/devlog\/[^/]+\/$/.test(latest[0])) detail.push(`no newest post on the landing (${JSON.stringify(latest)})`);
+  if (!latest || !/^\/news\/[^/]+\/$/.test(latest[0])) detail.push(`no newest post on the landing (${JSON.stringify(latest)})`);
   const feeds = await evalJS(`Array.from(document.querySelectorAll('link[rel=alternate]')).map((l) => l.getAttribute('href')).join(' ')`);
-  if (!/\/devlog\/feed\.xml/.test(feeds) || !/\/devlog\/feed\.json/.test(feeds)) detail.push(`feed links ${feeds}`);
+  if (!/\/news\/feed\.xml/.test(feeds) || !/\/news\/feed\.json/.test(feeds)) detail.push(`feed links ${feeds}`);
   if (consoleLines.slice(mark).some((l) => /^crash: page dpr/.test(l))) detail.push("the game booted on the landing");
   if (detail.length) fail("landing", detail.join("; ")); else pass("landing", `/ is the landing: JACK IN -> /jack-in/, newest post ${latest[0]} "${latest[1]}", both feed links, no redirect`);
 }
@@ -213,14 +213,14 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/'/g, "&apos;");   // sxml->html's escaping
   const about = text("about/index.html");
   if (!about.includes(esc(disclosure)) && !about.includes(disclosure)) detail.push("/about/ does not carry the disclosure verbatim");
-  const index = text("devlog/index.html");
-  const posts = fs.readdirSync(path.join(STAGED, "devlog")).filter((d) => fs.existsSync(path.join(STAGED, "devlog", d, "index.html")));
-  const listed = Array.from(index.matchAll(/href="\/devlog\/([^/"]+)\/"/g)).map((m) => m[1]);
+  const index = text("news/index.html");
+  const posts = fs.readdirSync(path.join(STAGED, "news")).filter((d) => fs.existsSync(path.join(STAGED, "news", d, "index.html")));
+  const listed = Array.from(index.matchAll(/href="\/news\/([^/"]+)\/"/g)).map((m) => m[1]);
   const missing = posts.filter((p) => !listed.includes(p));
-  if (missing.length) detail.push(`posts not on /devlog/: ${missing.join(", ")}`);
+  if (missing.length) detail.push(`posts not on /news/: ${missing.join(", ")}`);
   const dates = Array.from(index.matchAll(/<time datetime="([^"]+)"/g)).map((m) => m[1]);
   const sorted = [...dates].sort().reverse();
-  if (dates.join() !== sorted.join()) detail.push(`/devlog/ is not newest first: ${dates.join(" ")}`);
+  if (dates.join() !== sorted.join()) detail.push(`/news/ is not newest first: ${dates.join(" ")}`);
   const tracker = text("docs/tracker/index.html");
   if (!/Motif Tracker/.test(tracker)) detail.push("/docs/tracker/ is not the tracker manual");
   const trackerPage = text("tracker/index.html");
@@ -230,14 +230,14 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   for (const f of ["crash-the-stack.wasm", "styles.css", "sigil-wasm-bridges.js"]) if (fs.existsSync(path.join(STAGED, f))) detail.push(`the old game's ${f} is at the root`);
   const headers = text("_headers");
   if (!/^\/jack-in\/\*/m.test(headers) || /^\/\*$/m.test(headers)) detail.push("_headers does not scope the isolation headers to /jack-in/*");
-  if (detail.length) fail("pages", detail.join("; ")); else pass("pages", `/about/ carries the disclosure; /devlog/ lists ${posts.length} posts newest first; /docs/tracker/ and /tracker/ are what they should be; no game file at the root; _headers scoped`);
+  if (detail.length) fail("pages", detail.join("; ")); else pass("pages", `/about/ carries the disclosure; /news/ lists ${posts.length} posts newest first; /docs/tracker/ and /tracker/ are what they should be; no game file at the root; _headers scoped`);
 }
 
 // ---- feeds ----------------------------------------------------------------
 {
   const detail = [];
-  const rss = text("devlog/feed.xml");
-  const json = JSON.parse(text("devlog/feed.json"));
+  const rss = text("news/feed.xml");
+  const json = JSON.parse(text("news/feed.json"));
   if (!rss.startsWith('<?xml version="1.0" encoding="UTF-8"?>')) detail.push("the RSS has no XML prolog");
   if (!/<rss version="2.0"/.test(rss)) detail.push("not RSS 2.0");
   const rssItems = Array.from(rss.matchAll(/<item>([\s\S]*?)<\/item>/g)).map((m) => m[1]);
@@ -247,11 +247,11 @@ const text = (p) => fs.readFileSync(path.join(STAGED, p), "utf8");
   const jsonUrls = (json.items || []).map((i) => i.url);
   if (rssLinks.join() !== jsonUrls.join()) detail.push(`the two feeds list different posts: rss ${rssLinks.join(" ")} json ${jsonUrls.join(" ")}`);
   if (!rssLinks.length) detail.push("no entries");
-  if (rssLinks.some((l) => !l.startsWith(SITE_URL + "/devlog/"))) detail.push(`an RSS link is not under ${SITE_URL}/devlog/: ${rssLinks.join(" ")}`);
+  if (rssLinks.some((l) => !l.startsWith(SITE_URL + "/news/"))) detail.push(`an RSS link is not under ${SITE_URL}/news/: ${rssLinks.join(" ")}`);
   if (rssDates.some((d) => !/^[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} \+0000$/.test(d || ""))) detail.push(`an RSS pubDate is not RFC 822: ${rssDates.join(" | ")}`);
   if ((json.items || []).some((i) => !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/.test(i.date_published || ""))) detail.push("a JSON Feed date_published is not RFC 3339");
-  if (json.feed_url !== `${SITE_URL}/devlog/feed.json`) detail.push(`feed_url ${json.feed_url}`);
-  if (!/<atom:link href="https:\/\/crashthestack\.com\/devlog\/feed\.xml" rel="self"/.test(rss)) detail.push("no atom self link");
+  if (json.feed_url !== `${SITE_URL}/news/feed.json`) detail.push(`feed_url ${json.feed_url}`);
+  if (!/<atom:link href="https:\/\/crashthestack\.com\/news\/feed\.xml" rel="self"/.test(rss)) detail.push("no atom self link");
   // newest first in both
   const jd = (json.items || []).map((i) => i.date_published);
   if (jd.join() !== [...jd].sort().reverse().join()) detail.push("the JSON Feed is not newest first");
