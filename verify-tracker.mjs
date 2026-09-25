@@ -291,7 +291,16 @@ const PAL = { bg: [13, 10, 26], text: [204, 230, 255] };
   // the rooting code is so repetitive, and gzip -9 rose only 3.08%. What grew is what the phone
   // decodes and compiles, which is what this ceiling measures. Narrowing the rooting to builtins
   // that can actually allocate is sigil's t-4364b0; if that lands, this number comes back down.
-  const BASE = 24465466, SLACK = 19500000, TRACKER_MAX = 20 * 1024 * 1024;
+  //
+  // 21,534,534 since 2026-09-25 (the leader's ruling, on the merge of SCAN, P6), so the ceiling is
+  // 46,000,000. SCAN is +1,836,081 bytes over live 0.1.2 (42,695,810 -> 44,531,891, sigil 0.22.7),
+  // 99.8% of it code, no new stdlib or deps. 1.13 MB is code the game reaches (rules, solve,
+  // generate, bench, and code.sgl's share-code format 1). About 700 KB is SCAN modules the game does
+  // not import but the build links anyway: ~494 KB (input, save, cells, open) until P6b's shell
+  // hooks land, ~206 KB (check, text) for good, since only tests use them. Dropping unimported
+  // modules is sigil's t-9aba1f and the C-path size task (tasks/sigil-wasm-size-c-path); when
+  // they land, this number comes back down.
+  const BASE = 24465466, SLACK = 21534534, TRACKER_MAX = 20 * 1024 * 1024;
   const game = fs.statSync(gamePath).size, tracker = fs.statSync(wasmPath).size;
   if (game <= BASE + SLACK && tracker <= TRACKER_MAX) pass("sizes", `game ${game} bytes (base ${BASE} + ${game - BASE}), tracker ${tracker} bytes`);
   else fail("sizes", `game ${game} bytes (base ${BASE}, slack ${SLACK}), tracker ${tracker} bytes (max ${TRACKER_MAX})`);
