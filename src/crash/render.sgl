@@ -436,6 +436,36 @@
         (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
         (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2))))
 
+    ;; The objective's mark on a tile (D64), drawn in that tile's OWN layer
+    ;; pass so a tile stacked above it occludes the mark exactly as it
+    ;; occludes the face. Until 2026-09-25 the marks were painted after
+    ;; every layer had been drawn, as an overlay, and draw-ring put them
+    ;; OUTSIDE the tile's rect (x-1, y-1, w+2, h+2) as well -- so a mark on
+    ;; a covered tile floated on top of whatever covered it and read as
+    ;; belonging to the upper tile.
+    ;;
+    ;; Two parts, and the second is the one that matters. The inner border
+    ;; says "this tile" and is occluded along with it. The BADGE is a solid
+    ;; block in the tile's BOTTOM-LEFT corner, which is the corner an upper
+    ;; tile cannot reach: slot-rect shifts each layer by +shift in x and
+    ;; -shift in y, so a covering tile eats the top-right and leaves the
+    ;; bottom-left. A half-covered marked tile therefore still carries its
+    ;; badge -- and a badge is a shape, so it answers "is this one marked"
+    ;; without asking the eye for a hue.
+    ;;
+    ;; Correct occlusion will look like a bug to anyone who has not read
+    ;; this: a marked tile under another tile now shows only part of its
+    ;; border. That is the point. The badge is what keeps it legible.
+    (define MARK-BADGE 5)
+
+    (define (draw-face-mark x y w h)
+      (color! C-LABEL-LIT)
+      (draw-filled-rect x y w 2)
+      (draw-filled-rect x (+ y h -2) w 2)
+      (draw-filled-rect x y 2 h)
+      (draw-filled-rect (+ x w -2) y 2 h)
+      (draw-filled-rect (+ x 1) (+ y h -1 (- MARK-BADGE)) MARK-BADGE MARK-BADGE))
+
     ;; A tile's rect after the effects: (x y w h) moved by (dx dy) and
     ;; scaled about its centre by (sx sy).
     (define (viewed-rect r view)
@@ -558,6 +588,7 @@
              (lay (board-layout b))
              (selected (board-selected b))
              (now (trace-ticks (session-trace s)))
+             (marked (session-marks s))
              (ticks (fx-ticks x))
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
@@ -594,7 +625,12 @@
                                                 (and (tile-scrambled? b id) (cons ticks id))))))
               (locks (lambda (id face x y w h selected?)
                        (unless *hidden*
-                         (draw-face-lock x y w h (lock-state b id now))))))
+                         (draw-face-lock x y w h (lock-state b id now)))))
+              ;; the objective's marks, per layer rather than over the lot
+              (marks (lambda (id face x y w h selected?)
+                       (unless *hidden*
+                         (when (memv id marked)
+                           (draw-face-mark x y w h))))))
           (let loop ((layer 0))
             (when (< layer (layout-layer-count lay))
               (each-on-layer layer sides)
@@ -602,12 +638,13 @@
               (each-on-layer layer edges)
               (each-on-layer layer glyphs)
               (each-on-layer layer locks)
+              (each-on-layer layer marks)
               (loop (+ layer 1)))))
         (draw-ghosts g look x)
         (draw-particles g look x)
-        (unless *hidden*   ; the objective's marks (D64): a steady ring on each marked tile still on the board
-          (for-each (lambda (id) (when (tile-present? b id) (draw-ring g id C-LABEL-LIT 0.85)))
-                    (session-marks s)))
+        ;; (the objective's marks used to be painted here, over every layer,
+        ;; which is why a mark on a covered tile appeared to sit on the tile
+        ;; covering it; they are a per-layer pass now, see draw-face-mark)
         (when (and highlight (not *hidden*)) (draw-ring g highlight C-HIGHLIGHT 1.0))
         (unless *hidden*
           (let ((hint (session-hint s))
