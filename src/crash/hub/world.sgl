@@ -377,9 +377,26 @@
               (else (loop (cdr ns))))))
 
     ;; Has the runner seen cell i on this layer?
-    (define (world-seen? w i)
-      (let ((v (world-seen w)))
-        (and (< i (vector-length v)) (vector-ref v i))))
+    ;; The bounds check is in seen-at, on the VECTOR, and that split is load
+    ;; bearing. Sigil 0.22.7's native backend has a fast path for a 2-argument
+    ;; procedure whose tail can be (vector-ref (FIELD arg0) arg1), and it
+    ;; replaces the WHOLE BODY with that vector-ref, dropping every other
+    ;; branch. Written the obvious way,
+    ;;
+    ;;   (define (world-seen? w i)
+    ;;     (let ((v (world-seen w)))
+    ;;       (and (< i (vector-length v)) (vector-ref v i))))
+    ;;
+    ;; this compiled to a bare vector-ref in the release and web builds: the
+    ;; guard was gone and an out-of-range cell raised instead of answering #f.
+    ;; The let did not protect it; the detector saw through the binding. Dev
+    ;; builds are bytecode and behaved correctly, so the suite could not see
+    ;; it. See topics/sigil-native-vector-field-accessor-drops-guard.
+    ;;
+    ;; Passing the vector rather than the struct keeps the guarded read out of
+    ;; the shape the detector matches.
+    (define (world-seen? w i) (seen-at (world-seen w) i))
+    (define (seen-at v i) (and (< i (vector-length v)) (vector-ref v i)))
 
     (define (world-inventory-count w tool)
       (let ((e (assq tool (world-inventory w)))) (if e (cdr e) 0)))))
