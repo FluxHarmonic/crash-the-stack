@@ -1,0 +1,124 @@
+#!/usr/bin/env sigil
+;;; Two fresh renders, matched by measured integrated loudness with gain only.
+(import (sigil json) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(import (crash soundtrack tools))
+(initialize (path (script-dir) "../../.."))
+(requires (tools ffmpeg ffprobe sha256sum))
+
+(define (last-number text marker)
+  (let ((matches (filter (lambda (line) (contains? line marker))
+                        (split text "\n"))))
+    (check (pair? matches) "Missing measurement" marker)
+    (string->number
+      (car (filter (lambda (s) (not (equal? s "")))
+                   (split (trim (cadr (split (car (reverse matches)) marker))) " "))))))
+
+(define (measure file log)
+  ($ ffmpeg -hide_banner -nostats -i ,file
+     -af "ebur128=peak=true" -f null - err: ,log)
+  (let ((text (read-text log)))
+    (dict lufs: (last-number text "    I:")
+          peak: (last-number text "    Peak:"))))
+
+(cli "clock-expression-render" (script-args)
+  (list (option name: 'input long: "input" value: "DIR"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (input (option-ref options 'input))
+           (output (option-ref options 'output))
+           (manifest (json-decode (read-text (path input "comparison.json"))))
+           (duration (dict-ref manifest half_duration_seconds:))
+           (revision
+             (cond ((equal? (dict-ref manifest audition:) "Expression VIII") "viii")
+                   ((equal? (dict-ref manifest audition:) "Expression VII") "vii")
+                   ((equal? (dict-ref manifest audition:) "Expression VI") "vi")
+                   ((equal? (dict-ref manifest audition:) "Expression V") "v")
+                   ((equal? (dict-ref manifest audition:) "Expression IV") "iv")
+                   ((equal? (dict-ref manifest audition:) "Expression III") "iii")
+                   ((equal? (dict-ref manifest audition:) "Expression II") "ii")
+                   (else "i")))
+           (measurements '())
+           (commands '()))
+      (check (starts-with? output "/") "Use an absolute artifact directory")
+      (check (not (file-exists? output)) "Use a fresh output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/") (str (root) "/")))
+             "Keep audio outside the repository")
+      (define (run argv)
+        (set! commands (append commands (list (list->array argv))))
+        (write-json-file (path output "commands.json") (list->array commands))
+        (run-tool argv))
+      (write-text (path output "renderer.sha256") (str (out sha256sum ,motif) "\n"))
+      (each variant '("before" "after")
+        (let* ((source (path input (str "focused-" variant ".cts")))
+               (snapshot (path output (str variant ".cts")))
+               (wav (path output (str variant ".wav"))))
+          ($ ,motif tune check ,source)
+          (copy-file source snapshot)
+          (run (list motif "tune" "render" snapshot "-r" "44100" "-o" wav))
+          (let* ((probe (json ffprobe -v error -show_format -show_streams -of json ,wav))
+                 (stream (array-ref (dict-ref probe streams:) 0))
+                 (actual (string->number (dict-ref (dict-ref probe format:) duration:)))
+                 (levels (measure wav (path output (str variant "-levels.txt")))))
+            (check (and (= (dict-ref stream channels:) 2)
+                        (equal? (dict-ref stream sample_rate:) "44100")
+                        (< (abs (- actual duration)) 0.001))
+                   "Incorrect render format or duration" variant)
+            (check (< (dict-ref levels peak:) 0) "Source clips" variant)
+            (set! measurements
+              (append measurements
+                (list (dict variant: variant levels: levels
+                            source_sha256: (out sha256sum ,source))))))))
+      ;; Attenuate to the quieter half. Retain mix dynamics: no compression.
+      (let* ((target (apply min
+                       (map (lambda (m) (dict-ref (dict-ref m levels:) lufs:))
+                            measurements)))
+             (ogg-dir (path output "ogg"))
+             (file (path ogg-dir (str "clock-edge-expression-" revision "-ab.ogg")))
+             (adjustments '())
+             (checks '()))
+        (ensure-directory ogg-dir)
+        (each m measurements
+          (let* ((variant (dict-ref m variant:))
+                 (gain (- target (dict-ref (dict-ref m levels:) lufs:))))
+            (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                       "-i" (path output (str variant ".wav"))
+                       "-af" (str "volume=" (number->string gain) "dB")
+                       "-c:a" "pcm_f32le"
+                       (path output (str variant "-matched.wav"))))
+            (set! adjustments
+              (append adjustments (list (dict variant: variant gain_db: gain))))
+            (set! checks
+              (append checks
+                (list (measure (path output (str variant "-matched.wav"))
+                               (path output (str variant "-matched-levels.txt"))))))))
+        (check (<= (abs (- (dict-ref (car checks) lufs:)
+                           (dict-ref (cadr checks) lufs:))) 0.2)
+               "Loudness match exceeds tolerance")
+        (write-text (path output "sequence.txt")
+                    "file 'before-matched.wav'\nfile 'after-matched.wav'\n")
+        (run (list "ffmpeg" "-v" "error" "-nostdin" "-n"
+                   "-f" "concat" "-safe" "1" "-i" (path output "sequence.txt")
+                   "-c:a" "libvorbis" "-q:a" "7"
+                   "-metadata" (str "title=Clock Edge - " (dict-ref manifest audition:) " A/B")
+                   "-metadata" "artist=David Wilson"
+                   "-metadata" (str "comment="
+                        (if (equal? revision "v") "Expression IV" "Original")
+                        " 0:00; candidate 0:18.750. Gain-only loudness match; two release bars per half.")
+                   file))
+        (let* ((levels (measure file (path output "ogg-levels.txt")))
+               (actual (string->number
+                         (out ffprobe -v error -show_entries format=duration
+                              -of default=noprint_wrappers=1:nokey=1 ,file))))
+          (check (< (abs (- actual (* 2 duration))) 0.001) "OGG duration mismatch")
+          (check (<= (dict-ref levels peak:) -1) "OGG peak exceeds ceiling")
+          (write-json-file (path output "checks.json")
+            (dict source: manifest
+                  original_levels: (list->array measurements)
+                  gain_adjustments: (list->array adjustments)
+                  matched_levels: (list->array checks)
+                  encoded_levels: levels
+                  encoded_duration_seconds: actual
+                  audio_sha256: (out sha256sum ,file))))
+        (display (str "Ready: " file "\n"))))))

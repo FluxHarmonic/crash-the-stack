@@ -8,7 +8,7 @@ character. Unity is the default; old scores keep their original levels.
 ## Release and dependency
 
 Motif `v0.6.6` is commit `6a788c645673cc51ad9a510bebff48712f9ec779`, published
-to master and the annotated release tag on both Codeberg and git.usesigil.org.
+to master and the annotated release tag on Codeberg and the private mirror.
 Crash's `d6450c4` pins that exact release and sigil-dsp 0.3.4 in `sigil.lock`.
 The remaining dependency pins, including Sigil 0.22.3, are unchanged. No local
 package redirects are used for the integration build.

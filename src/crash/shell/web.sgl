@@ -1848,6 +1848,28 @@
       (when (and *booted* (eq? *screen* 'menu)) (open-menu!))
       0)
 
+    ;; What /version.json said, arriving as "VERSION<tab>SUMMARY" from the
+    ;; page just before the update state does. Held here as well as on the
+    ;; session because the session is rebuilt on a new deal and this is a
+    ;; property of the BUILD, not of the board.
+    ;;
+    ;; Either field may be empty and the drawing copes: the mark shows the
+    ;; word alone without a version, and the prompt shows its title alone
+    ;; without a summary. Nothing here is ever guessed at.
+    (define *update-version* #f)
+    (define *update-summary* #f)
+
+    (define (update-info! payload)
+      (let* ((tab (string-find payload "\t"))
+             (v (if tab (substring payload 0 tab) payload))
+             (s (if tab (substring payload (+ tab 1) (string-length payload)) "")))
+        (set! *update-version* (and (> (string-length v) 0) v))
+        (set! *update-summary* (and (> (string-length s) 0) s))
+        (when *session*
+          (set! *session* (session-with-update-info *session* *update-version* *update-summary*)))
+        (say "update" "info" (or *update-version* "-") "summary" (string-length s)))
+      0)
+
     ;; The player's APPLY: the page polls ("update", "chosen?") and reads
     ;; the answer from the dispatch's return value (1 once chosen; the
     ;; loader hands a handler's integer back to the page since sigil 0.22.2).
@@ -2077,7 +2099,11 @@
                                 (raise e)))
                     (open-menu!))))
       ;; the page's update word lands before the first frame, ahead of
-      ;; any session: the table takes it here, once
+      ;; any session: the table takes it here, once. The version and summary
+      ;; ride along the same way, and BEFORE the state, so a table that is
+      ;; about to draw the mark already knows what to put beside it.
+      (when (or *update-version* *update-summary*)
+        (set! *session* (session-with-update-info *session* *update-version* *update-summary*)))
       (when *update* (update! *update*)))
 
     ;; A page parameter landed (before the first frame; see open-menu!).
@@ -2114,6 +2140,7 @@
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")) (when *fresh* (hub-run-forget-store!)))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))
             ((string=? type "stack") (param! (lambda () (set! *stack* (string=? payload "on")))))
+            ((string=? type "update-info") (update-info! payload))   ; VERSION<tab>SUMMARY from /version.json, sent just before the state (2026-09-25)
             ((string=? type "update")
              (cond ((string=? payload "waiting") (update! 'waiting))
                    ((string=? payload "prompt") (update! 'prompt))
@@ -2211,7 +2238,7 @@
              (when *menu* (set! *menu* (menu-with-credits *menu* (credits-parse payload))))   ; a board boot has no menu yet: launch-menu takes them later
              (say "credits" (length (credits-parse payload)))
              0)
-            ;; NEWS (P4b, D20): the devlog's posts, read by the page from the site's
+            ;; NEWS (P4b, D20): the news posts, read by the page from the site's
             ;; JSON Feed once the menu is live, one per line DATE<tab>TITLE<tab>URL,
             ;; newest first; the menu up takes them (its NEWS row appears on its
             ;; next launch, or now when the top screen is showing)

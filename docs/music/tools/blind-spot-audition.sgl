@@ -1,0 +1,94 @@
+#!/usr/bin/env sigil
+;;; Test a short watchful exchange inside an existing bass pause.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (channel-events p channel)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+      (skip p 5))))
+
+(define (watchful-reply p)
+  ;; A-C call, a tiny C latch reply, then A with the returning bass and an echo.
+  (add-notes p
+    '((144 6 "A-3" 8 16 5)
+      (156 6 "C-4" 8 18 5)
+      (164 8 "C-4" 26 9 1)
+      (176 6 "A-3" 8 14 5)
+      (184 8 "A-3" 26 8 1))))
+
+(cli "blind-spot-audition" (script-args)
+  (list (option name: 'source long: "source" value: "FILE"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source
+             (or (option-ref options 'source)
+                 (path (root) "docs/music/album/blind-spot.cts")))
+           (score (read-score source))
+           (original (pattern score 8))
+           (candidate (watchful-reply original)))
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output)))
+             "Use a fresh external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Keep audition files outside the repository")
+      (check (and (= (field score tempo:) 96)
+                  (= (field original rows:) 256))
+             "Unexpected source phrase or clock")
+      (copy-file source (path output "source-album.cts"))
+      (each channel '(1 2 3 4 5 7)
+        (check (equal? (channel-events original channel)
+                       (channel-events candidate channel))
+               "Protected accompaniment changed" channel))
+      (each row (skip original 5)
+        (let ((revised-row
+                (list-find (lambda (r) (= (cadr r) (cadr row)))
+                           (skip candidate 5))))
+          (check revised-row "Original row lost")
+          (each cell (cddr row)
+            (check (member cell (cddr revised-row))
+                   "Original note, gate or effect changed" row cell))))
+      (each variant '("before" "after")
+        (write-album motif output variant "Blind Spot"
+          score
+          (list
+            (list "Third watchful phrase / eight bars"
+                  (if (equal? variant "before") original candidate))
+            (list "Two release bars" (phrase-rows 64 '())))
+          '("source-album.cts")
+          "Watchful reply: A-C-A muted signal with two quiet latch answers."
+          "All original events, bass pause, percussion, room tone, patches and mix preserved."
+          "2026-09-24"))
+      (let ((before (read-score (path output "before.cts")))
+            (after (read-score (path output "after.cts"))))
+        (check
+          (equal? before
+            (replace-child after 'patterns (child before 'patterns)))
+          "Clock, instruments, bus or arrangement changed"))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Blind Spot - Watchful Reply I"
+              before_stem: "before"
+              after_stem: "after"
+              half_seconds: 25
+              source_album_pattern: 8
+              source_shared_phrase: 7
+              source_album_start_seconds: 140
+              changed_channels: '(6 8)
+              added_attacks: 5
+              first_changed_row: 144
+              first_change_in_ab_seconds: 36.25
+              original_events_preserved: #t
+              patch_changes: #f
+              maintained_sources_unchanged: #t))
+      (display "Blind Spot comparison ready outside the repository.\n"))))

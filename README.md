@@ -8,7 +8,7 @@ web from one codebase.
 **Play:** [crashthestack.com/jack-in/](https://crashthestack.com/jack-in/),
 free, in the browser; it installs as an app from the browser's menu.
 The site has the [About page](https://crashthestack.com/about/), the
-[devlog](https://crashthestack.com/devlog/), the
+[news](https://crashthestack.com/news/), the
 [soundtrack](https://crashthestack.com/soundtrack/) and the
 [docs](https://crashthestack.com/docs/) (how to play, the tracker manual).
 

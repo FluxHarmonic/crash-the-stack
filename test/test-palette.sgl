@@ -76,3 +76,136 @@
                 (assert-true (and (assq (car p) datum) #t))))
             PALETTE))
 
+
+;; The selected tile's frame has to be a different color from the face it
+;; frames, at every point of the glow's breath. It was not, for one day:
+;; the frame was drawn in C-SELECTED, and `mix` returns c0 at t = 0, so at
+;; glow 0 the face was exactly C-SELECTED and the two-cell border was
+;; invisible. The face only ever moves 35% of the way toward the frame, so
+;; checking the breath's two ends checks all of it.
+;;
+;; MIN-FRAME-DISTANCE is euclidean in (r g b): 0.2 is about the gap
+;; between C-SIDE and C-SIDE-DARK, two colors the game already relies on
+;; a player telling apart. Sabotage: set SELECTED-FRAME-COLOR back to
+;; C-SELECTED and the glow-0 assertion names the distance as 0.
+(define MIN-FRAME-DISTANCE 0.2)
+
+(define (color-distance a b)
+  (let ((dr (- (car a) (car b)))
+        (dg (- (cadr a) (cadr b)))
+        (db (- (caddr a) (caddr b))))
+    (sqrt (+ (* dr dr) (* dg dg) (* db db)))))
+
+(test-group "palette: the selected tile's frame is not its face"
+  (for-each
+   (lambda (glow)
+     (let ((d (color-distance (selected-face-color glow) SELECTED-FRAME-COLOR)))
+       (test (string-append "at glow " (number->string glow)
+                            " the frame and the face are " (number->string d)
+                            " apart, want " (number->string MIN-FRAME-DISTANCE))
+         (assert-true (>= d MIN-FRAME-DISTANCE)))))
+   (list 0.0 1.0)))
+
+;; The card table gets the same frame round its selected packet, so it gets
+;; the same assertion. Until 2026-09-25 DEFRAG marked a selection with a ONE
+;; pixel line in C-SELECTED, which my colour-only sweep excluded on the
+;; grounds that a line appearing is already a non-colour cue. True, and still
+;; weaker than the tile table: David asked what DEFRAG got from the pass and
+;; the answer was nothing.
+(test-group "palette: the selected card frame is not its face"
+  (let ((d (color-distance (selected-card-color) SELECTED-FRAME-COLOR)))
+    (test (string-append "the card frame and the card face are " (number->string d)
+                         " apart, want " (number->string MIN-FRAME-DISTANCE))
+      (assert-true (>= d MIN-FRAME-DISTANCE)))))
+
+;; The tracker grid's four row bands have to be four different colours.
+;; They were three: the playhead's band and a bar's were both C-BAR-B, so
+;; a playhead row between bars was drawn exactly like a bar line. Pairwise
+;; distinctness is the whole assertion -- the lightness gaps between the
+;; bands are small by design (they are background tints, and the row's
+;; content has to stay readable on all of them), so what is being held here
+;; is that no two are the SAME, which the playhead's left-edge mark then
+;; backs up with a shape.
+(define BANDS (list 'cursor 'playhead 'bar 'beat))
+
+(test-group "palette: the tracker's row bands are four distinct colours"
+  (for-each
+   (lambda (a)
+     (for-each
+      (lambda (b)
+        (unless (eq? a b)
+          (test (string-append "the " (symbol->string a) " band and the "
+                               (symbol->string b) " band are different colours")
+            (assert-true (not (equal? (tracker-band-color a) (tracker-band-color b)))))))
+      BANDS))
+   BANDS)
+  (test "a row with no band has no colour"
+    (assert-true (not (tracker-band-color #f)))))
+
+;; THE LIGHTNESS BACKSTOP.
+;;
+;; The colourblind pass leads with shape: every tile state that matters now
+;; carries a glyph, a frame, a bar or a badge, because a shape survives any
+;; palette. This is the backstop under it -- the four colours a tile's FACE
+;; can be must also differ in lightness, so that a player who cannot
+;; separate two hues still sees two different tiles, and so that a later
+;; "just retune the colours" change cannot quietly collapse two states into
+;; one brightness.
+;;
+;; Relative luminance, the sRGB coefficients: a face's colour is compared by
+;; how bright it reads, not by how far apart its channels are. 0.15 is the
+;; threshold; the tightest real pair today is a weak lock against a selected
+;; face at 0.182, so the bar sits below what shipped rather than being fitted
+;; to it.
+;;
+;; It is a BACKSTOP and not the rule. Passing it does not make two faces
+;; readable -- the locks passed a lightness check at L* 61 against 84 and
+;; were still one shape in two colours, which is what started this work.
+;; Sabotage: give C-LOCKED C-LOCK-WEAK's triple and the pair is named.
+(define MIN-FACE-LIGHTNESS 0.15)
+
+(define (luminance c)
+  (+ (* 0.2126 (car c)) (* 0.7152 (cadr c)) (* 0.0722 (caddr c))))
+
+;; The faces draw-face-rects can paint, by the name the player would use.
+(define FACES
+  (list (cons "a plain face" C-STATIC-B)
+        (cons "a strong lock" C-LOCKED)
+        (cons "a weak lock" C-LOCK-WEAK)
+        (cons "a selected face at rest" (selected-face-color 0.0))
+        (cons "a selected face at full glow" (selected-face-color 1.0))))
+
+(test-group "palette: every tile face differs from every other in lightness"
+  (let pairs ((rest FACES))
+    (when (pair? rest)
+      (for-each
+       (lambda (other)
+         (let* ((a (car rest))
+                (d (abs (- (luminance (cdr a)) (luminance (cdr other))))))
+           ;; the two selected entries are the same face breathing, not two states
+           (unless (and (> (string-length (car a)) 8)
+                        (string=? (substring (car a) 0 8) "a select")
+                        (> (string-length (car other)) 8)
+                        (string=? (substring (car other) 0 8) "a select"))
+             (test (string-append (car a) " and " (car other) " differ by "
+                                  (number->string d) " in lightness, want "
+                                  (number->string MIN-FACE-LIGHTNESS))
+               (assert-true (>= d MIN-FACE-LIGHTNESS))))))
+       (cdr rest))
+      (pairs (cdr rest)))))
+
+;; C-TRACE is the trace meter at rest; C-SELECTED is a picked tile. They
+;; were the SAME triple, (0.30 0.95 0.85), and the datum said so out loud
+;; -- "meter low (alias of C-SELECTED)". One teal therefore meant two
+;; unrelated things, and a retune of either silently moved the other.
+;; They are separate colours now and this keeps them separate. It is not
+;; a lightness test: two roles can be equally bright and still be fine, as
+;; long as a player is never asked to read one as the other.
+(test-group "palette: the trace meter is not the selection colour"
+  (test "C-TRACE and C-SELECTED are different colours"
+    (assert-true (not (equal? C-TRACE C-SELECTED))))
+  ;; C-WIRE-LIT is deliberately C-SELECTED and stays that way: a live wire
+  ;; IS the selected colour, by design (D-wires). Naming it here so nobody
+  ;; "fixes" that alias by analogy with this one.
+  (test "C-WIRE-LIT is still C-SELECTED, which is deliberate"
+    (assert-equal C-SELECTED C-WIRE-LIT)))

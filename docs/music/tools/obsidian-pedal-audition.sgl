@@ -1,0 +1,118 @@
+#!/usr/bin/env sigil
+;;; Isolate a pedal texture change from the accepted melody and side pads.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (moving-pedal instrument)
+  (let* ((layers (field instrument layers:))
+         (upper (car layers)))
+    (check (= (length layers) 1) "Unexpected pedal layer bank")
+    (check (and (eq? (car upper) 'fm4-pad)
+                (= (field upper alg:) 7))
+           "Expected additive upper-harmonic layer")
+    ;; Preserve the octave pair, triangle core, output envelope and layer gain.
+    (set! upper (set-field upper op3: '(3 0.38 0.06 0.4 0.5 0.055)))
+    (set! upper (set-field upper op4: '(3.03 0.32 0.12 0.4 0.45 0.055)))
+    (set! upper (set-field upper chorus-rate: 0.17))
+    (set! upper (set-field upper chorus-depth: 5))
+    (set-field instrument layers: (list upper))))
+
+(define (expose-pedal p)
+  (let ((excerpt
+          (append (take (set-field p rows: 128) 5)
+            (filter
+              (lambda (row) (pair? (cddr row)))
+              (map
+                (lambda (row)
+                  (append (take row 2)
+                    (filter (lambda (cell) (= (car cell) 4)) (cddr row))))
+                (filter (lambda (row) (< (cadr row) 128)) (skip p 5)))))))
+    (transform excerpt unchanged)))
+
+(cli "obsidian-pedal-audition" (script-args)
+  (list (option name: 'source long: "source" value: "FILE")
+        (option name: 'exposed long: "exposed"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source
+             (or (option-ref options 'source)
+                 (path (root) "docs/music/album/obsidian-index.cts")))
+           (score (read-score source))
+           (original (pattern score 1))
+           (exposed? (option-ref options 'exposed))
+           (excerpt (if exposed? (expose-pedal original) original))
+           (bank (cdr (child score 'instruments)))
+           (pedal (list-find (lambda (i) (= (field i id:) 4)) bank))
+           (revised (moving-pedal pedal))
+           (candidate
+             (replace-child score 'instruments
+               (cons 'instruments
+                 (map (lambda (i)
+                        (if (= (field i id:) 4) revised i))
+                      bank)))))
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output)))
+             "Use a fresh external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Keep audition files outside the repository")
+      (check (and (= (field score tempo:) 84)
+                  (= (field original rows:) 256))
+             "Unexpected source phrase or clock")
+      (check
+        (equal? pedal (set-field revised layers: (field pedal layers:)))
+        "Pedal core or output routing changed")
+      (check
+        (equal? score
+          (replace-child candidate 'instruments (child score 'instruments)))
+        "Notes, clock, bus or arrangement changed")
+      (copy-file source (path output "source-album.cts"))
+      (each variant '("before" "after")
+        (write-album motif output variant "Obsidian Index"
+          (if (equal? variant "before") score candidate)
+          (list
+            (list (if exposed?
+                      "Pedal alone / first four calm bars"
+                      "First calm phrase / accepted melody")
+                  excerpt)
+            (list "Two release bars" (phrase-rows 64 '())))
+          '("source-album.cts")
+          "Pedal texture only: slower upper-partial bloom and chorus motion."
+          (if exposed?
+              "Same candidate patch isolated on channel 4; other voices muted equally in both halves."
+              "Original triangle core, notes, melody, side pads, percussion and mix preserved.")
+          "2026-09-24"))
+      (let ((before (read-score (path output "before.cts")))
+            (after (read-score (path output "after.cts"))))
+        (check
+          (equal? before
+            (replace-child after 'instruments (child before 'instruments)))
+          "Compiled score changed outside the instrument bank")
+        (check
+          (equal? revised
+            (list-find (lambda (i) (= (field i id:) 4))
+                       (cdr (child after 'instruments))))
+          "Renderer failed to preserve the candidate patch"))
+      (write-json-file (path output "comparison.json")
+        (dict title: (if exposed?
+                           "Obsidian Index - Pedal alone I"
+                           "Obsidian Index - Pedal texture I")
+              before_stem: "before"
+              after_stem: "after"
+              half_seconds: (if exposed? (/ 120.0 7) (/ 200.0 7))
+              pedal_only: (if exposed? #t #f)
+              source_album_pattern: 1
+              source_shared_phrase: 0
+              source_album_start_seconds: (/ 80.0 7)
+              changed_instrument: 4
+              changed_layer: 1
+              changed_fields: '("op3" "op4" "chorus-rate" "chorus-depth")
+              notes_unchanged: #t
+              maintained_sources_unchanged: #t))
+      (display "Obsidian pedal comparison ready outside the repository.\n"))))

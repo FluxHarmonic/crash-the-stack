@@ -101,3 +101,42 @@
         (assert-true (playable? b top))
         (assert-equal top
                       (session-highlight (session-step (with-highlight s top) (frame (quote up)) geom)))))))
+
+;;; Which way the layers stack, because a drawn mark now depends on it.
+;;;
+;;; slot-rect shifts a slot by +side in x and -side in y for each layer it
+;;; is up, so a tile stacked on another covers that tile's TOP-RIGHT and
+;;; leaves its BOTTOM-LEFT clear. (crash render)'s draw-face-mark puts the
+;;; objective's badge in that bottom-left corner for exactly this reason:
+;;; it is the part of a covered marked tile a player can still see.
+;;;
+;;; Flip the stacking direction and the badge silently moves to the corner
+;;; that gets covered, which is invisible in every test that only asks
+;;; whether a mark was drawn. Sabotage: negate the shift in slot-rect and
+;;; both assertions here name the direction that changed.
+(test-group "geometry: a layer stacks up and to the right"
+  ;; Two slots at the SAME hx and hy on different layers: the higher one's
+  ;; face is offset +side in x and -side in y, so it covers the lower
+  ;; tile's top-right and leaves its bottom-left clear.
+  (let loop ((id 0) (pair #f))
+    (cond
+      ((and (not pair) (< id (layout-slot-count lay)))
+       (let* ((s (layout-slot lay id))
+              (mate (let scan ((j 0))
+                      (cond ((>= j (layout-slot-count lay)) #f)
+                            ((and (not (= j id))
+                                  (= (slot-hx (layout-slot lay j)) (slot-hx s))
+                                  (= (slot-hy (layout-slot lay j)) (slot-hy s))
+                                  (> (slot-layer (layout-slot lay j)) (slot-layer s)))
+                             j)
+                            (else (scan (+ j 1)))))))
+         (loop (+ id 1) (and mate (cons id mate)))))
+      ((not pair)
+       (test "the turtle layout stacks at least one tile on another"
+         (assert-true #f)))
+      (else
+       (let ((lo (car pair)) (hi (cdr pair)))
+         (test "a higher layer's face sits further RIGHT"
+           (assert-true (> (slot-x geom hi) (slot-x geom lo))))
+         (test "a higher layer's face sits further UP (smaller y)"
+           (assert-true (< (slot-y geom hi) (slot-y geom lo)))))))))

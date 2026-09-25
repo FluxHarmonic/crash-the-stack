@@ -151,29 +151,39 @@ for (const action of actions) {
   }
   else if (kind === "tap") {
     const ctl = await waitLine(new RegExp(`^crash: control ${rest} (-?[\\d.]+) (-?[\\d.]+)$`), 0, 3000);
-    if (!ctl) { console.log(`SETUP-FAILED: no control ${rest}`); shutdown(2); }
+    if (!ctl) { console.log(`SETUP-FAILED: no control ${rest}`); shutdown(2); await new Promise(() => {}); }
     await tap(ctl.m[1], ctl.m[2]); await sleep(400);
   } else if (kind === "tool") {
     // a tool through the stack (ruling D33): the corner button, then the
     // named entry once the stack has printed it and slid up
     const btn = await waitLine(/^crash: control tool (-?[\d.]+) (-?[\d.]+)$/, 0, 3000);
-    if (!btn) { console.log("SETUP-FAILED: no control tool"); shutdown(2); }
+    // shutdown() does not stop this loop, so each failure must also block --
+    // the same `await new Promise(() => {})` the line: action uses. Without it
+    // the SETUP-FAILED message is printed and then execution falls through to
+    // dereference the null, so the run ends in a TypeError stack trace that
+    // buries the one line saying what actually went wrong.
+    if (!btn) { console.log("SETUP-FAILED: no control tool"); shutdown(2); await new Promise(() => {}); }
     const from = lines.length;
     await tap(btn.m[1], btn.m[2]);
     const entry = await waitLine(new RegExp(`^crash: tool ${rest} (-?[\\d.]+) (-?[\\d.]+) on$`), from, 3000);
-    if (!entry) { console.log(`SETUP-FAILED: no enabled tool ${rest}`); shutdown(2); }
+    if (!entry) { console.log(`SETUP-FAILED: no enabled tool ${rest} (the name is the game's, not the label: shuf, not SHUFFLE)`); shutdown(2); await new Promise(() => {}); }
     await sleep(350);
     await tap(entry.m[1], entry.m[2]); await sleep(400);
   } else if (kind === "menu") {
     // the newest menu line (one per screen shown: "crash: menu SCREEN ID X Y ...",
     // a value row as ID=VALUE), the named row tapped
+    // Both paths must produce waitLine's shape, { m }. The backward scan used
+    // to assign the raw match array, so menu.m was undefined and the action
+    // died on `menu.m[2]` -- and it died precisely when the scan SUCCEEDED,
+    // which is the normal case, so menu: only ever worked when no menu line
+    // had been printed yet and the waitLine fallback ran instead.
     let menu = null;
-    for (let i = lines.length - 1; i >= 0 && !menu; i--) { const m = lines[i].match(/^crash: menu (\w+) (.+)$/); if (m) menu = m; }
+    for (let i = lines.length - 1; i >= 0 && !menu; i--) { const m = lines[i].match(/^crash: menu (\w+) (.+)$/); if (m) menu = { m }; }
     if (!menu) menu = await waitLine(/^crash: menu (\w+) (.+)$/, 0, 3000);
-    if (!menu) { console.log("SETUP-FAILED: no menu line"); shutdown(2); }
+    if (!menu) { console.log("SETUP-FAILED: no menu line"); shutdown(2); await new Promise(() => {}); }
     const parts = menu.m[2].split(" "); let found = null;
     for (let i = 0; i + 2 < parts.length; i += 3) if (parts[i].split("=")[0] === rest) found = [parts[i + 1], parts[i + 2]];
-    if (!found) { console.log(`SETUP-FAILED: no menu row ${rest} on screen ${menu.m[1]}: ${menu.m[2]}`); shutdown(2); }
+    if (!found) { console.log(`SETUP-FAILED: no menu row ${rest} on screen ${menu.m[1]}: ${menu.m[2]}`); shutdown(2); await new Promise(() => {}); }
     await tap(found[0], found[1]); await sleep(600);
   } else if (kind === "at") { const [x, y] = rest.split(",").map(Number); await tap(x, y); await sleep(400); }
   else if (kind === "key") { await key(rest); }

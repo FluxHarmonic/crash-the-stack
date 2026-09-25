@@ -43,6 +43,7 @@
           tracker-pattern tracker-pattern-id tracker-rows tracker-channels
           tracker-cell tracker-block tracker-muted? tstate-mutes tstate-solo tstate-panel
           tracker-panel-lines tstate-panel-page tstate-spectrum meter-signature meter-row-kind
+          row-band row-playhead?
           COLUMNS ZOOM-CHANNELS PAGE-ROWS)
 
   (begin
@@ -386,8 +387,23 @@
     ;; Mute and solo (the mode applies them to the player)
     ;; ------------------------------------------------------------
 
-    (define (tracker-muted? s ch)
-      (and (tstate-mutes s) (< ch (vector-length (tstate-mutes s))) (vector-ref (tstate-mutes s) ch)))
+    ;; Both guards live in muted-at, on the VECTOR, for the same reason
+    ;; world-seen? is split: sigil 0.22.7's native backend replaces the whole
+    ;; body of a 2-argument procedure whose tail can be
+    ;; (vector-ref (FIELD arg0) arg1) with that vector-ref alone. Written the
+    ;; obvious way,
+    ;;
+    ;;   (define (tracker-muted? s ch)
+    ;;     (and (tstate-mutes s) (< ch (vector-length (tstate-mutes s)))
+    ;;          (vector-ref (tstate-mutes s) ch)))
+    ;;
+    ;; the release and web builds got a bare vector-ref and lost BOTH guards:
+    ;; the null check on mutes and the bounds check. A tstate whose mutes are
+    ;; still #f would have called vector-ref on #f. Dev builds are bytecode
+    ;; and behaved correctly, so no test could see it.
+    ;; See topics/sigil-native-vector-field-accessor-drops-guard.
+    (define (tracker-muted? s ch) (muted-at (tstate-mutes s) ch))
+    (define (muted-at v ch) (and v (< ch (vector-length v)) (vector-ref v ch)))
 
     (define (toggle-mute s ch)
       (let ((v (vector-copy (or (tstate-mutes s) (make-vector (+ (tracker-channels s) 1) #f)))))
@@ -425,6 +441,30 @@
         (cond ((= 0 (modulo row bar)) 'bar)
               ((= 0 (modulo row rpb)) 'beat)
               (else #f))))
+
+    ;; Which band a grid row is drawn with: cursor, playhead, bar, beat, or
+    ;; #f for a plain row. `kind` is this row's meter-row-kind.
+    ;;
+    ;; Until 2026-09-24 the draw picked these inline and picked two of them
+    ;; wrong. A playhead row and a bar row were both C-BAR-B, the same
+    ;; full-width rect, so a playhead that did not happen to land on a bar
+    ;; was indistinguishable from a bar line -- for everyone, not only a
+    ;; colourblind player.
+    (define (row-band row cur-row play-row kind)
+      (cond ((= row cur-row) 'cursor)
+            ((and play-row (= row play-row)) 'playhead)
+            ((eq? kind 'bar) 'bar)
+            ((eq? kind 'beat) 'beat)
+            (else #f)))
+
+    ;; Whether this row carries the playhead's own mark. Separate from the
+    ;; band on purpose: the mark is drawn even when the cursor's band covers
+    ;; the row, because the cursor branch above wins and the playhead would
+    ;; otherwise VANISH for as long as the two met -- which is what the old
+    ;; code did, and the reason "where is playback" had no answer at all on
+    ;; the row you were editing.
+    (define (row-playhead? row play-row)
+      (and play-row (= row play-row) #t))
 
     ;; rows of a new pattern: a bar of beats, four bars
     (define (meter-rows t)

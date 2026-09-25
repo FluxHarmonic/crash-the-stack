@@ -362,26 +362,68 @@
 
     (define (draw-face-rects x y w h selected? lock right-open? glow)
       ;; the face, with a lighter top-left edge
-      (color! (cond (selected? (mix C-SELECTED C-FACE-EDGE (* 0.35 glow)))
+      (color! (cond (selected? (selected-face-color glow))
                     ((eq? lock 'strong) C-LOCKED)
                     ((eq? lock 'weak) C-LOCK-WEAK)
                     (else FACE-COLOR)))
       (draw-filled-rect x y w h)
-      (color! (if selected? C-SELECTED FACE-EDGE-COLOR))
-      (draw-filled-rect x y w 1)
-      (draw-filled-rect x y 1 h)
-      (when right-open?
-        (color! (if selected? C-SELECTED C-SIDE-DARK))
+      (color! (if selected? SELECTED-FRAME-COLOR FACE-EDGE-COLOR))
+      ;; A SELECTED tile is framed on all four sides, two cells thick; an
+      ;; unselected one keeps its one-cell top-left highlight. Until
+      ;; 2026-09-24 selection was a tint and a hue swap on that same
+      ;; one-cell edge, so "which tile did I pick" was a colour question.
+      ;; The frame's color is SELECTED-FRAME-COLOR, not C-SELECTED: the
+      ;; face is C-SELECTED itself at glow 0, and a frame in the face's
+      ;; own color drew nothing a player could see (caught in a shot the
+      ;; day the frame landed).
+      ;; The frame is drawn INSIDE the tile's own rect: tiles overlap in a
+      ;; mahjong layout, and a border that spilled outside would be painted
+      ;; over by whichever neighbour drew next.
+      (if selected?
+          (let ((t 2))
+            (draw-filled-rect x y w t)
+            (draw-filled-rect x (+ y h (- t)) w t)
+            (draw-filled-rect x y t h)
+            (draw-filled-rect (+ x w (- t)) y t h))
+          (begin
+            (draw-filled-rect x y w 1)
+            (draw-filled-rect x y 1 h)))
+      (when (and right-open? (not selected?))
+        (color! C-SIDE-DARK)
         (draw-filled-rect (+ x w -1) y 1 h)))
 
     (define (draw-face-glyph-part g look face x y w h selected? scramble)
       (when face (draw-glyph-on g look face x y w h selected? scramble)))
 
+    ;; The lock's MARK says which lock it is; the colour only agrees with it.
+    ;; Both states drew the same two bars until 2026-09-24 and differed by hue
+    ;; alone (C-TRACE-HOT against C-LABEL-LIT), so a player who cannot separate
+    ;; those two colours could see that a tile was locked and not how. They
+    ;; differ in lightness (L* 61 against 84), which is exactly why the mark
+    ;; matters: a pair can pass a lightness test and still be unreadable as two
+    ;; different things.
+    ;;
+    ;;   STRONG  two solid bars, top and bottom  ▔▔▔▔▔ / ▁▁▁▁▁
+    ;;   WEAK    one broken bar, top only        ▔ ▔ ▔
+    ;;
+    ;; Two differences rather than one — the COUNT of bars and whether a bar is
+    ;; continuous — because a single difference survives less as the tile
+    ;; shrinks, and the phone draws this at 32 px.
+    (define WEAK-DASH 3)      ; cells of bar
+    (define WEAK-GAP 2)       ; cells of air between them
     (define (draw-face-lock x y w h lock)
       (when lock
         (color! (if (eq? lock 'strong) C-TRACE-HOT C-LABEL-LIT))
-        (draw-filled-rect x (+ y 3) w 2)
-        (draw-filled-rect x (+ y h -5) w 2)))
+        (if (eq? lock 'strong)
+            (begin
+              (draw-filled-rect x (+ y 3) w 2)
+              (draw-filled-rect x (+ y h -5) w 2))
+            ;; one bar, broken: it stops short of the tile's right edge rather
+            ;; than running a part-dash off it
+            (let loop ((dx 0))
+              (when (<= (+ dx WEAK-DASH) w)
+                (draw-filled-rect (+ x dx) (+ y 3) WEAK-DASH 2)
+                (loop (+ dx WEAK-DASH WEAK-GAP)))))))
 
     ;; A ring around a tile: the cursor highlight in magenta, the priced
     ;; hint in yellow. Drawn after every tile so no neighbor paints over it.
@@ -393,6 +435,36 @@
         (draw-filled-rect (- x 1) (+ y h -1) (+ w 2) 2)
         (draw-filled-rect (- x 1) (- y 1) 2 (+ h 2))
         (draw-filled-rect (+ x w -1) (- y 1) 2 (+ h 2))))
+
+    ;; The objective's mark on a tile (D64), drawn in that tile's OWN layer
+    ;; pass so a tile stacked above it occludes the mark exactly as it
+    ;; occludes the face. Until 2026-09-25 the marks were painted after
+    ;; every layer had been drawn, as an overlay, and draw-ring put them
+    ;; OUTSIDE the tile's rect (x-1, y-1, w+2, h+2) as well -- so a mark on
+    ;; a covered tile floated on top of whatever covered it and read as
+    ;; belonging to the upper tile.
+    ;;
+    ;; Two parts, and the second is the one that matters. The inner border
+    ;; says "this tile" and is occluded along with it. The BADGE is a solid
+    ;; block in the tile's BOTTOM-LEFT corner, which is the corner an upper
+    ;; tile cannot reach: slot-rect shifts each layer by +shift in x and
+    ;; -shift in y, so a covering tile eats the top-right and leaves the
+    ;; bottom-left. A half-covered marked tile therefore still carries its
+    ;; badge -- and a badge is a shape, so it answers "is this one marked"
+    ;; without asking the eye for a hue.
+    ;;
+    ;; Correct occlusion will look like a bug to anyone who has not read
+    ;; this: a marked tile under another tile now shows only part of its
+    ;; border. That is the point. The badge is what keeps it legible.
+    (define MARK-BADGE 5)
+
+    (define (draw-face-mark x y w h)
+      (color! C-LABEL-LIT)
+      (draw-filled-rect x y w 2)
+      (draw-filled-rect x (+ y h -2) w 2)
+      (draw-filled-rect x y 2 h)
+      (draw-filled-rect (+ x w -2) y 2 h)
+      (draw-filled-rect (+ x 1) (+ y h -1 (- MARK-BADGE)) MARK-BADGE MARK-BADGE))
 
     ;; A tile's rect after the effects: (x y w h) moved by (dx dy) and
     ;; scaled about its centre by (sx sy).
@@ -516,6 +588,7 @@
              (lay (board-layout b))
              (selected (board-selected b))
              (now (trace-ticks (session-trace s)))
+             (marked (session-marks s))
              (ticks (fx-ticks x))
              (glow (fx-glow x))
              (look (look-ref (session-look s)))
@@ -552,7 +625,12 @@
                                                 (and (tile-scrambled? b id) (cons ticks id))))))
               (locks (lambda (id face x y w h selected?)
                        (unless *hidden*
-                         (draw-face-lock x y w h (lock-state b id now))))))
+                         (draw-face-lock x y w h (lock-state b id now)))))
+              ;; the objective's marks, per layer rather than over the lot
+              (marks (lambda (id face x y w h selected?)
+                       (unless *hidden*
+                         (when (memv id marked)
+                           (draw-face-mark x y w h))))))
           (let loop ((layer 0))
             (when (< layer (layout-layer-count lay))
               (each-on-layer layer sides)
@@ -560,12 +638,13 @@
               (each-on-layer layer edges)
               (each-on-layer layer glyphs)
               (each-on-layer layer locks)
+              (each-on-layer layer marks)
               (loop (+ layer 1)))))
         (draw-ghosts g look x)
         (draw-particles g look x)
-        (unless *hidden*   ; the objective's marks (D64): a steady ring on each marked tile still on the board
-          (for-each (lambda (id) (when (tile-present? b id) (draw-ring g id C-LABEL-LIT 0.85)))
-                    (session-marks s)))
+        ;; (the objective's marks used to be painted here, over every layer,
+        ;; which is why a mark on a covered tile appeared to sit on the tile
+        ;; covering it; they are a per-layer pass now, see draw-face-mark)
         (when (and highlight (not *hidden*)) (draw-ring g highlight C-HIGHLIGHT 1.0))
         (unless *hidden*
           (let ((hint (session-hint s))
@@ -646,8 +725,24 @@
         (let* ((entry (car labels))
                (label (cdr entry))
                (w (label-w label)))
-          (color! (if (label-prefix? typed label) C-HIGHLIGHT C-LABEL-LIT))
-          (text-mini! label (+ (label-x g (car entry) w) 2) (+ (label-y g (car entry)) 1) 1))
+          ;; A label the typed letters still match is UNDERLINED as well as
+          ;; lit. Until 2026-09-24 "you are part way into this tag" was
+          ;; C-HIGHLIGHT against C-LABEL-LIT and nothing else, so the feedback
+          ;; that tells you whether to keep typing was a colour a player may
+          ;; not have. The rule stays the same; only how it shows changed.
+          (let* ((matching? (label-prefix? typed label))
+                 (lx (+ (label-x g (car entry) w) 2))
+                 (ly (+ (label-y g (car entry)) 1)))
+            (color! (if matching? C-HIGHLIGHT C-LABEL-LIT))
+            (text-mini! label lx ly 1)
+            ;; the rule spans the TEXT, not the box. label-w is the box's
+            ;; width, text-width-mini plus 4 for the padding, and the text
+            ;; starts 2 inside it -- so drawing label-w from the text's own x
+            ;; ran four pixels past the last letter while sitting flush at the
+            ;; first, which reads as an underline shifted to the right (David,
+            ;; on the 0.1.2 preview).
+            (when matching?
+              (draw-filled-rect lx (+ ly MINI-H 1) (text-width-mini label 1) 1))))
         (label-texts! g (cdr labels) typed)))
 
     ;; typed is a non-empty prefix of label.
@@ -808,6 +903,22 @@
                     (icon! (tool-name t) (+ x 6) (+ ty 1) 1)
                     (color! ink)
                     (text! (tool-label t) (+ x 22) ty 2)
+                    ;; A tool you cannot use is STRUCK THROUGH its name. The
+                    ;; entry already said so without colour -- the tag box at
+                    ;; the row's right end is filled when the tool is enabled
+                    ;; and an outline when it is not -- but it said it once, in
+                    ;; a 12x12 box at the far end, and then said it four more
+                    ;; times in colour alone (the icon's tone, this label, the
+                    ;; price, the count). The strike puts the non-colour answer
+                    ;; where the eye starts on the row, and it is the ordinary
+                    ;; mark for "not available", so it needs no learning.
+                    ;; The label is drawn at scale 2, so it is (* GLYPH-H 2)
+                    ;; tall and its middle is GLYPH-H down from ty; the rule
+                    ;; is two pixels, sitting one above that so it splits the
+                    ;; glyphs rather than underlining them.
+                    (unless on?
+                      (draw-filled-rect (+ x 22) (+ ty GLYPH-H -1)
+                                        (text-width (tool-label t) 2) 2))
                     (let* ((after (+ x 22 (text-width (tool-label t) 2) 4))
                            (after (if (tool-price t)
                                       (let ((p (number->string (tool-price t))))
@@ -1043,18 +1154,84 @@
 
     ;; The web build's waiting update (ruling D14): the mark in the HUD
     ;; while a version waits, the prompt's two boxes above the HUD.
-    (define (draw-update-mark g layout)
-      (draw-box (cdr (assq 'update (update-controls g layout))) "UPDATE" C-BAR-C C-SELECTED C-SELECTED))
+    ;; The HUD's mark: UPDATE at scale 2 as it always was, and the version it
+    ;; would take you to after it, in the mini set on the same baseline. The
+    ;; word keeps the prominence it had; the version reads as an annotation.
+    ;;
+    ;; Whole string at scale 2 would be 166 px for "UPDATE > 0.1.3", against a
+    ;; 78 px box and a 640 px screen: a quarter of the HUD for something only
+    ;; visible while an update waits. This costs 32 px instead.
+    ;;
+    ;; No version means no annotation: the fetch failed, or /version.json had
+    ;; no version field, and the mark says UPDATE alone rather than guessing.
+    (define (draw-update-mark g layout . rest)
+      (let* ((r (cdr (assq 'update (update-controls g layout))))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (version (and (pair? rest) (string? (car rest)) (> (string-length (car rest)) 0) (car rest)))
+             (word "UPDATE")
+             (ww (text-width word 2))
+             (tail (and version (string-append " " (string TRI) " " version)))
+             (tw (if tail (text-width-mini tail 1) 0))
+             (lead (exact (floor (/ (- w ww tw) 2)))))
+        (color! C-BAR-C)
+        (draw-filled-rect x y w h)
+        (color! C-SELECTED)
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (text! word (+ x lead) (+ y (exact (floor (/ (- h 14) 2)))) 2)
+        (when tail
+          ;; the mini set sits on the scale-2 baseline: 14 tall against 5, so
+          ;; it drops by the difference less one, which is where the caps line
+          ;; up rather than the box's middle
+          (text-mini! tail (+ x lead ww) (+ y (exact (floor (/ (- h 14) 2))) (- 14 MINI-H 1)) 1))))
 
-    (define (draw-update-prompt g)
+    ;; The panel's summary line: what the waiting release says about itself,
+    ;; from /version.json, which took it from that release's News post.
+    ;;
+    ;; It lives HERE and not in the HUD (David, 2026-09-25): the HUD keeps the
+    ;; compact "UPDATE > 0.1.3" mark so play stays uncluttered, and the sentence
+    ;; appears where the player has already stopped to read.
+    ;;
+    ;; PANEL-SUMMARY-CHARS is the panel's width in characters at scale 1: the
+    ;; 300 px box less an 8 px margin each side is 284, and text-width is
+    ;; 6n - 1, so 47 fit. Two lines of it hold every summary written so far
+    ;; (83, 91 and 90 characters) without touching a word. verify-site asserts
+    ;; the wrap rather than a flat length, because a summary that fits in total
+    ;; and splits badly is still wrong on the screen.
+    (define PANEL-SUMMARY-CHARS 47)
+
+    ;; One line if it fits, else two, broken at the space that balances them.
+    ;; split-point is the same helper draw-line-2 uses for the HUD's second
+    ;; row, so the panel and the HUD break a sentence the same way rather than
+    ;; each having their own idea of it.
+    (define (summary-lines text width)
+      (if (<= (string-length text) width)
+          (list text)
+          (let ((at (split-point text width)))
+            (if at
+                (list (substring text 0 at) (substring text (+ at 1) (string-length text)))
+                (list text)))))
+
+    (define (draw-update-prompt g . rest)
       (let* ((vw (geometry-vw g))
              (top (- (geometry-vh g) (geometry-hud-h g)))
              (title "NEW VERSION READY")
-             (tw (text-width title 2)))
+             (tw (text-width title 2))
+             (summary (and (pair? rest) (string? (car rest)) (> (string-length (car rest)) 0) (car rest)))
+             (lines (if summary (summary-lines summary PANEL-SUMMARY-CHARS) '())))
         (color-alpha! C-BG 0.9)
-        (draw-filled-rect (- (half vw) 150) (- top 74) 300 62)
+        ;; ten pixels taller than it was, for the two summary lines; the
+        ;; buttons moved down with it (update-controls' 'apply and 'later)
+        (draw-filled-rect (- (half vw) 150) (- top 84) 300 72)
         (color! C-SELECTED)
-        (text! title (- (half vw) (half tw)) (- top 68) 2)
+        (text! title (- (half vw) (half tw)) (- top 78) 2)
+        (color! C-TEXT)
+        (let rows ((ls lines) (y (- top 62)))
+          (when (pair? ls)
+            (text! (car ls) (- (half vw) (half (text-width (car ls) 1))) y 1)
+            (rows (cdr ls) (+ y 9))))
         (draw-box (cdr (assq 'apply (update-controls g 'zones))) "APPLY" C-BAR-C C-SELECTED C-TEXT)
         (draw-box (cdr (assq 'later (update-controls g 'zones))) "NOT NOW" C-BAR-C C-TEXT-DIM C-TEXT)))
 
@@ -1154,7 +1331,7 @@
                            (and (eq? (trace-phase tr) 'counter) (trace-ice-string tr))
                            (cached-text *seed-text* (session-seed s) seed-text))
         (when (or (eq? (session-update s) 'waiting) (eq? (session-update s) 'prompt))
-          (draw-update-mark g layout))
+          (draw-update-mark g layout (session-update-version s)))
         (draw-keys-button (control-rect g layout 'keys) (session-keys-shown s))
         ;; line 2: the keys line when asked for, else the phase line, else
         ;; the instruction (David, 2026-09-17: centered)
@@ -1455,4 +1632,4 @@
         (when glitch (draw-glitch g x glitch))
         (when (trace-severed? (session-trace s)) (draw-severed g x))
         (draw-hud s g x)
-        (when (eq? (session-update s) 'prompt) (draw-update-prompt g))))))
+        (when (eq? (session-update s) 'prompt) (draw-update-prompt g (session-update-summary s)))))))

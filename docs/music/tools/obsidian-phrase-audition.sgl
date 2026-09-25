@@ -1,0 +1,101 @@
+#!/usr/bin/env sigil
+;;; One focused melodic comparison, with the accepted patches and backing intact.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement))
+(initialize (path (script-dir) "../../.."))
+
+(define (channel-events p channel)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (= (car cell) channel)) (cddr row))))
+      (skip p 5))))
+
+(define (answer p)
+  ;; Keep the opening statement and its final release; reshape only the answer.
+  (let ((clean
+          (append (take p 5)
+            (filter
+              (lambda (row) (pair? (cddr row)))
+              (map
+                (lambda (row)
+                  (append (take row 2)
+                    (filter
+                      (lambda (cell)
+                        (not (and (= (car cell) 6)
+                                  (>= (cadr row) 144))))
+                      (cddr row))))
+                (skip p 5))))))
+    (add-notes clean
+      '((148 6 "G-3" 8 18 11)
+        (160 6 "B-3" 8 21 13)
+        (176 6 "A-3" 8 19 7)
+        (184 6 "G-3" 8 17 7)
+        (192 6 "F#3" 8 21 13)
+        (208 6 "B-3" 8 18 13)
+        (224 6 "G-3" 8 21 13)
+        (240 6 "E-3" 8 18 11)))))
+
+(cli "obsidian-phrase-audition" (script-args)
+  (list (option name: 'source long: "source" value: "FILE"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (source
+             (or (option-ref options 'source)
+                 (path (root) "docs/music/album/obsidian-index.cts")))
+           (score (read-score source))
+           (original (pattern score 8))
+           (candidate (answer original)))
+      (check (and (starts-with? output "/")
+                  (not (file-exists? output)))
+             "Use a fresh external output directory")
+      (ensure-directory output)
+      (check (not (starts-with? (str (realpath output) "/")
+                               (str (root) "/")))
+             "Keep audition files outside the repository")
+      (check (and (= (field score tempo:) 84)
+                  (= (field original rows:) 256))
+             "Unexpected source phrase or clock")
+      (copy-file source (path output "source-album.cts"))
+      (each channel '(1 2 3 4 5 7 8)
+        (check (equal? (channel-events original channel)
+                       (channel-events candidate channel))
+               "Protected accompaniment changed" channel))
+      (check
+        (equal?
+          (filter (lambda (row) (< (cadr row) 144))
+                  (channel-events original 6))
+          (filter (lambda (row) (< (cadr row) 144))
+                  (channel-events candidate 6)))
+        "Opening melody or its release changed")
+      (each variant '("before" "after")
+        (write-album motif output variant "Obsidian Index"
+          score
+          (list
+            (list "Third tense phrase / eight bars"
+                  (if (equal? variant "before") original candidate))
+            (list "Two release bars" (phrase-rows 64 '())))
+          '("source-album.cts")
+          "Glass answer only: G-B-A-G-F-sharp, then B-G-E."
+          "Opening melody, lower replies, pedal, pads, percussion and all patches preserved."
+          "2026-09-24"))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Obsidian Index - Glass answer I"
+              before_stem: "before"
+              after_stem: "after"
+              half_seconds: (/ 200.0 7)
+              source_album_pattern: 8
+              source_shared_phrase: 7
+              source_album_start_seconds: 160
+              changed_channel: 6
+              first_changed_row: 157
+              first_changed_attack_row: 160
+              patch_changes: #f
+              maintained_sources_unchanged: #t))
+      (display "Obsidian glass-answer comparison ready outside the repository.\n"))))

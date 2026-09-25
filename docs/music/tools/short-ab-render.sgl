@@ -29,19 +29,23 @@
            "Unexpected audio duration or format" file)))
 
 (cli "short-ab-render" (script-args)
-  (list (option name: 'input long: "input" value: "DIR"))
+  (list (option name: 'input long: "input" value: "DIR")
+        (option name: 'gain long: "gain" value: "DB" default: "-0.5"))
   (lambda (options)
     (let* ((input (option-ref options 'input))
            (output (option-ref options 'output))
            (motif (require-tool (option-ref options 'motif)))
            (manifest (json-decode (read-text (path input "comparison.json"))))
            (half (dict-ref manifest half_seconds:))
+           (requested-gain (string->number (option-ref options 'gain)))
            (stems (list (dict-ref manifest before_stem:)
                         (dict-ref manifest after_stem:)))
            (levels '())
            (commands '())
            (sequence (path output "sequence.txt"))
            (ogg (path output "ogg/comparison.ogg")))
+      (check (and requested-gain (<= -24 requested-gain 24))
+             "Monitoring gain must be a number within +/-24 dB")
       (check (and (starts-with? output "/") (not (file-exists? output)))
              "Use a fresh absolute external output directory")
       (ensure-directory output)
@@ -74,7 +78,7 @@
       (let* ((peak (apply max
                      (map (lambda (entry) (dict-ref (dict-ref entry levels:) true_peak_dbtp:))
                           levels)))
-             (gain (min -0.5 (- -2 peak))))
+             (gain (min requested-gain (- -2 peak))))
         (write-text sequence
           (str (string-join (map (lambda (stem) (str "file '" stem ".wav'")) stems) "\n") "\n"))
         (run
@@ -96,6 +100,7 @@
             (check (<= ending -70) "Final tail has not decayed")
             (write-json-file (path output "delivery-checks.json")
               (dict native: (list->array levels)
+                    requested_gain_db: requested-gain
                     common_gain_db: gain
                     after_starts_seconds: half
                     duration_seconds: (* 2 half)

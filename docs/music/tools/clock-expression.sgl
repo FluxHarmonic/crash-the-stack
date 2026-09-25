@@ -1,0 +1,377 @@
+#!/usr/bin/env sigil
+;;; Eight-bar controlled audition; maintained game and album sources stay intact.
+(import (sigil list) (sigil args))
+(load (path (script-dir) "lib/core.sgl"))
+(load (path (script-dir) "lib/album-arrangement.sgl"))
+(load (path (script-dir) "lib/song-source.sgl"))
+(import (crash soundtrack tools)
+        (crash soundtrack album arrangement)
+        (crash soundtrack songs))
+(initialize (path (script-dir) "../../.."))
+
+(define (write-frozen file text)
+  (if (file? file)
+      (check (equal? text (read-text file)) "Refusing to overwrite a differing layout" file)
+      (write-text file text)))
+
+(define (retune instrument settings)
+  (let ((patch (field instrument patch:)))
+    (each pair settings
+      (set! patch (set-field patch (car pair) (cadr pair))))
+    (set-field instrument patch: patch)))
+
+(define (patches parts)
+  (let* ((bank (cdr (child parts 'instruments)))
+         (lead (list-find (lambda (i) (= (field i id:) 10)) bank))
+         (anchor
+           (retune
+             (set-field (set-field lead id: 13) name: "signal-anchor")
+             '((index: 1.1) (cutoff: 1800) (decay: 0.36) (release: 0.1)))))
+    (replace-child parts 'instruments
+      (cons 'instruments
+        (append
+          (map
+            (lambda (instrument)
+              (case (field instrument id:)
+                ((2)
+                 ;; Keep the separate FM tick layer; shorten only the noise.
+                 (retune instrument
+                   '((decay: 0.024) (cutoff: 4200) (gain: 0.46))))
+                ((10)
+                 (retune instrument
+                   '((index: 1.35) (decay: 0.23) (release: 0.085))))
+                (else instrument)))
+            bank)
+          (list anchor))))))
+
+(define (develop p)
+  (if (not (= (field p id:) 9))
+      p
+      (let ((clean
+              (append (take p 5)
+                (filter
+                  (lambda (row) (pair? (cddr row)))
+                  (map
+                    (lambda (row)
+                      (append (take row 2)
+                        (filter
+                          (lambda (cell)
+                            (not (and (>= (cadr row) 64)
+                                      (member (car cell) '(6 7)))))
+                          (cddr row))))
+                    (skip p 5))))))
+        ;; The first two bars retain the hook. Three connected answers follow
+        ;; D-sharp minor, G-sharp minor and B, ending on D-sharp as a common tone.
+        ;; The anchor patch carries longer chord tones, without adding voices.
+        (add-notes clean
+          '((64 6 "D#4" 13 25 9)
+            (76 6 "F#4" 10 21 5)
+            (84 6 "A#4" 10 23 7)
+            (96 6 "G#4" 10 22 7)
+            (108 6 "F#4" 10 20 5)
+            (116 6 "F-4" 10 18 3)
+            (120 6 "D#4" 13 23 7)
+            (128 6 "G#3" 13 25 9)
+            (144 6 "B-3" 10 21 7)
+            (152 6 "D#4" 10 23 7)
+            (164 6 "C#4" 10 20 7)
+            (176 6 "B-3" 10 22 7)
+            (184 6 "G#3" 13 21 7)
+            (192 6 "F#4" 13 24 11)
+            (208 6 "D#4" 10 22 7)
+            (220 6 "C#4" 10 20 7)
+            (232 6 "A#3" 10 19 7)
+            (240 6 "F-4" 10 18 5)
+            (248 6 "D#4" 13 24 7)
+            (88 7 "D#5" 9 12 5)
+            (104 7 "D#5" 9 12 3)
+            (140 7 "D#4" 9 13 3)
+            (172 7 "D#4" 9 12 3)
+            (204 7 "B-4" 9 13 3)
+            (228 7 "F#4" 9 12 3))))))
+
+(define (with-anchor layout)
+  (replace-child layout 'arrangements
+    (cons 'arrangements
+      (map
+        (lambda (arrangement)
+          (replace-child arrangement 'bank
+            (append (child arrangement 'bank) '((27 13)))))
+        (cdr (child layout 'arrangements))))))
+
+(define (events p channels)
+  (filter
+    (lambda (row) (pair? (cddr row)))
+    (map
+      (lambda (row)
+        (append (take row 2)
+          (filter (lambda (cell) (member (car cell) channels))
+                  (cddr row))))
+      (skip p 5))))
+
+(define (consistent-lead candidate original)
+  (let ((lead (list-find (lambda (i) (= (field i id:) 10))
+                         (cdr (child original 'instruments)))))
+    (replace-child
+      (replace-child candidate 'instruments
+        (cons 'instruments
+          (map (lambda (i) (if (= (field i id:) 10) lead i))
+            (filter (lambda (i) (not (= (field i id:) 13)))
+                    (cdr (child candidate 'instruments))))))
+      'patterns
+      (cons 'patterns
+        (map
+          (lambda (p)
+            (append (take p 5)
+              (map
+                (lambda (row)
+                  (append (take row 2)
+                    (map
+                      (lambda (cell)
+                        (if (= (caddr cell) 13)
+                            (append (take cell 2) (list 10) (skip cell 3))
+                            cell))
+                      (cddr row))))
+                (skip p 5))))
+          (cdr (child candidate 'patterns)))))))
+
+(define (without-late-lead row)
+  (if (< (cadr row) 128)
+      row
+      (append (take row 2)
+        (filter (lambda (cell) (not (= (car cell) 6)))
+                (cddr row)))))
+
+(define (continue-phrase p)
+  (if (not (= (field p id:) 9))
+      p
+      (add-notes
+        (append (take p 5)
+          (filter (lambda (row) (pair? (cddr row)))
+            (map without-late-lead (skip p 5))))
+        '((128 6 "G#4" 10 24 7)
+          (136 6 "D#4" 10 21 7)
+          (144 6 "F#4" 10 22 7)
+          (152 6 "G#4" 10 24 7)
+          (164 6 "F#4" 10 21 7)
+          (172 6 "D#4" 10 20 7)
+          (180 6 "C#4" 10 21 7)
+          (188 6 "D#4" 10 22 3)
+          (192 6 "F#4" 10 24 7)
+          (200 6 "D#4" 10 22 7)
+          (208 6 "F#4" 10 21 7)
+          (216 6 "A#4" 10 23 7)
+          (228 6 "F#4" 10 21 7)
+          (236 6 "F-4" 10 19 7)
+          (244 6 "D#4" 10 24 11)))))
+
+(define (finish-bell p)
+  (if (not (= (field p id:) 9))
+      p
+      (let ((clean
+              (append (take p 5)
+                (filter
+                  (lambda (row) (pair? (cddr row)))
+                  (map
+                    (lambda (row)
+                      (append (take row 2)
+                        (filter
+                          (lambda (cell)
+                            (not (and (>= (cadr row) 64)
+                                      (= (car cell) 7))))
+                          (cddr row))))
+                    (skip p 5))))))
+        ;; Retain the fifth-to-root identity through each chord change.
+        ;; The last answer descends through the third before reaching B.
+        (add-notes clean
+          '((72 7 "A#4" 9 16 5)
+            (88 7 "D#4" 9 14 7)
+            (104 7 "A#4" 9 15 5)
+            (120 7 "D#4" 9 14 7)
+            (136 7 "D#5" 9 16 5)
+            (152 7 "G#4" 9 14 7)
+            (168 7 "D#5" 9 15 5)
+            (184 7 "G#4" 9 14 7)
+            (200 7 "F#5" 9 16 5)
+            (216 7 "B-4" 9 14 7)
+            (232 7 "F#5" 9 15 3)
+            (240 7 "D#5" 9 13 3)
+            (248 7 "B-4" 9 15 7))))))
+
+(define (restore-bell p original)
+  (let ((clean
+          (append (take p 5)
+            (events p '(1 2 3 4 5 6 8)))))
+    ;; Copy every original bell cell, including exact gates and dynamics.
+    (fold-left
+      (lambda (result row)
+        (fold-left
+          (lambda (score cell)
+            (put-cell score (cadr row) cell))
+          result
+          (cddr row)))
+      clean
+      (events original '(7)))))
+
+(define (balance-melody score accent-pitch)
+  (let* ((bank
+           (map
+             (lambda (instrument)
+               ;; Instrument gain scales explicit note volumes as well.
+               (case (field instrument id:)
+                 ((8 10) (append instrument '(gain: 1.2589254117941673)))
+                 ((9) (append instrument '(gain: 0.8413951416451951)))
+                 (else instrument)))
+             (cdr (child score 'instruments))))
+         (phrases
+           (map
+             (lambda (p)
+               (if (= (field p id:) 9)
+                   ;; Row 216: select the accent against the original bell B4.
+                   ;; Retain the note's onset, dynamics and existing gate.
+                   (put-cell p 216 (list 6 accent-pitch 10 23 "000"))
+                   p))
+             (cdr (child score 'patterns)))))
+    (replace-child
+      (replace-child score 'instruments (cons 'instruments bank))
+      'patterns
+      (cons 'patterns phrases))))
+
+(cli "clock-expression" (script-args)
+  (list (option name: 'consistent-tone long: "consistent-tone")
+        (option name: 'phrases-only long: "phrases-only")
+        (option name: 'connected-answer long: "connected-answer")
+        (option name: 'purposeful-bell long: "purposeful-bell")
+        (option name: 'original-bell long: "original-bell")
+        (option name: 'balanced-lead long: "balanced-lead")
+        (option name: 'unison-accent long: "unison-accent"))
+  (lambda (options)
+    (let* ((motif (require-tool (option-ref options 'motif)))
+           (output (option-ref options 'output))
+           (unison? (option-ref options 'unison-accent))
+           (balanced? (or unison? (option-ref options 'balanced-lead)))
+           (original-bell? (or balanced?
+                               (option-ref options 'original-bell)))
+           (bell? (and (not original-bell?)
+                       (option-ref options 'purposeful-bell)))
+           (connected? (or original-bell? bell?
+                           (option-ref options 'connected-answer)))
+           (phrases-only? (or connected? (option-ref options 'phrases-only)))
+           (consistent? (or phrases-only? (option-ref options 'consistent-tone)))
+           (audition (cond (unison? "Expression VIII")
+                           (balanced? "Expression VII")
+                           (original-bell? "Expression VI")
+                           (bell? "Expression V")
+                           (connected? "Expression IV")
+                           (phrases-only? "Expression III")
+                           (consistent? "Expression II")
+                           (else "Expression I")))
+           (frozen (path (root) "docs/music/alternates/clock-expression-i"))
+           (frozen? (file? (path frozen "parts-before.cts")))
+           (source (if frozen? frozen
+                       (path (root) "docs/music/songs/clock-edge")))
+           (parts (read-score (path source (if frozen? "parts-before.cts" "parts.cts"))))
+           (layout (read-score (path source "arrangements.sgl")))
+           (new-layout (if consistent? layout (with-anchor layout)))
+           (candidate
+             (patches
+               (replace-child parts 'patterns
+                 (cons 'patterns (map develop (cdr (child parts 'patterns)))))))
+           (candidate (if consistent? (consistent-lead candidate parts) candidate))
+           (candidate
+             (if phrases-only?
+                 (replace-child candidate 'instruments (child parts 'instruments))
+                 candidate))
+           (candidate
+             (if connected?
+                 (replace-child candidate 'patterns
+                   (cons 'patterns
+                     (map continue-phrase (cdr (child candidate 'patterns)))))
+                 candidate))
+           (before
+             (if bell?
+                 (read-score
+                   (path (root)
+                         "docs/music/alternates/clock-expression-iv/parts-after.cts"))
+                 parts))
+           (candidate
+             (if bell?
+                 (replace-child candidate 'patterns
+                   (cons 'patterns
+                     (map finish-bell (cdr (child candidate 'patterns)))))
+                 candidate))
+           (candidate
+             (if original-bell?
+                 (replace-child candidate 'patterns
+                   (cons 'patterns
+                     (map
+                       (lambda (p)
+                         (restore-bell p (pattern parts (field p id:))))
+                       (cdr (child candidate 'patterns)))))
+                 candidate))
+           (candidate
+             (if balanced?
+                 (balance-melody candidate (if unison? "B-4" "D#5"))
+                 candidate)))
+      (ensure-directory output)
+      (unless frozen?
+        (apply-song-plans (list (song-plan "clock-edge" motif)) "check" #f))
+      (each p (cdr (child parts 'patterns))
+        (let ((new (pattern candidate (field p id:))))
+          (check (equal? (take p 5) (take new 5)) "Pattern clock changed")
+          (check (equal? (events p '(1 2 3 4 5 8))
+                         (events new '(1 2 3 4 5 8)))
+                 "Backing performance changed")
+          (unless (= (field p id:) 9)
+            (check (equal? p new) "Unselected phrase changed"))))
+      (each key '(bus order history)
+        (check (equal? (child parts key) (child candidate key))
+               "Protected section changed" key))
+      (each spec (list (list "before" before) (list "after" candidate))
+        (write-canonical motif (path output (str "parts-" (car spec) ".cts"))
+                         (cadr spec)))
+      (write-frozen (path output "arrangements.sgl") (score-text layout))
+      (write-frozen (path output "arrangements-after.sgl") (score-text new-layout))
+      (each variant '("before" "after")
+        (let* ((after? (equal? variant "after"))
+               (pool (if after? candidate before))
+               (forms (child (if after? new-layout layout) 'arrangements))
+               (album (build-song-score pool (if after? new-layout layout)
+                                       (child forms 'album))))
+          (each form '(album game)
+            (write-canonical motif
+              (path output (str "clock-edge-" form "-" variant ".cts"))
+              (build-song-score pool (if after? new-layout layout)
+                                (child forms form))))
+          (write-album motif output (str "focused-" variant) "Clock Edge"
+            album
+            (list (list "Later tense answer / album 2:30" (pattern album 11))
+                  (list "Two-bar release" (phrase-rows 64 '())))
+            '("parts-before.cts" "parts-after.cts" "arrangements.sgl" "arrangements-after.sgl")
+            (cond
+              (unison? "Expression VIII: approved lead/bell gains; row 216 lead B4 doubles the original bell accent.")
+              (balanced? "Expression VII: original bell, lead up 2 dB, bell down 1.5 dB, and row 216 lead resolves the A-sharp/B clash to D-sharp5.")
+              (original-bell? "Expression VI: Expression IV lead with the exact pre-audition bell performance restored.")
+              (bell? "Expression V: IV lead retained; restore the bell fifth-to-root answers and finish with a descending triad.")
+              (connected? "Expression IV: keep the answer in the lead register and complete its cadence; original patches.")
+              (phrases-only? "Expression III: original patches and clap; compare the developed phrase only.")
+              (consistent? "Expression II: keep the original focused lead throughout; retain phrase development and shorter clap noise.")
+              (else "Expression I: original then developed phrase, FM anchors and shorter clap noise."))
+            "Backing notes, original opening hook, bass, kit timing, room and stereo balance retained."
+            "2026-09-23")))
+      (write-json-file (path output "comparison.json")
+        (dict title: "Clock Edge" audition: audition
+              album_start_seconds: 150
+              half_duration_seconds: 18.75
+              before_start_seconds: 0 after_start_seconds: 18.75
+              shared_phrase_id: 9
+              before_label: (if bell? "Expression IV" "Original")
+              after_label: audition
+              changed_channels: (cond (original-bell? '(6))
+                                      (bell? '(7))
+                                      (else '(6 7)))
+              patch_ids: (cond (balanced? '(8 9 10)) (phrases-only? '()) (consistent? '(2)) (else '(2 10 13)))
+              backing_events_preserved: #t
+              bus_preserved: #t
+              maintained_sources_unchanged: #t))
+      (display "Clock Edge short comparison and shared candidates ready.\n"))))
