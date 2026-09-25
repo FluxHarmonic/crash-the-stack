@@ -448,6 +448,19 @@
       if (params.has("music-budget")) app.dispatch("music-budget", params.get("music-budget"));   // the ladder forced (the arm)
       if (params.has("trace-at")) app.dispatch("trace-at", params.get("trace-at"));   // the trace lands at N s: the fill's run-up (the arm)
       if (params.has("tune")) app.dispatch("tune", params.get("tune"));   // every deal picks this tune (David's ear)
+      // ?update=waiting|prompt: pretend the worker has a version staged, so
+      // the mark and the prompt panel can be SEEN and armed. No arm could
+      // reach either before this: both hang off two successive deploys of one
+      // origin, which a test host cannot stage.
+      //
+      // It goes through the REAL path on purpose. fetchVersionInfo runs, so
+      // what is drawn comes from an actual /version.json over an actual fetch,
+      // and a file the game cannot parse fails here exactly as it would in
+      // production. A door that injected a version and a summary directly
+      // would draw the same pixels and prove nothing about the fetch.
+      if (params.has("update") && globalThis.__crashUpdates && globalThis.__crashUpdates.showVersion) {
+        globalThis.__crashUpdates.showVersion(app, params.get("update") === "prompt" ? "prompt" : "waiting");
+      }
       app.dispatch("device", (navigator.hardwareConcurrency || 0) + "," + (navigator.deviceMemory || 0));
       if (params.has("code")) app.dispatch("code", params.get("code"));   // P4: a share code's board at boot
       if (params.has("skip")) app.dispatch("skip", params.get("skip"));   // the soak's bisection door: parts of the tick left out
@@ -1007,8 +1020,12 @@
     // bare UPDATE mark, which is what it did before any of this existed.
     // Nothing here may delay or block the update itself.
     var versionInfo = null;
-    function fetchVersionInfo(then) {
-      if (!/\/jack-in\/$/.test(location.pathname)) { then(); return; }
+    function fetchVersionInfo(then, force) {
+      // Normally only beside the game on the real site: a dev host has no
+      // site and the fetch would 404 every boot for nothing. `force` is the
+      // ?update= door, which needs the fetch to actually happen on a test
+      // host; its failure is handled the same way as any other.
+      if (!force && !/\/jack-in\/$/.test(location.pathname)) { then(); return; }
       fetch("../version.json", { cache: "no-store" }).then(function (r) {
         return r.ok ? r.json() : null;
       }).then(function (v) {
@@ -1033,6 +1050,15 @@
     }
     var updates = globalThis.__crashUpdates;
     updates.ready = function (a) { app = a; gameReady = true; tell(); };
+    // the ?update= door lives in the boot script's own scope, which is not
+    // this one; it reaches the real fetch through the shared object rather
+    // than growing a second copy that could drift from this one
+    updates.showVersion = function (app, want) {
+      fetchVersionInfo(function () {
+        if (versionInfo) app.dispatch("update-info", versionInfo.version + "\t" + versionInfo.summary);
+        app.dispatch("update", want);
+      }, true);
+    };
     if (updates.app) updates.ready(updates.app);
     function waiting(reg) {
       status.reg = reg;
