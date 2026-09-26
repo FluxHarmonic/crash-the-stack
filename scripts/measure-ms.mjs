@@ -47,15 +47,28 @@ const VW = 640, VH = 400;
 // it matched NO line: every run reported "only 0 windows", a silent
 // SETUP failure read as a measurement (t-665cde). So the regex is checked
 // against a line in today's format before anything runs, and a mismatch
-// is SETUP-FAILED, never zero windows. SAMPLE is a real line, from the
-// 5b400c8 web build's ?ms readout; a change to the line in
-// src/crash/shell/web.sgl (say "frame-ms" ...) must change SAMPLE with it.
+// is SETUP-FAILED, never zero windows. SAMPLE is a line in today's format
+// (numbers made up), and the check after it holds its field names to the
+// game's own (say "frame-ms" ...) in src/crash/shell/web.sgl, in order.
 // --self-test runs only that check.
 const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (-?\d+))?(?: gcms ([\d.]+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?(?: tick ([\d.]+) pump ([\d.]+)(?: resize [\d.]+)? other ([\d.]+))?(?: boot ([\d.]+) count ([\d.]+))?(?: underruns (\d+))?$/;
 const SAMPLE = "crash: frame-ms 17 33 step 0.4 present 1.2 gc 3 0 alloc 123456 gcms 0.8 sim 2.1 draw 6.3 flush 0.2 tick 9.8 pump 0.3 resize 0.1 other 0.4 boot 0 count 0.1 underruns 0";
 {
   const m = SAMPLE.match(RE);
   if (!m || m[12] !== "9.8" || m[14] !== "0.4" || m[17] !== "0") { console.log(`SETUP-FAILED: the frame-ms regex does not read today's line (${m ? "groups moved" : "no match"}): ${SAMPLE}`); process.exit(2); }
+  // and SAMPLE is today's format, read from the game's own source: the
+  // field names of its (say "frame-ms" ...) in order, so a field the game
+  // gains or renames reddens this check instead of silently matching nothing
+  const SRC = "src/crash/shell/web.sgl";
+  if (fs.existsSync(SRC)) {
+    const src = fs.readFileSync(SRC, "utf8");
+    const at = src.indexOf('(say "frame-ms"');
+    const end = at < 0 ? -1 : src.indexOf('"underruns"', at);
+    const game = at < 0 || end < 0 ? null : src.slice(at, end + 11).match(/"([a-z-]+)"/g).map((w) => w.slice(1, -1));
+    const sample = SAMPLE.replace(/^crash: /, "").split(" ").filter((w) => /^[a-z-]+$/.test(w));
+    if (!game) { console.log(`SETUP-FAILED: no (say "frame-ms" ... "underruns") in ${SRC} to check SAMPLE against`); process.exit(2); }
+    if (game.join(" ") !== sample.join(" ")) { console.log(`SETUP-FAILED: the game's frame-ms line has the fields ${game.join(" ")}; SAMPLE (and the regex) have ${sample.join(" ")}`); process.exit(2); }
+  }
   if (flag("--self-test")) { console.log("measure-ms self-test: the frame-ms regex reads today's line (tick 9.8, other 0.4, underruns 0)"); process.exit(0); }
 }
 const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;charset=utf-8",

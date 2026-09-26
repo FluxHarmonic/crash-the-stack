@@ -162,6 +162,31 @@
            (lost (key-act t ice 'return 16)))
       (assert-false (= 11 (scan-table-retry-seed lost (lambda () 11)))))))
 
+(test-group "scan table: the pause lets go of every press"
+  ;; the 0.1.3 review, probed: the MENU click's down reached the session in
+  ;; the frame that asked for the overlay, its release landed while the
+  ;; overlay was up and never arrived, and every right-click after that was a
+  ;; chord (a sweep), never a flag
+  (test "after a menu request with a button down, a right-click still flags"
+    (let* ((t (key-act (lan 7) UPLINK 'return 16))
+           (seg (scan-table-segment t))
+           (hidden (let loop ((i 0)) (if (eq? (segment-state seg i) 'hidden) i (loop (+ i 1)))))
+           (paused (step t (frame (list 'escape) (list (list 'down 16 390 'left)) 16)))
+           (c (center paused hidden))
+           (after (step paused (frame '() (list (list 'down (car c) (cdr c) 'right) (list 'up (car c) (cdr c) 'right)) 16))))
+      (assert-true (and (memq 'menu (scan-table-requests paused)) #t))
+      (assert-equal 'flagged (segment-state (scan-table-segment after) hidden))))
+  (test "a right-button release on a panel row picks nothing"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (t (step (key-act t ice 'return 16) (frame '() '() PANEL-WAIT-MS)))
+           (r (scan-table-panel-rect t 0))
+           (x (+ (car r) 10))
+           (y (+ (cadr r) 10))
+           (picked (step t (frame '() (list (list 'down x y 'right) (list 'up x y 'right)) 16))))
+      (assert-equal '() (scan-table-requests picked)))))
+
 (test-group "scan table: refusals"
   (test "a tap on a flagged host in SCAN mode shakes it and says so"
     (let* ((s (scan-session-new 'lan 7 'original #f #t))
