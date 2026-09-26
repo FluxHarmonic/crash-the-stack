@@ -41,6 +41,9 @@
 //   preview        every page a link points at carries og:image (the gameplay
 //                  shot, 1200x630) and twitter:card summary_large_image; the
 //                  soundtrack page links /news/, not /devlog/
+//   devlog         the staged _redirects sends /devlog/, its old post paths and
+//                  its feeds to /news/ (301); /news/ is headed News
+//   crosslink      every page's footer links Harkfell beside Flux Harmonic
 //   version-missing the game's version fetch takes its missing branch for a 404
 //                  AND for 200 with HTML (t-5bb869)
 //   console        no error and no sokol refusal over the run
@@ -603,6 +606,53 @@ else {
   if (stale.length) detail.push(`the soundtrack page still links ${stale.join(" ")}`);
   if (detail.length) fail("preview", detail.join("; "));
   else pass("preview", `the landing, /about/, /news/ and /jack-in/ carry og:image ${OG} and summary_large_image; the shot is 1200x630; the soundtrack page links /news/`);
+}
+
+// ---- devlog (2026-09-26) ---------------------------------------------------------
+// The retired devlog's paths all 301 to /news/, and its feeds to the news
+// feeds, by the staged _redirects as Cloudflare Pages reads it: the first
+// rule whose source matches wins, a trailing * matches any rest of the path.
+// This arm's server does not apply _redirects, so the leg resolves the file
+// itself. Before these rules the live /devlog/ answered 200 with the old
+// listing from the edge's cache. /news/ itself must not redirect (the
+// control), and the tree must hold no devlog/ output for a rule to shadow.
+{
+  const detail = [], seen = [];
+  const rules = text("_redirects").split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map((l) => l.split(/\s+/));
+  const resolve = (p) => {
+    for (const [from, to, code] of rules) {
+      if (from.endsWith("*") ? p.startsWith(from.slice(0, -1)) : p === from) return `${code || "302"} ${to}`;
+    }
+    return "none";
+  };
+  const want = [
+    ["/devlog", "301 /news/"], ["/devlog/", "301 /news/"],
+    ["/devlog/early-and-in-the-open/", "301 /news/"], ["/devlog/the-trace-has-phases/", "301 /news/"],
+    ["/devlog/the-classics-are-sacred/", "301 /news/"], ["/devlog/three-tries/", "301 /news/"],
+    ["/devlog/feed.json", "301 /news/feed.json"], ["/devlog/feed.xml", "301 /news/feed.xml"],
+    ["/news/", "none"],
+  ];
+  for (const [p, w] of want) { const got = resolve(p); if (got !== w) detail.push(`${p} resolves to ${got}, not ${w}`); else seen.push(`${p} ${got}`); }
+  if (fs.existsSync(path.join(STAGED, "devlog"))) detail.push("the tree has a devlog/ directory");
+  const news = text("news/index.html");
+  if (!/<h1>News<\/h1>/.test(news)) detail.push(`/news/ is headed ${(/<h1>([^<]*)<\/h1>/.exec(news) || [])[1] || "nothing"}, not News`);
+  if (detail.length) fail("devlog", detail.join("; "));
+  else pass("devlog", `${seen.length} paths by _redirects: ${seen.join(", ")}; no devlog/ in the tree; /news/ headed News`);
+}
+
+// ---- crosslink (2026-09-26) ------------------------------------------------------
+// Every page's footer links the other Flux Harmonic game, beside the studio link.
+{
+  const detail = [];
+  const pages = ["index.html", "about/index.html", "news/index.html", "docs/tracker/index.html", "soundtrack/index.html", "404.html"];
+  for (const p of pages) {
+    const foot = (/<footer class="foot">([\s\S]*?)<\/footer>/.exec(text(p)) || [])[1];
+    if (!foot) { detail.push(`${p}: no footer`); continue; }
+    if (!/<p>Also from Flux Harmonic: <a href="https:\/\/harkfell\.com\/">Harkfell<\/a><\/p>/.test(foot)) detail.push(`${p}: the footer does not link Harkfell`);
+    if (!/href="https:\/\/fluxharmonic\.com"/.test(foot)) detail.push(`${p}: the footer lost the Flux Harmonic link`);
+  }
+  if (detail.length) fail("crosslink", detail.join("; "));
+  else pass("crosslink", `${pages.length} pages' footers link Harkfell beside Flux Harmonic (${pages.join(" ")})`);
 }
 
 // ---- version-missing (0.1.3, t-5bb869) -------------------------------------------
