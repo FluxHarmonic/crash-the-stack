@@ -42,6 +42,22 @@ const PHONE = flag("--phone");
 const TAP = flag("--tap");
 const TAP_MS = 400;
 const VW = 640, VH = 400;
+// The game's frame line, every optional part in order. "resize" (between
+// pump and other) came later than this tool, and a regex with no slot for
+// it matched NO line: every run reported "only 0 windows", a silent
+// SETUP failure read as a measurement (t-665cde). So the regex is checked
+// against a line in today's format before anything runs, and a mismatch
+// is SETUP-FAILED, never zero windows. SAMPLE is a real line, from the
+// 5b400c8 web build's ?ms readout; a change to the line in
+// src/crash/shell/web.sgl (say "frame-ms" ...) must change SAMPLE with it.
+// --self-test runs only that check.
+const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (-?\d+))?(?: gcms ([\d.]+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?(?: tick ([\d.]+) pump ([\d.]+)(?: resize [\d.]+)? other ([\d.]+))?(?: boot ([\d.]+) count ([\d.]+))?(?: underruns (\d+))?$/;
+const SAMPLE = "crash: frame-ms 17 33 step 0.4 present 1.2 gc 3 0 alloc 123456 gcms 0.8 sim 2.1 draw 6.3 flush 0.2 tick 9.8 pump 0.3 resize 0.1 other 0.4 boot 0 count 0.1 underruns 0";
+{
+  const m = SAMPLE.match(RE);
+  if (!m || m[12] !== "9.8" || m[14] !== "0.4" || m[17] !== "0") { console.log(`SETUP-FAILED: the frame-ms regex does not read today's line (${m ? "groups moved" : "no match"}): ${SAMPLE}`); process.exit(2); }
+  if (flag("--self-test")) { console.log("measure-ms self-test: the frame-ms regex reads today's line (tick 9.8, other 0.4, underruns 0)"); process.exit(0); }
+}
 const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;charset=utf-8",
   ".wasm": "application/wasm", ".json": "application/json;charset=utf-8",
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
@@ -124,7 +140,6 @@ async function evalJS(expr) {
   return r.result.value;
 }
 
-const RE = /^crash: frame-ms (\d+) (\d+) step ([\d.]+) present ([\d.]+)(?: gc (\d+) (\d+) alloc (-?\d+))?(?: gcms ([\d.]+))?(?: sim ([\d.]+) draw ([\d.]+) flush ([\d.]+))?(?: tick ([\d.]+) pump ([\d.]+) other ([\d.]+))?(?: boot ([\d.]+) count ([\d.]+))?(?: underruns (\d+))?$/;
 const WORST = /^crash: worst-frame (\d+) sim ([\d.]+) draw ([\d.]+) flush ([\d.]+) step ([\d.]+) advance ([\d.]+) save ([\d.]+) cues ([\d.]+) fx ([\d.]+)$/;
 async function waitLine(re, from, ms) {
   const t0 = Date.now();

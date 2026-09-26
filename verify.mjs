@@ -2013,7 +2013,11 @@ async function dealFrom(free, table, row = "new-board") {
         m0 = consoleLines.length;
         await press("ArrowDown"); await press("Enter");
         const scoring = await waitLine(/^crash: setting scoring (\w+)$/, m0, 2000);
-        const said = await menuOn("pause-game", m0);
+        // the reprint AFTER the scoring step (t-308dea): the Right and ArrowDown
+        // reprints (scoring=BOUNTY) can land after m0 on a slow frame, and a
+        // search from m0 then read the wrong one; every one of them precedes
+        // the "setting scoring" line, and the Enter reprint follows it
+        const said = scoring ? await menuOn("pause-game", scoring.index + 1) : null;
         if (!draw || draw.m[1] !== "3") detail = `Right on PULL said ${draw ? draw.m[0] : "nothing"}`;
         else if (!scoring || scoring.m[1] !== "standard") detail = `Enter on SCORING said ${scoring ? scoring.m[0] : "nothing"}`;
         else if (!said || said.rows.draw.value !== "3" || said.rows.scoring.value !== "AUDIT") detail = `the screen re-said ${said ? `draw=${said.rows.draw.value} scoring=${said.rows.scoring.value}` : "nothing"} after the steps`;

@@ -33,5 +33,10 @@
    "libxrender"
    "pulseaudio"
 
+   ;; the art scripts (scripts/art/*: the tile sheet, the logo, the card strip,
+   ;; which test-hub and test-title regenerate): ImageMagick's convert. David's
+   ;; box had it from the guix home profile, the azoth runners did not (t-b7ac83)
+   "imagemagick"
+
    ;; Web build
    "binaryen"))     ; wasm-opt
