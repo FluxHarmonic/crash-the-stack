@@ -1840,7 +1840,9 @@ async function dealFrom(free, table, row = "new-board") {
         if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
         if (s2.order.join(" ") !== want[sc]) { detail = `the ${sc} screen's rows are ${s2.order.join(" ")}, not ${want[sc]}`; break; }
         if (sc.startsWith("free-") && Math.abs(rowsFrom(s2) - rowsWant(s2)) > 1) { detail = `the ${sc} screen's first row starts at ${rowsFrom(s2)}, not ${rowsWant(s2)}`; break; }
-        if (sc.startsWith("free-") && s2.rows.version.value !== "HACKER") { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
+        // a game's value row: VERSION (HACKER by default) on STACK and DEFRAG, SIZE (LAN by default) on SCAN (0.1.3, CLASSIC only)
+        if (sc === "free-scan" && (!s2.rows.size || s2.rows.size.value !== "LAN")) { detail = `the ${sc} screen's SIZE reads ${rowsOf(s2)}, not LAN`; break; }
+        if (sc.startsWith("free-") && sc !== "free-scan" && (!s2.rows.version || s2.rows.version.value !== "HACKER")) { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
         if (sc === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
         if (sc === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
         seen.push(`${sc} (keys)`);

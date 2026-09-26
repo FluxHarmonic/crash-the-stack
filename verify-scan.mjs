@@ -493,9 +493,16 @@ else if (PHONE) {
   if (!bb) detail = "no open line for ?scan=backbone";
   else {
     const m0 = bb.index;
-    // a real gesture off the board (the bar's middle) resumes the context
-    await act(320, 392);
-    const resumed = await waitLine(/^crash: audio resumed$/, m0, 5000);
+    // a real gesture off the board (the bar's middle) resumes the context,
+    // once the game has opened it: a gesture before "crash: audio open" is
+    // ignored by design, and the board opens before the boot's audio step
+    // (the phone run's first try tapped 1.2 s in, too early)
+    await waitLine(/^crash: boot done /, m0, 30000);
+    let resumed = null;
+    for (let i = 0; i < 3 && !resumed; i++) {
+      await act(320, 392);
+      resumed = await waitLine(/^crash: audio resumed$/, m0, 3000);
+    }
     const music = await waitLine(/^crash: music open /, m0, 20000);
     if (!resumed) detail = "the audio context never resumed (no \"crash: audio resumed\" after a gesture): nothing to starve";
     else if (!music) detail = "no \"crash: music open\": the music is not playing, so an underrun could not be seen";
