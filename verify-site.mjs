@@ -468,6 +468,14 @@ else {
   root = STAGED;
   tombstoneWindow[1] = consoleErrors.length;
   if (detail.length) fail(name, detail.join("; "));
+  // The legs after this one test the NEW site, so they must not inherit this
+  // leg's worker. A red tombstone leaves the old root worker controlling the
+  // whole origin, and it answers every later navigation (/jack-in/ included)
+  // with its cached old game page: the 0.1.3 gate saw version-missing and
+  // console go red that way, downstream of this leg's own red. Clear it, as
+  // the leg does before it starts.
+  await navigate("about:blank");
+  await send("Storage.clearDataForOrigin", { origin, storageTypes: "service_workers,cache_storage" });
 }
 
 // ---- soundtrack -------------------------------------------------------------
