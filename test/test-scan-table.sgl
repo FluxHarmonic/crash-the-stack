@@ -115,7 +115,7 @@
       (assert-true (scan-table-lost? t))
       (assert-true (and (memq 'lost (scan-table-requests t)) #t))
       (assert-true (and (memq 'severed (scan-table-cues t)) #t))
-      (assert-equal '(retry new quit) (scan-table-panel-rows t))))
+      (assert-equal '(retry quit) (scan-table-panel-rows t))))
   (test "the panel waits PANEL-WAIT-MS, then Return picks the highlighted row"
     (let* ((t (key-act (lan 11) UPLINK 'return 16))
            (seg (cdr (line-of 11 UPLINK)))
@@ -126,24 +126,41 @@
            (down (step ready (frame (list 'down) '() 16)))
            (picked (step down (frame (list 'return) '() 16))))
       (assert-equal '() (scan-table-requests early))
-      (assert-equal '(new) (scan-table-requests picked))))
+      (assert-equal '(quit) (scan-table-requests picked))))
   (test "a tap on a panel row picks it"
     (let* ((t (key-act (lan 11) UPLINK 'return 16))
            (seg (cdr (line-of 11 UPLINK)))
            (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
            (t (step (key-act t ice 'return 16) (frame '() '() PANEL-WAIT-MS)))
-           (r (scan-table-panel-rect t 2))
+           (r (scan-table-panel-rect t 1))
            (x (+ (car r) 10))
            (y (+ (cadr r) 10))
            (picked (step t (frame '() (list (list 'down x y 'left) (list 'up x y 'left)) 16))))
       (assert-equal '(quit) (scan-table-requests picked))))
-  (test "RETRY LINK deals the same segment from the same uplink"
+  ;; David, 2026-09-26: RETRY LINK re-dealt the SAME board, whose ICE the
+  ;; loss had just shown, so the retry was trivial. Now it deals from a
+  ;; fresh seed: never the lost board's, and a different segment.
+  (test "RETRY LINK's seed is never the lost board's, and its board differs"
     (let* ((t (key-act (lan 11) UPLINK 'return 16))
-           (seg (scan-table-segment t))
-           (again (dealt (scan-table-retry t (scan-session-new 'lan 11 'original #f #f)))))
-      (assert-equal (segment-ice seg) (segment-ice (scan-table-segment again)))
-      (assert-true (segment-scanned? (scan-table-segment again) UPLINK))
-      (assert-equal 0 (scan-table-ms again)))))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (lost (key-act t ice 'return 16))
+           ;; a seed source that answers the lost seed first, then 12
+           (answers (list 11 11 12))
+           (next (lambda () (let ((s (car answers))) (set! answers (cdr answers)) s)))
+           (seed (scan-table-retry-seed lost next))
+           (again (key-act (scan-table-new (scan-session-new 'lan seed 'original #f #f) #f) UPLINK 'return 16)))
+      (assert-true (scan-table-lost? lost))
+      (assert-equal 12 seed)
+      (assert-false (equal? (segment-ice (scan-table-segment lost)) (segment-ice (scan-table-segment again))))
+      (assert-false (scan-table-over again))
+      (assert-equal 0 (scan-table-ms again))))
+  (test "a seed source stuck on the lost seed still gives another seed"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (lost (key-act t ice 'return 16)))
+      (assert-false (= 11 (scan-table-retry-seed lost (lambda () 11)))))))
 
 (test-group "scan table: refusals"
   (test "a tap on a flagged host in SCAN mode shakes it and says so"

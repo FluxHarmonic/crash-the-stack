@@ -5,7 +5,7 @@
 ;;; module is the rest of a table both shells share, so each shell's hook
 ;;; stays small: the clock (it starts at the uplink and stops at the end,
 ;;; as Windows' did), the end of a board (SEGMENT MAPPED, or ICE TRIPPED on
-;;; CLASSIC) and its panel (RETRY LINK, NEW SEGMENT, JACK OUT), the scan's
+;;; CLASSIC) and its panel (RETRY LINK or NEW SEGMENT, and JACK OUT), the scan's
 ;;; ripple (each newly scanned host shows a ring at a time, from the host
 ;;; the action was on), a refusal's shake, the moves, the cues and the
 ;;; requests the shell acts on, and the datum CONTINUE stores.
@@ -15,8 +15,9 @@
 ;;;   (scan-table-deal! t more?)      the deal's slice, while dealing (D81)
 ;;; and reads scan-table-cues / scan-table-requests after it. Requests:
 ;;;   menu      the pause overlay (Escape, or the panel's JACK OUT is `quit`)
-;;;   new       a new segment (ctrl+n, or the panel's NEW SEGMENT)
-;;;   retry     the same segment again (the panel's RETRY LINK)
+;;;   new       a new segment (ctrl+n, or the panel's NEW SEGMENT after a win)
+;;;   retry     a FRESH segment of the same size after a loss (RETRY LINK):
+;;;             never the lost board, whose ICE the loss has just shown
 ;;;   quit      back to the menu (the panel's JACK OUT)
 ;;;   won lost  the board ended this frame (the shell records the score)
 ;;;   buzz      the page's vibrate (a long press flagged)
@@ -36,7 +37,7 @@
           scan-table-session scan-table-ms scan-table-over scan-table-over-ms
           scan-table-moves scan-table-daily scan-table-cues scan-table-requests
           scan-table-panel scan-table-shake scan-table-toast scan-table-toast-ms
-          scan-table-new scan-table-retry
+          scan-table-new scan-table-retry-seed
           scan-table-step scan-table-deal! scan-table-dealing?
           scan-table-segment scan-table-seconds scan-table-ticks scan-table-counter
           scan-table-revealed? scan-table-reveal-age
@@ -50,8 +51,9 @@
     (define TOAST-MS 1600)
     (define TABLE-SAVE-VERSION 1)
 
-    ;; The end panel's rows: RETRY LINK only after a trip (CLASSIC's lost
-    ;; board); a mapped segment offers the next one or the menu.
+    ;; The end panel's rows. After a trip (CLASSIC's lost board) RETRY LINK
+    ;; deals a fresh segment of the same size; a mapped segment offers the
+    ;; next one (NEW SEGMENT). JACK OUT goes to the menu either way.
     (define PANEL-ROWS
       (list (list 'retry "RETRY LINK")
             (list 'new "NEW SEGMENT")
@@ -77,19 +79,22 @@
     (define (scan-table-new session daily)
       (scan-table session: session daily: daily))
 
-    ;; The same segment again: a fresh session of the same seed and preset
-    ;; with the uplink picked at the same host, so the deal (a function of
-    ;; the seed and the uplink) is the same board. The shell slices the
-    ;; deal as for a first click.
-    (define (scan-table-retry t fresh)
-      (let* ((old (scan-table-session t))
-             (first (scan-session-first old))
-             (s (if first
-                    (scan-step (scan-session fresh cursor: first)
-                               (make-scan-frame (list 'return) '() '() 0))
-                    fresh)))
-        (scan-table session: (scan-session s requests: '() news: '())
-                    daily: (scan-table-daily t))))
+    ;; RETRY LINK's seed (David, 2026-09-26: re-dealing the SAME board after
+    ;; a loss was trivial, since the loss shows every ICE). next-seed is the
+    ;; shell's FREE PLAY seed source, a thunk; it is asked again until it
+    ;; answers a seed other than the lost board's (at most TRIES times, a
+    ;; bound for a source that keeps repeating), so the retry is a different
+    ;; deal. A daily lost is retried the same way: its day is spent, and the
+    ;; retry is a free board of the daily's size that counts for its best
+    ;; time, not the streak (the shell opens it with no day).
+    (define RETRY-SEED-TRIES 8)
+    (define (scan-table-retry-seed t next-seed)
+      (let ((lost (scan-session-seed (scan-table-session t))))
+        (let loop ((k 0))
+          (let ((s (next-seed)))
+            (if (or (not (eqv? s lost)) (>= k RETRY-SEED-TRIES))
+                (if (eqv? s lost) (+ 1 (modulo s 4194303)) s)
+                (loop (+ k 1)))))))
 
     (define (scan-table-segment t) (scan-session-segment (scan-table-session t)))
     (define (scan-table-dealing? t) (scan-session-dealing? (scan-table-session t)))
@@ -263,7 +268,7 @@
     ;; --- the end panel ---------------------------------------------------------------
 
     (define (scan-table-panel-rows t)
-      (if (scan-table-lost? t) (list 'retry 'new 'quit) (list 'new 'quit)))
+      (if (scan-table-lost? t) (list 'retry 'quit) (list 'new 'quit)))
 
     (define (panel-label id) (cadr (assq id PANEL-ROWS)))
 
