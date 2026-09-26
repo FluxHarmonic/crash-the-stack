@@ -362,7 +362,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
         else {
           free2 = parseMenu(freeLine.m[1]).entries;
           const rows = Object.keys(free2).map((k) => k.split("=")[0]);
-          if (rows.join(" ") !== "stack cards code scores back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;   // D66: the games, ENTER CODE, HIGH SCORES
+          if (rows.join(" ") !== "stack cards scan code scores back") lookDetail = `FREE PLAY's rows are ${rows.join(" ")}`;   // D66: the games (SCAN since 0.1.3), ENTER CODE, HIGH SCORES
           else {
             // 32 px per row: the row under BACK is empty (above the band)
             await sleep(300);

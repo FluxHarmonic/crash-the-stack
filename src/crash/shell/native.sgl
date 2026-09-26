@@ -11,6 +11,7 @@
 ;;;                                       the door until P4's settings screen, ruling D34)
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
+;;;                   [--scan lan|wan|backbone]  straight to a SCAN board (0.1.3), of --seed or the next free seed
 ;;;                   [--mute]            no sound (the context still opens)
 ;;;                   [--bg reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off]
 ;;;                                       the living background's rule (reaction on the GPU by default;
@@ -87,6 +88,15 @@
           (crash hub run)
           (crash hub draw)
           (crash scan bench)   ; P6a: the --scanbench door (D81)
+          ;; 0.1.3: SCAN played (only what the hook uses: the SCAN modules'
+          ;; layout names would shadow the stack's)
+          (only (crash scan input) make-scan-frame scan-session-seed scan-session-preset)
+          (only (crash scan open) scan-open)
+          (only (crash scan generate) GEN-BUDGET-MS)
+          (only (crash scan table) scan-table-step scan-table-deal! scan-table-dealing? scan-table-session
+                scan-table-segment scan-table-cues scan-table-requests scan-table-retry scan-table-over
+                scan-table-ticks scan-table-moves scan-table-seconds)
+          (only (crash scan draw) draw-scan scan-bar-hit)
           (only (sigil time) current-jiffy jiffies-per-second)
           (only (sigil gc) gc-allocated-bytes gc-young-occupancy gc-minor-collect!)   ; the --scanbench door's GC probes
           (crash hud)
@@ -321,6 +331,7 @@
       (deal default: #f)          ; the card table, once opened
       (card-fx default: #f)
       (overlay default: #f)       ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
+      (scan default: #f)          ; SCAN's table, (crash scan table), once opened (0.1.3)
       (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
@@ -430,7 +441,7 @@
     ;; every face draws hidden); RESUME, Escape or the button again
     ;; returns; the exit row lands on the main menu with CONTINUE.
     (define (open-overlay a)
-      (let ((table (if (eq? (stage-screen a) 'cards) 'cards 'stack)))
+      (let ((table (case (stage-screen a) ((cards) 'cards) ((scan) 'scan) (else 'stack))))
         (when (and (eq? table 'stack) (stage-session a))
           (set-board-selected! (session-board (stage-session a)) #f))
         (display "crash: pause on") (newline)
@@ -444,9 +455,10 @@
       (let ((click (input-frame-click f)))
         (and click (not (eq? (stage-screen a) 'hub))   ; the hub has no bar button (P5)
              (eq? 'menu
-                  (if (eq? (stage-screen a) 'cards)
-                      (hit-card-control card-geom (deal-hud (stage-deal a)) (car click) (cdr click))
-                      (hit-control *geom* (session-hud (stage-session a)) (car click) (cdr click)))))))
+                  (case (stage-screen a)
+                    ((cards) (hit-card-control card-geom (deal-hud (stage-deal a)) (car click) (cdr click)))
+                    ((scan) (scan-bar-hit (scan-table-session (stage-scan a)) VW VH (car click) (cdr click)))   ; 0.1.3
+                    (else (hit-control *geom* (session-hud (stage-session a)) (car click) (cdr click))))))))
 
     ;; A run's layer cleared and its cascade over (David, 2026-09-21): the
     ;; run's ledger over the table with NEXT LAYER, pulled by Enter, a tap,
@@ -495,6 +507,7 @@
                                     (and (case (active-game)
                                            ((stack) (stage-session a))
                                            ((cards) (stage-deal a))
+                                           ((scan) (and (stage-scan a) (not (scan-table-over (stage-scan a)))))   ; 0.1.3
                                            (else #f))
                                          #t))
                                 #f
@@ -659,6 +672,7 @@
              (case (car choice)
                ((set) (apply-setting a (cadr choice) (cddr choice)))
                ((version) (version! (cadr choice) (cddr choice)) a)   ; a game's VERSION row stepped: remembered per game (D66)
+               ((size) (scan-size! (cdr choice)) a)                    ; SCAN's SIZE row (0.1.3)
                ;; NEWS (P4b, D20): a post chosen opens with the platform's opener
                ;; (xdg-open, open, ShellExecute). The native build reads no feed
                ;; today (no HTTP client among the game's deps), so the row only
@@ -682,12 +696,15 @@
                     (open-hub-entry a)
                     (case (active-game)
                     ((cards) (open-cards a seed fresh? #t))
+                    ((scan) (open-scan a fresh? #t))   ; 0.1.3
                     (else (open-stack a lay seed fresh? model #t)))))
                ((easy normal elite) (jack-in a (now-second) choice lay model))   ; JACK IN's pick (D65)
                ((stack) (free-play a 'stack lay seed fresh? model))
                ((cards) (free-play a 'cards lay seed fresh? model))
                ((daily-stack) (set-run! #f) (open-spec a (daily-spec 'stack) lay model))
                ((daily-cards) (set-run! #f) (open-spec a (daily-spec 'cards) lay model))
+               ((scan) (set-run! #f) (open-scan-table a (scan-new-table (menu-scan-size (stage-menu a)) #f)))   ; 0.1.3
+               ((daily-scan) (set-run! #f) (open-scan-table a (scan-daily-table #f)))
                ((copy)
                 (let ((code (live-code a)))
                   (when code (display "crash: copy ") (display (code-display code)) (newline)))
@@ -744,6 +761,105 @@
                deal: after
                card-fx: x
                bg: (advance-bg (stage-bg a) (clock-steps (card-fx-clock x)) (deal-trace d) (deal-trace after)))))
+
+    ;; --- SCAN (0.1.3) -----------------------------------------------------------
+    ;;
+    ;; The web shell's twin (see its SCAN section): the mouse polled into
+    ;; pointer events with their button, the uplink's deal sliced by
+    ;; GEN-BUDGET-MS (natively the audio has its own thread, so this is
+    ;; parity, not need), the table's requests acted on.
+    ;;   crash: scan open PRESET SEED | scan dealt MS | scan won SECONDS MOVES LINE | scan lost SECONDS
+    (define *scan-line* #f)     ; the end panel's score line
+    (define *scan-bg-acc* 0.0)
+    (define *scan-deal-at* #f)
+    (define *scan-door* #f)     ; --scan lan|wan|backbone: straight to a SCAN board
+
+    (define (say-scan . parts)
+      (display "crash: scan")
+      (for-each (lambda (p) (display " ") (display p)) parts)
+      (newline))
+
+    (define (open-scan-table a t)
+      (music-fresh!)
+      (set! *scan-line* #f)
+      (set! *scan-deal-at* #f)
+      (set-active-game! 'scan)
+      (let ((s (scan-table-session t)))
+        (say-scan "open" (scan-session-preset s) (scan-session-seed s))
+        (stage (field-for-deal a (scan-session-seed s)) screen: 'scan overlay: #f scan: t)))
+
+    ;; CONTINUE: the board in memory, else the stored one, else a new one.
+    (define (open-scan a fresh? resume?)
+      (if (and resume? (stage-scan a))
+          (begin (set-active-game! 'scan) (stage a screen: 'scan overlay: #f))
+          (open-scan-table a (or (and (not fresh?) (scan-boot #f))
+                                 (scan-new-table (scan-size-in-force) #f)))))
+
+    ;; The frame's pointer events: a move while a button is held, then each
+    ;; button that went down, then each that came up, at the pointer.
+    (define SCAN-BUTTONS (list 'left 'right 'middle))
+    (define (scan-events)
+      (let* ((p (or (window->virtual (mouse-x) (mouse-y)) (cons -1 -1)))
+             (x (exact (floor (car p))))   ; the letterbox inverse answers floats; hosts are hit-tested in integers
+             (y (exact (floor (cdr p))))
+             (held? (let loop ((bs SCAN-BUTTONS))
+                      (and (pair? bs) (or (mouse-down? (car bs)) (loop (cdr bs)))))))
+        (append (if held? (list (list 'move x y)) '())
+                (filter-map (lambda (b) (and (mouse-pressed? b) (list 'down x y b))) SCAN-BUTTONS)
+                (filter-map (lambda (b) (and (mouse-released? b) (list 'up x y b))) SCAN-BUTTONS))))
+
+    (define (filter-map f xs)
+      (let loop ((xs xs) (acc '()))
+        (if (null? xs)
+            (reverse acc)
+            (let ((v (f (car xs))))
+              (loop (cdr xs) (if v (cons v acc) acc))))))
+
+    (define (scan-deal-slice t)
+      (let ((t0 (current-milliseconds)))
+        (unless *scan-deal-at* (set! *scan-deal-at* t0))
+        (let ((t (scan-table-deal! t (lambda () (< (- (current-milliseconds) t0) GEN-BUDGET-MS)))))
+          (when (and (not (scan-table-dealing? t)) (scan-table-segment t))
+            (say-scan "dealt" (- (current-milliseconds) *scan-deal-at*))
+            (set! *scan-deal-at* #f))
+          t)))
+
+    (define (step-scan a f dt)
+      (let* ((before (stage-scan a))
+             (click (input-frame-click f))
+             (bar (and click (scan-bar-hit (scan-table-session before) VW VH (car click) (cdr click))))
+             (pressed (append (input-frame-pressed f)
+                              (case bar
+                                ((keys) (list '?))
+                                ((menu) (list 'escape))
+                                (else '()))))
+             (frame (make-scan-frame pressed (input-frame-held f) (scan-events) (exact (round (* 1000.0 dt)))))
+             (after (scan-table-step before frame))
+             (after (if (scan-table-dealing? after) (scan-deal-slice after) after))
+             (after (scan-save-after-frame! before after))
+             (a (stage a scan: after)))
+        (play-cues! (scan-table-cues after))
+        (set! *scan-bg-acc* (+ *scan-bg-acc* (* 60.0 dt)))
+        (let* ((steps (exact (floor *scan-bg-acc*)))
+               (a (begin (set! *scan-bg-acc* (- *scan-bg-acc* steps))
+                         (if (and (stage-bg a) (> steps 0)) (stage a bg: (bg-tick (stage-bg a) (min steps 4))) a))))
+          (let loop ((rs (scan-table-requests after)) (a a))
+            (if (null? rs) a (loop (cdr rs) (scan-request a (car rs) after)))))))
+
+    (define (scan-request a r t)
+      (case r
+        ((won)
+         (set! *scan-line* (scan-record! t))
+         (say-scan "won" (scan-table-seconds t) (scan-table-moves t) (or *scan-line* "-"))
+         a)
+        ((lost) (say-scan "lost" (scan-table-seconds t)) a)
+        ((menu) (unless (scan-table-over t) (scan-save! t)) (open-overlay a))
+        ((quit) (open-menu a))
+        ((new failed) (open-scan-table a (scan-new-table (scan-session-preset (scan-table-session t)) #f)))
+        ((retry)
+         (let ((s (scan-table-session t)))
+           (open-scan-table a (scan-table-retry t (scan-open (scan-session-preset s) (scan-session-seed s) 'original #f #f)))))
+        (else a)))
 
     (define (stage-background a) (stage-bg a))
 
@@ -821,6 +937,8 @@
                                               (open-spec (open-menu fresh) sp lay model)))))
                                 (*code* (display "crash: code refused ") (display *code*) (newline) (open-menu fresh))
                                 (*hub-seed* (jack-in (open-menu fresh) *hub-seed* *pace* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
+                                (*scan-door*   ; --scan PRESET (0.1.3): a SCAN board of --seed, else the next free seed
+                                 (open-scan-table (open-menu fresh) (scan-open-table *scan-door* (or seed (scan-seed-next!)) #f #f)))
                                 (cards?
                                  (open-cards (open-menu fresh) seed fresh? #t))
                                 (else (open-menu fresh))))))
@@ -842,6 +960,7 @@
                           ((hub) (music-frame! (quote hub) (hub-music-phase) (hub-music-seed)))
                           ((menu) (music-frame! (quote menu) #f))
                           ((stack) (music-frame! (quote stack) (session-trace (stage-session a)) (session-seed (stage-session a))))
+                          ((scan) (music-frame! (quote scan) #f (scan-session-seed (scan-table-session (stage-scan a)))))   ; 0.1.3: no trace
                           (else (music-frame! (quote cards) (deal-trace (stage-deal a)) (deal-seed (stage-deal a)))))))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
@@ -866,6 +985,10 @@
                                (stage a menu: (car r)))))
                         ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
+                        ((scan)   ; 0.1.3
+                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
+                               ((menu-frame? f) (scan-save! (stage-scan a)) (open-menu a))
+                               (else (step-scan a f dt))))
                         ((stack)
                          (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((menu-frame? f) (open-menu a))
@@ -929,6 +1052,8 @@
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
+                            ((scan) (draw-scan (stage-scan a) VW VH (stage-background a) *copper* *scan-line*)   ; 0.1.3
+                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
                             ((stack)
                              (if *bg-only*
                                  (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (stage-background a) *copper*)
@@ -1205,6 +1330,7 @@
         (set! *bg-rsteps* (let ((n (arg-value args "--react-steps" #f))) (and n (string->number n))))
         (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") (quote cleared)))
         (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
+        (set! *scan-door* (let ((p (arg-value args "--scan" #f))) (and p (memq (string->symbol p) (list (quote lan) (quote wan) (quote backbone))) (string->symbol p))))   ; --scan PRESET (0.1.3)
         (set! *pace* (let ((p (arg-value args "--pace" #f))) (if (and p (difficulty? (string->symbol p))) (string->symbol p) 'normal)))
         (set! *hub-seed* (let* ((h (arg-value args "--hub" #f)) (n (and h (string->number h))))
                            (and n (exact? n) (integer? n) (>= n 0) (min SEED-MAX (max 1 n)))))   ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)

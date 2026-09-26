@@ -43,7 +43,7 @@
 
   (export menu menu? menu-new menu-screen menu-entries menu-highlight menu-frames menu-ms menu-cursor-on? menu-y-offset OVERLAY-PAD CODE-LINE-H UNDER-ROW-GAP NOTE-H
           menu-title menu-with-title menu-settings menu-with-settings
-          menu-version menu-versions menu-with-version menu-with-versions menu-code-line menu-with-code-line menu-copy menu-code menu-page
+          menu-version menu-versions menu-with-version menu-with-versions menu-scan-size menu-with-scan-size menu-code-line menu-with-code-line menu-copy menu-code menu-page
           menu-scores menu-with-scores menu-run menu-open-run-done
           menu-news menu-news-seen menu-with-news menu-news-unread? menu-news-newest-date menu-post menu-row-label
           menu-new-overlay menu-new-layer-done menu-home menu-table menu-row-note
@@ -72,6 +72,8 @@
             (list 'news "NEWS")   ; P4b (D20): the news posts, beside UPDATE; NEW while unread
             (list 'stack "STACK")
             (list 'cards "DEFRAG")
+            (list 'scan "SCAN")               ; 0.1.3: SCAN, the third game (CLASSIC)
+            (list 'size "SIZE")               ; SCAN's preset: LAN | WAN | BACKBONE (D72), remembered
             (list 'new-board "NEW BOARD")     ; a game's screen (D66): the next board of the game
             (list 'daily-board "DAILY BOARD")  ; the game's daily
             (list 'code "ENTER CODE")     ; (David, 2026-09-22: the two-word items)
@@ -99,11 +101,14 @@
             ;; from the menu's news), each opening the post outside the game
             (list 'news "NEWS" 'back)
             ;; FREE PLAY (D66): the games first, each opening its own screen
-            (list 'free "FREE PLAY" 'stack 'cards 'code 'scores 'back)
+            (list 'free "FREE PLAY" 'stack 'cards 'scan 'code 'scores 'back)
             ;; a game's screen: its next board, its daily, its version (a
             ;; value row the shell remembers per game), BACK to FREE PLAY
             (list 'free-stack "STACK" 'new-board 'daily-board 'version 'back)
             (list 'free-cards "DEFRAG" 'new-board 'daily-board 'version 'back)
+            ;; SCAN is CLASSIC only until HACKER's trace lands (P6c): SIZE in
+            ;; place of VERSION
+            (list 'free-scan "SCAN" 'new-board 'daily-board 'size 'back)
             (list 'settings "SETTINGS" 'back)   ; the general rows (D51), filled from (crash settings)' group by open-screen
             (list 'credits "CREDITS")   ; the crawl: no rows; Escape, Backspace or a tap leaves
             (list 'scores "HIGH SCORES" 'back)
@@ -174,6 +179,7 @@
       (top-entries default: '()) ; the top screen's ids, kept while a sub-screen is up
       (settings default: '())    ; the settings in force, (crash settings)' alist
       (versions default: '())    ; the version to deal per game, ((stack . V) (cards . V)), V hacker | original; absent means hacker (D66)
+      (scan-size default: 'lan)  ; SCAN's SIZE row: lan | wan | backbone (D72), remembered by the shell
       (code-line default: #f)    ; the live board's share code (ten characters), or #f
       (copy default: #f)         ; the code line offers COPY (the web: the page writes the clipboard)
       (now-playing default: #f)  ; the soundtrack's title under the code line (M1: the note glyph and the title), or #f
@@ -210,11 +216,27 @@
       (menu m versions: (cons (cons table v)
                               (filter (lambda (e) (not (eq? (car e) table))) (menu-versions m)))))
     (define (menu-with-versions m pairs) (menu m versions: pairs))
+    ;; SCAN's preset (D72), the SIZE row: the shell stores a step (size . P)
+    ;; and hands it back through menu-with-scan-size at the next menu.
+    (define SCAN-SIZES (list 'lan 'wan 'backbone))
+    (define (menu-with-scan-size m p)
+      (menu m scan-size: (if (memq p SCAN-SIZES) p 'lan)))
+    (define (scan-size-label p)
+      (case p ((wan) "WAN") ((backbone) "BACKBONE") (else "LAN")))
+    ;; Windows' names beside ours, in the row's note
+    (define (scan-size-note p)
+      (case p ((wan) "INTERMEDIATE. 16X16, 40 ICE.") ((backbone) "EXPERT. 30X16, 99 ICE.") (else "BEGINNER. 9X9, 10 ICE.")))
+    (define (next-scan-size p delta)
+      (let* ((n (length SCAN-SIZES))
+             (i (let loop ((ps SCAN-SIZES) (i 0))
+                  (cond ((null? ps) 0) ((eq? (car ps) p) i) (else (loop (cdr ps) (+ i 1)))))))
+        (list-ref SCAN-SIZES (modulo (+ i delta) n))))
     ;; The game a screen belongs to: the game screens' table, else #f.
     (define (screen-table m)
       (case (menu-screen m)
         ((free-stack) 'stack)
         ((free-cards) 'cards)
+        ((free-scan) 'scan)
         (else #f)))
 
     ;; --- NEWS (P4b, ruling D20) -------------------------------------------------
@@ -282,11 +304,12 @@
     ;; item (a choice) or value (a row that steps). The overlay's exit row
     ;; and its CODE row show a value but pick as items.
     (define (menu-row-kind m id)
-      (if (or (eq? id 'version) (setting-ref id)) 'value 'item))   ; NEWS shows a value (NEW) but is an item: Enter opens it
+      (if (or (eq? id 'version) (eq? id 'size) (setting-ref id)) 'value 'item))   ; NEWS shows a value (NEW) but is an item: Enter opens it
 
     ;; The value a row shows, as text, or #f for a plain item.
     (define (menu-row-value m id)
       (cond ((eq? id 'version) (if (eq? (menu-version m (or (screen-table m) 'stack)) 'original) "CLASSIC" "HACKER"))
+            ((eq? id 'size) (scan-size-label (menu-scan-size m)))
             ((eq? id 'news) (and (menu-news-unread? m) "NEW"))   ; P4b: the unread mark
             ((and (eq? (menu-screen m) 'news) (menu-post m id)) (cadr (menu-post m id)))   ; a post's date
             ((setting-ref id) (setting-value-label id (settings-value (menu-settings m) id)))
@@ -299,6 +322,7 @@
     (define (menu-row-note m id)
       (cond ((eq? id 'disconnect) "RUN HELD. CONTINUE RESUMES THE LAYER.")
             ((eq? id 'back-to-menu) "BOARD SAVED. CONTINUE RESUMES IT.")
+            ((eq? id 'size) (scan-size-note (menu-scan-size m)))
             ((and (eq? (menu-screen m) 'pause-game) (setting-ref id))
              (if (eq? (setting-when id) 'next-deal) "NEXT DEAL" "NOW"))
             (else #f)))
@@ -542,7 +566,7 @@
     ;; Back to the home screen, the item that opened the sub-screen highlighted.
     (define (close-screen m)
       (let ((opener (case (menu-screen m)
-                      ((free-stack free-cards) #f)   ; below: a game's screen closes to FREE PLAY
+                      ((free-stack free-cards free-scan) #f)   ; below: a game's screen closes to FREE PLAY
                       ((free) 'free-play)
                       ((settings) 'settings)
                       ((credits) 'credits)
@@ -568,6 +592,9 @@
              (let ((table (or (screen-table m) 'stack)))
                (let ((v (if (eq? (menu-version m table) 'hacker) 'original 'hacker)))
                  (cons (menu-with-version m table v) (cons 'version (cons table v))))))
+            ((eq? id 'size)
+             (let ((p (next-scan-size (menu-scan-size m) delta)))
+               (cons (menu m scan-size: p) (cons 'size p))))
             ((setting-ref id)
              (let ((s (settings-step (menu-settings m) id delta)))
                (cons (menu m settings: s) (cons 'set (cons id (settings-value s id))))))
@@ -584,8 +611,9 @@
               ;; a game's row on FREE PLAY opens its screen (D66); its rows are the choices
               ((and (eq? (menu-screen m) 'free) (eq? id 'stack)) (cons (open-screen m 'free-stack) #f))
               ((and (eq? (menu-screen m) 'free) (eq? id 'cards)) (cons (open-screen m 'free-cards) #f))
+              ((and (eq? (menu-screen m) 'free) (eq? id 'scan)) (cons (open-screen m 'free-scan) #f))
               ((eq? id 'new-board) (cons m (or (screen-table m) 'stack)))
-              ((eq? id 'daily-board) (cons m (if (eq? (screen-table m) 'cards) 'daily-cards 'daily-stack)))
+              ((eq? id 'daily-board) (cons m (case (screen-table m) ((cards) 'daily-cards) ((scan) 'daily-scan) (else 'daily-stack))))
               ((eq? id 'settings) (cons (open-screen m 'settings) #f))
               ((eq? id 'game-settings) (cons (open-screen m 'pause-game) #f))
               ((eq? id 'credits) (cons (open-screen m 'credits) #f))

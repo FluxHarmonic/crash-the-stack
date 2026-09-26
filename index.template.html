@@ -436,6 +436,7 @@
       if (params.has("fresh")) app.dispatch("fresh", "on");
       if (params.has("cards")) app.dispatch("cards", "on");
       if (params.has("stack")) app.dispatch("stack", "on");
+      if (params.has("scan")) app.dispatch("scan", params.get("scan"));   // ?scan=lan|wan|backbone: straight to a SCAN board (0.1.3; the arms)
       if (params.has("seed")) app.dispatch("seed", params.get("seed"));
       if (params.has("bg")) app.dispatch("bg", params.get("bg"));
       if (params.has("hub")) app.dispatch("hub", params.get("hub"));   // ?hub=SEED: the hub live (P5)
@@ -642,6 +643,66 @@
     // pointerdown only, so the page sends the release (no coordinates needed)
     window.addEventListener("pointerup", function () { if (updates.app) updates.app.dispatch("pointerup", ""); }, true);   // the window: a mouse let go off the canvas ends the walk too
     window.addEventListener("pointercancel", function () { if (updates.app) updates.app.dispatch("pointerup", ""); }, true);
+
+    // SCAN (0.1.3) needs the mouse button and the release: a right click
+    // flags, a left release scans, both buttons sweep, and on touch every
+    // action is on release (a long press flags). The loader forwards
+    // pointerdown with no button (its comment: "a game that needs them keeps
+    // its own listener"), so every pointer event on the canvas also goes to
+    // the game as ("scan-pointer", "KIND,BUTTON,X,Y") in canvas-buffer px,
+    // the loader's own scale; the game ignores it off the SCAN screen. A move
+    // is sent only while a button or finger is down. The window takes the
+    // release, so a button let go off the canvas still ends the press.
+    // contextmenu is prevented on the canvas, or a right click would open
+    // the browser's menu instead of flagging.
+    (function () {
+      // e.buttons' bits: 1 left, 2 right, 4 middle. A second mouse button
+      // pressed while one is held arrives as a pointermove (a chord), not a
+      // pointerdown, so the mask is diffed on every event and each change
+      // is sent as that button's down or up.
+      var BITS = [[1, "left"], [2, "right"], [4, "middle"]];
+      var mask = 0;      // the mouse buttons down that began on the canvas
+      var touches = 0;   // fingers down that began on the canvas
+      function send(kind, button, e) {
+        if (!updates.app) return;
+        var r = canvas.getBoundingClientRect();
+        if (!r.width || !r.height) return;
+        var x = Math.round((e.clientX - r.left) * canvas.width / r.width);
+        var y = Math.round((e.clientY - r.top) * canvas.height / r.height);
+        updates.app.dispatch("scan-pointer", kind + "," + button + "," + x + "," + y);
+      }
+      function mouse(e, next) {
+        BITS.forEach(function (b) {
+          if ((next & b[0]) && !(mask & b[0])) send("down", b[1], e);
+          if (!(next & b[0]) && (mask & b[0])) send("up", b[1], e);
+        });
+        mask = next;
+      }
+      canvas.addEventListener("pointerdown", function (e) {
+        if (e.pointerType === "touch") { touches++; send("down", "touch", e); }
+        else mouse(e, e.buttons);
+      });
+      canvas.addEventListener("pointermove", function (e) {
+        if (e.pointerType === "touch") { if (touches > 0) send("move", "touch", e); }
+        else if (mask || e.buttons) {
+          if ((e.buttons & 7) !== mask) mouse(e, e.buttons & 7);
+          if (mask) send("move", "left", e);
+        }
+      });
+      window.addEventListener("pointermove", function (e) {   // a release off the canvas while dragging
+        if (e.pointerType !== "touch" && mask && (e.buttons & 7) !== mask && e.target !== canvas) mouse(e, e.buttons & 7);
+      }, true);
+      window.addEventListener("pointerup", function (e) {
+        if (e.pointerType === "touch") { if (touches > 0) { touches--; send("up", "touch", e); } }
+        else if (mask) mouse(e, e.buttons & 7);
+      }, true);
+      window.addEventListener("pointercancel", function (e) {
+        // a cancelled touch moves far off first, which cancels its press, then lifts
+        if (e.pointerType === "touch") { if (touches > 0) { touches = 0; var far = { clientX: -1e6, clientY: -1e6 }; send("move", "touch", far); send("up", "touch", far); } }
+        else if (mask) mouse(e, 0);
+      }, true);
+      canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+    })();
 
     // The loader maps a swipe anywhere on the document to an arrow key. On
     // the board a swipe would then both select (at pointerdown) and move

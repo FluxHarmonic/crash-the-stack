@@ -1800,9 +1800,10 @@ async function dealFrom(free, table, row = "new-board") {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards code scores back",   // D66: the games first; TRACKER sits on the top screen now (David, 2026-09-22)
+    const want = { free: "stack cards scan code scores back",   // D66: the games first; TRACKER sits on the top screen now (David, 2026-09-22)
                    "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
                    "free-cards": "new-board daily-board version back",
+                   "free-scan": "new-board daily-board size back",   // 0.1.3: SCAN is CLASSIC only, SIZE its value row
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     // NEWS joins the top screen wherever a feed sits beside the game, which
@@ -1817,7 +1818,7 @@ async function dealFrom(free, table, row = "new-board") {
     // SCORES and CODE from FREE PLAY (a sub is [row, screen]; a game's screen
     // closes to FREE PLAY, the others to the top)
     const walk = [["free-play", "free", null], ["settings", "settings", null], ["credits", "credits", null],
-                  ["free-play", "free", ["stack", "free-stack"]], ["free-play", "free", ["cards", "free-cards"]],
+                  ["free-play", "free", ["stack", "free-stack"]], ["free-play", "free", ["cards", "free-cards"]], ["free-play", "free", ["scan", "free-scan"]],
                   ["free-play", "free", ["scores", "scores"]], ["free-play", "free", ["code", "code"]]];
     const rowsOf = (s) => s.order.map((id) => s.rows[id].value ? `${id}=${s.rows[id].value}` : id).join(" ");
     for (const [id, screen, sub] of walk) {

@@ -129,6 +129,18 @@
           (crash hub run)
           (crash hub draw)
           (crash scan bench)   ; P6a: the ?scanbench door (D81)
+          ;; 0.1.3: SCAN played (only what the hook uses: the SCAN modules'
+          ;; layout names would shadow the stack's)
+          (only (crash scan rules) segment-state segment-size segment-w segment-h segment-counter)
+          (only (crash scan input) make-scan-frame scan-session scan-session-segment scan-session-seed
+                scan-session-preset scan-session-mode scan-session-zoom scan-session-touch?
+                scan-session-first scan-session-w scan-session-h scan-layout scan-map? scan-host-rect)
+          (only (crash scan open) scan-open)
+          (only (crash scan generate) GEN-BUDGET-MS)
+          (only (crash scan table) scan-table-step scan-table-deal! scan-table-dealing? scan-table-session
+                scan-table-segment scan-table-cues scan-table-requests scan-table-retry scan-table-over
+                scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds)
+          (only (crash scan draw) draw-scan scan-bar-hit)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -191,6 +203,7 @@
     (define *update-chosen* #f) ; the player took APPLY; the page's poll reads it
     (define *cards* #f)      ; ?cards: straight to the card table
     (define *stack* #f)      ; ?stack: straight to the stack
+    (define *scan-door* #f)  ; ?scan=lan|wan|backbone: straight to a new SCAN board (0.1.3)
     (define *seed* #f)       ; ?seed=N: the raw seed a fresh deal or board starts from; none given: the tables' own first ones
     (define *clock* #f)      ; the page's clock at boot (ms): the title reveal's seed when ?seed is not given (P3d)
     (define *clock-at* 0.0)  ; now-ms when the clock landed (the epoch second is the clock plus the time since)
@@ -1322,6 +1335,8 @@
           ((entry) (music-frame! 'entry 'cleared))
           ((hub) (music-frame! 'hub (hub-music-phase) (hub-music-seed)))
           ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
+          ;; 0.1.3: SCAN has no trace (CLASSIC): the stack's pool, no phase, by the board's seed
+          ((scan) (when *scan* (music-frame! 'scan #f (scan-session-seed (scan-table-session *scan*)))))
           (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
     ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
@@ -1375,6 +1390,9 @@
           ((menu) (menu-tick f dt))
           ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
           ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
+          ((scan) (cond (*overlay* (overlay-tick f dt))                 ; 0.1.3: the pause panel stops the clock
+                        ((menu-frame? f) (scan-save! *scan*) (open-menu!))
+                        (else (scan-tick f dt))))
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
                  ((or (menu-frame? f)
@@ -1442,10 +1460,11 @@
     (define (table-ticks)
       (cond ((eq? *screen* 'hub) (world-beat (hub-screen-world (hub-run-in-force))))   ; P5: the hub's beats
             ((eq? *screen* 'cards) (trace-ticks (deal-trace *deal*)))
+            ((eq? *screen* 'scan) (scan-table-ticks *scan*))   ; 0.1.3: SCAN's clock
             (else (trace-ticks (session-trace *session*)))))
 
     (define (open-overlay!)
-      (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
+      (let ((table (case *screen* ((cards) 'cards) ((scan) 'scan) (else 'stack))))
         (when (and *session* (eq? table 'stack))
           (set-board-selected! (session-board *session*) #f))   ; nothing to come back to
         (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t (music-title)))
@@ -1461,9 +1480,10 @@
       (let ((click (input-frame-click f)))
         (and click (not (eq? *screen* 'hub))   ; the hub has no bar button (P5)
              (eq? 'menu
-                  (if (eq? *screen* 'cards)
-                      (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click))
-                      (hit-control *geom* (session-hud *session*) (car click) (cdr click)))))))
+                  (case *screen*
+                    ((cards) (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click)))
+                    ((scan) (scan-bar-hit (scan-table-session *scan*) VW VH (car click) (cdr click)))   ; 0.1.3
+                    (else (hit-control *geom* (session-hud *session*) (car click) (cdr click))))))))
 
     (define (overlay-tick f dt)
       (when *trace* (say-menu *overlay*))
@@ -1508,6 +1528,9 @@
                            (begin
                              (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
                              (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*)))))
+                          ((eq? *screen* 'scan)   ; 0.1.3
+                           (draw-scan *scan* VW VH (background) *copper* *scan-line*)
+                           (draw-overlay *overlay* VW VH BOARD-H))
                           (else
                            (draw-session *session* *geom* *fx* (background) *copper* #t)
                            (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
@@ -1544,6 +1567,7 @@
                                     (and (case (active-game)
                                          ((stack) *session*)
                                          ((cards) *deal*)
+                                         ((scan) (and *scan* (not (scan-table-over *scan*))))   ; 0.1.3
                                          (else #f))
                                        #t))
                                 (or *seed* *clock*)   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
@@ -1677,6 +1701,193 @@
 
     ;; JACK IN: a new run from a seed (the clock's, or a run code's),
     ;; its first layer dealt.
+    ;; --- SCAN (0.1.3) ------------------------------------------------------------
+    ;;
+    ;; The third table, as its own screen: (crash scan table) holds the board
+    ;; in play, (crash scan draw) draws it. The page forwards every pointer
+    ;; event on the canvas with its button (the loader's pointerdown carries
+    ;; none; topics/sigil-web-loader-pointerdown-has-no-button) as
+    ;; ("scan-pointer", "KIND,BUTTON,X,Y"), KIND down|up|move, BUTTON
+    ;; left|right|middle|touch, X Y canvas-buffer px; the loader's own
+    ;; pointerdown still arrives as the click the bar's buttons take. The
+    ;; first click's deal is sliced by GEN-BUDGET-MS of the frame (D81).
+    ;;   crash: scan open PRESET SEED CELL X0 Y0 MAP?   a board opened, its layout (virtual px)
+    ;;   crash: scan dealt MS frames N worst MS        the uplink's deal is done (wall ms, its frames, the longest)
+    ;;   crash: scan deal-audio underruns U worst MS   the sink's starved frames over it and 1 s after
+    ;;   crash: scan state SCANNED FLAGGED TRIPPED MODE ZOOM COUNTER   after a frame that changed it
+    ;;   crash: scan won SECONDS MOVES LINE | scan lost SECONDS
+    ;;   crash: scan request NAME
+    (define *scan* #f)           ; the table, (crash scan table), once opened
+    (define *scan-events* '())   ; the page's pointer events since the last frame, newest first, virtual
+    (define *scan-line* #f)      ; the end panel's score line
+    (define *scan-bg-acc* 0.0)   ; the field's ticks owed (60 a second)
+    (define *scan-deal-at* #f)   ; now-ms when the uplink's deal began
+
+    (define (scan-pointer! payload)
+      (let ((parts (string-split payload ",")))
+        (when (and (eq? *screen* 'scan) (not *overlay*) (= (length parts) 4))
+          (let ((kind (string->symbol (car parts)))
+                (button (string->symbol (cadr parts)))
+                (x (string->number (caddr parts)))
+                (y (string->number (cadddr parts))))
+            (when (and x y (memq kind (list 'down 'up 'move)) (memq button (list 'left 'right 'middle 'touch)))
+              ;; a release off the letterboxed viewport still releases (at no host)
+              (let ((p (or (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y)
+                           (cons -1 -1))))
+                (set! *scan-events*
+                      (cons (if (eq? kind 'move)
+                                (list 'move (exact (floor (car p))) (exact (floor (cdr p))))   ; integers: the hit test divides
+                                (list kind (exact (floor (car p))) (exact (floor (cdr p))) button))
+                            *scan-events*)))))))
+      0)
+
+    (define (scan-counts t)
+      (let ((seg (scan-table-segment t)))
+        (if (not seg)
+            (list 0 0 0)
+            (let loop ((i 0) (sc 0) (fl 0) (tr 0))
+              (if (= i (segment-size seg))
+                  (list sc fl tr)
+                  (case (segment-state seg i)
+                    ((scanned) (loop (+ i 1) (+ sc 1) fl tr))
+                    ((flagged suspect) (loop (+ i 1) sc (+ fl 1) tr))
+                    ((tripped) (loop (+ i 1) sc fl (+ tr 1)))
+                    (else (loop (+ i 1) sc fl tr))))))))
+
+    (define (say-scan-state t)
+      (let ((c (scan-counts t))
+            (s (scan-table-session t)))
+        (say "scan" "state" (car c) (cadr c) (caddr c) (scan-session-mode s)
+             (if (scan-session-zoom s) "zoomed" (if (scan-map? s) "map" "board"))
+             (scan-table-counter* t))
+        ;; the first hidden host on screen and its center (virtual px), for the
+        ;; arm's flag legs:   crash: scan hidden I X Y   (none: -1 -1 -1)
+        (let ((seg (scan-table-segment t)))
+          (let loop ((i 0))
+            (cond ((or (not seg) (= i (segment-size seg))) (say "scan" "hidden" -1 -1 -1))
+                  ((and (eq? (segment-state seg i) 'hidden) (scan-host-rect s i))
+                   (let ((r (scan-host-rect s i)))
+                     (say "scan" "hidden" i (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+                  (else (loop (+ i 1))))))))
+
+    (define (scan-table-counter* t)
+      (let ((seg (scan-table-segment t)))
+        (if seg (segment-counter seg) -1)))
+
+    (define (open-scan-table! t)
+      (music-fresh!)
+      (field-for-deal! (scan-session-seed (scan-table-session t)))
+      (set! *screen* 'scan)
+      (set! *overlay* #f)
+      (set! *announced* #f)
+      (set! *scan-events* '())
+      (set! *scan-line* #f)
+      (set! *scan-deal-at* #f)
+      (set-active-game! 'scan)
+      (set! *scan* t)
+      (let* ((s (scan-table-session t))
+             (l (scan-layout (scan-session-w s) (scan-session-h s))))
+        (say "scan" "open" (scan-session-preset s) (scan-session-seed s)
+             (car l) (cadr l) (caddr l) (if (scan-map? s) "map" "board"))))
+
+    ;; CONTINUE: the board in memory, else the stored one, else a new one.
+    (define (open-scan! resume?)
+      (if (and resume? *scan*)
+          (begin
+            (set! *screen* 'scan)
+            (set! *overlay* #f)
+            (set! *scan-events* '())
+            (set-active-game! 'scan))
+          (open-scan-table! (or (and (not *fresh*) (scan-boot *touch*))
+                                (scan-new-table (scan-size-in-force) *touch*)))))
+
+    ;; The first click's audio (D81, leg 13): the sink's starved frames from
+    ;; the deal's first frame to AUDIO-WATCH-MS after its last (a starved
+    ;; ring is counted when the audio thread next runs dry, which can be
+    ;; after the long frame), and the longest frame of the deal:
+    ;;   crash: scan dealt MS frames N worst MS
+    ;;   crash: scan deal-audio underruns U worst MS   AUDIO-WATCH-MS later
+    (define AUDIO-WATCH-MS 1000)
+    (define *scan-deal-u0* 0)
+    (define *scan-deal-frames* 0)
+    (define *scan-deal-worst* 0.0)
+    (define *scan-audio-until* #f)
+
+    (define (scan-deal-slice t)
+      (let ((t0 (now-ms)))
+        (unless *scan-deal-at*
+          (set! *scan-deal-at* t0)
+          (set! *scan-deal-u0* (audio-underruns))
+          (set! *scan-deal-frames* 0)
+          (set! *scan-deal-worst* 0.0))
+        (set! *scan-deal-frames* (+ 1 *scan-deal-frames*))
+        (let ((t (scan-table-deal! t (lambda () (< (- (now-ms) t0) GEN-BUDGET-MS)))))
+          (set! *scan-deal-worst* (max *scan-deal-worst* (- (now-ms) t0)))
+          (when (and (not (scan-table-dealing? t)) (scan-table-segment t))
+            (say "scan" "dealt" (exact (round (- (now-ms) *scan-deal-at*)))
+                 "frames" *scan-deal-frames* "worst" (exact (round *scan-deal-worst*)))
+            (set! *scan-audio-until* (+ (now-ms) AUDIO-WATCH-MS))
+            (set! *scan-deal-at* #f))
+          t)))
+
+    (define (scan-audio-watch!)
+      (when (and *scan-audio-until* (>= (now-ms) *scan-audio-until*))
+        (set! *scan-audio-until* #f)
+        (say "scan" "deal-audio" "underruns" (- (audio-underruns) *scan-deal-u0*)
+             "worst" (exact (round *scan-deal-worst*)))))
+
+    (define (scan-tick f dt)
+      (let* ((click (input-frame-click f))
+             (s0 (scan-table-session *scan*))
+             (bar (and click (scan-bar-hit s0 VW VH (car click) (cdr click))))
+             (pressed (append (input-frame-pressed f)
+                              (case bar
+                                ((flag-mode) (list 'flag-mode))
+                                ((map) (list 'map))
+                                ((keys) (list '?))
+                                ((menu) (list 'escape))
+                                (else '()))))
+             (held (filter (lambda (k) (memq k MODIFIERS)) *keys*))
+             (frame (make-scan-frame pressed held (reverse *scan-events*) (exact (round (* 1000.0 dt)))))
+             (before *scan*)
+             (after (scan-table-step before frame))
+             (after (if (scan-table-dealing? after) (scan-deal-slice after) after))
+             (after (if *no-save* after (scan-save-after-frame! before after))))
+        (set! *scan-events* '())
+        (set! *scan* after)
+        (scan-audio-watch!)
+        (play-cues! (scan-table-cues after))
+        ;; the field at 60 steps a second, whatever the frame rate
+        (set! *scan-bg-acc* (+ *scan-bg-acc* (* 60.0 dt)))
+        (let ((steps (exact (floor *scan-bg-acc*))))
+          (set! *scan-bg-acc* (- *scan-bg-acc* steps))
+          (when (and *bg* (> steps 0)) (set! *bg* (bg-tick *bg* (min steps 4)))))
+        (when (and *trace*
+                   (or (not (eq? (scan-table-segment before) (scan-table-segment after)))
+                       (not (eq? (scan-session-mode (scan-table-session before)) (scan-session-mode (scan-table-session after))))
+                       (not (eq? (scan-session-zoom (scan-table-session before)) (scan-session-zoom (scan-table-session after))))))
+          (say-scan-state after))
+        (for-each (lambda (r) (scan-request! r after)) (scan-table-requests after))
+        (when (eq? *screen* 'scan)
+          (present! #f (lambda () (draw-scan *scan* VW VH (background) *copper* *scan-line*))))))
+
+    (define (scan-request! r t)
+      (say "scan" "request" r)
+      (case r
+        ((won)
+         (set! *scan-line* (and (not *no-save*) (scan-record! t)))
+         (say "scan" "won" (scan-table-seconds t) (scan-table-moves t) (or *scan-line* "-")))
+        ((lost) (say "scan" "lost" (scan-table-seconds t)))
+        ((menu) (unless (scan-table-over t) (scan-save! t)) (open-overlay!))
+        ((quit) (open-menu!))
+        ((new failed)
+         (open-scan-table! (scan-new-table (scan-session-preset (scan-table-session t)) *touch*)))
+        ((retry)
+         (let ((s (scan-table-session t)))
+           (open-scan-table! (scan-table-retry t (scan-open (scan-session-preset s) (scan-session-seed s) 'original #f *touch*)))))
+        ((buzz) (set! *vibrate-asked* #t))
+        (else #f)))
+
     ;; --- the hub (P5): JACK IN is a hub run ---------------------------------------
 
     ;; --- the entry (D65's transition, 2026-09-22) ---------------------------------
@@ -1896,6 +2107,7 @@
              (case (car choice)
                ((set) (apply-setting! (cadr choice) (cddr choice)))
                ((version) (version! (cadr choice) (cddr choice)))   ; a game's VERSION row stepped: remembered per game (D66)
+               ((size) (scan-size! (cdr choice)))                    ; SCAN's SIZE row (0.1.3)
                ;; NEWS (P4b): a post chosen; the page opens it outside the game
                ;; (window.open: the installed app shows it in browser UI, D20)
                ;;   crash: open URL
@@ -1914,12 +2126,15 @@
                     (open-hub-entry!)
                     (case (active-game)
                     ((cards) (open-cards! #t))
+                    ((scan) (open-scan! #t))   ; 0.1.3
                     (else (open-stack! #t)))))
                ((easy normal elite) (jack-in! (now-second) choice))   ; JACK IN's pick (D65)
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
                ((daily-stack) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'stack)))
                ((daily-cards) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'cards)))
+               ((scan) (set-run! #f) (open-scan-table! (scan-new-table (menu-scan-size *menu*) *touch*)))   ; 0.1.3
+               ((daily-scan) (set-run! #f) (say-daily!) (open-scan-table! (scan-daily-table *touch*)))
                ((update) (update-chosen!))
                ;; NEWS (P4b): the screen opened, its posts seen: the store remembers
                ((news-seen) (news-seen! (menu-news-newest-date *menu*)))
@@ -2085,6 +2300,9 @@
             (*code* (say "code" "refused" *code*) (open-menu!))
             (*cards* (say "boot" "step" "cards") (open-cards! #t))
             (*stack* (say "boot" "step" "stack") (open-stack! #t))
+            ((memq *scan-door* (list 'lan 'wan 'backbone))   ; ?scan=PRESET (0.1.3)
+             (say "boot" "step" "scan")
+             (open-scan-table! (scan-open-table *scan-door* (or *seed* (scan-seed-next!)) #f *touch*)))
             ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub-entry!))   ; ?hub=continue: the saved run (P5; the arms)
             ((number? *hub-seed*) (jack-in! *hub-seed* *pace*))   ; ?hub=SEED: JACK IN at boot (&hubat=N lands when the entry screen opens the hub; P5, the arms)
             ;; S8's line, and then the error goes on its way: the loader reports
@@ -2136,6 +2354,9 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "pointerup") (set! *pointer-up* #t) 0)   ; P5: the hub's hold-to-walk ends on the release
+            ((string=? type "scan-pointer") (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button
+            ;; ?scan=lan|wan|backbone: straight to a new SCAN board (the arms' door; ?seed=N its seed)
+            ((string=? type "scan") (param! (lambda () (set! *scan-door* (string->symbol payload)))))
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)
             ((string=? type "fresh") (param! (lambda () (set! *fresh* (string=? payload "on")) (when *fresh* (hub-run-forget-store!)))))
             ((string=? type "cards") (param! (lambda () (set! *cards* (string=? payload "on")))))

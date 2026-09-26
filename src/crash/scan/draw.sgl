@@ -1,0 +1,478 @@
+;;; (crash scan draw) - Drawing a SCAN board.
+;;;
+;;; The segment in the board band (640x352), every host by its state's
+;;; entry in (crash scan cells)' CELL-LOOK: the glyph and the pattern tell
+;;; the states apart, the colours are the table's palette roles (the 0.1.2
+;;; accessibility rule: never colour alone). Then the bar (the ICE counter
+;;; where the other tables' meter sits, the clock at the right, the
+;;; instruction line, MENU at the left; on a touch screen the SCAN / FLAG
+;;; mode button and, on a zoomed map, the MAP button, both at the right
+;;; under the thumb), a refusal's toast, and the end panel.
+;;;
+;;; Not (crash render): SCAN keeps its own module so the stack's draw is
+;;; untouched. Nothing here reads input, a platform or a clock.
+
+(define-library (crash scan draw)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (sigil graphics)
+          (crash palette)
+          (crash font)
+          (crash atlas)
+          (crash geometry)
+          (only (crash render) draw-board-background draw-menu-button draw-keys-button
+                draw-line-2 draw-toast-in text-cache cached-text)
+          (crash scan rules)
+          (crash scan cells)
+          (crash scan input)
+          (crash scan table))
+
+  (export draw-scan draw-scan-cell scan-bar-controls scan-bar-hit
+          scan-instruction glyph-scale)
+
+  (begin
+    (define (text! text x y scale)
+      (if (atlas-on?) (atlas-text text x y scale) (draw-text text x y scale)))
+
+    (define (text-mini! text x y scale)
+      (if (atlas-on?) (atlas-text-mini text x y scale) (draw-text-mini text x y scale)))
+
+    (define (role-color role)
+      (let ((e (assq role PALETTE)))
+        (if e (cdr e) C-TEXT)))
+
+    (define (look state) (cell-look state))
+    (define (look-fg state) (role-color (list-ref (look state) 3)))
+    (define (look-ground state) (role-color (list-ref (look state) 4)))
+
+    ;; --- the glyphs (5 wide, 7 tall, # lit) ------------------------------------
+    ;; The pennant and the crystal are SCAN's own; the digits and ? are the
+    ;; game's 5x7 font.
+    (define PENNANT
+      (list ".##.."
+            ".###."
+            ".####"
+            ".##.."
+            ".#..."
+            ".#..."
+            "###.."))
+    (define CRYSTAL
+      (list "..#.."
+            ".###."
+            "##.##"
+            "#####"
+            "##.##"
+            ".###."
+            "..#.."))
+    (define NOISE
+      (list "#.#.#"
+            ".#.#."
+            "#.#.#"
+            ".#.#."
+            "#.#.#"
+            ".#.#."
+            "#.#.#"))
+
+    ;; The glyph's scale in a host of size c: 2 at 20 px (10x14, the
+    ;; design's), 3 from 28 px, never under 1.
+    (define (glyph-scale c)
+      (max 1 (min 3 (quotient (- c 4) 8))))
+
+    (define (glyph-at rows x y c)
+      (let* ((sc (glyph-scale c))
+             (gx (+ x (quotient (- c (* 5 sc)) 2)))
+             (gy (+ y (quotient (- c (* 7 sc)) 2))))
+        (draw-rows rows gx gy sc 5)))
+
+    (define (char-at text x y c)
+      (let* ((sc (glyph-scale c))
+             (gx (+ x (quotient (- c (text-width text sc)) 2)))
+             (gy (+ y (quotient (- c (* 7 sc)) 2))))
+        (text! text gx gy sc)))
+
+    (define DIGITS (vector "0" "1" "2" "3" "4" "5" "6" "7" "8"))
+
+    ;; --- a host ------------------------------------------------------------------
+
+    ;; The raised block: the face, a 1 px rim top and left in C-SIDE (the
+    ;; rim carries hidden against revealed: 3.98:1 on C-BG), a 2 px side
+    ;; bottom and right in C-SIDE-DARK.
+    (define (block! x y c)
+      (color! C-STATIC-B)
+      (draw-filled-rect x y c c)
+      (color! C-SIDE)
+      (draw-filled-rect x y c 1)
+      (draw-filled-rect x y 1 c)
+      (color! C-SIDE-DARK)
+      (draw-filled-rect x (+ y c -2) c 2)
+      (draw-filled-rect (+ x c -2) y 2 c))
+
+    (define (floor! x y c)
+      (color! C-BG)
+      (draw-filled-rect x y c c)
+      (color! C-BAR-A)   ; the revealed grid, faint: the wires carry the look
+      (draw-filled-rect x y c 1)
+      (draw-filled-rect x y 1 c))
+
+    (define (hatch! x y c step)
+      (let loop ((k 0))
+        (when (< k c)
+          (draw-filled-rect (+ x k) (+ y k) 1 1)
+          (draw-filled-rect (+ x k) (+ y (modulo (+ k (quotient c 2)) c)) 1 1)
+          (loop (+ k 1))))
+      (when (= step 2)
+        (let loop ((k 0))
+          (when (< k c)
+            (draw-filled-rect (+ x (- c k 1)) (+ y k) 1 1)
+            (loop (+ k 1))))))
+
+    (define (ring! x y c dashed?)
+      (let loop ((k 1))
+        (when (< k (- c 1))
+          (when (or (not dashed?) (< (modulo k 6) 3))
+            (draw-filled-rect (+ x k) (+ y 1) 1 1)
+            (draw-filled-rect (+ x k) (+ y c -2) 1 1)
+            (draw-filled-rect (+ x 1) (+ y k) 1 1)
+            (draw-filled-rect (+ x c -2) (+ y k) 1 1))
+          (loop (+ k 1)))))
+
+    ;; One host in state (a CELL-STATES member) at x y, size c. The
+    ;; overlays (cursor, cursor-flag, marked) draw over what is there.
+    (define (draw-scan-cell state x y c)
+      (case state
+        ((hidden) (block! x y c))
+        ((pressed) (color! C-STATIC-B) (draw-filled-rect x y c c))
+        ((zero) (floor! x y c))
+        ((flagged)
+         (block! x y c)
+         (color! (look-fg 'flagged))
+         (glyph-at PENNANT x y c))
+        ((suspect)
+         (block! x y c)
+         (color! (look-fg 'suspect))
+         (char-at "?" x y c))
+        ((wrong-flag)
+         (block! x y c)
+         (color! (look-fg 'wrong-flag))
+         (glyph-at PENNANT x y c)
+         (color! C-TEXT)
+         (let loop ((k 2))
+           (when (< k (- c 2))
+             (draw-filled-rect (+ x k) (+ y k) 2 2)
+             (loop (+ k 1)))))
+        ((tripped)
+         (color! (look-ground 'tripped))
+         (draw-filled-rect x y c c)
+         (color! (look-fg 'tripped))
+         (glyph-at CRYSTAL x y c))
+        ((ice)
+         (floor! x y c)
+         (color! (look-fg 'ice))
+         (glyph-at CRYSTAL x y c))
+        ((defused)
+         (floor! x y c)
+         (color! (look-fg 'defused))
+         (glyph-at CRYSTAL x y c)
+         (draw-filled-rect (+ x 2) (+ y 3) 1 (- c 6))
+         (draw-filled-rect (+ x 2) (+ y 3) 3 1)
+         (draw-filled-rect (+ x 2) (+ y c -4) 3 1)
+         (draw-filled-rect (+ x c -3) (+ y 3) 1 (- c 6))
+         (draw-filled-rect (+ x c -5) (+ y 3) 3 1)
+         (draw-filled-rect (+ x c -5) (+ y c -4) 3 1))
+        ((firewall-strong firewall-weak)
+         (block! x y c)
+         (color! (look-fg state))
+         (hatch! x y c (if (eq? state 'firewall-strong) 2 1)))
+        ((masked)
+         (floor! x y c)
+         (color! (look-fg 'masked))
+         (glyph-at NOISE x y c))
+        ((marked)
+         (color! (look-fg 'marked))
+         (draw-filled-rect (+ x c -6) y 6 2)
+         (draw-filled-rect (+ x c -2) y 2 6))
+        ((cursor cursor-flag)
+         (color! C-SELECTED)
+         (ring! x y c (eq? state 'cursor-flag)))
+        (else
+         ;; reading-1 .. reading-8
+         (floor! x y c)
+         (let ((n (reading-of state)))
+           (when n
+             (color! (look-fg state))
+             (char-at (vector-ref DIGITS n) x y c))))))
+
+    (define (reading-of state)
+      (case state
+        ((reading-1) 1) ((reading-2) 2) ((reading-3) 3) ((reading-4) 4)
+        ((reading-5) 5) ((reading-6) 6) ((reading-7) 7) ((reading-8) 8)
+        (else #f)))
+
+    ;; --- the board -------------------------------------------------------------------
+
+    ;; The state a host shows now: before the deal every host is hidden;
+    ;; a host whose ripple ring has not arrived still shows hidden; a held
+    ;; press shows the pressed host flat.
+    (define (shown-state t s seg i)
+      (cond ((not seg) 'hidden)
+            ((not (scan-table-revealed? t i)) 'hidden)
+            (else
+             (let ((st (segment-cell-state seg i)))
+               (if (and (eq? st 'hidden) (pressed-host? s i)) 'pressed st)))))
+
+    (define (pressed-host? s i)
+      (let ((p (scan-session-press s)))
+        (and p
+             (eqv? (list-ref p 0) i)
+             (memq (list-ref p 1) '(left touch middle))
+             #t)))
+
+    ;; The wiring between two scanned zeros, right and down, lit while the
+    ;; ripple is fresh (C-WIRE-LIT fading to C-WIRE-DARK over 330 ms).
+    (define WIRE-FADE-MS 330)
+    (define (wires! t seg s i x y c)
+      (let ((w (segment-w seg)))
+        (define (wire-to j horizontal?)
+          (when (and (eq? (segment-state seg j) 'scanned)
+                     (= 0 (segment-reading seg j))
+                     (scan-table-revealed? t j)
+                     (scan-host-rect s j))   ; not past a zoomed window's edge
+            (let ((age (scan-table-reveal-age t i)))
+              (color! (if (and age (< age WIRE-FADE-MS))
+                          (mix C-WIRE-LIT C-WIRE-DARK (/ age (* 1.0 WIRE-FADE-MS)))
+                          C-WIRE-DARK))
+              (if horizontal?
+                  (draw-filled-rect (+ x (quotient c 2)) (+ y (quotient c 2)) c 1)
+                  (draw-filled-rect (+ x (quotient c 2)) (+ y (quotient c 2)) 1 c)))))
+        (when (< (modulo i w) (- w 1)) (wire-to (+ i 1) #t))
+        (when (< (quotient i w) (- (segment-h seg) 1)) (wire-to (+ i w) #f))))
+
+    (define (shake-dx t i)
+      (let ((sh (scan-table-shake t)))
+        (if (and sh (eqv? (car sh) i))
+            (if (even? (quotient (cdr sh) 40)) 2 -2)
+            0)))
+
+    (define (draw-board t)
+      (let* ((s (scan-table-session t))
+             (seg (scan-session-segment s))
+             (n (* (scan-session-w s) (scan-session-h s))))
+        (let loop ((i 0))
+          (when (< i n)
+            (let ((r (scan-host-rect s i)))
+              (when r
+                (let* ((x (+ (car r) (shake-dx t i)))
+                       (y (cadr r))
+                       (c (caddr r))
+                       (st (shown-state t s seg i)))
+                  (draw-scan-cell st x y c))))
+            (loop (+ i 1))))
+        ;; the wiring in a second pass: a wire runs into its neighbor's
+        ;; cell, which the first pass would otherwise paint over
+        (when seg
+          (let loop ((i 0))
+            (when (< i n)
+              (let ((r (scan-host-rect s i)))
+                (when (and r (eq? (shown-state t s seg i) 'zero))
+                  (wires! t seg s i (car r) (cadr r) (caddr r))))
+              (loop (+ i 1)))))
+        ;; the keyboard cursor over everything, dashed in FLAG mode, once a
+        ;; cursor key is used (a mouse or touch player never sees it)
+        (when (scan-table-cursor? t)
+          (let ((r (scan-host-rect s (scan-session-cursor s))))
+            (when r
+              (draw-scan-cell (if (eq? (scan-session-mode s) 'flag) 'cursor-flag 'cursor)
+                              (car r) (cadr r) (caddr r)))))
+        ;; FLAG mode's frame: the board's edge dashed, so the mode shows
+        ;; without colour (D70)
+        (when (eq? (scan-session-mode s) 'flag)
+          (let* ((l (scan-layout (scan-session-w s) (scan-session-h s)))
+                 (zoom? (and (scan-map? s) (scan-session-zoom s)))
+                 (c (if zoom? ZOOM-CELL (car l)))
+                 (cols (if zoom? (min ZOOM-W (scan-session-w s)) (scan-session-w s)))
+                 (rows (if zoom? (min ZOOM-H (scan-session-h s)) (scan-session-h s)))
+                 (x0 (- (quotient (- BAND-W (* cols c)) 2) 3))
+                 (y0 (- (quotient (- BAND-H (* rows c)) 2) 3))
+                 (w (+ (* cols c) 6))
+                 (h (+ (* rows c) 6)))
+            (color! C-ICE)
+            (let loop ((k 0))
+              (when (< k w)
+                (draw-filled-rect (+ x0 k) y0 4 1)
+                (draw-filled-rect (+ x0 k) (+ y0 h -1) 4 1)
+                (loop (+ k 8))))
+            (let loop ((k 0))
+              (when (< k h)
+                (draw-filled-rect x0 (+ y0 k) 1 4)
+                (draw-filled-rect (+ x0 w -1) (+ y0 k) 1 4)
+                (loop (+ k 8))))))))
+
+    ;; --- the bar ---------------------------------------------------------------------
+
+    ;; The bar's buttons as (name x y w h): MENU at the left (no tool stack
+    ;; on CLASSIC, so it takes the wrench's corner), the keys button at the
+    ;; right on a desktop; on touch the mode button and, on a zoomed map,
+    ;; MAP, 40 px each so a thumb finds them.
+    (define TOUCH-BUTTON 40)
+    (define (scan-bar-controls s vw vh)
+      (append (list (list 'menu 4 (- vh 28) 24 24))
+              (if (scan-session-touch? s)
+                  (append (list (list 'flag-mode (- vw TOUCH-BUTTON 4) (- vh TOUCH-BUTTON 4) TOUCH-BUTTON TOUCH-BUTTON))
+                          (if (and (scan-map? s) (scan-session-zoom s))
+                              (list (list 'map (- vw (* 2 TOUCH-BUTTON) 8) (- vh TOUCH-BUTTON 4) TOUCH-BUTTON TOUCH-BUTTON))
+                              '()))
+                  (list (list 'keys (- vw 28) (- vh 28) 24 24)))))
+
+    (define (scan-bar-hit s vw vh x y)
+      (let loop ((cs (scan-bar-controls s vw vh)))
+        (cond ((null? cs) #f)
+              ((let ((r (cdr (car cs))))
+                 (and (>= x (car r)) (< x (+ (car r) (caddr r)))
+                      (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
+               (car (car cs)))
+              (else (loop (cdr cs))))))
+
+    ;; The instruction line: what to do now, in the design's words.
+    (define (scan-instruction t)
+      (let ((s (scan-table-session t)))
+        (cond ((scan-session-keys? s) "ARROWS MOVE. SPACE SCANS. F FLAGS. N NEXT. CTRL+N NEW. ESC MENU.")
+              ((scan-table-won? t) "SEGMENT MAPPED.")
+              ((scan-table-lost? t) "ICE TRIPPED.")
+              ((scan-table-dealing? t) "DIALING THE SEGMENT.")
+              ((and (scan-map? s) (not (scan-session-zoom s))) "TAP THE MAP TO ZOOM IN.")
+              ((not (scan-table-segment t)) "PICK AN UPLINK. IT IS CLEAN.")
+              ((scan-session-touch? s)
+               (if (eq? (scan-session-mode s) 'flag)
+                   "TAP TO FLAG. SCAN MODE: THE BUTTON AT RIGHT."
+                   "TAP TO SCAN. FLAG MODE: THE BUTTON AT RIGHT."))
+              (else "CLICK SCANS. RIGHT-CLICK FLAGS. CLICK A READING TO SWEEP."))))
+
+    (define *ice-text* (text-cache))
+    (define *time-text* (text-cache))
+    (define (ice-text n) (string-append "ICE " (number->string n)))
+    (define (clock-string secs)
+      (let ((m (quotient secs 60))
+            (r (modulo secs 60)))
+        (string-append (number->string m) ":" (if (< r 10) "0" "") (number->string r))))
+    (define (time-text secs) (string-append "TIME " (clock-string secs)))
+
+    (define (draw-bar t vw vh)
+      (let* ((s (scan-table-session t))
+             (top (- vh HUD-HEIGHT))
+             (controls (scan-bar-controls s vw vh)))
+        (color! C-BG)
+        (draw-filled-rect 0 top vw (- vh top))
+        (color! C-BAR-C)
+        (draw-filled-rect 0 top vw 1)
+        (draw-menu-button (cdr (assq 'menu controls)))
+        ;; the counter where the meter sits
+        (let* ((m (meter-box vw top 'zones))
+               (text (cached-text *ice-text* (scan-table-counter t) ice-text)))
+          (color! (if (< (scan-table-counter t) 0) C-TRACE-HOT C-ICE))
+          (text! text (+ (car m) (quotient (- (caddr m) (text-width text 2)) 2)) (+ (cadr m) 2) 2))
+        ;; the clock at the right, left of the touch buttons
+        (let* ((text (cached-text *time-text* (scan-table-seconds t) time-text))
+               (right (if (scan-session-touch? s)
+                          (- vw (* 2 TOUCH-BUTTON) 16)
+                          (- vw 36))))
+          (color! C-TEXT)
+          (text! text (- right (text-width text 2)) (+ top 7) 2))
+        (draw-line-2 vw top (scan-instruction t)
+                     (cond ((scan-table-lost? t) C-ICE)
+                           ((scan-table-won? t) C-SELECTED)
+                           (else C-TEXT-DIM)))
+        (if (scan-session-touch? s)
+            (begin
+              (mode-button! (cdr (assq 'flag-mode controls)) (scan-session-mode s))
+              (let ((m (assq 'map controls)))
+                (when m (map-button! (cdr m)))))
+            (draw-keys-button (cdr (assq 'keys controls)) (scan-session-keys? s)))))
+
+    (define (box! r lit?)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! (if lit? C-ICE C-BAR-C))
+        (draw-filled-rect x y w h)
+        (color! (if lit? C-ICE C-TEXT-DIM))
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)))
+
+    ;; The mode button: the pennant and FLAG, filled in C-ICE while FLAG
+    ;; mode is on; the crosshair and SCAN, outlined, in SCAN mode. The
+    ;; icon and the word differ, not only the fill.
+    (define (mode-button! r mode)
+      (let* ((flag? (eq? mode 'flag))
+             (x (car r)) (y (cadr r)) (w (caddr r)))
+        (box! r flag?)
+        (color! (if flag? C-BG C-TEXT))
+        (if flag?
+            (draw-rows PENNANT (+ x (quotient (- w 10) 2)) (+ y 5) 2 5)
+            (begin
+              (draw-filled-rect (+ x (quotient w 2) -1) (+ y 5) 2 14)
+              (draw-filled-rect (+ x (quotient w 2) -7) (+ y 11) 14 2)))
+        (let ((word (if flag? "FLAG" "SCAN")))
+          (text-mini! word (+ x (quotient (- w (text-width-mini word 1)) 2)) (+ y 26) 1))))
+
+    (define (map-button! r)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)))
+        (box! r #f)
+        (color! C-TEXT)
+        ;; a small grid: the whole board
+        (let loop ((k 0))
+          (when (< k 3)
+            (draw-filled-rect (+ x 12) (+ y 6 (* k 5)) 16 1)
+            (draw-filled-rect (+ x 12 (* k 8)) (+ y 6) 1 11)
+            (loop (+ k 1))))
+        (text-mini! "MAP" (+ x (quotient (- w (text-width-mini "MAP" 1)) 2)) (+ y 26) 1)))
+
+    ;; --- the end panel -------------------------------------------------------------------
+
+    (define (panel-label id)
+      (case id ((retry) "RETRY LINK") ((new) "NEW SEGMENT") (else "JACK OUT")))
+
+    (define (draw-panel t best-line)
+      (let* ((rows (scan-table-panel-rows t))
+             (n (length rows))
+             (won? (scan-table-won? t))
+             (title (if won? "SEGMENT MAPPED" "ICE TRIPPED."))
+             (first (scan-table-panel-rect t 0))
+             (top (- (cadr first) 60))
+             (bottom (+ (cadr first) (* n 32) 8)))
+        (color-alpha! C-BG 0.88)
+        (draw-filled-rect 120 top 400 (- bottom top))
+        (color! (if won? C-SELECTED C-ICE))
+        (draw-filled-rect 120 top 400 1)
+        (draw-filled-rect 120 (- bottom 1) 400 1)
+        (text! title (quotient (- BAND-W (text-width title 3)) 2) (+ top 10) 3)
+        (let ((line (cond (best-line best-line)
+                          (won? (time-text (scan-table-seconds t)))
+                          (else (string-append "TIME " (clock-string (scan-table-seconds t)))))))
+          (color! C-TEXT)
+          (text! line (quotient (- BAND-W (text-width line 1)) 2) (+ top 38) 1))
+        (let loop ((rs rows) (i 0))
+          (when (pair? rs)
+            (let* ((r (scan-table-panel-rect t i))
+                   (hi? (= i (scan-table-panel t)))
+                   (label (panel-label (car rs))))
+              (when hi?
+                (color! C-BAR-C)
+                (draw-filled-rect (car r) (cadr r) (caddr r) (cadddr r)))
+              (color! (if hi? C-HIGHLIGHT C-TEXT))
+              (text! label (+ (car r) (quotient (- (caddr r) (text-width label 2)) 2)) (+ (cadr r) 7) 2))
+            (loop (cdr rs) (+ i 1))))))
+
+    ;; --- the frame -------------------------------------------------------------------
+
+    ;; t the table; bg the living background ((crash bg)) or #f; best-line
+    ;; the end panel's line under its title (the shell's score news), or #f.
+    (define (draw-scan t vw vh bg copper best-line)
+      (draw-board-background vw vh (- vh HUD-HEIGHT) 0.0 bg copper)
+      (draw-board t)
+      (draw-bar t vw vh)
+      (when (and (scan-table-toast t) (> (scan-table-toast-ms t) 0))
+        (draw-toast-in vw (scan-table-toast t) (- vh HUD-HEIGHT)
+                       (- 1.0 (/ (scan-table-toast-ms t) (* 1.0 TOAST-MS)))))
+      (when (and (scan-table-over t) (>= (scan-table-over-ms t) PANEL-WAIT-MS))
+        (draw-panel t best-line)))))
