@@ -1,0 +1,119 @@
+#!/bin/sh
+# Read and write single R2 objects through R2's S3-compatible API, with the
+# site's Cloudflare API token. This path exists because the token is scoped to
+# ONE bucket ("Workers R2 Storage Bucket Item Read/Write" on it, nothing else):
+# `wrangler r2 object get/put --remote` goes through Cloudflare's REST object
+# endpoint instead, and that answers 403 to a bucket-scoped token (measured
+# 2026-09-25 on harkfell-wasm). A token that can write every bucket could
+# damage the account's backups, so the publish uses this.
+#
+#   r2-s3 head BUCKET KEY                  is it there?
+#   r2-s3 get  BUCKET KEY FILE             download; FILE is written only on success
+#   r2-s3 put  BUCKET KEY FILE TYPE [CC]   upload with Content-Type TYPE (and
+#                                          Cache-Control CC, when given)
+#
+# Exit status: 0 done / present; 3 the key is absent (404 NoSuchKey, head and
+# get only); 1 anything else, a missing BUCKET included (404 NoSuchBucket), with
+# the HTTP status and R2's error code on stderr. So a refused or broken request,
+# or a typo in the bucket name, is never mistaken for "absent".
+#
+# put signs the file's sha256 (x-amz-content-sha256), so R2 refuses a body that
+# arrived different from the file hashed here. It never deletes, and it does not
+# check whether the key exists: callers do get -> put -> get -> cmp.
+#
+# Needs curl with --aws-sigv4 (7.75+), jq, sha256sum; CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID (eval "$(~/Ops/scripts/cf-env <site>)"). The S3 access
+# key id is the token's id, asked of Cloudflare's /tokens/verify; the S3 secret
+# is sha256(token). Neither is printed, and neither is passed on a command line
+# (curl reads them from a mode-600 file).
+#
+# R2_S3_ENDPOINT and R2_API_BASE override the S3 endpoint and the API base
+# (default https://<account>.r2.cloudflarestorage.com and
+# https://api.cloudflare.com/client/v4); the tests point them at a local mock.
+set -eu
+say() { echo "r2-s3: $*" >&2; }
+usage() { say "usage: r2-s3 head BUCKET KEY | get BUCKET KEY FILE | put BUCKET KEY FILE TYPE [CACHE-CONTROL]"; exit 2; }
+[ $# -ge 3 ] || usage
+OP=$1 BUCKET=$2 KEY=$3
+case "$OP" in
+  head) [ $# = 3 ] || usage ;;
+  get)  [ $# = 4 ] || usage; FILE=$4 ;;
+  put)  [ $# = 5 ] || [ $# = 6 ] || usage; FILE=$4; TYPE=$5; CC=${6:-}; [ -f "$FILE" ] || { say "$FILE is not a file"; exit 1; } ;;
+  *) usage ;;
+esac
+# every value that reaches a URL, a header or a config file is ONE line
+# matching a whitelist (grep -x alone matches line by line, so a value with a
+# newline in it would pass as long as each line did)
+oneline() { [ "$(printf '%s' "$1" | wc -l)" = 0 ]; }
+nocntrl() { [ "$(printf '%s' "$1" | tr -d '\000-\037\177' | wc -c)" = "$(printf '%s' "$1" | wc -c)" ]; }
+# names that need no URL encoding, so the path curl signs is the path R2 checks
+oneline "$BUCKET" && printf '%s' "$BUCKET" | grep -Eqx '[a-z0-9][a-z0-9-]{1,62}' || { say "bad bucket name: $BUCKET"; exit 2; }
+oneline "$KEY" && printf '%s' "$KEY" | grep -Eqx '[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*' || { say "refusing key $KEY: only [A-Za-z0-9._-] segments joined by /"; exit 2; }
+# curl removes . and .. segments BEFORE signing, so "../other-bucket/x" would be
+# signed and sent as /other-bucket/x: a key must never leave its bucket
+case "/$KEY/" in */./*|*/../*) say "refusing key $KEY: a . or .. segment"; exit 2 ;; esac
+if [ "$OP" = put ]; then
+  nocntrl "$TYPE" && nocntrl "$CC" || { say "refusing a control character in TYPE or CACHE-CONTROL"; exit 2; }
+fi
+: "${CLOUDFLARE_API_TOKEN:?r2-s3: CLOUDFLARE_API_TOKEN not set (eval \"\$(~/Ops/scripts/cf-env <site>)\")}"
+: "${CLOUDFLARE_ACCOUNT_ID:?r2-s3: CLOUDFLARE_ACCOUNT_ID not set}"
+# Cloudflare tokens and account ids are [A-Za-z0-9_-]; anything else would be
+# mis-parsed by curl's -K config (a quote ends the value) or break the URL
+oneline "$CLOUDFLARE_API_TOKEN" && printf '%s' "$CLOUDFLARE_API_TOKEN" | grep -Eqx '[A-Za-z0-9_-]+' || { say "CLOUDFLARE_API_TOKEN is not a Cloudflare token (characters outside [A-Za-z0-9_-])"; exit 2; }
+oneline "$CLOUDFLARE_ACCOUNT_ID" && printf '%s' "$CLOUDFLARE_ACCOUNT_ID" | grep -Eqx '[A-Za-z0-9_-]+' || { say "CLOUDFLARE_ACCOUNT_ID has characters outside [A-Za-z0-9_-]"; exit 2; }
+command -v curl > /dev/null && command -v jq > /dev/null || { say "needs curl and jq on PATH"; exit 1; }
+API="${R2_API_BASE:-https://api.cloudflare.com/client/v4}"
+EP="${R2_S3_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com}"
+
+W=$(mktemp -d "${TMPDIR:-/tmp}/r2-s3.XXXXXX"); trap 'rm -rf "$W"' EXIT; chmod 700 "$W"
+# the EXIT trap holds the S3 secret's cleanup; turn fatal signals into exits so
+# it runs under every /bin/sh (dash skips EXIT traps on a fatal signal)
+trap 'exit 129' HUP; trap 'exit 130' INT; trap 'exit 143' TERM
+umask 077
+
+# the token's id is the S3 access key id (account-owned tokens first, then user tokens)
+auth() { printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" > "$W/api.cfg"
+  for p in "accounts/$CLOUDFLARE_ACCOUNT_ID/tokens/verify" "user/tokens/verify"; do
+    id=$(curl -sS --connect-timeout 20 --max-time 60 -K "$W/api.cfg" "$API/$p" 2>/dev/null \
+      | jq -r 'select(.success == true and .result.status == "active") | .result.id // empty' 2>/dev/null) || id=
+    [ -n "$id" ] && { printf '%s' "$id"; return 0; }
+  done
+  return 1; }
+KID=$(auth) || { say "Cloudflare did not verify CLOUDFLARE_API_TOKEN as an active token"; exit 1; }
+rm -f "$W/api.cfg"
+printf 'user = "%s:%s"\n' "$KID" "$(printf '%s' "$CLOUDFLARE_API_TOKEN" | sha256sum | cut -d' ' -f1)" > "$W/s3.cfg"
+
+# s3 [curl args...]: one signed request; sets CODE, ERR; the body lands in $W/body.
+# Bounded: a 20s connect, and a transfer under 1 KB/s for 60s is abandoned.
+# --retry covers transient network and 5xx failures; every request is idempotent.
+s3() { rm -f "$W/body"
+  CODE=$(curl -sS -K "$W/s3.cfg" --aws-sigv4 aws:amz:auto:s3 --connect-timeout 20 \
+    --speed-limit 1024 --speed-time 60 --retry 3 -o "$W/body" -w '%{http_code}' "$@" "$EP/$BUCKET/$KEY") || CODE="curl-exit-$?"
+  ERR=$(sed -n 's:.*<Code>\([^<]*\)</Code>.*:\1:p' "$W/body" 2>/dev/null | head -1) || ERR=
+}
+fail() { say "$OP $BUCKET/$KEY: HTTP $CODE${ERR:+ ($ERR)}"; exit 1; }
+
+case "$OP" in
+  head)
+    s3 -I
+    case "$CODE" in
+      200) exit 0 ;;
+      404) # a HEAD has no body to say WHICH 404: ask again with a GET, whose
+           # body names NoSuchKey or NoSuchBucket (small either way)
+           s3
+           case "$CODE $ERR" in "200 "*) exit 0 ;; "404 NoSuchKey") exit 3 ;; *) fail ;; esac ;;
+      *) fail ;;
+    esac ;;
+  get)
+    s3
+    case "$CODE" in
+      200) cp "$W/body" "$FILE" ;;
+      404) [ "$ERR" = NoSuchKey ] && exit 3; fail ;;
+      *) fail ;;
+    esac ;;
+  put)
+    SHA=$(sha256sum "$FILE" | cut -d' ' -f1)
+    if [ -n "$CC" ]; then set -- -H "Cache-Control: $CC"; else set --; fi
+    s3 -T "$FILE" -H "Content-Type: $TYPE" -H "x-amz-content-sha256: $SHA" "$@"
+    [ "$CODE" = 200 ] || fail ;;
+esac
