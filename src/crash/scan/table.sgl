@@ -1,0 +1,335 @@
+;;; (crash scan table) - A SCAN board in play: the session and what is
+;;; around it.
+;;;
+;;; (crash scan input) turns a frame into actions on the segment. This
+;;; module is the rest of a table both shells share, so each shell's hook
+;;; stays small: the clock (it starts at the uplink and stops at the end,
+;;; as Windows' did), the end of a board (SEGMENT MAPPED, or ICE TRIPPED on
+;;; CLASSIC) and its panel (RETRY LINK, NEW SEGMENT, JACK OUT), the scan's
+;;; ripple (each newly scanned host shows a ring at a time, from the host
+;;; the action was on), a refusal's shake, the moves, the cues and the
+;;; requests the shell acts on, and the datum CONTINUE stores.
+;;;
+;;; The shell calls, per frame:
+;;;   (scan-table-step t frame)       the frame's input, clock and effects
+;;;   (scan-table-deal! t more?)      the deal's slice, while dealing (D81)
+;;; and reads scan-table-cues / scan-table-requests after it. Requests:
+;;;   menu      the pause overlay (Escape, or the panel's JACK OUT is `quit`)
+;;;   new       a new segment (ctrl+n, or the panel's NEW SEGMENT)
+;;;   retry     the same segment again (the panel's RETRY LINK)
+;;;   quit      back to the menu (the panel's JACK OUT)
+;;;   won lost  the board ended this frame (the shell records the score)
+;;;   buzz      the page's vibrate (a long press flagged)
+;;;   tools     ctrl+Space (CLASSIC has no tools; the shell ignores it)
+;;;
+;;; Rules family: no platform, no clock of its own (the frame carries dt).
+
+(define-library (crash scan table)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash scan rules)
+          (crash scan input))
+
+  (export RING-MS SHAKE-MS TOAST-MS PANEL-WAIT-MS PANEL-ROWS
+          scan-table scan-table?
+          scan-table-session scan-table-ms scan-table-over scan-table-over-ms
+          scan-table-moves scan-table-daily scan-table-cues scan-table-requests
+          scan-table-panel scan-table-shake scan-table-toast scan-table-toast-ms
+          scan-table-new scan-table-retry
+          scan-table-step scan-table-deal! scan-table-dealing?
+          scan-table-segment scan-table-seconds scan-table-ticks scan-table-counter
+          scan-table-revealed? scan-table-reveal-age
+          scan-table-panel-rows scan-table-panel-rect scan-table-panel-hit
+          scan-table-won? scan-table-lost?
+          scan-table->datum datum->scan-table)
+
+  (begin
+    (define RING-MS 33)       ; a ripple ring every two ticks (the design's section 6)
+    (define SHAKE-MS 240)
+    (define TOAST-MS 1600)
+    (define TABLE-SAVE-VERSION 1)
+
+    ;; The end panel's rows: RETRY LINK only after a trip (CLASSIC's lost
+    ;; board); a mapped segment offers the next one or the menu.
+    (define PANEL-ROWS
+      (list (list 'retry "RETRY LINK")
+            (list 'new "NEW SEGMENT")
+            (list 'quit "JACK OUT")))
+
+    (define-struct scan-table
+      (session default: #f)
+      (ms default: 0)            ; the clock: ms of play since the uplink, frozen at the end
+      (over default: #f)         ; #f | won | lost
+      (over-ms default: 0)       ; ms since the end
+      (moves default: 0)         ; actions that changed the segment
+      (daily default: #f)        ; the UTC day of a daily board, or #f
+      (reveal default: #f)       ; host -> the ms (on the table's clock) its ring shows, or #f
+      (now default: 0)           ; ms since the board opened (the ripple's clock; runs before the uplink too)
+      (panel default: 0)         ; the end panel's highlight
+      (shake default: #f)        ; (host . ms left) of a refusal
+      (toast default: #f)        ; the line a refusal says, or #f
+      (toast-ms default: 0)
+      (cues default: '())        ; this frame's, for the shell
+      (requests default: '()))   ; this frame's, for the shell
+
+    (define (scan-table-new session daily)
+      (scan-table session: session daily: daily))
+
+    ;; The same segment again: a fresh session of the same seed and preset
+    ;; with the uplink picked at the same host, so the deal (a function of
+    ;; the seed and the uplink) is the same board. The shell slices the
+    ;; deal as for a first click.
+    (define (scan-table-retry t fresh)
+      (let* ((old (scan-table-session t))
+             (first (scan-session-first old))
+             (s (if first
+                    (scan-step (scan-session fresh cursor: first)
+                               (make-scan-frame (list 'return) '() '() 0))
+                    fresh)))
+        (scan-table session: (scan-session s requests: '() news: '())
+                    daily: (scan-table-daily t))))
+
+    (define (scan-table-segment t) (scan-session-segment (scan-table-session t)))
+    (define (scan-table-dealing? t) (scan-session-dealing? (scan-table-session t)))
+    (define (scan-table-won? t) (eq? (scan-table-over t) 'won))
+    (define (scan-table-lost? t) (eq? (scan-table-over t) 'lost))
+    (define (scan-table-seconds t) (quotient (scan-table-ms t) 1000))
+    ;; The clock at 60 a second, the scores' unit (the other tables' ticks).
+    (define (scan-table-ticks t) (quotient (* (scan-table-ms t) 60) 1000))
+
+    ;; The ICE counter: total less flags less tripped; the segment's own
+    ;; once dealt, the preset's total before the uplink.
+    (define (scan-table-counter t)
+      (let ((seg (scan-table-segment t)))
+        (if seg (segment-counter seg) (scan-session-m (scan-table-session t)))))
+
+    ;; Has host i's ripple ring reached it (always, when no ripple runs)?
+    (define (scan-table-revealed? t i)
+      (let ((r (scan-table-reveal t)))
+        (or (not r)
+            (let ((at (vector-ref r i)))
+              (or (not at) (>= (scan-table-now t) at))))))
+
+    ;; ms since host i's ring showed, or #f when it has no ring.
+    (define (scan-table-reveal-age t i)
+      (let ((r (scan-table-reveal t)))
+        (and r
+             (let ((at (vector-ref r i)))
+               (and at (- (scan-table-now t) at))))))
+
+    ;; --- a frame -------------------------------------------------------------------
+
+    (define (scan-table-step t f)
+      (let* ((dt (max 0 (scan-frame-dt f)))
+             (t (scan-table t cues: '() requests: '()
+                            now: (+ (scan-table-now t) dt)
+                            toast-ms: (max 0 (- (scan-table-toast-ms t) dt))
+                            shake: (let ((sh (scan-table-shake t)))
+                                     (and sh (> (cdr sh) dt) (cons (car sh) (- (cdr sh) dt)))))))
+        (if (scan-table-over t)
+            (panel-step (scan-table t over-ms: (+ (scan-table-over-ms t) dt)) f)
+            (play-step t f dt))))
+
+    (define (play-step t f dt)
+      (let* ((before (scan-table-session t))
+             (seg0 (scan-session-segment before))
+             (after (scan-step before f))
+             (seg1 (scan-session-segment after))
+             (news (scan-session-news after))
+             (changed? (and seg0 seg1 (not (eq? seg0 seg1)) (not (equal? (segment-cells seg0) (segment-cells seg1)))))
+             ;; the clock runs from the uplink's deal on, and not while dealing
+             (ms (if (and seg0 (not (segment-over? seg0))) (+ (scan-table-ms t) dt) (scan-table-ms t)))
+             (t (scan-table t
+                            session: after
+                            ms: ms
+                            moves: (if changed? (+ 1 (scan-table-moves t)) (scan-table-moves t))
+                            reveal: (if changed?
+                                        (ripple (scan-table-reveal t) seg0 seg1 (origin before after f) (scan-table-now t))
+                                        (scan-table-reveal t))
+                            requests: (map-requests (scan-session-requests after))
+                            cues: (news-cues news seg0 seg1)))
+             (t (refusals t news)))
+        (ended t seg1)))
+
+    ;; The host an action was on: a pointer event's host, else the cursor.
+    (define (origin before after f)
+      (let loop ((es (scan-frame-pointer f)) (last #f))
+        (if (null? es)
+            (or last (scan-session-cursor after))
+            (let ((e (car es)))
+              (loop (cdr es)
+                    (or (and (memq (car e) '(up down))
+                             (scan-host-at before (cadr e) (caddr e)))
+                        last))))))
+
+    ;; Every host newly scanned (or shown) gets its ring's time: RING-MS a
+    ;; ring of Chebyshev distance from the origin.
+    (define (ripple old seg0 seg1 o now)
+      (let* ((n (segment-size seg1))
+             (w (segment-w seg1))
+             (r (if old (vector-copy old) (make-vector n #f)))
+             (ox (modulo o w))
+             (oy (quotient o w)))
+        (let loop ((i 0))
+          (when (< i n)
+            (unless (eq? (segment-state seg0 i) (segment-state seg1 i))
+              (when (eq? (segment-state seg1 i) 'scanned)
+                (vector-set! r i (+ now (* RING-MS (max (abs (- (modulo i w) ox))
+                                                         (abs (- (quotient i w) oy))))))))
+            (loop (+ i 1))))
+        r))
+
+    (define (map-requests rs)
+      (filter (lambda (r) (memq r '(menu new tools buzz failed))) rs))
+
+    (define (refusals t news)
+      (let loop ((ns news) (t t))
+        (if (null? ns)
+            t
+            (let ((n (car ns)))
+              (loop (cdr ns)
+                    (if (and (pair? n) (eq? (car n) 'refused))
+                        (scan-table t
+                                    shake: (and (caddr n) (cons (caddr n) SHAKE-MS))
+                                    toast: (if (eq? (cadr n) 'flagged) "FLAGGED. UNFLAG FIRST." "PICK AN UPLINK FIRST.")
+                                    toast-ms: TOAST-MS
+                                    cues: (append (scan-table-cues t) (list 'mismatch)))
+                        t))))))
+
+    ;; The frame's cues from what the segment did, in the existing sounds
+    ;; (P6c brings SCAN's own five): an opening or a sweep that scanned
+    ;; several hosts matches, one host selects, a flag selects, a trip
+    ;; severs, the map clears.
+    (define (news-cues news seg0 seg1)
+      (let loop ((ns news) (acc '()))
+        (if (null? ns)
+            (reverse acc)
+            (let ((n (car ns)))
+              (loop (cdr ns)
+                    (cond ((not (pair? n)) acc)
+                          ((eq? (car n) 'uplink) (cons 'match acc))
+                          ((eq? (car n) 'scanned)
+                           (cond ((> (cadr n) 1) (cons 'match acc))
+                                 ((= (cadr n) 1) (cons 'select acc))
+                                 (else acc)))
+                          ((memq (car n) '(flagged hidden suspect)) (cons 'select acc))   ; a flag's cycle
+                          ((eq? (car n) 'trip) (cons 'severed acc))
+                          ((eq? (car n) 'mapped) (cons 'cleared acc))
+                          (else acc)))))))
+
+    (define (ended t seg)
+      (cond ((not seg) t)
+            ((segment-won? seg)
+             (scan-table t over: 'won over-ms: 0 panel: 0 requests: (append (scan-table-requests t) (list 'won))))
+            ((segment-lost? seg)
+             (scan-table t over: 'lost over-ms: 0 panel: 0 requests: (append (scan-table-requests t) (list 'lost))))
+            (else t)))
+
+    ;; The deal's slice (D81): the shell's budget as more?.
+    (define (scan-table-deal! t more?)
+      (let* ((s (scan-session-deal! (scan-table-session t) more?))
+             (seg (scan-session-segment s))
+             (dealt? (and seg (not (scan-table-segment t)))))
+        (scan-table t
+                    session: s
+                    requests: (append (scan-table-requests t)
+                                      (if (memq 'failed (scan-session-requests s)) (list 'failed) '()))
+                    reveal: (if dealt?
+                                (ripple #f (blank seg) seg (scan-session-first s) (scan-table-now t))
+                                (scan-table-reveal t))
+                    cues: (if dealt? (append (scan-table-cues t) (list 'match)) (scan-table-cues t)))))
+
+    ;; A segment of the same grid with every host hidden: what the uplink's
+    ;; opening is compared against for its ripple.
+    (define (blank seg)
+      (segment seg cells: (make-vector (segment-size seg) 'hidden)))
+
+    ;; --- the end panel ---------------------------------------------------------------
+
+    (define (scan-table-panel-rows t)
+      (if (scan-table-lost? t) (list 'retry 'new 'quit) (list 'new 'quit)))
+
+    (define (panel-label id) (cadr (assq id PANEL-ROWS)))
+
+    ;; (x y w h) of the index-th row, centered in the band under the
+    ;; end line.
+    (define PANEL-ROW-W 240)
+    (define PANEL-ROW-H 28)
+    (define PANEL-ROW-GAP 4)
+    (define PANEL-Y 150)
+    (define (scan-table-panel-rect t index)
+      (list (quotient (- BAND-W PANEL-ROW-W) 2)
+            (+ PANEL-Y (* index (+ PANEL-ROW-H PANEL-ROW-GAP)))
+            PANEL-ROW-W
+            PANEL-ROW-H))
+
+    (define (scan-table-panel-hit t x y)
+      (let loop ((i 0))
+        (cond ((= i (length (scan-table-panel-rows t))) #f)
+              ((let ((r (scan-table-panel-rect t i)))
+                 (and (>= x (car r)) (< x (+ (car r) (caddr r)))
+                      (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
+               i)
+              (else (loop (+ i 1))))))
+
+    ;; The panel takes a tap on a row (on release, as the board does), the
+    ;; arrows and Return or Space, r for RETRY LINK, n for NEW SEGMENT,
+    ;; Escape for the menu. It waits PANEL-WAIT-MS first, so the click that
+    ;; ended the board never picks a row too.
+    (define PANEL-WAIT-MS 400)
+    (define (panel-step t f)
+      (let* ((rows (scan-table-panel-rows t))
+             (n (length rows))
+             (ready? (>= (scan-table-over-ms t) PANEL-WAIT-MS))
+             (tap (and ready?
+                       (let loop ((es (scan-frame-pointer f)) (hit #f))
+                         (if (null? es)
+                             hit
+                             (let ((e (car es)))
+                               (loop (cdr es)
+                                     (or (and (eq? (car e) 'up)
+                                              (scan-table-panel-hit t (cadr e) (caddr e)))
+                                         hit)))))))
+             (pressed (scan-frame-pressed f)))
+        (define (pick id) (scan-table t requests: (list id) cues: (list 'match)))
+        (cond (tap (pick (list-ref rows tap)))
+              ((not ready?) t)
+              ((memq 'escape pressed) (scan-table t requests: (list 'menu)))
+              ((and (memq 'r pressed) (memq 'retry rows)) (pick 'retry))
+              ((memq 'n pressed) (pick 'new))
+              ((or (memq 'up pressed) (memq 'k pressed))
+               (scan-table t panel: (modulo (- (scan-table-panel t) 1) n) cues: (list 'select)))
+              ((or (memq 'down pressed) (memq 'j pressed))
+               (scan-table t panel: (modulo (+ (scan-table-panel t) 1) n) cues: (list 'select)))
+              ((or (memq 'return pressed) (memq 'space pressed))
+               (pick (list-ref rows (min (scan-table-panel t) (- n 1)))))
+              (else t))))
+
+    ;; --- the datum (CONTINUE) ------------------------------------------------------------
+
+    ;; (scan-table 1 MS MOVES DAILY SESSION) with SESSION (crash scan save)'s
+    ;; datum; the shell's save module converts the session (this module
+    ;; stays out of the store). An ended board is never stored: CONTINUE
+    ;; offers a board still in play.
+    (define (scan-table->datum t session-datum)
+      (list 'scan-table TABLE-SAVE-VERSION (scan-table-ms t) (scan-table-moves t) (scan-table-daily t) session-datum))
+
+    ;; The table from a datum, given the session it names (or #f).
+    (define (datum->scan-table d session)
+      (and session
+           (list? d)
+           (= (length d) 6)
+           (eq? (car d) 'scan-table)
+           (eqv? (cadr d) TABLE-SAVE-VERSION)
+           (integer? (list-ref d 2))
+           (>= (list-ref d 2) 0)
+           (integer? (list-ref d 3))
+           (>= (list-ref d 3) 0)
+           (or (not (list-ref d 4)) (integer? (list-ref d 4)))
+           (let ((seg (scan-session-segment session)))
+             (and (not (and seg (segment-over? seg)))
+                  (scan-table session: session
+                              ms: (list-ref d 2)
+                              moves: (list-ref d 3)
+                              daily: (list-ref d 4))))))))

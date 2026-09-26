@@ -1,0 +1,181 @@
+;;; SCAN's table (0.1.3, P6b's hooks): the clock, the end of a board and
+;;; its panel, the ripple, the refusal, RETRY LINK, and the CONTINUE datum.
+;;;
+;;; Every play here goes through (crash scan input)'s raw frames (keys and
+;;; pointer events), as the shells hand them over, so the table is tested
+;;; on the path the game runs.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash scan rules)
+        (crash scan generate)
+        (crash scan input)
+        (crash scan save)
+        (crash scan table))
+
+(define (always) #t)
+
+(define (frame pressed pointer dt) (make-scan-frame pressed '() pointer dt))
+
+(define (step t f) (scan-table-step t f))
+
+;; Deal to the end, as a shell would over several frames.
+(define (dealt t)
+  (let loop ((t t))
+    (if (scan-table-dealing? t) (loop (scan-table-deal! t always)) t)))
+
+(define (lan seed) (scan-table-new (scan-session-new 'lan seed 'original #f #f) #f))
+
+;; The cursor to host i, then Return (scan, or sweep on a reading) or f.
+(define (key-act t i key dt)
+  (let ((t (scan-table t session: (scan-session (scan-table-session t) cursor: i))))
+    (dealt (step t (frame (list key) '() dt)))))
+
+(define (center t i)
+  (let ((r (scan-host-rect (scan-table-session t) i)))
+    (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+
+(define (click t i button dt)
+  (let ((c (center t i)))
+    (dealt (step t (frame '() (list (list 'down (car c) (cdr c) button) (list 'up (car c) (cdr c) button)) dt)))))
+
+;; The dealt line's steps after the uplink, and the uplink's ICE vector.
+(define (line-of seed first)
+  (let ((d (deal-segment 'lan seed first 'original #f)))
+    (cons (cdr (dealt-line d)) (dealt-segment d))))
+
+(define UPLINK 40)   ; the middle of 9x9
+
+(test-group "scan table: the clock and the deal"
+  (test "the clock waits for the uplink, then runs"
+    (let* ((t (step (lan 7) (frame '() '() 500))))
+      (assert-equal 0 (scan-table-ms t))
+      (let* ((t (click t UPLINK 'left 16))
+             (t2 (step t (frame '() '() 1000))))
+        (assert-true (and (scan-table-segment t) #t))
+        (assert-true (segment-scanned? (scan-table-segment t) UPLINK))
+        (assert-equal 1000 (- (scan-table-ms t2) (scan-table-ms t))))))
+  (test "the counter reads the preset's ICE before the uplink and the segment's after"
+    (let* ((t (lan 7))
+           (t2 (key-act t UPLINK 'f 16)))
+      (assert-equal 10 (scan-table-counter t))
+      ;; a flag before the uplink is refused, with the toast
+      (assert-equal 10 (scan-table-counter t2))
+      (assert-true (and (scan-table-toast t2) #t))
+      (let* ((t3 (key-act t UPLINK 'return 16))
+             (seg (scan-table-segment t3))
+             (hidden (let loop ((i 0))
+                       (cond ((= i 81) #f)
+                             ((eq? (segment-state seg i) 'hidden) i)
+                             (else (loop (+ i 1))))))
+             (t4 (key-act t3 hidden 'f 16)))
+        (assert-equal 9 (scan-table-counter t4))
+        (assert-equal 1 (scan-table-moves t4))))))
+
+(test-group "scan table: the ripple"
+  (test "the uplink's opening shows ring by ring from the uplink"
+    (let* ((t (key-act (lan 7) UPLINK 'return 16))
+           (seg (scan-table-segment t))
+           ;; a scanned host two rings out
+           (far (let loop ((i 0))
+                  (cond ((= i 81) #f)
+                        ((and (segment-scanned? seg i)
+                              (= 2 (max (abs (- (modulo i 9) 4)) (abs (- (quotient i 9) 4)))))
+                         i)
+                        (else (loop (+ i 1)))))))
+      (assert-true (and far #t))
+      (assert-true (scan-table-revealed? t UPLINK))
+      (assert-false (scan-table-revealed? t far))
+      (let ((later (step t (frame '() '() (* 2 RING-MS)))))
+        (assert-true (scan-table-revealed? later far))))))
+
+(test-group "scan table: the end of a board"
+  (test "the dealt line played to the end maps the segment: won, once, the clock frozen"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (steps (car (line-of 11 UPLINK)))
+           (t (let loop ((t t) (ss steps))
+                (if (null? ss)
+                    t
+                    (loop (if (eq? (car (car ss)) 'scan)
+                              (key-act t (cadr (car ss)) 'return 100)
+                              t)
+                          (cdr ss)))))
+           (ms (scan-table-ms t))
+           (after (step t (frame '() '() 5000))))
+      (assert-true (scan-table-won? t))
+      (assert-equal ms (scan-table-ms after))
+      (assert-false (memq 'won (scan-table-requests after)))
+      (assert-equal '(new quit) (scan-table-panel-rows t))))
+  (test "CLASSIC: scanning ICE ends the board, lost, with RETRY LINK first"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (t (key-act t ice 'return 16)))
+      (assert-true (scan-table-lost? t))
+      (assert-true (and (memq 'lost (scan-table-requests t)) #t))
+      (assert-true (and (memq 'severed (scan-table-cues t)) #t))
+      (assert-equal '(retry new quit) (scan-table-panel-rows t))))
+  (test "the panel waits PANEL-WAIT-MS, then Return picks the highlighted row"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (t (key-act t ice 'return 16))
+           (early (step t (frame (list 'return) '() 16)))
+           (ready (step t (frame '() '() PANEL-WAIT-MS)))
+           (down (step ready (frame (list 'down) '() 16)))
+           (picked (step down (frame (list 'return) '() 16))))
+      (assert-equal '() (scan-table-requests early))
+      (assert-equal '(new) (scan-table-requests picked))))
+  (test "a tap on a panel row picks it"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (t (step (key-act t ice 'return 16) (frame '() '() PANEL-WAIT-MS)))
+           (r (scan-table-panel-rect t 2))
+           (x (+ (car r) 10))
+           (y (+ (cadr r) 10))
+           (picked (step t (frame '() (list (list 'down x y 'left) (list 'up x y 'left)) 16))))
+      (assert-equal '(quit) (scan-table-requests picked))))
+  (test "RETRY LINK deals the same segment from the same uplink"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (scan-table-segment t))
+           (again (dealt (scan-table-retry t (scan-session-new 'lan 11 'original #f #f)))))
+      (assert-equal (segment-ice seg) (segment-ice (scan-table-segment again)))
+      (assert-true (segment-scanned? (scan-table-segment again) UPLINK))
+      (assert-equal 0 (scan-table-ms again)))))
+
+(test-group "scan table: refusals"
+  (test "a tap on a flagged host in SCAN mode shakes it and says so"
+    (let* ((s (scan-session-new 'lan 7 'original #f #t))
+           (t (dealt (scan-table-new s #f)))
+           (c (center t UPLINK))
+           (t (dealt (step t (frame '() (list (list 'down (car c) (cdr c) 'touch) (list 'up (car c) (cdr c) 'touch)) 16))))
+           (seg (scan-table-segment t))
+           (hidden (let loop ((i 0)) (if (eq? (segment-state seg i) 'hidden) i (loop (+ i 1)))))
+           (t (key-act t hidden 'f 16))
+           (c2 (center t hidden))
+           (t (step t (frame '() (list (list 'down (car c2) (cdr c2) 'touch) (list 'up (car c2) (cdr c2) 'touch)) 16))))
+      (assert-equal "FLAGGED. UNFLAG FIRST." (scan-table-toast t))
+      (assert-equal hidden (car (scan-table-shake t)))
+      (assert-true (and (memq 'mismatch (scan-table-cues t)) #t)))))
+
+(test-group "scan table: the CONTINUE datum"
+  (test "a board in play round-trips with its clock and moves"
+    (let* ((t (key-act (lan 5) UPLINK 'return 16))
+           (t (step t (frame '() '() 4321)))
+           (d (scan-table->datum t (scan-save (scan-table-session t))))
+           (back (datum->scan-table d (scan-load (list-ref d 5) #f))))
+      (assert-true (and back #t))
+      (assert-equal (scan-table-ms t) (scan-table-ms back))
+      (assert-equal (segment-cells (scan-table-segment t)) (segment-cells (scan-table-segment back)))))
+  (test "an ended board is refused (CONTINUE offers a board in play)"
+    (let* ((t (key-act (lan 11) UPLINK 'return 16))
+           (seg (cdr (line-of 11 UPLINK)))
+           (ice (let loop ((i 0)) (if (segment-ice? seg i) i (loop (+ i 1)))))
+           (t (key-act t ice 'return 16))
+           (d (scan-table->datum t (scan-save (scan-table-session t)))))
+      (assert-false (datum->scan-table d (scan-load (list-ref d 5) #f)))))
+  (test "a malformed datum is refused"
+    (assert-false (datum->scan-table (list 'scan-table 2 0 0 #f #f) (scan-session-new 'lan 1 'original #f #f)))
+    (assert-false (datum->scan-table (list 'scan-table 1 -5 0 #f #f) (scan-session-new 'lan 1 'original #f #f)))))
