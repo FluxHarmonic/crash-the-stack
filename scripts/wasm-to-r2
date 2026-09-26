@@ -6,6 +6,18 @@
 #   scripts/wasm-to-r2 DIR --local
 #   scripts/wasm-to-r2 DIR --upload   send to R2 and leave no wasm in DIR
 #   scripts/wasm-to-r2 DIR --upload --dry-run
+#                                     everything but the upload; with the
+#                                     credentials set, a read-only HEAD of
+#                                     each key shows the token reaches the
+#                                     bucket (a refusal fails the run)
+#
+# --upload goes through R2's S3 API (scripts/r2-s3) with CLOUDFLARE_API_TOKEN
+# and CLOUDFLARE_ACCOUNT_ID (eval "$(~/Ops/scripts/cf-env crash)"). The token
+# holds Bucket Item Read/Write on Crash's buckets only; wrangler's `r2 object`
+# REST path refuses such a token, so nothing here uses it. Each key is read
+# first: present means compared byte for byte against the file (and refused if
+# different, never overwritten); absent means put, read back and compared; a
+# refused or failed read stops the run. Nothing is ever deleted.
 #
 # CRASH_WEB_DIR=build/remote-web-<sha> scripts/wasm-to-r2 DIR --upload
 #     read the wasm from that built tree instead of build/web: publish exactly
@@ -117,23 +129,41 @@ fi
 LEFT="$(find "$DIR" -name '*.wasm' | sort)"
 [ -z "$LEFT" ] || { echo "wasm-to-r2: .wasm files left in the tree; Pages caps a file at 25 MiB and will refuse the deploy:"; echo "$LEFT" | sed 's/^/  /'; exit 1; }
 
+R2W="$(mktemp -d "${TMPDIR:-/tmp}/wasm-to-r2-XXXXXX")"
+trap 'rm -rf "$R2W"' EXIT
+HAVE_CREDS=0; [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] && HAVE_CREDS=1
 put() {   # local file, bucket key
-  if [ "$DRY" = 1 ]; then echo "wasm-to-r2: would put $2 ($(stat -c%s "$1") bytes) in $BUCKET"; return 0; fi
-  # --remote on BOTH calls, always. wrangler 4's `r2 object` talks to a LOCAL
-  # simulator by default, which needs workerd (missing from this box's install:
-  # "spawn .../@cloudflare/workerd-linux-64/bin/workerd ENOENT"). Without the
-  # flag a publish writes to a directory nobody serves and says nothing is
-  # wrong, which is the worst of the available failures.
-  # Content-addressed, so a key already there holds these very bytes.
-  if wrangler r2 object get "$BUCKET/$2" --remote --file /dev/null > /dev/null 2>&1; then
-    echo "wasm-to-r2: $2 is already in $BUCKET"
+  if [ "$DRY" = 1 ]; then
+    if [ "$HAVE_CREDS" = 1 ]; then
+      set +e; scripts/r2-s3 head "$BUCKET" "$2" 2> "$R2W/log"; hrc=$?; set -e
+      case "$hrc" in
+        0) echo "wasm-to-r2: R2 read-only check: $2 is already in $BUCKET (the token reads the bucket)" ;;
+        3) echo "wasm-to-r2: R2 read-only check: $2 is absent from $BUCKET (the token reads the bucket)" ;;
+        *) cat "$R2W/log"; echo "wasm-to-r2: REFUSED: the token cannot read $BUCKET (r2-s3 rc $hrc); a publish would fail"; exit 1 ;;
+      esac
+    else
+      echo "wasm-to-r2: CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID not set, so R2 was not checked"
+    fi
+    echo "wasm-to-r2: would put $2 ($(stat -c%s "$1") bytes) in $BUCKET (scripts/r2-s3), read it back and compare"
     return 0
   fi
-  wrangler r2 object put "$BUCKET/$2" --remote --file "$1" --content-type application/wasm > /dev/null
-  echo "wasm-to-r2: put $2 ($(stat -c%s "$1") bytes)"
+  # r2-s3 exits 3 only for an absent key: a refused or failed read is never
+  # taken as "absent, put it". Content-addressed keys, but a key that is
+  # already there is still compared, not trusted.
+  rm -f "$R2W/back"
+  set +e; scripts/r2-s3 get "$BUCKET" "$2" "$R2W/back" 2> "$R2W/log"; grc=$?; set -e
+  case "$grc" in
+    0) cmp -s "$1" "$R2W/back" || { echo "wasm-to-r2: REFUSED: $BUCKET/$2 holds other bytes than $1; not overwritten"; exit 1; }
+       echo "wasm-to-r2: $2 is already in $BUCKET (read back, identical)"; return 0 ;;
+    3) ;;
+    *) cat "$R2W/log"; echo "wasm-to-r2: REFUSED: could not read $BUCKET/$2 (r2-s3 rc $grc: refused or failed, not absent)"; exit 1 ;;
+  esac
+  scripts/r2-s3 put "$BUCKET" "$2" "$1" application/wasm 2> "$R2W/log" || { cat "$R2W/log"; echo "wasm-to-r2: the R2 upload of $2 failed"; exit 1; }
+  scripts/r2-s3 get "$BUCKET" "$2" "$R2W/back" 2> "$R2W/log" || { cat "$R2W/log"; echo "wasm-to-r2: the R2 read-back of $2 failed"; exit 1; }
+  cmp -s "$1" "$R2W/back" || { echo "wasm-to-r2: REFUSED: the read-back of $BUCKET/$2 is not $1"; exit 1; }
+  echo "wasm-to-r2: put $2 ($(stat -c%s "$1") bytes; read back, identical)"
 }
-[ "$DRY" = 1 ] || command -v wrangler > /dev/null || { echo "wasm-to-r2: wrangler not on PATH"; exit 1; }
-[ "$DRY" = 1 ] || [ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "wasm-to-r2: CLOUDFLARE_API_TOKEN not set (. the environment file that holds it)"; exit 1; }
+[ "$DRY" = 1 ] || [ "$HAVE_CREDS" = 1 ] || { echo "wasm-to-r2: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set (eval \"\$(~/Ops/scripts/cf-env crash)\")"; exit 1; }
 put "$GAME" "$GKEY"
 put "$TRACKER" "$TKEY"
 echo "wasm-to-r2: upload. /jack-in/w/$GSHA/crash-the-stack.wasm, /tracker/w/$TSHA/crash-tracker.wasm, bucket $BUCKET"

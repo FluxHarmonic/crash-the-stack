@@ -1,0 +1,90 @@
+#!/bin/sh
+# Gate for scripts/wasm-to-r2 --upload, against scripts/r2-s3-mock.cjs: no
+# network, no token, nothing uploaded anywhere real.
+#
+#   scripts/test-wasm-to-r2 [WASM-TO-R2]   (default scripts/wasm-to-r2; another
+#                                           path, inside scripts/, for sabotage)
+#
+# Each case stages a fresh fake tree (the three pages wasm-to-r2 rewrites) and
+# a fake built tree (CRASH_WEB_DIR) holding the two wasm, then runs the upload
+# against a mock scoped to the bucket, or to another one for the refusals.
+# Last line is VERDICT; rc 0 only if every check passed.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+W2R="${1:-scripts/wasm-to-r2}"
+BUCKET=crashthestack-wasm
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-wasm-to-r2.XXXXXX"); M=""
+trap '[ -n "$M" ] && kill $M 2>/dev/null; rm -rf "$T"' EXIT
+
+WEB="$T/web"; mkdir -p "$WEB/tracker"
+head -c 300000 /dev/urandom > "$WEB/crash-the-stack.wasm"
+head -c 100000 /dev/urandom > "$WEB/tracker/crash-tracker.wasm"
+GSHA=$(sha256sum "$WEB/crash-the-stack.wasm" | cut -c1-16); TSHA=$(sha256sum "$WEB/tracker/crash-tracker.wasm" | cut -c1-16)
+GKEY="jack-in/w/$GSHA/crash-the-stack.wasm"; TKEY="tracker/w/$TSHA/crash-tracker.wasm"
+stage() {   # a fresh staged tree in $DIR
+  DIR="$T/site-$1"; rm -rf "$DIR"; mkdir -p "$DIR/jack-in" "$DIR/tracker"
+  echo '<main data-wasm="crash-the-stack"></main>' > "$DIR/jack-in/index.html"
+  echo 'const PRECACHE = ["crash-the-stack.wasm"];' > "$DIR/jack-in/sw.js"
+  echo '<main data-wasm="crash-tracker"></main>' > "$DIR/tracker/index.html"
+}
+TOKEN=tok-test-wasm-to-r2
+start_mock() {   # scope-bucket [mode]
+  [ -n "$M" ] && kill $M 2>/dev/null; wait 2>/dev/null
+  node scripts/r2-s3-mock.cjs 0 "$TOKEN" "$1" ${2:-honest} > "$T/mock.log" 2>&1 & M=$!
+  i=0; until grep -q listening "$T/mock.log" 2>/dev/null; do i=$((i+1)); [ $i -le 100 ] || { echo "SETUP-FAILED: the mock did not start"; cat "$T/mock.log"; exit 1; }; sleep 0.1; done
+  PORT=$(sed -n 's/^mock-r2 listening \([0-9]*\).*/\1/p' "$T/mock.log")
+}
+run() {   # creds|nocreds args...
+  c=$1; shift
+  if [ "$c" = creds ]; then
+    env CRASH_WEB_DIR="$WEB" CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct \
+      R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" sh "$W2R" "$@" > "$T/out" 2>&1
+  else
+    env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID CRASH_WEB_DIR="$WEB" \
+      R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" sh "$W2R" "$@" > "$T/out" 2>&1
+  fi
+  RC=$?; }
+N=0; F=0
+ok() { N=$((N+1)); if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; F=$((F+1)); sed 's/^/    | /' "$T/out" | tail -6; fi; }
+puts() { grep -c "^PUT /$BUCKET/$1 -> 200" "$T/mock.log"; }
+s3reqs() { grep -cE '^(GET|PUT|HEAD|DELETE) /' "$T/mock.log"; }
+
+start_mock "$BUCKET"; stage a
+run nocreds "$DIR" --upload
+ok "upload without credentials: refused, no S3 request" '[ $RC = 1 ] && grep -q "must be set" "$T/out" && [ "$(s3reqs)" = 0 ]'
+stage b; run nocreds "$DIR" --upload --dry-run
+ok "dry run without credentials: rc 0, says R2 not checked, no S3 request" '[ $RC = 0 ] && grep -q "R2 was not checked" "$T/out" && [ "$(s3reqs)" = 0 ]'
+ok "  presence: this is the r2-s3 wasm-to-r2" 'grep -q "scripts/r2-s3" "$T/out"'
+stage c; run creds "$DIR" --upload --dry-run
+ok "dry run with credentials: both keys absent, rc 0, nothing put" '[ $RC = 0 ] && [ "$(grep -c "is absent from $BUCKET (the token reads the bucket)" "$T/out")" = 2 ] && ! grep -q "^PUT" "$T/mock.log"'
+stage d; run creds "$DIR" --upload
+ok "upload: both keys put once, read back identical" '[ $RC = 0 ] && [ "$(puts "$GKEY")" = 1 ] && [ "$(puts "$TKEY")" = 1 ] && [ "$(grep -c "read back, identical" "$T/out")" = 2 ]'
+ok "  each put followed by a GET of its key" 'grep -A99 "^PUT /$BUCKET/$GKEY -> 200" "$T/mock.log" | grep -q "^GET /$BUCKET/$GKEY -> 200" && grep -A99 "^PUT /$BUCKET/$TKEY -> 200" "$T/mock.log" | grep -q "^GET /$BUCKET/$TKEY -> 200"'
+ok "  stored as application/wasm" 'grep -qx "stored-type $BUCKET/$GKEY application/wasm" "$T/mock.log" && grep -qx "stored-type $BUCKET/$TKEY application/wasm" "$T/mock.log"'
+ok "  pages rewritten to the hashed paths, no wasm left in the tree" 'grep -q "data-wasm=\"w/$GSHA/crash-the-stack\"" "$DIR/jack-in/index.html" && grep -q "\"w/$GSHA/crash-the-stack.wasm\"" "$DIR/jack-in/sw.js" && grep -q "data-wasm=\"w/$TSHA/crash-tracker\"" "$DIR/tracker/index.html" && [ -z "$(find "$DIR" -name "*.wasm")" ]'
+stage e; run creds "$DIR" --upload
+ok "upload again: both already there and compared, no second put" '[ $RC = 0 ] && [ "$(grep -c "is already in $BUCKET (read back, identical)" "$T/out")" = 2 ] && [ "$(puts "$GKEY")" = 1 ] && [ "$(puts "$TKEY")" = 1 ]'
+stage f; run creds "$DIR" --upload --dry-run
+ok "dry run, keys present: says already there" '[ $RC = 0 ] && [ "$(grep -c "is already in $BUCKET (the token reads the bucket)" "$T/out")" = 2 ]'
+
+start_mock "some-other-bucket"
+stage g; run creds "$DIR" --upload --dry-run
+ok "dry run, token out of scope: rc 1, REFUSED" '[ $RC = 1 ] && grep -q "REFUSED: the token cannot read $BUCKET" "$T/out"'
+stage h; run creds "$DIR" --upload
+ok "upload, token out of scope: REFUSED, no put" '[ $RC = 1 ] && grep -q "REFUSED: could not read $BUCKET/$GKEY" "$T/out" && ! grep -q "^PUT" "$T/mock.log"'
+ok "  and says 403, not absent" 'grep -q "HTTP 403" "$T/out"'
+
+start_mock "$BUCKET"
+head -c 1000 /dev/urandom > "$T/other.bin"
+env CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
+  scripts/r2-s3 put "$BUCKET" "$GKEY" "$T/other.bin" application/wasm 2>/dev/null || { echo "SETUP-FAILED: could not plant other bytes at the key"; exit 1; }
+stage i; run creds "$DIR" --upload
+ok "upload, key holds OTHER bytes: REFUSED, not overwritten" '[ $RC = 1 ] && grep -q "holds other bytes" "$T/out" && [ "$(puts "$GKEY")" = 1 ]'
+ok "  nothing was ever deleted" '! grep -q "^DELETE" "$T/mock.log"'
+
+
+start_mock "$BUCKET" corruptget
+stage j; run creds "$DIR" --upload
+ok "upload, read-back differs from what was put: REFUSED" '[ $RC = 1 ] && [ "$(puts "$GKEY")" = 1 ] && grep -q "the read-back of $BUCKET/$GKEY is not" "$T/out"'
+
+echo "VERDICT: $((N-F))/$N passed"; [ "$F" = 0 ]
