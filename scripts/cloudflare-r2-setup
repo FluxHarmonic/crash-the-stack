@@ -4,7 +4,12 @@
 # (the permission classifier refuses account writes, which is the correct
 # answer for a shared account).
 #
-#   . the environment file that holds it
+#   eval "$(~/Ops/scripts/cf-env admin)"   (creating a bucket needs account-wide
+#                                         R2 Storage Edit; Crash's own token,
+#                                         cf-env crash, holds Bucket Item
+#                                         Read/Write on crashthestack-wasm and
+#                                         crashthestack-assets only, and cannot
+#                                         see or create buckets)
 #   scripts/cloudflare-r2-setup            say what it would do
 #   scripts/cloudflare-r2-setup --create   create the bucket
 #
@@ -24,14 +29,22 @@ BUCKET="${CRASH_WASM_BUCKET:-crashthestack-wasm}"
 CREATE=0; [ "${1:-}" = "--create" ] && CREATE=1
 
 command -v wrangler > /dev/null || { echo "cloudflare-r2-setup: wrangler not on PATH"; exit 1; }
-[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { echo "cloudflare-r2-setup: CLOUDFLARE_API_TOKEN not set; . the environment file that holds it, first"; exit 1; }
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || { echo "cloudflare-r2-setup: CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID not set (eval \"\$(~/Ops/scripts/cf-env admin)\")"; exit 1; }
 
 echo "cloudflare-r2-setup: account:"
 wrangler whoami 2>&1 | grep -E '│' | sed 's/^/  /' || true
 
-if wrangler r2 bucket list 2>/dev/null | grep -q "^name: *$BUCKET$"; then
+# three answers, not two: a bucket-scoped token cannot see buckets at all, and
+# "the token can't tell" must not read as "missing, create it"
+# the token reaches curl on stdin (-K -), not on its command line
+BUCKET_JSON="$(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" | curl -sS -K - "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET")" || BUCKET_JSON='{}'
+if [ "$(printf '%s' "$BUCKET_JSON" | jq -r '.success' 2>/dev/null)" = true ]; then
   echo "cloudflare-r2-setup: bucket $BUCKET already exists; nothing to do"
   exit 0
+elif ! printf '%s' "$BUCKET_JSON" | jq -e '[.errors[]?.code] | index(10006)' > /dev/null 2>&1; then
+  echo "cloudflare-r2-setup: bucket $BUCKET: unknown to this token ($(printf '%s' "$BUCKET_JSON" | jq -c '.errors[0]' 2>/dev/null || echo 'no JSON reply'))"
+  echo "cloudflare-r2-setup: NOT creating anything. A bucket-scoped token cannot see buckets; use one with account-wide R2 Storage Edit (cf-env admin)"
+  exit 1
 fi
 
 if [ "$CREATE" = 0 ]; then
