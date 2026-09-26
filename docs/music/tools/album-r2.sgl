@@ -72,24 +72,52 @@
                     asset_base: base
                     uploads: (list->array uploads)))
             (display (str "Prepared page and upload plan in " output "\n")))
+          ;; Uploads go through R2's S3 API (scripts/r2-s3): Crash's token holds
+          ;; Bucket Item Read/Write on its own buckets only, and wrangler's
+          ;; `r2 object` REST path refuses such a token. Each key is read first:
+          ;; absent (r2-s3 exit 3) is put, read back and compared; present is
+          ;; compared and never overwritten; anything else stops the upload.
+          ;; A receipt is written only once R2 is known to hold these bytes.
           (let* ((plan (json-decode (read-text plan-file)))
                  (bucket (dict-ref plan bucket:))
-                 (receipts (path output "receipts")))
-            (require-tool "wrangler")
+                 (receipts (path output "receipts"))
+                 (r2 (path (root) "scripts/r2-s3"))
+                 (sha (lambda (file) (car (split (out sha256sum ,file) " "))))
+                 (set? (lambda (name)
+                         (let ((v (getenv name))) (and v (not (equal? v "")))))))
+            (check (file? r2) "scripts/r2-s3 is missing" r2)
+            (check (and (set? "CLOUDFLARE_API_TOKEN") (set? "CLOUDFLARE_ACCOUNT_ID"))
+                   "Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID: eval \"$(~/Ops/scripts/cf-env crash)\"")
             (ensure-directory receipts)
-            (each item (array->list (dict-ref plan uploads:))
-              (let* ((source (dict-ref item source:))
-                     (key (dict-ref item key:))
-                     (hash (dict-ref item sha256:))
-                     (receipt (path receipts (str (basename key) ".sha256"))))
-                (check (equal? hash (car (split (out sha256sum ,source) " ")))
-                       "Source changed since preparation" source)
-                (if (and (file? receipt) (equal? (trim (read-text receipt)) hash))
-                    (display (str "Already uploaded " key "\n"))
-                    (begin
-                      (display (str "Uploading " key "\n"))
-                      ($ wrangler r2 object put ,(str bucket "/" key)
-                         --file ,source --content-type ,(dict-ref item type:)
-                         --cache-control "public, max-age=31536000, immutable"
-                         --remote)
-                      (write-text receipt (str hash "\n")))))))))))
+            (with-temp-dir work
+              (each item (array->list (dict-ref plan uploads:))
+                (let* ((source (dict-ref item source:))
+                       (key (dict-ref item key:))
+                       (hash (dict-ref item sha256:))
+                       (back (path work "back"))
+                       (receipt (path receipts (str (basename key) ".sha256"))))
+                  (check (equal? hash (sha source))
+                         "Source changed since preparation" source)
+                  (if (and (file? receipt) (equal? (trim (read-text receipt)) hash))
+                      (display (str "Already uploaded " key "\n"))
+                      (let* ((found ($? ,r2 get ,bucket ,key ,back))
+                             (status (exit-status found)))
+                        (cond
+                          ((equal? status 0)
+                           (check (equal? hash (sha back))
+                                  "Refusing: the bucket already holds OTHER bytes at this key; use a new prefix"
+                                  (str bucket "/" key))
+                           (display (str "Already in " bucket ", identical: " key "\n")))
+                          ((equal? status 3)
+                           (display (str "Uploading " key "\n"))
+                           (let ((put ($? ,r2 put ,bucket ,key ,source ,(dict-ref item type:)
+                                          "public, max-age=31536000, immutable")))
+                             (check (ok? put) "R2 upload failed" key (stderr-of put)))
+                           (let ((again ($? ,r2 get ,bucket ,key ,back)))
+                             (check (ok? again) "R2 read-back failed" key (stderr-of again)))
+                           (check (equal? hash (sha back))
+                                  "R2 read-back differs from the source" key))
+                          (else
+                           (error "Could not read the key from R2 (refused or failed, not absent)"
+                                  (str bucket "/" key) status (stderr-of found))))
+                        (write-text receipt (str hash "\n"))))))))))))

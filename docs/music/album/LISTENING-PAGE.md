@@ -96,9 +96,14 @@ sigil docs/music/tools/album-r2.sgl --stage upload \
   --output /absolute/new-r2-preview
 ```
 
-The upload stage uses existing Wrangler authentication, one object at a time,
-and records a source-hash receipt after each successful upload. Repeating it
-resumes the remaining files. It rejects source changes after plan creation.
+The upload stage goes through R2's S3 API (scripts/r2-s3) with Crash's
+bucket-scoped token, so run `eval "$(~/Ops/scripts/cf-env crash)"` first. It
+uploads one object at a time: each key is read first, an absent key is put,
+read back and compared, and a key that is already there is compared and never
+overwritten (different bytes stop the upload). A source-hash receipt is
+written once R2 is known to hold the bytes. Repeating it resumes the remaining
+files. It rejects source changes after plan creation. `scripts/test-album-r2`
+checks all of this against a local mock.
 Use a new prefix for revised audio: versioned objects have a one-year immutable
 cache lifetime. Do not overwrite a published version with changed bytes.
 Only the four small files under this output's soundtrack/ belong in Pages.
@@ -349,6 +354,9 @@ Fault Line is integrated into the game's Defrag pool; its mastered audition
 has not been added to the fifteen-track public album. The new staged player
 retains the CC BY credit and native download-control hint.
 
-`scripts/publish-web --dry-run` now passes `--local` to WASM staging. It must
-never upload to R2; the normal publish path retains `--upload`. The game worker
+`scripts/publish-web --dry-run` never uploads to R2; the normal publish path
+retains `--upload`. Without credentials the dry run passes `--local` to WASM
+staging; with `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set it passes
+`--upload --dry-run`, which stages as a publish does and makes only read-only
+HEADs of the two wasm keys (2026-09-26, bucket-scoped tokens). The game worker
 is scoped to `/jack-in/`, leaving the soundtrack outside its navigation scope.

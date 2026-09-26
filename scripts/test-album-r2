@@ -1,0 +1,88 @@
+#!/bin/sh
+# Gate for the upload stage of docs/music/tools/album-r2.sgl, against
+# scripts/r2-s3-mock.cjs: no network, no token, nothing uploaded anywhere real.
+#
+#   scripts/test-album-r2 [ALBUM-R2]   (default docs/music/tools/album-r2.sgl;
+#                                       another path, in that directory, for
+#                                       sabotage runs)
+#
+# Each case writes an upload plan (the shape --stage prepare writes) for two
+# fake MP3s into a fresh output directory and runs --stage upload. Needs
+# `sigil deps install` in this checkout first.
+# Last line is VERDICT; rc 0 only if every check passed.
+set -u
+cd "$(dirname "$0")/.." || exit 1
+ALBUM="${1:-docs/music/tools/album-r2.sgl}"
+BUCKET=crashthestack-assets
+CC="public, max-age=31536000, immutable"
+T=$(mktemp -d "${TMPDIR:-/tmp}/test-album-r2.XXXXXX"); M=""
+trap '[ -n "$M" ] && kill $M 2>/dev/null; rm -rf "$T"' EXIT
+command -v sigil > /dev/null || { echo "SETUP-FAILED: sigil not on PATH"; exit 1; }
+
+mkdir "$T/src"
+head -c 50000 /dev/urandom > "$T/src/one.mp3"; head -c 70000 /dev/urandom > "$T/src/two.mp3"
+K1=soundtrack/test-i/one.mp3; K2=soundtrack/test-i/two.mp3
+plan() {   # a fresh output directory with the plan in it -> $OUT
+  OUT="$T/out-$1"; mkdir -p "$OUT"
+  jq -n --arg b "$BUCKET" --arg s1 "$T/src/one.mp3" --arg s2 "$T/src/two.mp3" \
+    --arg h1 "$(sha256sum "$T/src/one.mp3" | cut -d' ' -f1)" --arg h2 "$(sha256sum "$T/src/two.mp3" | cut -d' ' -f1)" \
+    --arg k1 "$K1" --arg k2 "$K2" \
+    '{bucket: $b, asset_base: "https://assets.example/soundtrack/test-i/", uploads: [
+       {source: $s1, key: $k1, sha256: $h1, bytes: 50000, type: "audio/mpeg"},
+       {source: $s2, key: $k2, sha256: $h2, bytes: 70000, type: "audio/mpeg"}]}' > "$OUT/upload-plan.json"
+}
+TOKEN=tok-test-album-r2
+start_mock() {   # scope-bucket [mode]
+  [ -n "$M" ] && kill $M 2>/dev/null; wait 2>/dev/null
+  node scripts/r2-s3-mock.cjs 0 "$TOKEN" "$1" ${2:-honest} > "$T/mock.log" 2>&1 & M=$!
+  i=0; until grep -q listening "$T/mock.log" 2>/dev/null; do i=$((i+1)); [ $i -le 100 ] || { echo "SETUP-FAILED: the mock did not start"; cat "$T/mock.log"; exit 1; }; sleep 0.1; done
+  PORT=$(sed -n 's/^mock-r2 listening \([0-9]*\).*/\1/p' "$T/mock.log")
+}
+run() {   # creds|nocreds
+  if [ "$1" = creds ]; then
+    env CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
+      timeout 300 sigil "$ALBUM" --stage upload --output "$OUT" > "$T/out" 2>&1
+  else
+    env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
+      timeout 300 sigil "$ALBUM" --stage upload --output "$OUT" > "$T/out" 2>&1
+  fi
+  RC=$?; }
+N=0; F=0
+ok() { N=$((N+1)); if eval "$2"; then echo "PASS $1"; else echo "FAIL $1"; F=$((F+1)); sed 's/^/    | /' "$T/out" | tail -6; fi; }
+puts() { grep -c "^PUT /$BUCKET/$1 -> 200" "$T/mock.log"; }
+s3reqs() { grep -cE '^(GET|PUT|HEAD|DELETE) /' "$T/mock.log"; }
+receipts() { ls "$OUT/receipts" 2>/dev/null | wc -l; }
+
+start_mock "$BUCKET"; plan a; run nocreds
+ok "no credentials: fails, names the variables, no S3 request, no receipt" '[ $RC != 0 ] && grep -q "Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID" "$T/out" && [ "$(s3reqs)" = 0 ] && [ "$(receipts)" = 0 ]'
+plan b; run creds
+ok "upload: both put once, rc 0" '[ $RC = 0 ] && [ "$(puts $K1)" = 1 ] && [ "$(puts $K2)" = 1 ]'
+ok "  stored as audio/mpeg with the immutable Cache-Control" 'grep -qx "stored-type $BUCKET/$K1 audio/mpeg" "$T/mock.log" && grep -qx "stored-cc $BUCKET/$K1 $CC" "$T/mock.log" && grep -qx "stored-cc $BUCKET/$K2 $CC" "$T/mock.log"'
+ok "  each put followed by a GET of its key" 'grep -A99 "^PUT /$BUCKET/$K1 -> 200" "$T/mock.log" | grep -q "^GET /$BUCKET/$K1 -> 200" && grep -A99 "^PUT /$BUCKET/$K2 -> 200" "$T/mock.log" | grep -q "^GET /$BUCKET/$K2 -> 200"'
+ok "  a receipt per file, holding its hash" '[ "$(receipts)" = 2 ] && [ "$(cat "$OUT/receipts/one.mp3.sha256")" = "$(sha256sum "$T/src/one.mp3" | cut -d" " -f1)" ]'
+before=$(s3reqs); run creds
+ok "same output again: receipts say done, no S3 request" '[ $RC = 0 ] && [ "$(grep -c "Already uploaded" "$T/out")" = 2 ] && [ "$(s3reqs)" = "$before" ]'
+plan c; run creds
+ok "fresh output, keys present: compared, not put again, receipts written" '[ $RC = 0 ] && [ "$(grep -c "identical" "$T/out")" = 2 ] && [ "$(puts $K1)" = 1 ] && [ "$(receipts)" = 2 ]'
+
+start_mock "some-other-bucket"; plan d; run creds
+ok "token out of scope: fails, no put, no receipt" '[ $RC != 0 ] && grep -q "refused or failed, not absent" "$T/out" && ! grep -q "^PUT" "$T/mock.log" && [ "$(receipts)" = 0 ]'
+ok "  and says 403" 'grep -q "HTTP 403" "$T/out"'
+
+start_mock "$BUCKET"
+head -c 999 /dev/urandom > "$T/other.bin"
+env CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
+  scripts/r2-s3 put "$BUCKET" "$K1" "$T/other.bin" audio/mpeg 2>/dev/null || { echo "SETUP-FAILED: could not plant other bytes at the key"; exit 1; }
+plan e; run creds
+ok "key holds OTHER bytes: refused, not overwritten, no receipt for it" '[ $RC != 0 ] && grep -q "OTHER bytes" "$T/out" && [ "$(puts $K1)" = 1 ] && [ ! -e "$OUT/receipts/one.mp3.sha256" ]'
+
+start_mock "$BUCKET" corruptget; plan f; run creds
+ok "read-back differs from what was put: refused, no receipt" '[ $RC != 0 ] && grep -q "read-back differs" "$T/out" && [ "$(receipts)" = 0 ]'
+
+start_mock "$BUCKET"; plan g; printf x >> "$T/src/two.mp3"; run creds
+ok "source changed since the plan: refused before its upload" '[ $RC != 0 ] && grep -q "Source changed since preparation" "$T/out" && [ "$(puts $K2)" = 0 ]'
+ok "  nothing was ever deleted" '! grep -q "^DELETE" "$T/mock.log"'
+
+start_mock "$BUCKET"; plan h; jq --arg k "soundtrack/../escaped-bucket/one.mp3" ".uploads[0].key = \$k" "$OUT/upload-plan.json" > "$T/p.json" && mv "$T/p.json" "$OUT/upload-plan.json"; run creds
+ok "plan with a .. key: fails, nothing reaches the server, no receipt" '[ $RC != 0 ] && grep -q "escaped-bucket/one.mp3" "$OUT/upload-plan.json" && [ "$(s3reqs)" = 0 ] && [ "$(receipts)" = 0 ]'
+echo "VERDICT: $((N-F))/$N passed"; [ "$F" = 0 ]
