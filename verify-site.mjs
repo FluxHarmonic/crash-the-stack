@@ -35,6 +35,14 @@
 //                  ends on /jack-in/?code=... with the game booted, the root
 //                  registration gone, no crash-the-stack-* cache left, the
 //                  game's own worker registered under /jack-in/
+//   not-found      a missing path answers the site's 404.html with status 404 (the
+//                  server answers as Cloudflare Pages does: without a 404.html,
+//                  the landing page with 200); /about/ still 200
+//   preview        every page a link points at carries og:image (the gameplay
+//                  shot, 1200x630) and twitter:card summary_large_image; the
+//                  soundtrack page links /news/, not /devlog/
+//   version-missing the game's version fetch takes its missing branch for a 404
+//                  AND for 200 with HTML (t-5bb869)
 //   console        no error and no sokol refusal over the run
 import http from "node:http";
 import fs from "node:fs";
@@ -71,16 +79,37 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
 // which tree answers at the root: the staged one, or (the tombstone leg's
 // first half) the old game
 let root = STAGED;
+// paths the server treats as absent (the version-missing leg hides
+// /version.json, and /404.html for the host that has none)
+let hidden = new Set();
 const requests = [];
+// A missing path is answered as Cloudflare Pages answers it (0.1.3; Harkfell's
+// scripts/serve-site.mjs has the same rule): the nearest 404.html up the tree
+// with status 404, and with no 404.html anywhere the root index.html with 200.
+// The old server answered a bare 404 here, so no leg could see that the
+// deployed site answered every missing path with its landing page and 200
+// (topics/cloudflare-pages-serves-index-for-a-missing-path).
+function readable(fp) { try { return fs.statSync(fp).isFile(); } catch { return false; } }
+function notFound(urlPath) {
+  let dir = path.posix.dirname(urlPath.endsWith("/") ? urlPath + "x" : urlPath);
+  for (;;) {
+    const rel = path.posix.join(dir, "404.html");
+    if (!hidden.has(rel) && readable(path.join(root, rel))) return [404, path.join(root, rel)];
+    if (dir === "/" || dir === ".") break;
+    dir = path.posix.dirname(dir);
+  }
+  return [200, path.join(root, "index.html")];
+}
 const server = http.createServer((req, res) => {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   requests.push(urlPath);
   const rel = urlPath === "/" ? "/index.html" : (urlPath.endsWith("/") ? urlPath + "index.html" : urlPath);
-  const fp = path.join(root, rel);
+  let fp = path.join(root, rel), status = 200;
   if (fp !== root && !fp.startsWith(root + path.sep)) { res.writeHead(403).end(); return; }
+  if (hidden.has(rel) || hidden.has(urlPath) || !readable(fp)) [status, fp] = notFound(urlPath);
   fs.readFile(fp, (err, buf) => {
     if (err) { res.writeHead(404).end("not found: " + urlPath); return; }
-    res.writeHead(200, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
+    res.writeHead(status, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(buf);
   });
 });
@@ -506,9 +535,87 @@ else {
   else pass("version", `/version.json is ${v.version} (${v.released}), build ${v.build} matching the staged game, summary ${v.summary.length}/${LINE2_CHARS} chars and drawable, served no-cache`);
 }
 
+// ---- not-found (0.1.3) ----------------------------------------------------------
+// A missing path is a real 404: the site's own 404.html, status 404, HTML. The
+// server answers as Pages does, so without a 404.html in the staged tree
+// every probe below answers 200 with the landing page, and this leg says so
+// (its sabotage: stage without 404.html). /about/ is the positive control:
+// a real page still answers 200.
+{
+  const detail = [];
+  const probes = ["/definitely-not-here", "/news/no-such-post/", "/jack-in/assets/no-such.png", "/version.jsonx"];
+  for (const p of probes) {
+    const r = await fetch(`${origin}${p}`);
+    const type = (r.headers.get("content-type") || "").split(";")[0];
+    const body = await r.text();
+    if (r.status !== 404) detail.push(`${p} answered ${r.status}${/JACK IN/.test(body) && /class="hero"/.test(body) ? " with the landing page" : ""}`);
+    else if (type !== "text/html") detail.push(`${p} answered 404 as ${type}`);
+    else if (!/404: link severed/.test(body)) detail.push(`${p} answered 404 but not with the site's 404 page`);
+  }
+  const about = await fetch(`${origin}/about/`);
+  if (about.status !== 200) detail.push(`the control /about/ answered ${about.status}`);
+  if (detail.length) fail("not-found", detail.join("; "));
+  else pass("not-found", `${probes.length} missing paths answered 404 with the site's 404 page (${probes.join(" ")}); /about/ 200`);
+}
+
+// ---- preview (0.1.3) ----------------------------------------------------------
+// A shared link shows a real board, not the app icon: every page a link can
+// point at carries og:image = the gameplay shot and Twitter's large card, and
+// the shot is a 1200x630 PNG in the tree. The soundtrack page links /news/,
+// not the /devlog/ the news left behind.
+{
+  const detail = [];
+  const OG = "https://crashthestack.com/og-image.png";
+  for (const p of ["index.html", "about/index.html", "news/index.html", "jack-in/index.html"]) {
+    const html = text(p);
+    const og = (/<meta property="og:image" content="([^"]+)"/.exec(html) || [])[1];
+    const card = (/<meta name="twitter:card" content="([^"]+)"/.exec(html) || [])[1];
+    if (og !== OG) detail.push(`${p}: og:image is ${og || "absent"}`);
+    if (card !== "summary_large_image") detail.push(`${p}: twitter:card is ${card || "absent"}`);
+    if (!/<meta (property|name)="(og|twitter):description"/.test(html)) detail.push(`${p}: no description card`);
+  }
+  if (!fs.existsSync(path.join(STAGED, "og-image.png"))) detail.push("og-image.png is not in the tree");
+  else {
+    const png = fs.readFileSync(path.join(STAGED, "og-image.png"));
+    const w = png.readUInt32BE(16), h = png.readUInt32BE(20);
+    if (png.toString("ascii", 1, 4) !== "PNG" || w !== 1200 || h !== 630) detail.push(`og-image.png is ${w}x${h}, not a 1200x630 PNG`);
+  }
+  const og = await fetch(`${origin}/og-image.png`);
+  if (og.status !== 200 || !/^image\/png/.test(og.headers.get("content-type") || "")) detail.push(`/og-image.png answered ${og.status} ${og.headers.get("content-type")}`);
+  const stale = (text("soundtrack/index.html").match(/href="\/devlog\/[^"]*"/g) || []);
+  if (stale.length) detail.push(`the soundtrack page still links ${stale.join(" ")}`);
+  if (detail.length) fail("preview", detail.join("; "));
+  else pass("preview", `the landing, /about/, /news/ and /jack-in/ carry og:image ${OG} and summary_large_image; the shot is 1200x630; the soundtrack page links /news/`);
+}
+
+// ---- version-missing (0.1.3, t-5bb869) -------------------------------------------
+// The game's version fetch must take its "missing" branch for BOTH answers
+// a host gives a missing /version.json: a real 404 (the site with its
+// 404.html), and 200 with the landing's HTML (a host with no 404.html, as
+// Pages answered before 0.1.3). The second is the bug: r.ok is true, so
+// only r.json() throwing on the HTML kept the readout honest, through the
+// catch ("crash: version.json none ..."). The ?update=waiting door runs the
+// page's real fetch. Sabotage: drop the content-type check, and the 200
+// case logs "none" (the catch), never "missing 200".
+{
+  const detail = [], seen = [];
+  for (const [hide, want] of [[["/version.json"], "missing 404 text/html"], [["/version.json", "/404.html"], "missing 200 text/html"]]) {
+    hidden = new Set(hide);
+    const mark = consoleLines.length;
+    await navigate(`${origin}/jack-in/?trace&fresh&update=waiting`);
+    const line = await waitLine(/^crash: version\.json (.+)$/, mark, 60000);
+    if (!line) detail.push(`hiding ${hide.join(" ")}: the page said nothing about version.json`);
+    else if (line.m[1] !== want) detail.push(`hiding ${hide.join(" ")}: "crash: version.json ${line.m[1]}", not "${want}"`);
+    else seen.push(`${hide.join("+")} -> ${want}`);
+  }
+  hidden = new Set();
+  if (detail.length) fail("version-missing", detail.join("; "));
+  else pass("version-missing", seen.join("; "));
+}
+
 // ---- console ----------------------------------------------------------------
 {
-  const sokol = consoleLines.filter((l) => /^sokol\[level=[01]\]/.test(l));
+  const sokol =consoleLines.filter((l) => /^sokol\[level=[01]\]/.test(l));
   // the tombstone leg's own window is left out: the old page's fetches die
   // as the tree switches under it, which is what a deploy does to it
   const errors = consoleErrors.filter((e, i) => !(i >= tombstoneWindow[0] && i < tombstoneWindow[1]) && !/image fetch failed: TypeError: Failed to fetch|Failed to load resource: net::ERR_FAILED/.test(e));
