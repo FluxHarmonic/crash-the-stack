@@ -83,6 +83,7 @@ let root = STAGED;
 // /version.json, and /404.html for the host that has none)
 let hidden = new Set();
 const requests = [];
+const indexed = [];   // missing paths answered with the root index and 200 (a tree with no 404.html), for a red's detail
 // A missing path is answered as Cloudflare Pages answers it (0.1.3; Harkfell's
 // scripts/serve-site.mjs has the same rule): the nearest 404.html up the tree
 // with status 404, and with no 404.html anywhere the root index.html with 200.
@@ -98,6 +99,7 @@ function notFound(urlPath) {
     if (dir === "/" || dir === ".") break;
     dir = path.posix.dirname(dir);
   }
+  indexed.push(`${root === STAGED ? "staged" : "old"}:${urlPath}`);
   return [200, path.join(root, "index.html")];
 }
 const server = http.createServer((req, res) => {
@@ -437,7 +439,14 @@ else {
       await sleep(250);
     }
     const booted = at === `${origin}/jack-in/?trace&code=${CODE}` ? await gameUp(60000) : null;
-    if (at !== `${origin}/jack-in/?trace&code=${CODE}`) detail.push(`after the deploy the old client sits at ${at} (requests since: ${requests.slice(before).join(" ")})`);
+    if (at !== `${origin}/jack-in/?trace&code=${CODE}`) {
+      // why: what the old page is fetching (its worker answers most from its
+      // cache, which never reaches the server: the page's own resource
+      // entries see those too), and which paths got the index with 200
+      const seen = await evalJS(`(() => { const n = {}; for (const e of performance.getEntriesByType("resource")) { const p = new URL(e.name).pathname; n[p] = (n[p] || 0) + 1; } return Object.entries(n).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([p, c]) => p + " x" + c).join(" "); })()`).catch(() => "unreadable");
+      const cache = await evalJS(`caches.keys().then((ks) => Promise.all(ks.map((k) => caches.open(k).then((c) => c.keys()).then((rs) => Promise.all(rs.map((r) => caches.match(r).then((res) => res && /text\\/html/.test(res.headers.get("content-type") || "") && !/\\/$|index\\.html$/.test(new URL(r.url).pathname) ? new URL(r.url).pathname : null))))))).then((xs) => xs.flat().filter(Boolean).join(" "))`).catch(() => "unreadable");
+      detail.push(`after the deploy the old client sits at ${at} (requests since: ${requests.slice(before).join(" ")}; the page's resource entries: ${seen}; cached as HTML: ${cache || "none"}; answered with the index: ${indexed.join(" ") || "none"})`);
+    }
     else if (!booted) detail.push("the game did not boot at /jack-in/ after the move");
     if (!detail.length) {
       // the game's own worker registers under /jack-in/ once the board's boot is done
