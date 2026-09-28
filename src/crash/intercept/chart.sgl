@@ -43,7 +43,7 @@
           (sigil list))
 
   (export make-chart chart-lanes chart-keys chart-fall-ms chart-hash chart-rate
-          DIFFICULTIES difficulty-name difficulty? TIERS KEYS)
+          DIFFICULTIES difficulty-name difficulty? TIERS KEYS lane-shares REPAIR-SHARE)
 
   (begin
     (define DIFFICULTIES (list 'script-kid 'runner 'elite))
@@ -155,7 +155,62 @@
     (define BUCKET-MS 10)
     (define CHORD-MS 1.0)   ; two notes this close are one instant (a chord)
 
+    ;; A lane that takes more than REPAIR-SHARE of a chart has collapsed it
+    ;; (David on Clock Edge, 2026-09-28: "about 98% of the taps fall on the
+    ;; second lane"). Clock Edge's kick is on every beat at 128 BPM, and
+    ;; SCRIPT KID allows 2 notes in any second, so the kick alone filled
+    ;; the cap (214 of 222 notes): its clap on the backbeat and its melody,
+    ;; all on beats and eighths, never found room. Such a chart is made
+    ;; again with that lane DECIMATED: only every k-th of its candidates, in
+    ;; time order, is offered (k = 2, then 4: a four-on-the-floor kick on
+    ;; beats 1 and 3, then on the one of each bar), which frees the cap for
+    ;; the other lanes. (Stretching the lane's gap instead left two kicks in
+    ;; every second-long window; offering the lane last starved it: 3 kicks
+    ;; of 212.) A chart with no lane over the line is exactly what the plain
+    ;; order makes: Black Glass and Blind Spot, whose charts David loves
+    ;; "even on the easiest setting", keep their hashes (Black Glass SCRIPT
+    ;; KID has 67 % of its notes on F, so the line sits above it).
+    (define REPAIR-SHARE 0.70)
+    (define DECIMATE-STEPS '(2 4))
+
+    (define (lane-shares chart)
+      (let ((n (max 1 (vector-length chart))))
+        (map (lambda (lane)
+               (/ (length (filter (lambda (note) (= lane (vector-ref note 1))) (vector->list chart)))
+                  (* 1.0 n)))
+             '(0 1 2 3))))
+
     (define (make-chart onsets difficulty)
+      (let loop ((decimated '()))
+        (let* ((c (chart-with onsets difficulty decimated))
+               (shares (lane-shares c))
+               (top (fold-left max 0.0 shares))
+               (lane (let find ((l 0)) (if (= (list-ref shares l) top) l (find (+ l 1)))))
+               (k (let ((e (assv lane decimated))) (if e (cdr e) 1)))
+               (next (list-find (lambda (s) (> s k)) DECIMATE-STEPS)))
+          (if (and (> top REPAIR-SHARE) next)
+              (loop (cons (cons lane next) (filter (lambda (e) (not (= (car e) lane))) decimated)))
+              c))))
+
+    ;; Only every k-th candidate (in time order) of each decimated lane.
+    (define (decimate cands decimated)
+      (if (null? decimated)
+          cands
+          (apply append
+                 (map (lambda (lane)
+                        (let ((mine (list-sort (lambda (a b) (< (car a) (car b)))
+                                               (filter (lambda (c) (= lane (cadr c))) cands)))
+                              (e (assv lane decimated)))
+                          (if (not e)
+                              mine
+                              (let loop ((cs mine) (i 0) (acc '()))
+                                (cond ((null? cs) (reverse acc))
+                                      ((= 0 (modulo i (cdr e))) (loop (cdr cs) (+ i 1) (cons (car cs) acc)))
+                                      (else (loop (cdr cs) (+ i 1) acc)))))))
+                      '(0 1 2 3)))))
+
+    ;; decimated: ((lane . k) ...)
+    (define (chart-with onsets difficulty decimated)
       (let* ((t (tier difficulty))
              (grid-max (list-ref t 0))
              (lane-gap (list-ref t 1))
@@ -163,7 +218,7 @@
              (cap (list-ref t 3))
              (chord (list-ref t 4))
              (cands (filter (lambda (c) (<= (list-ref c 2) grid-max))
-                            (candidates onsets difficulty)))
+                            (decimate (candidates onsets difficulty) decimated)))
              (end-ms (fold-left (lambda (m c) (max m (car c))) 0.0 cands))
              (nb (+ 2 (exact (floor (/ end-ms BUCKET-MS)))))
              (buckets (make-vector nb '()))
