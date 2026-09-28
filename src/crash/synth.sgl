@@ -27,13 +27,26 @@
         (cond ((null? ps) 0) ((eq? (car ps) name) k) (else (loop (cdr ps) (+ k 1))))))
     (define GAIN 0.35)
 
-    ;; A mono float buffer of n frames, filled by (f t i) -> sample, t in seconds.
+    ;; A mono float buffer, filled by (f t i) -> sample, t in seconds: the
+    ;; cue's `seconds`, then TAIL-S more in which the cue's own formula runs
+    ;; on under a fade (2026-09-28: every cue ended 9 to 32 dB under its
+    ;; peak, cut rather than decaying, which David heard in Harkfell as "a
+    ;; broken sample"). The fade is 1 at `seconds` and falls exponentially,
+    ;; FADE-DB lower FADE-S later, so the last TAIL-S - FADE-S (20 ms) of every
+    ;; cue sit 40 dB under what its formula plays there; test-cue-tails holds
+    ;; them 40 dB under the cue's own peak.
+    (define TAIL-S 0.05)
+    (define FADE-S 0.03)
+    (define FADE-DB -40.0)
+    (define FADE-K (/ (* (- FADE-DB) (log 10.0)) (* 20.0 FADE-S)))   ; e^(-k FADE-S) = 10^(FADE-DB/20)
     (define (render rate seconds f)
-      (let* ((n (exact (floor (* rate seconds))))
+      (let* ((n (exact (floor (* rate (+ seconds TAIL-S)))))
              (bv (make-bytevector (* 4 n) 0)))
         (let loop ((i 0))
           (when (< i n)
-            (bytevector-ieee-single-set! bv (* 4 i) (* GAIN (f (/ i (* 1.0 rate)) i)) 'little)
+            (let* ((t (/ i (* 1.0 rate)))
+                   (fade (if (<= t seconds) 1.0 (exp (- (* FADE-K (- t seconds)))))))
+              (bytevector-ieee-single-set! bv (* 4 i) (* GAIN fade (f t i)) 'little))
             (loop (+ i 1))))
         bv))
 
@@ -81,7 +94,7 @@
         ;; six chirps in a row, each a different pitch
         ((scramble)
          (render rate 0.24 (lambda (t i)
-                             (let* ((k (exact (floor (/ t 0.04))))
+                             (let* ((k (min 5 (exact (floor (/ t 0.04)))))   ; the sixth chirp rings into the tail; no seventh
                                     (u (- t (* k 0.04)))
                                     (hz (+ 400.0 (* 300.0 (modulo (* k 5) 7)))))
                                (* (decay u 60.0) (square hz t))))))

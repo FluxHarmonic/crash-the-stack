@@ -1,0 +1,50 @@
+;;; Every cue rings out (2026-09-28: the glasswood-sound worker measured
+;;; Crash's cues ending only 9 to 32 dB under their peaks, cut rather than
+;;; decaying: cleared -9.1 dB, select and scramble -10.4, lock -31.7; David
+;;; heard the same fault in Harkfell as "a broken sample"). Harkfell's
+;;; test-cue-tails is the model: every cue rendered as the game renders it,
+;;; then its END read from the samples.
+;;;
+;;;   tail   the peak of a cue's last TAIL-S is at least TAIL-DB under its own peak
+;;;
+;;; The control: a cue cut in half (its first half as a cue of its own)
+;;; fails the tail rule, so the rule can go red.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (crash synth))
+
+(define RATE 48000)
+(define TAIL-S 0.02)
+(define TAIL-DB -40.0)
+
+(define (peak bv from to)
+  (let loop ((i (max 0 from)) (m 0.0))
+    (if (>= i to) m (loop (+ i 1) (max m (abs (cue-ref bv i)))))))
+(define (db x) (if (<= x 0.0) -200.0 (* 20.0 (/ (log x) (log 10.0)))))
+(define (tail-db bv)
+  (let* ((n (cue-frames bv)) (k (exact (round (* TAIL-S RATE)))))
+    (- (db (peak bv (- n k) n)) (db (peak bv 0 n)))))
+
+(define (first-half bv)
+  (let* ((n (quotient (cue-frames bv) 2))
+         (out (make-bytevector (* 4 n) 0)))
+    (bytevector-copy! out 0 bv 0 (* 4 n))
+    out))
+
+(define REPORT (map (lambda (name) (let ((bv (render-cue name RATE))) (list name (cue-frames bv) (tail-db bv)))) CUES))
+
+(test-group "cue tails: every cue rings out"
+  (test "every cue rendered and not silent (the check has its subject)"
+    (assert-equal (length CUES) (length REPORT))
+    (for-each (lambda (name) (assert-true (> (peak (render-cue name RATE) 0 (cue-frames (render-cue name RATE))) 0.01))) CUES))
+  (test "control: a cue cut in half ends at level, and the rule sees it"
+    (for-each (lambda (name) (assert-true (> (tail-db (first-half (render-cue name RATE))) TAIL-DB)))
+              '(cleared select scramble lock)))
+  (test "every cue's last 20 ms are at least 40 dB under its peak"
+    (for-each (lambda (r)
+                (display "  ") (display (car r)) (display " ") (display (cadr r)) (display " frames, tail ")
+                (display (/ (round (* 10.0 (caddr r))) 10.0)) (display " dB") (newline))
+              REPORT)
+    (assert-equal '() (map car (filter (lambda (r) (> (caddr r) TAIL-DB)) REPORT)))))
