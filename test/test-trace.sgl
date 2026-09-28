@@ -45,7 +45,7 @@
 (define SEED 5)
 (define lay (turtle-layout))
 (define geom (make-geometry lay 640 400))
-(define TPS 60)   ; (crash tween)'s TICKS-PER-SECOND, the one clock
+(define TPS 60)   ; (substratic time clock) (substratic time tween)'s TICKS-PER-SECOND, the one clock
 
 (define (frame pressed . rest)
   (make-input-frame pressed (if (pair? rest) (car rest) '()) #f))
@@ -457,15 +457,35 @@
       (let ((next (session-step severed (frame '(n) '(ctrl)) geom)))
         (assert-equal (+ SEED 1) (session-seed next))
         (assert-equal 'trace (phase-of next))))
-    (test "the severed board's thirds: RETRY LINK, NEW STACK, JACK OUT"
-      (let ((left (session-step severed (make-input-frame '() '() (cons 100 150)) geom))
-            (middle (session-step severed (make-input-frame '() '() (cons 320 150)) geom))
-            (right (session-step severed (make-input-frame '() '() (cons 560 150)) geom)))
-        (assert-equal SEED (session-seed left))
-        (assert-equal 'trace (phase-of left))
-        (assert-equal (+ SEED 1) (session-seed middle))
-        (assert-equal 'severed (phase-of right))
-        (assert-equal MSG-NO-MENU (session-message right))))))
+    ;; the shared end panel's rows (t-6a2d35; the board's thirds before P6c):
+    ;; each row's center, from (crash geometry) panel-row-rect's numbers
+    (test "the severed board's panel rows: RETRY LINK, NEW STACK, JACK OUT; off the rows nothing"
+      (let ((retry (session-step severed (make-input-frame '() '() (cons 320 164)) geom))
+            (next (session-step severed (make-input-frame '() '() (cons 320 196)) geom))
+            (out (session-step severed (make-input-frame '() '() (cons 320 228)) geom))
+            (off (session-step severed (make-input-frame '() '() (cons 100 150)) geom)))
+        (assert-equal SEED (session-seed retry))
+        (assert-equal 'trace (phase-of retry))
+        (assert-equal (+ SEED 1) (session-seed next))
+        (assert-equal 'severed (phase-of out))
+        (assert-equal MSG-NO-MENU (session-message out))
+        (assert-equal SEED (session-seed off))
+        (assert-equal 'severed (phase-of off))))
+    ;; the panel's keyboard (David, 2026-09-28: no highlight to move on STACK)
+    (test "the severed panel by key: the arrows move the highlight (wrapping), Return picks the row"
+      (let* ((key (lambda (s k) (session-step s (make-input-frame (list k) '() #f) geom)))
+             (down (key severed 'down))
+             (down2 (key down 'down))
+             (up (key severed 'up)))
+        (assert-equal 0 (session-panel severed))
+        (assert-equal 1 (session-panel down))
+        (assert-equal 2 (session-panel down2))
+        (assert-equal 2 (session-panel up))                ; up from the top wraps to JACK OUT
+        (assert-equal 'severed (phase-of down))           ; moving picks nothing
+        (assert-equal SEED (session-seed (key severed 'return)))
+        (assert-equal 'trace (phase-of (key severed 'return)))   ; RETRY LINK
+        (assert-equal (+ SEED 1) (session-seed (key down 'return)))   ; NEW STACK
+        (assert-equal 'jack-out (session-request (key down2 'return)))))))
 
 (test-group "trace: (g) clearing under the ICE wins with the phase tag and stops the timers"
   (let* ((s (under-ice (two-pairs-board) (* TPS ICE-INTERVAL)))
