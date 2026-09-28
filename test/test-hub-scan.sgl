@@ -1,0 +1,205 @@
+;;; SCAN in the hub (P6d; gate leg 14 of topics/crash-the-stack-scan-design
+;;; section 11, with D82): SCAN nodes by depth, the reveal as a key in the
+;;; generator's proof (with the positive control: the revealer's reveal
+;;; removed is unsolvable), a hidden node and a veiled ladder refusing
+;;; until revealed, the SCAN launch (its spec, grid, marks and tools), the
+;;; map reward checked against a disk computed here, and the save.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash code)
+        (crash hub world)
+        (crash hub gen)
+        (crash hub rules)
+        (crash hub screen)
+        (crash hub save))
+
+(define (scan-nodes l) (filter (lambda (n) (eq? (node-table n) 'scan)) (layer-nodes l)))
+(define (revealer l) (find (lambda (n) (eq? (node-effect n) 'reveal)) (layer-nodes l)))
+
+;; The layer with its revealer's reveal taken away (the positive control).
+(define (unrevealed l)
+  (layer l nodes: (map (lambda (n) (if (eq? (node-effect n) 'reveal) (node n effect: #f effect-arg: #f) n))
+                       (layer-nodes l))))
+
+(define (world-at seed depth)
+  (hub-with-layer (world run-seed: seed) (generate-layer seed depth 0) depth 0))
+
+(define (at-cell w c) (world w runner: (runner cell: c)))
+
+(define (has-event? w tag)
+  (any (lambda (e) (or (eq? e tag) (and (pair? e) (eq? (car e) tag)))) (world-events w)))
+
+(test-group "hub SCAN: the nodes by depth (D82)"
+  (test "layer 1 has none: the first layer teaches the hub"
+    (assert-equal '() (scan-nodes (generate-layer 1 1 0))))
+  (test "layer 2: one optional SCAN node, intel only (no key, no effect)"
+    (let ((ns (scan-nodes (generate-layer 1 2 0))))
+      (assert-equal 1 (length ns))
+      (assert-false (node-key (car ns)))
+      (assert-false (node-effect (car ns)))
+      (assert-false (node-required? (car ns)))
+      (assert-equal '() (layer-veiled (generate-layer 1 2 0)))))
+  (test "layer 3: a required SCAN node reveals the ladder, which is veiled"
+    (let* ((l (generate-layer 1 3 0))
+           (r (revealer l)))
+      (assert-true (and r (node-required? r) #t))
+      (assert-equal 'scan (node-table r))
+      (assert-equal (layer-exit l) (node-effect-arg r))
+      (assert-equal (list (layer-exit l)) (layer-veiled l))))
+  (test "layer 4: a required SCAN node reveals a hidden key node, which is veiled"
+    (let* ((l (generate-layer 1 4 0))
+           (r (revealer l))
+           (hidden (find (lambda (n) (node-hidden? n)) (layer-nodes l))))
+      (assert-true (and r hidden (node-key hidden) #t))
+      (assert-equal (node-cell hidden) (node-effect-arg r))
+      (assert-equal (list (node-cell hidden)) (layer-veiled l)))))
+
+(test-group "hub SCAN: the reveal in the proof (leg 14's controls)"
+  (test "a SCAN-hidden ladder: solvable with the reveal, unsolvable with it removed"
+    (let ((l (generate-layer 1 3 0)))
+      (assert-true (layer-solvable? l))
+      (assert-false (layer-solvable? (unrevealed l)))))
+  (test "a SCAN-hidden key node: solvable with the reveal, unsolvable with it removed"
+    (let ((l (generate-layer 1 4 0)))
+      (assert-true (layer-solvable? l))
+      (assert-false (layer-solvable? (unrevealed l)))))
+  (test "depths 3 to 6, seeds 1 to 50: every layer builds, is solvable with its hidden thing in place, and needs its revealer"
+    (let ((built 0))
+      (for-each (lambda (depth)
+                  (for-each (lambda (seed)
+                              (let ((l (generate-layer seed depth 0)))
+                                (assert-true (and l #t))
+                                (when l
+                                  (set! built (+ built 1))
+                                  (assert-true (pair? (layer-veiled l)))
+                                  (assert-true (layer-solvable? l))
+                                  (assert-false (layer-solvable? (unrevealed l))))))
+                            (iota 50 1)))
+                (list 3 4 5 6))
+      (assert-equal 200 built))))
+
+(test-group "hub SCAN: the veil in play"
+  (test "a hidden node refuses enter before its reveal and takes it after"
+    (let* ((w (world-at 1 4))
+           (hidden (find (lambda (n) (node-hidden? n)) (world-nodes w)))
+           (w (at-cell w (node-cell hidden)))
+           (before (hub-step w 'enter))
+           (after (hub-step (world w revealed: (list (node-cell hidden))) 'enter)))
+      (assert-true (world-veiled? w (node-cell hidden)))
+      (assert-false (world-request before))
+      (assert-eq 'launch (world-request after))))
+  (test "a veiled ladder refuses descend before its reveal and takes it after"
+    (let* ((w (world-at 1 3))
+           (w (at-cell w (layer-exit (world-layer w))))
+           (before (hub-step w 'descend))
+           (after (hub-step (world w revealed: (list (layer-exit (world-layer w)))) 'descend)))
+      (assert-false (world-request before))
+      (assert-eq 'descend (world-request after))))
+  (test "the revealer's clear unveils what it hid"
+    (let* ((w (world-at 1 3))
+           (r (revealer (world-layer w)))
+           (w (hub-step (at-cell w (node-cell r)) 'enter))
+           (w (hub-return w (list 'cleared 40 10 0.1 '()))))
+      (assert-true (has-event? w 'revealed))
+      (assert-false (world-veiled? w (layer-exit (world-layer w)))))))
+
+(test-group "hub SCAN: the launch"
+  (test "a SCAN node launches a SCAN board: its spec, the descriptor's grid and marks, and only the tools it serves"
+    (let* ((w (world-at 1 3))
+           (r (revealer (world-layer w)))
+           (w (world (at-cell w (node-cell r)) inventory: (list (cons 'probe 2) (cons 'peek 1) (cons 'scramble 1))))
+           (w (hub-step w 'enter))
+           (l (hub-launch w 1 'vegas))
+           (d (descriptor-at 3)))
+      (assert-eq 'scan (spec-table (launch-spec l)))
+      (assert-equal (descriptor-scan-grid d) (launch-grid l))
+      (assert-equal (descriptor-scan-marks d) (launch-marks l))
+      (assert-equal (list (cons 'probe 2)) (launch-tools l))))
+  (test "a STACK node's launch is unchanged: no grid, and the probe still serves it"
+    (let* ((w (world-at 1 1))
+           (n (find (lambda (n) (node-key n)) (world-nodes w)))
+           (w (world (at-cell w (node-cell n)) inventory: (list (cons 'probe 1))))
+           (l (hub-launch (hub-step w 'enter) 1 'vegas)))
+      (assert-eq 'stack (spec-table (launch-spec l)))
+      (assert-false (launch-grid l))
+      (assert-equal (list (cons 'probe 1)) (launch-tools l)))))
+
+;; The disk around c, computed here: every cell within MAP-RADIUS.
+(define (disk l c)
+  (let ((w (layer-width l)))
+    (filter (lambda (i)
+              (let ((dx (- (modulo i w) (modulo c w)))
+                    (dy (- (quotient i w) (quotient c w))))
+                (<= (+ (* dx dx) (* dy dy)) (* MAP-RADIUS MAP-RADIUS))))
+            (iota (layer-size l)))))
+
+(test-group "hub SCAN: the map reward (D75)"
+  (test "a SCAN clear maps exactly the disk of MAP-RADIUS around its node, and not a cell beyond it"
+    (let* ((w (world-at 1 2))
+           (n (car (scan-nodes (world-layer w))))
+           (l (world-layer w))
+           (c (node-cell n))
+           (in (disk l c))
+           (w0 (at-cell w c))
+           (w1 (hub-return (hub-step w0 'enter) (list 'cleared 40 10 0.1 '())))
+           ;; cells just beyond the radius, unseen before, outside the node's room
+           (beyond (filter (lambda (i)
+                             (and (not (memv i in))
+                                  (not (world-seen? w0 i))
+                                  (let ((dx (- (modulo i (layer-width l)) (modulo c (layer-width l))))
+                                        (dy (- (quotient i (layer-width l)) (quotient c (layer-width l)))))
+                                    (<= (+ (* dx dx) (* dy dy)) (* (+ MAP-RADIUS 3) (+ MAP-RADIUS 3))))))
+                           (iota (layer-size l))))
+           (room-cells* (let ((r (find (lambda (r) (room-contains? r (modulo c (layer-width l)) (quotient c (layer-width l))))
+                                       (layer-rooms l))))
+                          (if r (room-cells r (layer-width l)) '()))))
+      (assert-true (every (lambda (i) (world-seen? w1 i)) in))
+      (assert-true (> (length beyond) 0))
+      (assert-true (every (lambda (i) (or (memv i room-cells*) (not (world-seen? w1 i)))) beyond))))
+  (test "exactly the daemons standing in the disk show their sight for MAP-BEATS, and it fades a beat at a time"
+    (let* ((w (world-at 1 2))
+           (l (world-layer w))
+           (n (car (scan-nodes l)))
+           (in (disk l (node-cell n)))
+           (w1 (hub-return (hub-step (at-cell w (node-cell n)) 'enter) (list 'cleared 40 10 0.1 '())))
+           (inside (filter (lambda (d) (memv (daemon-cell d) in)) (world-daemons w1))))
+      ;; a floor: a layer with no daemon in the disk would pass for free
+      (assert-true (pair? inside))
+      (for-each (lambda (d)
+                  (assert-equal (and (memv (daemon-cell d) in) MAP-BEATS)
+                                (let ((e (assv (daemon-index d) (world-mapped w1)))) (and e (cdr e)))))
+                (world-daemons w1))
+      (let ((w2 (hub-step w1 'wait)))
+        (for-each (lambda (d)
+                    (assert-equal (- MAP-BEATS 1) (cdr (assv (daemon-index d) (world-mapped w2)))))
+                  inside))))
+  (test "a STACK clear maps only its room, as before"
+    (let* ((w (world-at 1 1))
+           (n (find (lambda (n) (node-key n)) (world-nodes w)))
+           (w1 (hub-return (hub-step (at-cell w (node-cell n)) 'enter) (list 'cleared 40 10 0.1 '()))))
+      (assert-equal '() (world-mapped w1)))))
+
+(test-group "hub SCAN: the save (version 5, and version 4 regrows scanless)"
+  (test "revealed cells and mapped daemons round-trip"
+    (let* ((hs (hub-screen-new 1))
+           (w (world-at 1 3))
+           (hs (hub-screen hs world: w prev: w))
+           (w2 (world w revealed: (list (layer-exit (world-layer w))) mapped: (list (cons 0 5))))
+           (back (datum->hub-screen (hub-screen->datum (hub-screen hs world: w2 prev: w2)))))
+      (assert-true (and back #t))
+      (assert-equal (list (layer-exit (world-layer w))) (world-revealed (hub-screen-world back)))
+      (assert-equal (list (cons 0 5)) (world-mapped (hub-screen-world back)))))
+  (test "a version 4 run (saved before P6d) regrows its layer with no SCAN node: the layer it was saved on"
+    (let* ((w (world-at 1 3))
+           (hs (hub-screen (hub-screen-new 1) world: w prev: w))
+           (d (hub-screen->datum hs))
+           (v4 (cons 'crash-run (cons 4 (filter (lambda (e) (not (memq (car e) '(revealed mapped scanless)))) (cddr d)))))
+           (back (datum->hub-screen v4)))
+      (assert-true (and back #t))
+      (let ((bw (hub-screen-world back)))
+        (assert-true (world-scanless? bw))
+        (assert-equal '() (scan-nodes (world-layer bw)))
+        (assert-equal '() (layer-veiled (world-layer bw)))
+        (assert-equal (layer-cells (generate-layer 1 3 0 #f)) (layer-cells (world-layer bw)))))))

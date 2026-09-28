@@ -99,17 +99,33 @@
           w
           (loop (hub-step w (list 'move (car path))) (cdr path))))))
 
+;; The SCAN node that reveals a veiled cell (D82), if any.
+(define (revealer-of w cell)
+  (find (lambda (n) (and (eq? (node-effect n) 'reveal) (eqv? (node-effect-arg n) cell))) (world-nodes w)))
+
+;; A veiled cell unveiled first: its revealer walked to and cleared. A
+;; cell no SCAN node reveals is left as it is (the stall then shows).
+(define (unveil w cell)
+  (let ((r (and (world-veiled? w cell) (revealer-of w cell))))
+    (if (not r)
+        w
+        (let ((w (walk w (node-cell r))))
+          (if (world-request w) w (clear-here w))))))
+
 ;; The layer by the rules alone: the key nodes in gate order, then the
-;; ladder. Answers a world asking to descend, or one whose link severed.
+;; ladder, each unveiled first when a SCAN node hides it (D82). Answers a
+;; world asking to descend, or one whose link severed.
 (define (script-layer w)
   (let loop ((w w) (k 0))
     (cond ((world-request w) w)
           ((< k (length (layer-gates (world-layer w))))
            (let* ((n (find (lambda (n) (eq? (node-key n) (list-ref KEY-COLORS k))) (world-nodes w)))
-                  (w (walk w (node-cell n))))
+                  (w (unveil w (node-cell n)))
+                  (w (if (world-request w) w (walk w (node-cell n)))))
              (if (world-request w) w (loop (clear-here w) (+ k 1)))))
           (else
-           (let ((w (walk w (layer-exit (world-layer w)))))
+           (let* ((w (unveil w (layer-exit (world-layer w))))
+                  (w (if (world-request w) w (walk w (layer-exit (world-layer w))))))
              (if (world-request w) w (hub-step w 'descend)))))))
 
 ;; Does every gate matter? With every other gate opened and no key, the
@@ -785,6 +801,11 @@
                (cond ((eq? (world-request w) 'severed)
                       (assert-true (< attempts 32))
                       (run (hub-severed-layer w) (+ attempts 1) layers))
+                     ((not (eq? (world-request w) 'descend))
+                      ;; a stall (the ladder refused: veiled, D82): stop, naming the layer
+                      (assert-equal (list 'descend 'at-depth (world-depth w))
+                                    (list (world-request w) 'at-depth (world-depth w)
+                                          (if (world-veiled? w (layer-exit (world-layer w))) 'ladder-veiled 'ladder-open))))
                      (else
                       (assert-equal 'descend (world-request w))
                       (display (string-append "  layer " (number->string (world-depth w))

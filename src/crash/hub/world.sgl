@@ -27,7 +27,8 @@
           TENSE-AT HUNTED-AT ALERT-AT CARRY HIGH
           DIFFICULTIES difficulty? daemon-pace HELD-ALERT-AT
           DAEMON-KINDS daemon-kind? daemon-kind daemon-awake?
-          KEY-COLORS TOOLS tool-scope tool-table hub-tool? board-tool? tool-known?
+          KEY-COLORS TOOLS tool-scope tool-table tool-serves? hub-tool? board-tool? tool-known?
+          MAP-RADIUS MAP-BEATS SCAN-GRID
           PRICES hub-tool-price
           ;; --- cells ---
           CELL-KINDS cell-walkable? cell-blocks-sight?
@@ -40,14 +41,15 @@
           descriptor-budget descriptor-calm-bpm descriptor-tense-bpm
           descriptor-bounty descriptor-optional-bounty descriptor-trace-at descriptor-sever-at
           descriptor-shop descriptor-loot descriptor-log descriptor-gibson descriptor-tier-scale descriptor-marks
+          descriptor-scan-optional descriptor-scan-hides descriptor-scan-grid descriptor-scan-marks
           LAYERS layer-count descriptor-at
           ;; --- the layer ---
           node node? node-index node-cell node-table node-bounty node-key node-effect node-effect-arg node-loot
-          node-required? node-state node-attempts node-heat
+          node-required? node-state node-attempts node-heat node-hidden?
           daemon daemon? daemon-index daemon-cell daemon-facing daemon-route daemon-step daemon-alert daemon-hunting daemon-returning?
           layer layer? layer-depth layer-seed layer-width layer-height layer-cells layer-gates
           layer-nodes layer-caches layer-daemons layer-entry layer-exit layer-rooms layer-market layer-try
-          layer-cell layer-gate-color layer-node-at layer-cache-at layer-size
+          layer-cell layer-gate-color layer-node-at layer-cache-at layer-size layer-veiled
           ;; --- the world ---
           runner runner? runner-cell runner-facing runner-cloak
           ledger ledger? ledger-cleared ledger-beats ledger-moves ledger-reconnects
@@ -55,7 +57,7 @@
           world world? world-run-seed world-difficulty world-depth world-attempt world-layer world-runner
           world-nodes world-daemons world-keys world-opened world-taken world-dark world-decoys
           world-inventory world-credits world-layer-credits world-trace world-beat world-ledger world-seen world-seen? world-last-seen
-          world-request world-events world-done?
+          world-request world-events world-done? world-revealed world-mapped world-veiled? world-scanless?
           world-node world-inventory-count)
 
   (begin
@@ -87,27 +89,37 @@
     (define HUNTED-AT 0.8)          ; trace fraction where it is hunted: ICE every half bar
     (define CARRY 0.25)             ; of the budget: what a board's finishing trace adds, times its fraction
     (define HIGH 0.75)              ; of the budget: the trace a severed board leaves you at
+    ;; SCAN in the hub (P6d, D75): every SCAN clear maps the layer around it
+    (define MAP-RADIUS 10)          ; cells (Euclidean) around the node that join the memory
+    (define MAP-BEATS 16)           ; beats the daemons in that radius show their sight through the fog
+    (define SCAN-GRID (list 16 10 20))   ; a node board's grid and ICE: 16x10 at the hub's 32 px, 20 ICE
 
     ;; blackICE's four tokens, renamed keys; a gate is one color.
     (define KEY-COLORS (list 'red 'green 'blue 'yellow))
 
-    ;; One bag of tools across the world and the boards: (name scope table).
+    ;; One bag of tools across the world and the boards: (name scope tables).
     ;; scope world: used on a beat here; scope board: carried into the
-    ;; named table's board (the design note's exploit tools and DEFRAG's
-    ;; scramble) and consumed there once the boards learn them.
+    ;; named tables' boards (the design note's exploit tools and DEFRAG's
+    ;; scramble) and consumed there once the boards learn them. A probe is
+    ;; a probe wherever it is carried (P6d): STACK's and SCAN's.
     (define TOOLS
-      (list (list 'cloak 'world #f)
-            (list 'decoy 'world #f)
-            (list 'jam 'world #f)
-            (list 'scramble 'board 'cards)
-            (list 'peek 'board 'stack)
-            (list 'probe 'board 'stack)
-            (list 'purge 'board 'stack)))
+      (list (list 'cloak 'world '())
+            (list 'decoy 'world '())
+            (list 'jam 'world '())
+            (list 'scramble 'board (list 'cards))
+            (list 'peek 'board (list 'stack))
+            (list 'probe 'board (list 'stack 'scan))
+            (list 'purge 'board (list 'stack))))
 
     (define (tool-entry name) (assq name TOOLS))
     (define (tool-known? name) (and (tool-entry name) #t))
     (define (tool-scope name) (let ((e (tool-entry name))) (and e (cadr e))))
-    (define (tool-table name) (let ((e (tool-entry name))) (and e (caddr e))))
+    ;; The first table a board tool serves (#f for a world tool).
+    (define (tool-table name)
+      (let ((e (tool-entry name))) (and e (pair? (caddr e)) (car (caddr e)))))
+    ;; Is the tool carried into this table's board?
+    (define (tool-serves? name table)
+      (let ((e (tool-entry name))) (and e (memq table (caddr e)) #t)))
     (define (hub-tool? name) (eq? (tool-scope name) 'world))
     (define (board-tool? name) (eq? (tool-scope name) 'board))
 
@@ -201,8 +213,21 @@
       (loot default: '())             ; what an optional node yields, in order
       (log default: "")               ; the terminal-log line (David's)
       (gibson default: '())           ; Gibson's lines (David's)
-      (tier-scale default: 1))
+      (tier-scale default: 1)
+      ;; SCAN in the hub (P6d; D75, D82: SCAN reveals). Optional SCAN nodes
+      ;; give intel; a required one hides what cannot be acted on until it
+      ;; is seen: the ladder down (drawn scrambled, not taken) or a required
+      ;; key node (not on the map, no enter), until that SCAN clears.
+      (scan-optional default: 0)      ; optional SCAN nodes on the layer
+      (scan-hides default: #f)        ; #f | ladder | node: what the layer's required SCAN reveals
+      (scan-grid default: SCAN-GRID)  ; (w h ice) of a SCAN node's board
+      (scan-marks default: 2))        ; hosts to extract on a SCAN node's board (D74)
 
+    ;; SCAN (P6d, D82): layer 1 teaches the hub and has none; from layer 2 an
+    ;; optional SCAN node (intel); from layer 3 a required one that reveals the
+    ;; ladder (odd depths) or a hidden key node (even depths). Markets from
+    ;; layer 2 stock the probe. The grids are the design's: 16x10 with 20 then
+    ;; 24 ICE, and 20x11 with 33 on the deep layers.
     ;; Six layers, STACK and DEFRAG alternating as run.sgl's LAYERS (D60:
     ;; JACK IN's six layers become six maps). Built with list, not quoted
     ;; (the wasm literal hazard, (crash menu)).
@@ -214,23 +239,28 @@
             (descriptor depth: 2 table: 'cards width: 44 height: 24 rooms: 7 extra-links: 1
                         required: 2 optional: 1 daemons: 3 kinds: (list 'drone 'crawler 'sentinel) ice: 2 caches: 2 shadows: 3 market?: #t
                         budget: 440 bounty: 50 optional-bounty: 35 trace-at: 180 sever-at: 220 marks: 1
-                        shop: (list 'cloak 'decoy 'scramble) loot: (list 'scramble))
+                        shop: (list 'cloak 'decoy 'scramble 'probe) loot: (list 'scramble)
+                        scan-optional: 1 scan-grid: (list 16 10 20) scan-marks: 2)
             (descriptor depth: 3 table: 'stack width: 48 height: 28 rooms: 8 extra-links: 2
                         required: 3 optional: 2 daemons: 4 kinds: (list 'drone 'sentinel 'crawler 'hunter) ice: 2 caches: 3 shadows: 3 market?: #t
                         budget: 480 bounty: 60 optional-bounty: 45 trace-at: 170 sever-at: 210 marks: 3
-                        shop: (list 'cloak 'decoy 'jam 'peek) loot: (list 'jam 'peek))
+                        shop: (list 'cloak 'decoy 'jam 'peek 'probe) loot: (list 'jam 'peek)
+                        scan-optional: 1 scan-hides: 'ladder scan-grid: (list 16 10 24) scan-marks: 3)
             (descriptor depth: 4 table: 'cards width: 52 height: 30 rooms: 9 extra-links: 2
                         required: 3 optional: 2 daemons: 4 kinds: (list 'drone 'crawler 'sentinel 'hunter) ice: 3 caches: 3 shadows: 4 market?: #t
                         budget: 520 bounty: 70 optional-bounty: 55 trace-at: 160 sever-at: 200 marks: 2
-                        shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'decoy 'scramble))
+                        shop: (list 'cloak 'decoy 'jam 'scramble 'probe) loot: (list 'decoy 'scramble)
+                        scan-optional: 1 scan-hides: 'node scan-grid: (list 16 10 24) scan-marks: 3)
             (descriptor depth: 5 table: 'stack width: 60 height: 34 rooms: 11 extra-links: 3
                         required: 4 optional: 3 daemons: 5 kinds: (list 'drone 'sentinel 'crawler 'hunter 'drone) ice: 3 caches: 4 shadows: 5 market?: #t
                         budget: 600 bounty: 80 optional-bounty: 65 trace-at: 150 sever-at: 190 marks: 4
-                        shop: (list 'cloak 'decoy 'jam 'peek 'probe 'purge) loot: (list 'cloak 'probe 'purge))
+                        shop: (list 'cloak 'decoy 'jam 'peek 'probe 'purge) loot: (list 'cloak 'probe 'purge)
+                        scan-optional: 1 scan-hides: 'ladder scan-grid: (list 20 11 33) scan-marks: 3)
             (descriptor depth: 6 table: 'cards width: 60 height: 34 rooms: 12 extra-links: 3
                         required: 4 optional: 3 daemons: 5 kinds: (list 'hunter 'drone 'sentinel 'crawler 'hunter) ice: 4 caches: 4 shadows: 5 market?: #t
                         budget: 640 bounty: 90 optional-bounty: 75 trace-at: 140 sever-at: 180 marks: 2
-                        shop: (list 'cloak 'decoy 'jam 'scramble) loot: (list 'jam 'scramble 'decoy))))
+                        shop: (list 'cloak 'decoy 'jam 'scramble 'probe) loot: (list 'jam 'scramble 'decoy)
+                        scan-optional: 1 scan-hides: 'node scan-grid: (list 20 11 33) scan-marks: 3)))
 
     (define (layer-count) (length LAYERS))
 
@@ -257,7 +287,8 @@
       (required? default: #f)
       (state default: 'sealed)
       (attempts default: 0)
-      (heat default: 0.0))            ; a held board's trace against its trace-at, 0..1 (D65: the cabinet shows it)
+      (heat default: 0.0)             ; a held board's trace against its trace-at, 0..1 (D65: the cabinet shows it)
+      (hidden? default: #f))          ; D82: not on the map, and no enter, until a SCAN node reveals its cell
 
     ;; A daemon. kind (D65, the roster): drone (a route patrol, the fan
     ;; ahead), sentinel (never moves; its facing turns a quarter on each of
@@ -304,7 +335,8 @@
       (exit default: 0)
       (rooms default: '())
       (market default: #f)
-      (try default: 0))
+      (try default: 0)
+      (veiled default: '()))              ; D82: cells hidden until a SCAN node's reveal (a node's, or the exit's)
 
     (define (layer-size l) (* (layer-width l) (layer-height l)))
     (define (layer-cell l i) (vector-ref (layer-cells l) i))
@@ -367,7 +399,10 @@
       (ledger default: (ledger))
       (request default: #f)
       (events default: '())
-      (done? default: #f))
+      (done? default: #f)
+      (revealed default: '())           ; D82: veiled cells a SCAN clear revealed, this layer
+      (mapped default: '())             ; D75: alist daemon index -> beats its sight shows through the fog
+      (scanless? default: #f))        ; this layer was grown without SCAN nodes: a run saved before P6d (hub save version 4)
 
     ;; The live node by index, or #f.
     (define (world-node w index)
@@ -397,6 +432,16 @@
     ;; the shape the detector matches.
     (define (world-seen? w i) (seen-at (world-seen w) i))
     (define (seen-at v i) (and (< i (vector-length v)) (vector-ref v i)))
+
+    ;; Is cell i still veiled (D82): hidden by the layer until a SCAN clear
+    ;; revealed it? A veiled node is off the map and refuses enter; a veiled
+    ;; ladder is drawn scrambled and refuses descend.
+    (define (world-veiled? w i)
+      (let ((l (world-layer w)))
+        (and l
+             (memv i (layer-veiled l))
+             (not (memv i (world-revealed w)))
+             #t)))
 
     (define (world-inventory-count w tool)
       (let ((e (assq tool (world-inventory w)))) (if e (cdr e) 0)))))

@@ -38,7 +38,8 @@
           hub-runner-hidden? daemon-sight line-of-sight? cell-adjacent? hub-runner-sight hub-path
           hub-nearest-daemon hub-node-here hub-buy hub-market-request hub-remember hub-hold-board
           hub-required-left
-          launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson launch-marks
+          launch launch? launch-spec launch-node launch-tools launch-trace-at launch-sever-at launch-gibson launch-marks launch-grid
+          hub-map-cells hub-mapped-sight?
           action-valid? ACTIONS)
 
   (begin
@@ -71,6 +72,9 @@
               trace: 0
               beat: 0
               last-seen: #f
+              revealed: '()
+              mapped: '()
+              scanless?: #f
               request: #f
               events: '()
               seen: (make-vector (layer-size l) #f))))
@@ -102,6 +106,50 @@
             (let ((v (vector-copy (world-seen w))))
               (for-each (lambda (i) (vector-set! v i #t)) (room-cells room width))
               (world w seen: v)))))
+
+    ;; D75 (P6d): a SCAN clear maps the layer around its node. The cells
+    ;; within MAP-RADIUS (Euclidean, no line of sight: a scan sees through
+    ;; walls) of cell c, in index order.
+    (define (hub-map-cells w c)
+      (let* ((l (world-layer w))
+             (width (layer-width l))
+             (height (layer-height l))
+             (cx (idx-x c width))
+             (cy (idx-y c width))
+             (r2 (* MAP-RADIUS MAP-RADIUS)))
+        (let loop ((y (min (- height 1) (+ cy MAP-RADIUS))) (acc '()))
+          (if (< y (max 0 (- cy MAP-RADIUS)))
+              acc
+              (loop (- y 1)
+                    (let across ((x (min (- width 1) (+ cx MAP-RADIUS))) (acc acc))
+                      (if (< x (max 0 (- cx MAP-RADIUS)))
+                          acc
+                          (across (- x 1)
+                                  (let ((dx (- x cx)) (dy (- y cy)))
+                                    (if (<= (+ (* dx dx) (* dy dy)) r2)
+                                        (cons (idx x y width) acc)
+                                        acc))))))))))
+
+    ;; Those cells join the memory, and every daemon standing in them shows
+    ;; its sight through the fog for MAP-BEATS: the node is the one you hack
+    ;; to see the route ahead (patrols, sight fans, ICE, the nodes around).
+    (define (map-around w c)
+      (let* ((cells (hub-map-cells w c))
+             (v (vector-copy (world-seen w))))
+        (for-each (lambda (i) (vector-set! v i #t)) cells)
+        (world w
+               seen: v
+               mapped: (fold-left (lambda (acc d)
+                                    (if (memv (daemon-cell d) cells)
+                                        (cons (cons (daemon-index d) MAP-BEATS)
+                                              (filter (lambda (e) (not (= (car e) (daemon-index d)))) acc))
+                                        acc))
+                                  (world-mapped w)
+                                  (world-daemons w)))))
+
+    ;; Does daemon index i show its sight through the fog (a SCAN clear)?
+    (define (hub-mapped-sight? w i)
+      (and (assv i (world-mapped w)) #t))
 
     ;; A run from its seed, on layer 1.
     ;; A run from its seed at a difficulty (NORMAL when none is given).
@@ -476,7 +524,7 @@
 
     (define (do-enter w)
       (let ((n (live-node-here w)))
-        (if (and n (not (eq? (node-state n) 'cleared)))
+        (if (and n (not (eq? (node-state n) 'cleared)) (not (world-veiled? w (node-cell n))))   ; D82: a veiled node takes no enter
             (add-event (world w request: 'launch) (list 'enter (node-index n)))
             (add-event w (list 'refused 'enter)))))
 
@@ -505,7 +553,7 @@
           (add-event w (list 'refused 'market))))
 
     (define (do-descend w)
-      (if (hub-can-descend? w)
+      (if (and (hub-can-descend? w) (not (world-veiled? w (runner-cell (world-runner w)))))   ; D82: a veiled ladder is not taken
           (add-event (world w request: 'descend) 'descend)
           (add-event w (list 'refused 'descend))))
 
@@ -722,7 +770,8 @@
         (world w
                runner: (runner r cloak: (max 0 (- (runner-cloak r) 1)))
                decoys: (tick-alist (world-decoys w))
-               dark: (tick-alist (world-dark w)))))
+               dark: (tick-alist (world-dark w))
+               mapped: (tick-alist (world-mapped w)))))   ; D75: a SCAN clear's sight fans fade
 
     ;; --- the step ---------------------------------------------------------------
 
@@ -756,7 +805,8 @@
       (tools default: '())
       (trace-at default: 180)
       (sever-at default: 220)
-      (marks default: 0)                ; the objective (D64): marked pairs (STACK) or cards (DEFRAG) to extract
+      (marks default: 0)                ; the objective (D64): marked pairs (STACK) or cards (DEFRAG) to extract, hosts (SCAN, D74)
+      (grid default: #f)                ; SCAN: the node board's (w h ice), P6d
       (gibson default: '()))
 
     ;; The launch of the node under the runner, or #f without a launch
@@ -769,15 +819,18 @@
              (let* ((seed (hub-mix (layer-seed (world-run-seed w) (world-depth w) (world-attempt w))
                                    (+ 1 (node-index n))
                                    (node-attempts n)))
-                    (spec (spec-new (node-table n) 'hacker draw scoring 'turtle seed)))
+                    (spec (if (eq? (node-table n) 'scan)
+                              (scan-spec-new 'hacker 'node #f seed)   ; P6d: its grid rides in the launch
+                              (spec-new (node-table n) 'hacker draw scoring 'turtle seed))))
                (and spec
                     (launch spec: spec
                             node: n
-                            tools: (filter (lambda (e) (eq? (tool-table (car e)) (node-table n)))
+                            tools: (filter (lambda (e) (tool-serves? (car e) (node-table n)))
                                            (world-inventory w))
                             trace-at: (descriptor-trace-at d)
                             sever-at: (descriptor-sever-at d)
-                            marks: (descriptor-marks d)
+                            marks: (if (eq? (node-table n) 'scan) (descriptor-scan-marks d) (descriptor-marks d))
+                            grid: (and (eq? (node-table n) 'scan) (descriptor-scan-grid d))
                             gibson: (descriptor-gibson d)))))))
 
     (define (replace-node w n)
@@ -806,6 +859,8 @@
                                          (cons (cons c -1) (filter (lambda (e) (not (= (car e) c))) dark)))
                                        (world-dark w)
                                        arg)))
+            ((eq? effect 'reveal)   ; D82: a SCAN node's clear unveils what it hid
+             (add-event (world w revealed: (cons arg (world-revealed w))) (list 'revealed arg)))
             ((eq? effect 'open)
              (world w opened: (cons arg (world-opened w))))
             ((eq? effect 'reroute)
@@ -857,6 +912,7 @@
                                    ledger: (ledger-add (ledger-add (world-ledger w) 'beats beats) 'moves moves)))
                          (w (if (>= fraction 0.5) (alert-nearest w (node-cell n)) w))
                          (w (reveal-room w (node-cell n)))   ; the reward shows (D64): the node's room is mapped
+                         (w (if (eq? (node-table n) 'scan) (map-around w (node-cell n)) w))   ; D75: a SCAN clear maps the layer around it
                          (w (consume w consumed)))
                     (sever-if-over (add-event w (list 'cleared (node-index n)))))
                   (let* ((consumed (cadr outcome))

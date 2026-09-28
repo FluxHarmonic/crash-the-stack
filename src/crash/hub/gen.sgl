@@ -539,6 +539,7 @@
                            (caches '())
                            (daemons '())
                            (market #f)
+                           (veiled '())
                            (next-index 0))
                       (vector-set! cells entry-cell 'ladder-up)
                       (vector-set! cells exit-cell 'ladder-down)
@@ -615,6 +616,55 @@
                                  (dm (place-daemon rnd cells (list-ref rooms (list-ref other-rooms (rnd (length other-rooms)))) w h i kind)))
                             (when dm (set! daemons (cons dm daemons))))
                           (loop (+ i 1))))
+                      ;; SCAN (P6d, D82): the optional nodes (intel) anywhere, loot
+                      ;; continuing the descriptor's list; then the required one,
+                      ;; when the descriptor says what it hides: the ladder (its
+                      ;; revealer in the ladder's region, the last) or the last key
+                      ;; node (hidden, its revealer in that node's region, which the
+                      ;; keys before it open). The hidden cell is veiled until the
+                      ;; revealer's clear; the proof below holds a reveal as one more
+                      ;; key. Placed after every other draw, so the rest of a
+                      ;; layer is the same as before SCAN came into the hub.
+                      (let loop ((i 0))
+                        (when (and (not failed) (< i (descriptor-scan-optional d)))
+                          (let* ((room (list-ref rooms (rnd n)))
+                                 (cell (pick-plain rnd cells room w))
+                                 (loot (let ((l (descriptor-loot d)))
+                                         (and (pair? l) (list-ref l (modulo (+ i (descriptor-optional d)) (length l)))))))
+                            (when cell
+                              (vector-set! cells cell 'node)
+                              (set! nodes (cons (node index: next-index cell: cell table: 'scan
+                                                      bounty: (descriptor-optional-bounty d) loot: loot)
+                                                nodes))
+                              (set! next-index (+ next-index 1)))
+                            (loop (+ i 1)))))
+                      (let ((hides (descriptor-scan-hides d))
+                            (last (length gated)))
+                        (when (and (not failed) hides)
+                          (let* ((target (if (eq? hides 'ladder)
+                                             exit-cell
+                                             (let ((kn (and (> last 0)
+                                                            (find (lambda (x) (eq? (node-key x) (list-ref KEY-COLORS (- last 1))))
+                                                                  nodes))))
+                                               (and kn (node-cell kn)))))
+                                 (region (if (eq? hides 'ladder) last (- last 1)))
+                                 (in-region (filter (lambda (i) (= (vector-ref regions i) region)) (iota n)))
+                                 (choices (let ((not-entry (filter (lambda (i) (not (= i entry))) in-region)))
+                                            (if (pair? not-entry) not-entry in-region)))
+                                 (cell (and target
+                                            (pair? choices)
+                                            (pick-plain rnd cells (list-ref rooms (list-ref choices (rnd (length choices)))) w))))
+                            (if (not cell)
+                                (set! failed #t)
+                                (begin
+                                  (vector-set! cells cell 'node)
+                                  (set! nodes (cons (node index: next-index cell: cell table: 'scan
+                                                          bounty: (descriptor-bounty d) effect: 'reveal effect-arg: target
+                                                          required?: #t)
+                                                    (map (lambda (x) (if (eqv? (node-cell x) target) (node x hidden?: #t) x))
+                                                         nodes)))
+                                  (set! next-index (+ next-index 1))
+                                  (set! veiled (list target)))))))
                       ;; barriers: void beside anything walkable, eight ways.
                       ;; Walked from the WALKABLE cells out (a layer has far
                       ;; fewer of those than void ones, and the neighbours of
@@ -657,7 +707,8 @@
                                   exit: exit-cell
                                   rooms: (cons (list-ref rooms entry) (filter (lambda (r) (not (eq? r (list-ref rooms entry)))) rooms))
                                   market: market
-                                  try: try))))))))
+                                  try: try
+                                  veiled: veiled))))))))
 
     ;; --- the proof -------------------------------------------------------------
 
@@ -669,27 +720,42 @@
     ;; cell (when collect? is on: every board is winnable by its
     ;; generator), a gate passes with its color's key or once opened.
     ;; With collect? off the search asks whether the gates matter at all.
+    ;; D82 (P6d): a REVEAL is one more key. A SCAN node with the reveal
+    ;; effect adds it on its cell; a hidden node's key is taken only with
+    ;; it, and a veiled ladder is reached only with it. So a layer whose
+    ;; revealer is unreachable before what it hides is unsolvable, and the
+    ;; walk-back placement puts the revealer first.
+    (define REVEAL-BIT 16)
+    (define (has-bit? mask bit) (= 1 (modulo (quotient mask bit) 2)))
+
     (define (layer-reachable? l collect? opened)
       (let* ((w (layer-width l))
              (h (layer-height l))
              (size (* w h))
-             (seen (make-vector (* size 16) #f))
+             (seen (make-vector (* size 32) #f))
              (start (layer-entry l))
-             (goal (layer-exit l)))
+             (goal (layer-exit l))
+             (goal-veiled? (and (memv goal (layer-veiled l)) #t)))
         (vector-set! seen start #t)
         (let loop ((front (list (cons start 0))) (back '()))
           (cond ((and (null? front) (null? back)) #f)
                 ((null? front) (loop (reverse back) '()))
-                ((= (car (car front)) goal) #t)
+                ((and (= (car (car front)) goal)
+                      (or (not goal-veiled?) (has-bit? (cdr (car front)) REVEAL-BIT)))
+                 #t)
                 (else
                  (let* ((c (car (car front)))
-                        (mask (let ((n (layer-node-at l c)))
-                                (if (and collect? n (node-key n))
-                                    (let ((bit (color-bit (node-key n))))
-                                      (if (= 0 (modulo (quotient (cdr (car front)) bit) 2))
-                                          (+ (cdr (car front)) bit)
-                                          (cdr (car front))))
-                                    (cdr (car front))))))
+                        (m (cdr (car front)))
+                        (n (and collect? (layer-node-at l c)))
+                        (mask (cond ((not n) m)
+                                    ((and (node-key n)
+                                          (or (not (node-hidden? n)) (has-bit? m REVEAL-BIT))
+                                          (not (has-bit? m (color-bit (node-key n)))))
+                                     (+ m (color-bit (node-key n))))
+                                    ((and (eq? (node-effect n) 'reveal)
+                                          (not (has-bit? m REVEAL-BIT)))
+                                     (+ m REVEAL-BIT))
+                                    (else m))))
                    (loop (cdr front)
                          (fold-orthogonal
                           c w h back
@@ -698,22 +764,26 @@
                               (if (and (cell-walkable? kind)
                                        (or (not (eq? kind 'gate))
                                            (memv n opened)
-                                           (let ((bit (color-bit (layer-gate-color l n))))
-                                             (= 1 (modulo (quotient mask bit) 2))))
+                                           (has-bit? mask (color-bit (layer-gate-color l n))))
                                        (not (vector-ref seen (+ n (* mask size)))))
                                   (begin (vector-set! seen (+ n (* mask size)) #t)
                                          (cons (cons n mask) back))
-                                  back))))))))))
-)
+                                  back)))))))))))
+
     (define (layer-solvable? l)
       (layer-reachable? l #t '()))
 
     ;; The layer for (run seed, depth, attempt): sub-seeds tried in order
     ;; until one builds and proves solvable, or #f after GEN-TRIES (never
-    ;; seen over the tested seeds; the test counts).
-    (define (generate-layer run-seed depth attempt)
-      (let ((d (descriptor-at depth))
-            (base (layer-seed run-seed depth attempt)))
+    ;; seen over the tested seeds; the test counts). A last argument #f
+    ;; builds it without its SCAN nodes (P6d): exactly the layer the seed
+    ;; named before SCAN came into the hub, for a run saved then (hub save
+    ;; version 4), whose runner and daemons stand on that layer.
+    (define (generate-layer run-seed depth attempt . rest)
+      (let* ((scan? (or (null? rest) (car rest)))
+             (d0 (descriptor-at depth))
+             (d (and d0 (if scan? d0 (descriptor d0 scan-optional: 0 scan-hides: #f))))
+             (base (layer-seed run-seed depth attempt)))
         (and d
              (let loop ((try 0))
                (and (< try GEN-TRIES)
