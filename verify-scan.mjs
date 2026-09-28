@@ -368,6 +368,117 @@ async function faceShare(vx, vy, vw, vh) {
   return { share: face / n, n };
 }
 
+// ---- --meds: t-26f655's two phone MEDs, measured (no verdict) -----------------------
+// Run with --phone (and --throttle, 4 by default): prints MEASURE lines and
+// exits without the legs.
+//   continue  CONTINUE re-deals a stored BACKBONE board in one frame: the
+//             longest frame around it and the sink's starvations over it
+//   draw      SCAN's draw allocates per host per frame: over 8 s idle on a
+//             dealt board, frame gaps and the runtime's bytes allocated per
+//             frame, for LAN (81 hosts), BACKBONE (480) and a STACK board
+async function gaps(on) {
+  return evalJS(on
+    ? `(() => { window.__g = []; let p = performance.now(); window.__gOn = true;
+         const f = (t) => { const n = performance.now(); window.__g.push(n - p); p = n; if (window.__gOn) requestAnimationFrame(f); };
+         requestAnimationFrame(f); return true; })()`
+    : `(() => { window.__gOn = false; const s = window.__g.slice(1).sort((a, b) => a - b);
+         const q = (x) => s[Math.min(s.length - 1, Math.floor(x * s.length))];
+         return { n: s.length, p50: q(0.5), p95: q(0.95), max: s[s.length - 1] }; })()`);
+}
+async function starvedCount() {
+  const s = await evalJS("window.crashPageStats ? window.crashPageStats() : ''");
+  const l = (s.split("\n").find((x) => x.startsWith("page starved-at ")) || "").slice("page starved-at ".length);
+  return l === "(none)" || l === "" ? 0 : l.split(", ").length;
+}
+async function allocated() {
+  const m0 = consoleLines.length;
+  await evalJS("window.__crashUpdates.app.dispatch('soak', '')");
+  const s = await waitLine(/^crash: soak gc (\d+) peak \d+ next \d+ young \d+ minor (\d+) major (\d+) gcms ([\d.]+)/, m0, 3000);
+  return s && { bytes: +s.m[1], minor: +s.m[2], major: +s.m[3], gcms: +s.m[4] };
+}
+async function trustedShift() {
+  await send("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Shift", code: "ShiftLeft", windowsVirtualKeyCode: 16 });
+}
+// the music playing: a trusted Shift (a gesture that picks nothing), then,
+// on a board only, a tap on the bar's middle
+async function musicOn(m0, onBoard = true) {
+  await waitLine(/^crash: boot done /, m0, 30000);
+  for (let i = 0; i < 3; i++) {
+    await trustedShift();
+    if (await waitLine(/^crash: audio resumed$/, m0, 1500)) break;
+    if (onBoard) await act(320, 392);
+    if (await waitLine(/^crash: audio resumed$/, m0, 3000)) break;
+  }
+  return waitLine(/^crash: music open /, m0, 20000);
+}
+const fmt = (g) => `${g.n} frames, gap p50 ${g.p50.toFixed(1)} p95 ${g.p95.toFixed(1)} max ${g.max.toFixed(1)} ms`;
+if (flag("--meds")) {
+  const M = (name, s) => console.log(`MEASURE ${name}: ${s}`);
+  // continue
+  {
+    const bb = await open(`scan=backbone&seed=${SEED}`);
+    const music = bb && await musicOn(bb.index);
+    if (!music) M("continue", "SKIPPED: no board or no music");
+    else {
+      let m0 = consoleLines.length;
+      if (PHONE) { await touch(320, 176); await sleep(300); await touch(336, 176); } else await act(...hostCenter(bb, 15, 8));
+      const dealt = await waitLine(/^crash: scan dealt /, m0, 30000);
+      await sleep(500);
+      m0 = consoleLines.length;
+      await key("Escape");   // the overlay: the board is stored (scan-save!)
+      await sleep(800);
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace` });
+      if (await waitLine(/^crash: title gate /, m0, 20000)) { await key("ArrowUp"); await waitLine(/^crash: title connect$/, m0, 3000); }
+      if (await waitLine(/^crash: title card tick /, m0, 20000)) { await key("ArrowUp"); await waitLine(/^crash: title card done /, m0, 3000); }
+      await key("ArrowUp");
+      const music2 = await musicOn(m0, false);
+      const top = await waitLine(/^crash: menu top (.+)$/, m0, 10000);
+      await sleep(1000);
+      await send("Emulation.setCPUThrottlingRate", { rate: THROTTLE });
+      const s0 = await starvedCount();
+      await gaps(true);
+      const m1 = consoleLines.length;
+      await key("Enter");   // CONTINUE, the first row with a stored board
+      const o = await waitLine(OPEN_RE, m1, 15000);
+      await sleep(2500);
+      const g = await gaps(false);
+      const s1 = await starvedCount();
+      await send("Emulation.setCPUThrottlingRate", { rate: 1 });
+      if (!dealt || !music2 || !top || !o) M("continue", `SKIPPED: dealt ${!!dealt} music ${!!music2} menu ${top ? top.m[1].split(" ")[0] : "none"} open ${!!o}`);
+      else M("continue", `${THROTTLE}x ${PHONE ? "phone" : "desktop"}: ${o.m[0]}; over the 2.5 s after Enter ${fmt(g)}; sink starvations ${s1 - s0}`);
+    }
+  }
+  // draw
+  for (const [name, q, uplink] of [["lan", `scan=lan&seed=${SEED}`, (b) => hostCenter(b, 4, 4)],
+                                   ["backbone", `scan=backbone&seed=${SEED}`, (b) => hostCenter(b, 15, 8)],
+                                   ["stack", `stack&seed=1&bg=off`, null]]) {
+    const m0 = consoleLines.length;
+    let b = null;
+    if (uplink) {
+      b = await open(`${q}&bg=off`);
+      if (!b) { M(`draw ${name}`, "SKIPPED: no open line"); continue; }
+      if (PHONE && b.view === "map") { await touch(320, 176); await sleep(300); await touch(336, 176); } else await act(...uplink(b));
+      if (!(await waitLine(/^crash: scan dealt /, m0, 30000))) { M(`draw ${name}`, "SKIPPED: no deal"); continue; }
+    } else {
+      await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh&${q}` });
+      if (!(await waitLine(/^crash: boot done /, m0, 30000))) { M(`draw ${name}`, "SKIPPED: no boot"); continue; }
+    }
+    await sleep(1500);
+    await send("Emulation.setCPUThrottlingRate", { rate: THROTTLE });
+    const a0 = await allocated();
+    await gaps(true);
+    await sleep(8000);
+    const g = await gaps(false);
+    const a1 = await allocated();
+    await send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    if (!a0 || !a1) M(`draw ${name}`, `${fmt(g)}; no soak line`);
+    else M(`draw ${name}`, `${THROTTLE}x ${PHONE ? "phone" : "desktop"}${b ? " " + b.view : ""}: ${fmt(g)}; allocated ${a1.bytes - a0.bytes} B = ${Math.round((a1.bytes - a0.bytes) / Math.max(1, g.n))} B/frame; minor GCs ${a1.minor - a0.minor}, major ${a1.major - a0.major}, GC ${(a1.gcms - a0.gcms).toFixed(1)} ms`);
+  }
+  shutdown(0);
+  await new Promise(() => {});
+}
+
 // ---- menu ------------------------------------------------------------------------
 {
   const mark = consoleLines.length;
