@@ -328,14 +328,33 @@
     ;; ?demo=cleared (the arms' door): every ICE flagged and every clean
     ;; host scanned but the last hidden one, so one scan maps the segment.
     ;; A dealt segment only (the uplink scanned); an over one is unchanged.
-    (define (segment-demo-near-cleared s)
+    (define (segment-demo-near-cleared s . prefer)   ; prefer: hosts to leave first (a node board's mark sectors, so extraction stays open)
       (if (or (not (segment-first s)) (segment-over? s))
           s
+          ;; the host left hidden has no clean zero beside it: play never
+          ;; leaves a hidden host next to a scanned zero (the flood takes it),
+          ;; and a press on that zero would open it; on a node board the table
+          ;; prefers a host in a mark's sector, or the next step extracts every
+          ;; mark and maps the segment (D74) before the arm's scan
           (let* ((cells (vector-copy (segment-cells s)))
-                 (last (let loop ((i (- (segment-size s) 1)))
-                         (cond ((< i 0) #f)
-                               ((and (not (segment-ice? s i)) (not (eq? (vector-ref cells i) 'scanned))) i)
-                               (else (loop (- i 1)))))))
+                 (candidate? (lambda (i)
+                               (and (not (segment-ice? s i))
+                                    (not (eq? (vector-ref cells i) 'scanned)))))
+                 (by-zero? (lambda (i)
+                             (let loop ((ns (segment-neighbors s i)))
+                               (and (pair? ns)
+                                    (or (and (not (segment-ice? s (car ns))) (= 0 (segment-reading s (car ns))))
+                                        (loop (cdr ns)))))))
+                 (pick (lambda (ok?)
+                         (let loop ((i (- (segment-size s) 1)))
+                           (cond ((< i 0) #f)
+                                 ((ok? i) i)
+                                 (else (loop (- i 1)))))))
+                 (preferred? (lambda (i) (or (null? prefer) (memv i (car prefer)))))
+                 (last (or (pick (lambda (i) (and (preferred? i) (candidate? i) (not (by-zero? i)))))
+                           (pick (lambda (i) (and (preferred? i) (candidate? i))))
+                           (pick (lambda (i) (and (candidate? i) (not (by-zero? i)))))
+                           (pick candidate?))))
             (if (not last)
                 s
                 (begin
