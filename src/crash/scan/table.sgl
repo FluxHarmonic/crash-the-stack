@@ -193,7 +193,7 @@
                                         (ripple (scan-table-reveal t) seg0 seg1 (origin before after f) (scan-table-now t))
                                         (scan-table-reveal t))
                             requests: (map-requests (scan-session-requests after))
-                            cues: (news-cues news seg0 seg1)
+                            cues: (news-cues news seg1 (origin before after f))
                             cursor?: (cursor-shown? (scan-table-cursor? t) f)))
              (t (refusals t news))
              (t (hacker-step t news dt changed?))
@@ -341,27 +341,37 @@
                                     cues: (append (scan-table-cues t) (list 'mismatch)))
                         t))))))
 
-    ;; The frame's cues from what the segment did, in the existing sounds
-    ;; (P6c brings SCAN's own five): an opening or a sweep that scanned
-    ;; several hosts matches, one host selects, a flag selects, a trip
-    ;; severs, the map clears.
-    (define (news-cues news seg0 seg1)
-      (let loop ((ns news) (acc '()))
-        (if (null? ns)
-            (reverse acc)
-            (let ((n (car ns)))
-              (loop (cdr ns)
-                    (cond ((not (pair? n)) acc)
-                          ((eq? (car n) 'uplink) (cons 'match acc))
-                          ((eq? (car n) 'scanned)
-                           (cond ((> (cadr n) 1) (cons 'match acc))
-                                 ((= (cadr n) 1) (cons 'select acc))
-                                 (else acc)))
-                          ((memq (car n) '(flagged hidden suspect)) (cons 'select acc))   ; a flag's cycle
-                          ((eq? (car n) 'trip) (cons (if (and seg1 (eq? (segment-version seg1) 'hacker)) 'mismatch 'severed) acc))   ; HACKER plays on: no sever sound
-                          ((and (eq? (car n) 'probed) (eq? (caddr n) 'ice)) (cons 'select acc))
-                          ((eq? (car n) 'mapped) (cons 'cleared acc))
-                          (else acc)))))))
+    ;; The frame's cues from what the segment did (the design's section 7,
+    ;; P6c): an opening of two or more hosts is one sweep, never a ping per
+    ;; host; a single host pings at its reading's pitch; a flag ticks, its
+    ;; removal ticks back; a trip trips; a probe sonars (its echo drops a
+    ;; fifth on ICE) and makes no ping of its own scan; the map clears. o:
+    ;; the host the action was on (its reading is the ping's).
+    (define PINGS (vector 'select 'ping-1 'ping-2 'ping-3 'ping-4 'ping-5 'ping-6 'ping-7 'ping-8))
+    (define (ping-of seg o)
+      (if (and seg o (eq? (segment-state seg o) 'scanned))
+          (vector-ref PINGS (segment-reading seg o))
+          'select))
+    (define (news-cues news seg1 o)
+      (let ((probed? (any (lambda (n) (and (pair? n) (eq? (car n) 'probed))) news)))
+        (let loop ((ns news) (acc '()))
+          (if (null? ns)
+              (reverse acc)
+              (let ((n (car ns)))
+                (loop (cdr ns)
+                      (cond ((not (pair? n)) acc)
+                            ((eq? (car n) 'uplink) (cons 'sweep acc))
+                            ((eq? (car n) 'probed) (cons (if (eq? (caddr n) 'ice) 'probe-ice 'probe) acc))
+                            ((eq? (car n) 'scanned)
+                             (cond (probed? acc)
+                                   ((> (cadr n) 1) (cons 'sweep acc))
+                                   ((= (cadr n) 1) (cons (ping-of seg1 o) acc))
+                                   (else acc)))
+                            ((memq (car n) '(flagged suspect)) (cons 'flag acc))
+                            ((eq? (car n) 'hidden) (cons 'unflag acc))
+                            ((eq? (car n) 'trip) (cons 'trip acc))
+                            ((eq? (car n) 'mapped) (cons 'cleared acc))
+                            (else acc))))))))
 
     ;; The board's end this frame: mapped (HACKER's trace freezes with its
     ;; phase), tripped on CLASSIC, or severed on HACKER.
@@ -397,7 +407,7 @@
                     reveal: (if dealt?
                                 (ripple #f (blank seg) seg (scan-session-first s) (scan-table-now t))
                                 (scan-table-reveal t))
-                    cues: (if dealt? (append (scan-table-cues t) (list 'match)) (scan-table-cues t)))))
+                    cues: (if dealt? (append (scan-table-cues t) (list 'sweep)) (scan-table-cues t)))))
 
     ;; A segment of the same grid with every host hidden: what the uplink's
     ;; opening is compared against for its ripple.

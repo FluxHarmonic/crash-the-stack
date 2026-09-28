@@ -1,0 +1,104 @@
+;;; SCAN's sound (P6c; gate leg 15 of topics/crash-the-stack-scan-design
+;;; section 11): a scripted frame sequence through the table gives the
+;;; pinned cues. One flood is one sweep, never a ping per host; a single
+;;; scan pings at its reading's pitch; flags tick; a trip trips; a probe
+;;; sonars, its echo dropping on ICE; the counter-hacks use the existing
+;;; lock, scramble and shuffle. Every cue named is one the synth renders,
+;;; and the SCAN pool is the pinned list.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash trace)
+        (crash synth)
+        (crash music)
+        (crash scan rules)
+        (crash scan input)
+        (crash scan table))
+
+(define (always) #t)
+
+(define (dealt t)
+  (let loop ((t t))
+    (if (scan-table-dealing? t) (loop (scan-table-deal! t always)) t)))
+
+(define (frame pressed pointer dt) (make-scan-frame pressed '() pointer dt))
+
+(define (center t i)
+  (let ((r (scan-host-rect (scan-table-session t) i)))
+    (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+
+;; A click, and the cues of the frame that took it (the deal's included).
+(define (click t i button)
+  (let* ((c (center t i))
+         (t1 (scan-table-step t (frame '() (list (list 'down (car c) (cdr c) button) (list 'up (car c) (cdr c) button)) 16)))
+         (t2 (dealt t1)))
+    (cons t2 (append (scan-table-cues t1)
+                     (if (eq? t1 t2) '() (list-tail* (scan-table-cues t2) (length (scan-table-cues t1))))))))
+
+(define (list-tail* xs k) (if (or (= k 0) (null? xs)) xs (list-tail* (cdr xs) (- k 1))))
+
+(define UPLINK 136)
+(define (wan version) (scan-table-new (scan-session-new 'wan 3 version #f #f) #f))
+
+(define (host-where t pred)
+  (let ((seg (scan-table-segment t)))
+    (find (lambda (i) (pred seg i)) (iota (segment-size seg)))))
+
+;; a hidden clean host with a nonzero reading and no zero beside it: a
+;; scan of it opens exactly one host
+(define (single t)
+  (host-where t (lambda (seg i)
+                  (and (segment-hidden? seg i)
+                       (not (segment-ice? seg i))
+                       (> (segment-reading seg i) 0)))))
+
+(test-group "scan sound: the cues a frame calls for (leg 15)"
+  (test "the uplink's opening is one sweep, never a ping per host"
+    (let ((r (click (wan 'hacker) UPLINK 'left)))
+      (assert-equal '(sweep) (cdr r))
+      (assert-true (> (length (filter (lambda (i) (segment-scanned? (scan-table-segment (car r)) i))
+                                      (iota 256)))
+                      1))))
+  (test "a single host pings at its reading's pitch"
+    (let* ((t (car (click (wan 'hacker) UPLINK 'left)))
+           (i (single t))
+           (r (click t i 'left)))
+      (assert-equal (list (string->symbol (string-append "ping-" (number->string (segment-reading (scan-table-segment t) i)))))
+                    (cdr r))))
+  (test "a flag ticks, and its removal ticks back"
+    (let* ((t (car (click (wan 'hacker) UPLINK 'left)))
+           (i (single t))
+           (r1 (click t i 'right))
+           (r2 (click (car r1) i 'right)))
+      (assert-equal '(flag) (cdr r1))
+      (assert-equal '(unflag) (cdr r2))))
+  (test "a trip trips, on both versions"
+    (for-each (lambda (v)
+                (let* ((t (car (click (wan v) UPLINK 'left)))
+                       (i (host-where t (lambda (seg i) (and (segment-hidden? seg i) (segment-ice? seg i))))))
+                  (assert-true (and (memq 'trip (cdr (click t i 'left))) #t))))
+              '(hacker original)))
+  (test "a probe sonars: probe on a clean host, probe-ice on ICE, and no ping over it"
+    (let* ((t (car (click (wan 'hacker) UPLINK 'left)))
+           (t (scan-table-step t (frame (list 'o) '() 0)))
+           (clean (click t (single t) 'left))
+           (t2 (scan-table-step (car clean) (frame (list 'o) '() 0)))
+           (ice (click t2 (host-where t2 (lambda (seg i) (and (segment-hidden? seg i) (segment-ice? seg i)))) 'left)))
+      (assert-equal '(probe) (cdr clean))
+      (assert-equal '(probe-ice) (cdr ice))))
+  (test "the counter-hacks sound as the stack's do: lock, scramble, shuffle"
+    (let* ((t (car (click (wan 'hacker) UPLINK 'left)))
+           (t (scan-table t trace: (trace (scan-table-trace t) phase: 'counter countdown: 13200 ice-timer: 1)))
+           (t2 (scan-table-step t (frame '() '() 17)))
+           (name (trace-last-ice (scan-table-trace t2))))
+      (assert-equal (case name ((firewall) '(lock)) ((mask) '(scramble)) ((wipe) '(shuffle)) (else '()))
+                    (scan-table-cues t2))))
+  (test "every cue SCAN names is one the synth renders"
+    (for-each (lambda (c) (assert-true (and (memq c CUES) #t)))
+              '(ping-1 ping-2 ping-3 ping-4 ping-5 ping-6 ping-7 ping-8 sweep flag unflag trip probe probe-ice
+                lock scramble shuffle cleared severed mismatch match select))))
+
+(test-group "scan sound: the pool"
+  (test "SCAN's pool is the pinned list (David picks by ear; an edit cannot drift it)"
+    (assert-equal '(clock-edge quiet-array relay-ghost) (music-pool 'scan))))

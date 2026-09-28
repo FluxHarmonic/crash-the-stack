@@ -18,7 +18,13 @@
 
   (begin
     (define PI2 6.283185307179586)
-    (define CUES '(select match mismatch shuffle lock scramble cleared severed modem dial card))
+    (define CUES '(select match mismatch shuffle lock scramble cleared severed modem dial card
+                   ping-1 ping-2 ping-3 ping-4 ping-5 ping-6 ping-7 ping-8 sweep flag unflag trip probe probe-ice))   ; SCAN's (P6c)
+    ;; SCAN's scale: A minor pentatonic from A4, eight steps (a reading's ping)
+    (define PENTATONIC '(440.0 523.25 587.33 659.25 783.99 880.0 1046.5 1174.66))
+    (define (ping-step name)
+      (let loop ((ps '(ping-1 ping-2 ping-3 ping-4 ping-5 ping-6 ping-7 ping-8)) (k 0))
+        (cond ((null? ps) 0) ((eq? (car ps) name) k) (else (loop (cdr ps) (+ k 1))))))
     (define GAIN 0.35)
 
     ;; A mono float buffer of n frames, filled by (f t i) -> sample, t in seconds.
@@ -113,6 +119,44 @@
          (render rate 0.14 (lambda (t i)
                              (+ (* 0.7 (decay t 20.0) (sine 110.0 t))
                                 (* 0.2 (decay t 120.0) (noise i))))))
+        ;; --- SCAN's own five (P6c; the design note's section 7) ---
+        ;; a reading scanned: a short blip whose pitch steps up with the
+        ;; reading, 1 low to 8 high, on A minor pentatonic so it sits over
+        ;; most tunes. It repeats the digit and never replaces it.
+        ((ping-1 ping-2 ping-3 ping-4 ping-5 ping-6 ping-7 ping-8)
+         (let ((hz (list-ref PENTATONIC (ping-step name))))
+           (render rate 0.07 (lambda (t i)
+                               (* (decay t 45.0) (+ (* 0.7 (sine hz t)) (* 0.3 (square hz t))))))))
+        ;; a flood opening: a rising run up the same scale, 12 steps in
+        ;; 0.4 s, so a big opening sounds big without running long
+        ((sweep)
+         (render rate 0.4 (lambda (t i)
+                            (let* ((k (min 11 (exact (floor (/ t (/ 0.4 12.0))))))
+                                   (u (- t (* k (/ 0.4 12.0))))
+                                   (hz (* (list-ref PENTATONIC (modulo k 8)) (if (>= k 8) 2.0 1.0))))
+                              (* (decay u 40.0) (sine hz t))))))
+        ;; a flag placed: a dry tick; removed: the same tick reversed
+        ((flag)
+         (render rate 0.04 (lambda (t i) (* (decay t 90.0) (+ (* 0.6 (noise i)) (* 0.4 (square 2400.0 t)))))))
+        ((unflag)
+         (render rate 0.04 (lambda (t i)
+                             (let ((r (- 0.04 t)))
+                               (* (decay r 90.0) (+ (* 0.6 (noise i)) (* 0.4 (square 2400.0 r))))))))
+        ;; ICE tripped: a noise burst over a falling saw, the loudest cue
+        ;; after the sever
+        ((trip)
+         (render rate 0.35 (lambda (t i)
+                             (* (decay t 7.0)
+                                (+ (* 0.55 (noise i))
+                                   (* 0.45 (saw (- 520.0 (* 900.0 t)) t)))))))
+        ;; the probe: a sonar ping and a two-tap echo; on ICE the echo's
+        ;; second tap drops a fifth, so you hear the answer
+        ((probe probe-ice)
+         (let ((low (if (eq? name 'probe-ice) (/ 1320.0 1.5) 1320.0)))
+           (render rate 0.5 (lambda (t i)
+                              (cond ((< t 0.18) (* (decay t 18.0) (sine 1320.0 t)))
+                                    ((< t 0.32) (* 0.5 (decay (- t 0.18) 25.0) (sine 1320.0 t)))
+                                    (else (* 0.5 (decay (- t 0.32) 25.0) (sine low t))))))))
         (else (render rate 0.01 (lambda (t i) 0.0)))))
 
     ;; --- the ambient's samples: s16le mono in a bytevector -----------------------
