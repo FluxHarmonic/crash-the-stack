@@ -21,12 +21,14 @@
           (crash font)
           (crash atlas)
           (crash geometry)
-          (only (crash render) draw-board-background draw-menu-button draw-keys-button
+          (only (crash trace) trace-phase trace-cleared-in TAG-CLEAN-RUN TAG-UNDER-ICE)
+          (only (crash render) draw-board-background draw-menu-button draw-keys-button draw-meter-in
                 draw-line-2 draw-toast-in text-cache cached-text)
           (crash scan rules)
           (crash scan cells)
           (crash scan input)
-          (crash scan table))
+          (crash scan table)
+          (only (crash scan trace) MSG-PROBE-ARMED))
 
   (export draw-scan draw-scan-cell scan-bar-controls scan-bar-hit
           scan-instruction glyph-scale)
@@ -311,12 +313,18 @@
     ;; --- the bar ---------------------------------------------------------------------
 
     ;; The bar's buttons as (name x y w h): MENU at the left (no tool stack
-    ;; on CLASSIC, so it takes the wrench's corner), the keys button at the
-    ;; right on a desktop; on touch the mode button and, on a zoomed map,
-    ;; MAP, 40 px each so a thumb finds them.
+    ;; on SCAN, so it takes the wrench's corner), and on HACKER the PROBE
+    ;; button beside it (the one tool, D73: a press arms it); the keys
+    ;; button at the right on a desktop; on touch the mode button and, on a
+    ;; zoomed map, MAP, 40 px each so a thumb finds them (PROBE too).
     (define TOUCH-BUTTON 40)
     (define (scan-bar-controls s vw vh)
       (append (list (list 'menu 4 (- vh 28) 24 24))
+              (if (scan-session-hacker? s)
+                  (if (scan-session-touch? s)
+                      (list (list 'probe 32 (- vh TOUCH-BUTTON 4) TOUCH-BUTTON TOUCH-BUTTON))
+                      (list (list 'probe 32 (- vh 28) 24 24)))
+                  '())
               (if (scan-session-touch? s)
                   (append (list (list 'flag-mode (- vw TOUCH-BUTTON 4) (- vh TOUCH-BUTTON 4) TOUCH-BUTTON TOUCH-BUTTON))
                           (if (and (scan-map? s) (scan-session-zoom s))
@@ -336,12 +344,17 @@
     ;; The instruction line: what to do now, in the design's words.
     (define (scan-instruction t)
       (let ((s (scan-table-session t)))
-        (cond ((scan-session-keys? s) "ARROWS MOVE. SPACE SCANS. F FLAGS. N NEXT. ESC MENU.")
+        (cond ((scan-session-keys? s)
+               (if (scan-session-hacker? s)
+                   "ARROWS MOVE. SPACE SCANS. F FLAGS. O PROBES. ESC MENU."
+                   "ARROWS MOVE. SPACE SCANS. F FLAGS. N NEXT. ESC MENU."))
               ((scan-table-won? t) "SEGMENT MAPPED.")
               ((scan-table-lost? t) "ICE TRIPPED.")
+              ((scan-table-severed? t) "LINK SEVERED.")
               ((scan-table-dealing? t) "DIALING THE SEGMENT.")
               ((and (scan-map? s) (not (scan-session-zoom s))) "TAP THE MAP TO ZOOM IN.")
               ((not (scan-table-segment t)) "PICK AN UPLINK. IT IS CLEAN.")
+              ((scan-session-armed? s) MSG-PROBE-ARMED)
               ((scan-session-touch? s)
                (if (eq? (scan-session-mode s) 'flag)
                    "TAP TO FLAG. SCAN MODE: THE BUTTON AT RIGHT."
@@ -357,30 +370,41 @@
         (string-append (number->string m) ":" (if (< r 10) "0" "") (number->string r))))
     (define (time-text secs) (string-append "TIME " (clock-string secs)))
 
+    ;; CLASSIC: the ICE counter where the meter sits and the clock at the
+    ;; right. HACKER: the trace meter in its place (it carries the time and
+    ;; the phase), and the ICE counter at the right.
     (define (draw-bar t vw vh)
       (let* ((s (scan-table-session t))
              (top (- vh HUD-HEIGHT))
-             (controls (scan-bar-controls s vw vh)))
+             (controls (scan-bar-controls s vw vh))
+             (tr (scan-table-trace t))
+             (m (meter-box vw top 'zones))
+             (right (if (scan-session-touch? s)
+                        (- vw (* 2 TOUCH-BUTTON) 16)
+                        (- vw 36)))
+             (ice (cached-text *ice-text* (scan-table-counter t) ice-text))
+             (ice-color (if (< (scan-table-counter t) 0) C-TRACE-HOT C-ICE)))
         (color! C-BG)
         (draw-filled-rect 0 top vw (- vh top))
         (color! C-BAR-C)
         (draw-filled-rect 0 top vw 1)
         (draw-menu-button (cdr (assq 'menu controls)))
-        ;; the counter where the meter sits
-        (let* ((m (meter-box vw top 'zones))
-               (text (cached-text *ice-text* (scan-table-counter t) ice-text)))
-          (color! (if (< (scan-table-counter t) 0) C-TRACE-HOT C-ICE))
-          (text! text (+ (car m) (quotient (- (caddr m) (text-width text 2)) 2)) (+ (cadr m) 2) 2))
-        ;; the clock at the right, left of the touch buttons
-        (let* ((text (cached-text *time-text* (scan-table-seconds t) time-text))
-               (right (if (scan-session-touch? s)
-                          (- vw (* 2 TOUCH-BUTTON) 16)
-                          (- vw 36))))
-          (color! C-TEXT)
-          (text! text (- right (text-width text 2)) (+ top 7) 2))
+        (let ((p (assq 'probe controls)))
+          (when p (probe-button! (cdr p) (scan-session-armed? s))))
+        (if tr
+            (begin
+              (draw-meter-in m tr)
+              (color! ice-color)
+              (text! ice (- right (text-width ice 2)) (+ top 7) 2))
+            (let ((text (cached-text *time-text* (scan-table-seconds t) time-text)))
+              (color! ice-color)
+              (text! ice (+ (car m) (quotient (- (caddr m) (text-width ice 2)) 2)) (+ (cadr m) 2) 2)
+              (color! C-TEXT)
+              (text! text (- right (text-width text 2)) (+ top 7) 2)))
         (draw-line-2 vw top (scan-instruction t)
-                     (cond ((scan-table-lost? t) C-ICE)
+                     (cond ((or (scan-table-lost? t) (scan-table-severed? t)) C-ICE)
                            ((scan-table-won? t) C-SELECTED)
+                           ((scan-session-armed? s) C-LABEL-LIT)
                            (else C-TEXT-DIM)))
         (if (scan-session-touch? s)
             (begin
@@ -415,6 +439,32 @@
         (let ((word (if flag? "FLAG" "SCAN")))
           (text-mini! word (+ x (quotient (- w (text-width-mini word 1)) 2)) (+ y 26) 1))))
 
+    ;; PROBE (HACKER): a sonar ring, filled in C-LABEL-LIT while armed; on
+    ;; touch the word under it. The icon and the fill differ, not only hue.
+    (define SONAR
+      (list "....."
+            ".###."
+            "#...#"
+            "#.#.#"
+            "#...#"
+            ".###."
+            "....."))
+    (define (probe-button! r armed?)
+      (let ((x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r)))
+        (color! (if armed? C-LABEL-LIT C-BAR-C))
+        (draw-filled-rect x y w h)
+        (color! (if armed? C-LABEL-LIT C-TEXT-DIM))
+        (draw-filled-rect x y w 1)
+        (draw-filled-rect x (+ y h -1) w 1)
+        (draw-filled-rect x y 1 h)
+        (draw-filled-rect (+ x w -1) y 1 h)
+        (color! (if armed? C-BG C-TEXT))
+        (if (>= h TOUCH-BUTTON)
+            (begin
+              (draw-rows SONAR (+ x (quotient (- w 10) 2)) (+ y 5) 2 5)
+              (text-mini! "PROBE" (+ x (quotient (- w (text-width-mini "PROBE" 1)) 2)) (+ y 26) 1))
+            (draw-rows SONAR (+ x (quotient (- w 10) 2)) (+ y (quotient (- h 14) 2)) 2 5))))
+
     (define (map-button! r)
       (let ((x (car r)) (y (cadr r)) (w (caddr r)))
         (box! r #f)
@@ -436,17 +486,22 @@
       (let* ((rows (scan-table-panel-rows t))
              (n (length rows))
              (won? (scan-table-won? t))
-             (title (if won? "SEGMENT MAPPED" "ICE TRIPPED."))
+             (severed? (scan-table-severed? t))
+             (title (cond (won? "SEGMENT MAPPED") (severed? "LINK SEVERED.") (else "ICE TRIPPED.")))
+             (tr (scan-table-trace t))
+             ;; HACKER's clear carries the phase it was cleared in
+             (tag (and won? tr (if (eq? (trace-cleared-in tr) 'counter) TAG-UNDER-ICE TAG-CLEAN-RUN)))
              (first (scan-table-panel-rect t 0))
              (top (- (cadr first) 60))
              (bottom (+ (cadr first) (* n 32) 8)))
         (color-alpha! C-BG 0.88)
         (draw-filled-rect 120 top 400 (- bottom top))
-        (color! (if won? C-SELECTED C-ICE))
+        (color! (cond (won? C-SELECTED) (severed? C-TRACE-HOT) (else C-ICE)))
         (draw-filled-rect 120 top 400 1)
         (draw-filled-rect 120 (- bottom 1) 400 1)
         (text! title (quotient (- BAND-W (text-width title 3)) 2) (+ top 10) 3)
-        (let ((line (cond (best-line best-line)
+        (let ((line (cond (best-line (if tag (string-append tag ". " best-line) best-line))
+                          (tag (string-append tag ". " (time-text (scan-table-seconds t))))
                           (won? (time-text (scan-table-seconds t)))
                           (else (string-append "TIME " (clock-string (scan-table-seconds t)))))))
           (color! C-TEXT)

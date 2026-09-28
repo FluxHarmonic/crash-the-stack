@@ -1803,7 +1803,7 @@ async function dealFrom(free, table, row = "new-board") {
     const want = { free: "stack cards scan code scores back",   // D66: the games first; TRACKER sits on the top screen now (David, 2026-09-22)
                    "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
                    "free-cards": "new-board daily-board version back",
-                   "free-scan": "new-board daily-board size back",   // 0.1.3: SCAN is CLASSIC only, SIZE its value row
+                   "free-scan": "new-board daily-board version size back",   // SCAN: VERSION (P6c) and SIZE, both value rows
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
     // NEWS joins the top screen wherever a feed sits beside the game, which
@@ -1840,9 +1840,9 @@ async function dealFrom(free, table, row = "new-board") {
         if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
         if (s2.order.join(" ") !== want[sc]) { detail = `the ${sc} screen's rows are ${s2.order.join(" ")}, not ${want[sc]}`; break; }
         if (sc.startsWith("free-") && Math.abs(rowsFrom(s2) - rowsWant(s2)) > 1) { detail = `the ${sc} screen's first row starts at ${rowsFrom(s2)}, not ${rowsWant(s2)}`; break; }
-        // a game's value row: VERSION (HACKER by default) on STACK and DEFRAG, SIZE (LAN by default) on SCAN (0.1.3, CLASSIC only)
+        // a game's value rows: VERSION (HACKER by default) on every game, SIZE (LAN by default) on SCAN
         if (sc === "free-scan" && (!s2.rows.size || s2.rows.size.value !== "LAN")) { detail = `the ${sc} screen's SIZE reads ${rowsOf(s2)}, not LAN`; break; }
-        if (sc.startsWith("free-") && sc !== "free-scan" && (!s2.rows.version || s2.rows.version.value !== "HACKER")) { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
+        if (sc.startsWith("free-") && (!s2.rows.version || s2.rows.version.value !== "HACKER")) { detail = `the ${sc} screen's VERSION reads ${rowsOf(s2)}, not HACKER`; break; }
         if (sc === "scores" && !consoleLines.slice(m0).some((l) => /^crash: scores stack hacker /.test(l))) { detail = "the SCORES screen said no \"crash: scores\" line"; break; }
         if (sc === "code" && !consoleLines.slice(m0).some((l) => /^crash: keypad 0 /.test(l))) { detail = "the CODE screen said no \"crash: keypad\" line"; break; }
         seen.push(`${sc} (keys)`);

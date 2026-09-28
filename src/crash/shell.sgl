@@ -52,7 +52,7 @@
           (only (crash stack generate) FACE-ORDER)
           ;; 0.1.3: SCAN's store, scores and CONTINUE (only what is used: the
           ;; SCAN modules' layout names would shadow the tables')
-          (only (crash scan input) scan-session-segment scan-session-mode scan-session-preset)
+          (only (crash scan input) scan-session-segment scan-session-mode scan-session-preset scan-session-version)
           (only (crash scan open) scan-open)
           (only (crash scan save) scan-save scan-load)
           (only (crash scan table) scan-table-new scan-table-session scan-table-over scan-table-daily
@@ -680,7 +680,7 @@
     ;; A board opened (through (crash scan open): the neighbor table built
     ;; and a minor collection, D81) as a table.
     (define (scan-open-table preset seed daily touch?)
-      (scan-table-new (scan-open preset seed 'original #f touch?) daily))
+      (scan-table-new (scan-open preset seed (version-in-force 'scan) #f touch?) daily))
 
     (define (scan-new-table preset touch?)
       (scan-open-table preset (scan-seed-next!) #f touch?))
@@ -737,7 +737,7 @@
                       ((wan) 'scan-wan)
                       ((backbone) 'scan-backbone)
                       (else 'scan-lan)))
-             (r (scores-record (scores-in-force) table 'original (scan-table-ticks t) (scan-table-moves t)))
+             (r (scores-record (scores-in-force) table (scan-session-version s) (scan-table-ticks t) (scan-table-moves t)))
              (board (car r))
              (board (if (scan-table-daily t) (scores-daily-clear board 'scan (scan-table-daily t)) board)))
         (set! *scores* board)
@@ -812,12 +812,23 @@
     ;; one key per game; the menu's step choice (version TABLE . V) writes
     ;; it, launch-menu reads both back. Anything but original reads hacker.
     (define (version-key table)
-      (if (eq? table 'cards) "version-cards" "version-stack"))
+      (case table ((cards) "version-cards") ((scan) "version-scan") (else "version-stack")))
+    ;; SCAN before its key exists (P6c, the leader's ruling): a 0.1.3 player
+    ;; with SCAN history stays CLASSIC, anyone else gets HACKER, and the
+    ;; answer is stored at once, so a new player's first HACKER clear (which
+    ;; is SCAN history too) cannot flip them to CLASSIC at the next read.
     (define (version-in-force table)
-      (if (eq? (store-read-datum (version-key table)) 'original) 'original 'hacker))
+      (let ((v (store-read-datum (version-key table))))
+        (cond ((eq? v 'original) 'original)
+              ((or (eq? v 'hacker) (not (eq? table 'scan))) 'hacker)
+              (else
+               (let ((d (scores-scan-default-version (scores-in-force) (saved-game? 'scan))))
+                 (version! 'scan d)
+                 d)))))
     (define (versions-in-force)
       (list (cons 'stack (version-in-force 'stack))
-            (cons 'cards (version-in-force 'cards))))
+            (cons 'cards (version-in-force 'cards))
+            (cons 'scan (version-in-force 'scan))))
     (define (version! table v)
       (store-write-datum! (version-key table) v))
 
