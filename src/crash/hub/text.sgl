@@ -6,6 +6,8 @@
 ;;;   R G B Y a gate by color (r g b y once opened)
 ;;;   1..4 a key node (its gate's color in KEY-COLORS order), S F an optional
 ;;;   STACK / DEFRAG node (s f cleared, * alerted, H a board held there)   M market
+;;;   N a SCAN node (n cleared); in a world dump a veiled node shows as floor
+;;;   and a veiled ladder as &, until the SCAN node that hides it clears (D82)
 ;;;   $ a cache (. once taken)   < ladder up   > ladder down
 ;;;   @ the runner   ! a daemon (a drone when read; the kind is on its status line)
 ;;;   , a cell in a daemon's sight (the world dump)
@@ -37,10 +39,10 @@
     ;; table; cleared lowercase, alerted a star.
     (define (node-char n)
       (cond ((eq? (node-state n) 'alerted) #\*)
-            ((eq? (node-state n) 'cleared) (if (eq? (node-table n) 'stack) #\s #\f))
+            ((eq? (node-state n) 'cleared) (case (node-table n) ((stack) #\s) ((scan) #\n) (else #\f)))
             ((eq? (node-state n) 'held) #\H)
             ((node-key n) (integer->char (+ (char->integer #\1) (list-index (node-key n) KEY-COLORS))))
-            (else (if (eq? (node-table n) 'stack) #\S #\F))))
+            (else (case (node-table n) ((stack) #\S) ((scan) #\N) (else #\F)))))
 
     ;; The character of cell i: the layer's own, with the live state when
     ;; a world is given.
@@ -53,6 +55,7 @@
               ((eq? kind 'shadow) #\:)
               ((eq? kind 'ice) (if (and w (assv i (world-dark w))) #\_ #\~))
               ((eq? kind 'gate) (gate-char (layer-gate-color l i) (and w (memv i (world-opened w)) #t)))
+              ((and w (world-veiled? w i)) (if (eq? kind 'ladder-down) #\& #\.))   ; D82: veiled until a SCAN clears
               ((eq? kind 'node)
                (let ((n (layer-node-at l i)))
                  (node-char (or (and w n (world-node w (node-index n))) n))))
@@ -176,9 +179,9 @@
                          (set! nodes (cons (node index: (length nodes) cell: i table: 'stack bounty: 40 required?: #t
                                                  key: (list-ref KEY-COLORS (- (char->integer c) (char->integer #\1))))
                                            nodes)))
-                        ((or (char=? c #\S) (char=? c #\F))
+                        ((memv c (list #\S #\F #\N))
                          (vector-set! cells i 'node)
-                         (set! nodes (cons (node index: (length nodes) cell: i table: (if (char=? c #\S) 'stack 'cards) bounty: 25)
+                         (set! nodes (cons (node index: (length nodes) cell: i table: (case c ((#\S) 'stack) ((#\N) 'scan) (else 'cards)) bounty: 25)
                                            nodes)))
                         ((char=? c #\M) (vector-set! cells i 'market) (set! market i))
                         ((char=? c #\$) (vector-set! cells i 'cache) (set! caches (cons (cons i (cons 'credits 10)) caches)))

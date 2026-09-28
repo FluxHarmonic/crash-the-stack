@@ -2815,7 +2815,9 @@ async function dealFrom(free, table, row = "new-board") {
         const said = await waitLine(/^crash: open (\S+)$/, m2, 3000);
         await sleep(1500);
         const targets = (await send("Target.getTargets")).targetInfos.filter((t) => t.type === "page");
-        opened = targets.find((t) => t.url === "https://crashthestack.com/devlog/newest/");
+        // the live site redirects /devlog/ to /news/ (31eb63b), so a browser with a
+        // network lands the new context there; one without stays at the post's URL
+        opened = targets.find((t) => t.url === "https://crashthestack.com/devlog/newest/" || t.url === "https://crashthestack.com/news/");
         const still = await evalJS("location.href");
         if (!said) detail = "Enter on the first post printed no crash: open line";
         else if (said.m[1] !== "https://crashthestack.com/devlog/newest/") detail = `opened ${said.m[1]}`;

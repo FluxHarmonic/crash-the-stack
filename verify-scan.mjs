@@ -387,7 +387,7 @@ async function faceShare(vx, vy, vw, vh) {
     const game = await waitLine(/^crash: menu free-scan (.+)$/, m0, 3000);
     const grows = game ? game.m[1].split(" ").filter((_, i) => i % 3 === 0).join(" ") : "";
     if (!game) detail = "Enter on SCAN did not open SCAN's screen (no \"crash: menu free-scan\" line)";
-    else if (grows !== "new-board daily-board size=LAN back") detail = `SCAN's rows are ${grows}, not new-board daily-board size=LAN back`;
+    else if (grows !== "new-board daily-board version=HACKER size=LAN back") detail = `SCAN's rows are ${grows}, not new-board daily-board version=HACKER size=LAN back (P6c: VERSION, HACKER on a fresh store)`;
     else {
       m0 = consoleLines.length;
       await key("Enter");

@@ -92,7 +92,7 @@
         (cond ((eq? kind 'gate) (and (not (memv i (world-opened w))) (key-number (layer-gate-color l i))))
               ((eq? kind 'node)
                (let ((n (layer-node-at l i)))
-                 (and n (node-key n) (key-number (node-key n)))))
+                 (and n (node-key n) (not (world-veiled? w i)) (key-number (node-key n)))))   ; D82: a hidden node shows nothing
               (else #f))))
 
     ;; A dither of ICE dots over a seen cell: one dot every 4 px (scaled), offset by row.
@@ -308,9 +308,10 @@
          ;; a live node burns in its key's hue; a crashed one keeps lighting
          ;; its sector, brighter and cool: the layer reads as taken (D64)
          (filter-map (lambda (n)
-                       (if (eq? (node-state n) 'cleared)
-                           (list (node-cell n) CLEARED-NODE-LIGHT 'cool)
-                           (list (node-cell n) NODE-LIGHT (key-hue (node-key n)))))
+                       (cond ((world-veiled? w (node-cell n)) #f)   ; D82: a hidden node does not glow
+                             ((eq? (node-state n) 'cleared)
+                              (list (node-cell n) CLEARED-NODE-LIGHT 'cool))
+                             (else (list (node-cell n) NODE-LIGHT (key-hue (node-key n))))))
                      (world-nodes w))
          (filter-map (lambda (g)
                        (and (not (memv (car g) (world-opened w)))
@@ -517,7 +518,12 @@
               ((eq? kind 'node)
                (let* ((n (layer-node-at l i))
                       (live (and n (world-node w (node-index n)))))
-                 (if (and live (eq? (node-state live) 'cleared)) "node-cleared" "node")))
+                 (cond ((world-veiled? w i) #f)   ; D82: hidden, the floor shows
+                       ((and live (eq? (node-state live) 'cleared)) "node-cleared")
+                       ;; one cabinet per table (P6d): shape, not hue, says which game
+                       ((eq? (node-table n) 'scan) "node-scan")
+                       ((eq? (node-table n) 'cards) "node-defrag")
+                       (else "node"))))
               ((eq? kind 'market) "market")
               ((eq? kind 'cache) (if (memv i (world-taken w)) #f "cache"))
               ((eq? kind 'ice) (if (assv i (world-dark w)) #f "ice"))
@@ -559,7 +565,12 @@
              (py-of (lambda (cy) (exact (round (+ (/ top 2.0) (* CELL-PX (- cy cam-y 0.5)))))))
              (x0 (- (exact (floor (- cam-x (/ VIEW-W 2.0)))) 1))
              (y0 (- (exact (floor (- cam-y (/ VIEW-H 2.0)))) 1))
-             (fans (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w))))
+             (fans (fold-left (lambda (acc d) (append (daemon-sight l d) acc)) '() (world-daemons w)))
+             ;; D75: the daemons a SCAN clear mapped show their sight through the fog
+             (mapped-fans (fold-left (lambda (acc d)
+                                       (if (hub-mapped-sight? w (daemon-index d)) (append (daemon-sight l d) acc) acc))
+                                     '()
+                                     (world-daemons w))))
         (light-map! w)
         (if bg
             (draw-board-background vw vh top 0.0 bg 'off)
@@ -582,6 +593,9 @@
                              (draw-lit 'cool "fog" 4.0 px py))
                             ((eq? kind 'void)
                              (draw-lit 'cool "veil" 4.0 px py))
+                            ((and (<= light 0.0) (memv i mapped-fans))
+                             (draw-lit 'cool "fog" 4.0 px py)
+                             (draw-sight-cell px py))
                             ((<= light 0.0)
                              (draw-lit 'cool "fog" 4.0 px py))
                             ((eq? kind 'barrier)
@@ -592,14 +606,14 @@
                              ;; already in world-opened, so item-tile has no tile for it
                              (cond ((memv i opening-gates) (draw-gate-opening hue "gate" light px py tween))
                                    ((memv i opening-nodes) (draw-node-opening hue light px py tween))
-                                   ((and locked-ladder? (eq? kind 'ladder-down))
+                                   ((and (eq? kind 'ladder-down) (or locked-ladder? (world-veiled? w i)))   ; D82: veiled, drawn scrambled too
                                     (draw-ladder-locked hue light px py (world-beat w)))
                                    (else (let ((item (item-tile w i)))
                                            (when item (draw-lit hue item light px py)))))
                              (when (and (in-bounds? lx (- ly 1) width height)
                                         (eq? (layer-cell l (idx lx (- ly 1) width)) 'barrier))
                                (draw-lit hue "wall-shadow" light px py))
-                             (when (and visible? (memv i fans))
+                             (when (or (and visible? (memv i fans)) (memv i mapped-fans))
                                (draw-sight-cell px py))
                              (let ((k (key-label-for w i)))
                                (when k
@@ -612,7 +626,7 @@
           ;; the daemons the runner sees, sliding between beats, each its kind's
           ;; silhouette facing where it looks (D65)
           (for-each (lambda (d)
-                      (when (vector-ref *visible* (daemon-cell d))
+                      (when (or (vector-ref *visible* (daemon-cell d)) (hub-mapped-sight? w (daemon-index d)))   ; D75: mapped ones through the fog
                         (let ((at (hub-screen-daemon-at hs d)))
                           (draw-lit 'cool (daemon-tile d) (vector-ref *light* (daemon-cell d)) (px-of (car at)) (py-of (cdr at))))))
                     (world-daemons w))
