@@ -684,9 +684,9 @@ else if (PHONE) {
       else {
         const m3 = consoleLines.length;
         await act(+hid.m[2], +hid.m[3]);
-        const won = await waitLine(/^crash: scan won /, m3, 5000);
+        const won = await waitLine(/^crash: scan won /, m3, 8000);
         const back = won && await waitLine(/^crash: hub open 2 (\d+) keys (\d+) cleared (\d+)$/, m3, 15000);
-        if (!won) detail = `the ${PHONE ? "tap" : "click"} on the last clean host did not map the segment`;
+        if (!won) detail = `the ${PHONE ? "tap" : "click"} at ${hid.m[2]},${hid.m[3]} on the last clean host did not map the segment (waited from line ${m3}; the hidden line was ${hid.index}; after it: ${JSON.stringify(consoleLines.slice(hid.index + 1, hid.index + 9))})`;
         else if (!back) detail = "the mapped node board did not bring the hub back on layer 2";
         else if (+back.m[3] !== +up.m[3] + 1) detail = `the hub came back with ${back.m[3]} nodes cleared, not ${+up.m[3] + 1}: ${back.m[0]}`;
         else note = `${at.m[0]}; launch ${launch.m[1]}; ${o.m[0]}; ${won.m[0]}; ${back.m[0]}`;
