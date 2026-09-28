@@ -43,6 +43,7 @@
 ;;;   crash: hud zones                     the bar's layout at boot (the one layout)
 ;;;   crash: cards draw 1|3                the pull count flipped (the PULL tool)
 ;;;   crash: literal-check ok|FAILED ...   the quoted literals' shapes at boot
+;;;   crash: table-check ok|FAILED ...     every table record complete at boot (t-90ec6b)
 ;;;   crash: select N                      a tile was selected
 ;;;   crash: deselect                      the selection was cleared by a pick
 ;;;   crash: undo tiles N                  an undo put tiles back
@@ -153,6 +154,7 @@
           (crash sfx)
           (crash audio)
           (crash shell)
+          (crash table)          ; t-90ec6b: one record per table (TABLES below)
           (crash code)
           (only (crash scores) scores-best scores-streak)
           (only (crash daily) daily-date)
@@ -1334,10 +1336,12 @@
           ;; it and threw — the fade never ran (the gate, 2026-09-23).
           ((entry) (music-frame! 'entry 'cleared))
           ((hub) (music-frame! 'hub (hub-music-phase) (hub-music-seed)))
-          ((stack) (when *session* (music-frame! 'stack (session-trace *session*) (session-seed *session*))))
-          ;; 0.1.3: SCAN has no trace (CLASSIC): the stack's pool, no phase, by the board's seed
-          ((scan) (when *scan* (music-frame! 'scan (scan-table-trace *scan*) (scan-session-seed (scan-table-session *scan*)))))   ; HACKER's trace drives the sections (P6c)
-          (else (when *deal* (music-frame! 'cards (deal-trace *deal*) (deal-seed *deal*)))))))
+          ;; a table: its pool by its board's seed, its trace's phase (#f on
+          ;; CLASSIC SCAN), once a board is in memory
+          (else
+           (let ((k (table-up)))
+             (when (and k ((table-kind-board? k)))
+               (music-frame! *screen* ((table-kind-trace k)) ((table-kind-seed k)))))))))
     ;; The whole tick timed too (P3c, David's phone summary at 9f897bc: the
     ;; parts summed to 17 ms of a 49 ms frame): the boot step, the stats
     ;; bookkeeping, the audio pump, and OTHER = the tick minus every timed
@@ -1384,60 +1388,127 @@
         (set! *pump-ms* (+ *pump-ms* (- (now-ms) t0))))
       (set! *tick-ms* (- (now-ms) *tick-start*)))
 
+    ;; One frame of the screen up. The tables go through their records
+    ;; (TABLES, (crash table), t-90ec6b): the pause overlay first, else the
+    ;; table's own tick.
     (define (tick-screen f dt)
-      (let ((click (input-frame-click f)))
-        (case *screen*
-          ((menu) (menu-tick f dt))
-          ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
-          ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
-          ((scan) (cond (*overlay* (overlay-tick f dt))                 ; 0.1.3: the pause panel stops the clock
-                        ((menu-frame? f) (scan-save! *scan*) (open-menu!))
-                        (else
-                         (scan-tick f dt)
-                         ;; a SCAN node taken (P6d): the hub once the clear has shown
-                         (when (and (eq? *screen* 'scan) (not *overlay*) (eq? *layer-cleared* 'scan)
-                                    *scan* (scan-table-over *scan*) (>= (scan-table-over-ms *scan*) SCAN-NODE-HOLD-MS))
-                           (layer-done! 'scan)))))
-          ((stack)
-           (cond (*overlay* (overlay-tick f dt))
-                 ((or (menu-frame? f)
-                      (jack-out? *session* f VW VH (geometry-hud-h *geom*)))
-                  (open-menu!))
-                 (else
-                  (stack-tick f dt)
-                  ;; the session's request: Escape or the bar's MENU button
-                  ;; (the table's overlay, D51), or NEXT / RETRY inside a run
-                  ;; (the dealt board is replaced by the run's)
-                  (let ((request (session-request *session*)))
-                    (when request
-                      (set! *session* (session-clear-request *session*))
-                      (case request
-                        ((menu) (open-overlay!))
-                        ((next retry) (run-request! request 'stack))
-                        (else #f))))
-                  ;; a run's layer cleared: once the cascade is over, the ledger
-                  ;; with NEXT LAYER (or the run's end, straight to its ledger)
-                  (when (and (not *overlay*) (eq? *layer-cleared* 'stack) (not (fx-cleared *fx*)))
-                    (layer-done! 'stack)))))
-          (else
-           (cond (*overlay* (overlay-tick f dt))
-                 ((or (menu-frame? f)
-                      (jack-out-tap? *deal* f *card-geom*))
-                  (open-menu!))
-                 (else
-                  (cards-tick f dt)
-                  (let ((request (deal-request *deal*)))
-                    (when request
-                      (set! *deal* (deal-clear-request *deal*))
-                      (case request
-                        ((menu) (open-overlay!))
-                        ((next retry) (run-request! request 'cards))
-                        (else #f))))
-                  (when (and (not *overlay*) (eq? *layer-cleared* 'cards) (not (card-fx-cascading? *card-fx*)))
-                    (layer-done! 'cards))))))
+      (case *screen*
+        ((menu) (menu-tick f dt))
+        ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
+        ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
+        (else
+         (if *overlay*
+             (overlay-tick f dt)                                     ; the pause panel stops the table's clock
+             ((table-kind-tick (table-up)) f dt))))
       ;; the layer's clear, noted by (crash shell) when the run advanced
       (let ((t (take-layer-cleared!)))
-        (when t (set! *layer-cleared* t)))))
+        (when t (set! *layer-cleared* t))))
+
+    ;; --- the tables' records (t-90ec6b) ----------------------------------------------
+
+    ;; STACK's frame: Escape or a severed board's JACK OUT goes to the menu;
+    ;; the session's request: the table's overlay (D51), or NEXT / RETRY
+    ;; inside a run (the dealt board is replaced by the run's); a run's
+    ;; layer cleared: once the cascade is over, the ledger with NEXT LAYER.
+    (define (tick-stack-table! f dt)
+      (cond ((or (menu-frame? f)
+                 (jack-out? *session* f VW VH (geometry-hud-h *geom*)))
+             (open-menu!))
+            (else
+             (stack-tick f dt)
+             (let ((request (session-request *session*)))
+               (when request
+                 (set! *session* (session-clear-request *session*))
+                 (case request
+                   ((menu) (open-overlay!))
+                   ((next retry) (run-request! request 'stack))
+                   (else #f))))
+             (when (and (not *overlay*) (eq? *layer-cleared* 'stack) (not (fx-cleared *fx*)))
+               (layer-done! 'stack)))))
+
+    ;; DEFRAG's frame: the same shape as STACK's.
+    (define (tick-cards-table! f dt)
+      (cond ((or (menu-frame? f)
+                 (jack-out-tap? *deal* f *card-geom*))
+             (open-menu!))
+            (else
+             (cards-tick f dt)
+             (let ((request (deal-request *deal*)))
+               (when request
+                 (set! *deal* (deal-clear-request *deal*))
+                 (case request
+                   ((menu) (open-overlay!))
+                   ((next retry) (run-request! request 'cards))
+                   (else #f))))
+             (when (and (not *overlay*) (eq? *layer-cleared* 'cards) (not (card-fx-cascading? *card-fx*)))
+               (layer-done! 'cards)))))
+
+    ;; SCAN's frame (0.1.3): ctrl+e stores the board and goes to the menu;
+    ;; a SCAN node taken (P6d): the hub once the clear has shown.
+    (define (tick-scan-table! f dt)
+      (cond ((menu-frame? f) (scan-save! *scan*) (open-menu!))
+            (else
+             (scan-tick f dt)
+             (when (and (eq? *screen* 'scan) (not *overlay*) (eq? *layer-cleared* 'scan)
+                        *scan* (scan-table-over *scan*) (>= (scan-table-over-ms *scan*) SCAN-NODE-HOLD-MS))
+               (layer-done! 'scan)))))
+
+    ;; The three records. Each field reads the shell's own state for its
+    ;; table (see (crash table) for what each is for).
+    (define TABLES
+      (list (table-kind name: 'stack
+                        board?: (lambda () (and *session* #t))
+                        live?: (lambda () (and *session* #t))
+                        tick: tick-stack-table!
+                        draw: (lambda () (draw-session *session* *geom* *fx* (background) *copper* #t))
+                        hud-h: (lambda () (geometry-hud-h *geom*))
+                        ticks: (lambda () (trace-ticks (session-trace *session*)))
+                        trace: (lambda () (session-trace *session*))
+                        seed: (lambda () (session-seed *session*))
+                        bar-hit: (lambda (x y) (hit-control *geom* (session-hud *session*) x y))
+                        code: (lambda () (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
+                        open: (lambda (resume?) (open-stack! resume?))
+                        hold!: (lambda () (hub-run-hold! 'stack (session-trace *session*)))
+                        deselect!: (lambda () (when *session* (set-board-selected! (session-board *session*) #f)))   ; nothing to come back to
+                        prepare!: (lambda () (when (and *session* *geom*) (tiles-ensure! *geom*)))
+                        cascading?: (lambda () (and *fx* (fx-cleared *fx*) #t)))
+            (table-kind name: 'cards
+                        board?: (lambda () (and *deal* #t))
+                        live?: (lambda () (and *deal* #t))
+                        tick: tick-cards-table!
+                        draw: (lambda () (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t))
+                        hud-h: (lambda () (card-geometry-hud-h *card-geom*))
+                        ticks: (lambda () (trace-ticks (deal-trace *deal*)))
+                        trace: (lambda () (deal-trace *deal*))
+                        seed: (lambda () (deal-seed *deal*))
+                        bar-hit: (lambda (x y) (hit-card-control *card-geom* (deal-hud *deal*) x y))
+                        code: (lambda () (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
+                        open: (lambda (resume?) (open-cards! resume?))
+                        hold!: (lambda () (hub-run-hold! 'cards (deal-trace *deal*)))
+                        prepare!: (lambda () #f)
+                        cascading?: (lambda () (and *card-fx* (card-fx-cascading? *card-fx*) #t))
+                        deselect!: (lambda () #f))
+            (table-kind name: 'scan
+                        board?: (lambda () (and *scan* #t))
+                        live?: (lambda () (and *scan* (not (scan-table-over *scan*)) #t))
+                        tick: tick-scan-table!
+                        draw: (lambda () (draw-scan *scan* VW VH (background) *copper* *scan-line*))
+                        hud-h: (lambda () (- VH BOARD-H))
+                        ticks: (lambda () (scan-table-ticks *scan*))
+                        trace: (lambda () (scan-table-trace *scan*))   ; #f on CLASSIC
+                        seed: (lambda () (scan-session-seed (scan-table-session *scan*)))
+                        bar-hit: (lambda (x y) (scan-bar-hit (scan-table-session *scan*) VW VH x y))
+                        code: (lambda () #f)   ; SCAN's format-1 codes are not offered in the pause menu yet
+                        open: (lambda (resume?) (open-scan! resume?))
+                        hold!: (lambda () (hub-run-hold! 'scan (or (scan-table-trace *scan*) (trace-new 'twist))))   ; P6d
+                        prepare!: (lambda () #f)
+                        cascading?: (lambda () #f)
+                        deselect!: (lambda () #f))))
+
+    ;; The record of the table up, or of a table by name (#f for a screen
+    ;; that is not a table).
+    (define (table-up) (table-of TABLES *screen*))
+    (define (table-named name) (table-of TABLES name))
 
     ;; A run's layer cleared and its cascade over (David, 2026-09-21): the
     ;; run's ledger over the table with NEXT LAYER, pulled by Enter, a tap,
@@ -1463,16 +1534,15 @@
     ;; free play) lands on the main menu with CONTINUE.
     ;;   crash: pause on|off TICKS            the overlay opened or closed; the table's clock (it holds between)
     (define (table-ticks)
-      (cond ((eq? *screen* 'hub) (world-beat (hub-screen-world (hub-run-in-force))))   ; P5: the hub's beats
-            ((eq? *screen* 'cards) (trace-ticks (deal-trace *deal*)))
-            ((eq? *screen* 'scan) (scan-table-ticks *scan*))   ; 0.1.3: SCAN's clock
-            (else (trace-ticks (session-trace *session*)))))
+      (let ((k (table-up)))
+        (cond ((eq? *screen* 'hub) (world-beat (hub-screen-world (hub-run-in-force))))   ; P5: the hub's beats
+              (k ((table-kind-ticks k)))
+              (else 0))))
 
     (define (open-overlay!)
-      (let ((table (case *screen* ((cards) 'cards) ((scan) 'scan) (else 'stack))))
-        (when (and *session* (eq? table 'stack))
-          (set-board-selected! (session-board *session*) #f))   ; nothing to come back to
-        (set! *overlay* (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code) #t (music-title)))
+      (let ((k (table-up)))
+        ((table-kind-deselect! k))
+        (set! *overlay* (menu-new-overlay (table-kind-name k) (and (run-in-force) #t) (settings-in-force) (live-code) #t (music-title)))
         (set! *menu-said* #f)
         (say "pause" "on" (table-ticks))))
 
@@ -1484,11 +1554,7 @@
     (define (overlay-button-tap? f)
       (let ((click (input-frame-click f)))
         (and click (not (eq? *screen* 'hub))   ; the hub has no bar button (P5)
-             (eq? 'menu
-                  (case *screen*
-                    ((cards) (hit-card-control *card-geom* (deal-hud *deal*) (car click) (cdr click)))
-                    ((scan) (scan-bar-hit (scan-table-session *scan*) VW VH (car click) (cdr click)))   ; 0.1.3
-                    (else (hit-control *geom* (session-hud *session*) (car click) (cdr click))))))))
+             (eq? 'menu ((table-kind-bar-hit (table-up)) (car click) (cdr click))))))
 
     (define (overlay-tick f dt)
       (when *trace* (say-menu *overlay*))
@@ -1507,7 +1573,7 @@
                (when (eq? (car choice) 'set) (apply-setting! (cadr choice) (cddr choice))))
               ((eq? choice 'resume) (close-overlay!))
               ((eq? choice 'next-layer)
-               (let ((table (case *screen* ((cards) 'cards) ((scan) 'scan) (else 'stack))))
+               (let ((table (table-kind-name (table-up))))
                  (set! *overlay* #f)
                  (run-request! 'next table)))
               ((eq? choice 'copy) (copy-code!))
@@ -1515,11 +1581,7 @@
                (close-overlay!)
                ;; DISCONNECT on a hub-launched board: the board is held at its node and the
                ;; runner is back in the world there (ruled 2026-09-22); else the main menu
-               (if (and (eq? choice 'disconnect) (memq *screen* (list 'stack 'cards 'scan))
-                        (case *screen*
-                          ((cards) (hub-run-hold! 'cards (deal-trace *deal*)))
-                          ((scan) (hub-run-hold! 'scan (or (scan-table-trace *scan*) (trace-new 'twist))))   ; P6d
-                          (else (hub-run-hold! 'stack (session-trace *session*)))))
+               (if (and (eq? choice 'disconnect) (table-up) ((table-kind-hold! (table-up))))
                    (open-hub!)
                    (open-menu!)))
               (else #f)))
@@ -1527,19 +1589,13 @@
       (when *overlay*
         (present! #f
                   (lambda ()
-                    (cond ((eq? *screen* 'hub)   ; P5
-                           (hub-draw! VW VH (background))
-                           (draw-overlay *overlay* VW VH BOARD-H))
-                          ((eq? *screen* 'cards)
-                           (begin
-                             (draw-deal *deal* *card-geom* *card-fx* (texture-for-path PORTRAITS-PATH) (background) *copper* #t)
-                             (draw-overlay *overlay* VW VH (- VH (card-geometry-hud-h *card-geom*)))))
-                          ((eq? *screen* 'scan)   ; 0.1.3
-                           (draw-scan *scan* VW VH (background) *copper* *scan-line*)
-                           (draw-overlay *overlay* VW VH BOARD-H))
-                          (else
-                           (draw-session *session* *geom* *fx* (background) *copper* #t)
-                           (draw-overlay *overlay* VW VH (- VH (geometry-hud-h *geom*)))))))))
+                    (if (eq? *screen* 'hub)   ; P5
+                        (begin
+                          (hub-draw! VW VH (background))
+                          (draw-overlay *overlay* VW VH BOARD-H))
+                        (let ((k (table-up)))
+                          ((table-kind-draw k))
+                          (draw-overlay *overlay* VW VH (- VH ((table-kind-hud-h k))))))))))
 
     ;; --- entry ---------------------------------------------------------------
 
@@ -1553,13 +1609,17 @@
     (define (live-code)
       ;; the run held for CONTINUE shows its own code (P5); else the table up, else
       ;; the one the store names (the pause menu after a table)
-      (case (cond ((and (not (memq *screen* (list 'stack 'cards))) (hub-run-in-force)) 'run)
-                  ((memq *screen* (list 'stack 'cards)) *screen*)
-                  (else (active-game)))
-        ((run) (hub-run-code))
-        ((stack) (and *session* (not (board-cleared? (session-board *session*))) (encode (session-spec *session*))))
-        ((cards) (and *deal* (not (deal-won? *deal*)) (encode (deal-spec *deal*))))
-        (else #f)))
+      (let ((which (cond ((and (not (memq *screen* CODE-TABLES)) (hub-run-in-force)) 'run)
+                         ((memq *screen* CODE-TABLES) *screen*)
+                         (else (active-game)))))
+        (if (eq? which 'run)
+            (hub-run-code)
+            (let ((k (table-named which)))
+              (and k ((table-kind-code k)))))))
+
+    ;; The tables whose own share code the pause menu shows (SCAN's format-1
+    ;; codes are not offered there yet: on SCAN in a run the run's shows).
+    (define CODE-TABLES (list 'stack 'cards))
 
     (define (open-menu!)
       (set! *screen* 'menu)
@@ -1570,12 +1630,8 @@
       ;; a menu rebuilt mid-reveal (the update word landing) keeps the reveal (P3d)
       (set! *menu* (let ((m (launch-menu (and *update* #t)
                                 (or (and (hub-run-in-force) #t)   ; P5: a live hub run continues
-                                    (and (case (active-game)
-                                         ((stack) *session*)
-                                         ((cards) *deal*)
-                                         ((scan) (and *scan* (not (scan-table-over *scan*))))   ; 0.1.3
-                                         (else #f))
-                                       #t))
+                                    (let ((k (table-named (active-game))))   ; the active game's board in memory
+                                      (and k ((table-kind-live? k)) #t)))
                                 (or *seed* *clock*)   ; ?seed=N seeds the title reveal too, else the page's clock (P3d)
                                 (live-code)
                                 #t      ; COPY: the page writes the clipboard
@@ -2026,10 +2082,7 @@
              (when l
                (say "hub" "launch" (node-index (launch-node l)) (encode (launch-spec l)))
                (if (hub-run-resume?)   ; a held board: back to it as CONTINUE would
-                   (case (node-table (launch-node l))
-                     ((cards) (open-cards! #t))
-                     ((scan) (open-scan! #t))   ; P6d
-                     (else (open-stack! #t)))
+                   ((table-kind-open (table-named (node-table (launch-node l)))) #t)
                    (if (eq? (node-table (launch-node l)) 'scan)
                        (open-scan-table! (scan-node-table l *touch*))   ; P6d: a SCAN node's board
                        (open-spec! (launch-spec l)))))))
@@ -2147,10 +2200,7 @@
                ((continue)
                 (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
                     (open-hub-entry!)
-                    (case (active-game)
-                    ((cards) (open-cards! #t))
-                    ((scan) (open-scan! #t))   ; 0.1.3
-                    (else (open-stack! #t)))))
+                    ((table-kind-open (table-named (active-game))) #t)))
                ((easy normal elite) (jack-in! (now-second) choice))   ; JACK IN's pick (D65)
                ((stack) (free-play! 'stack))
                ((cards) (free-play! 'cards))
@@ -2219,8 +2269,8 @@
       (let ((t1 (now-ms)))
         (frame-begin!)
         (atlas-ensure!)
-        (when (and (eq? *screen* 'stack) *session* *geom*)
-          (tiles-ensure! *geom*))
+        (let ((k (table-up)))   ; a table's own bake before the passes (STACK's tiles)
+          (when k ((table-kind-prepare! k))))
         ;; the menu's and the overlay's bakes, before the passes (they are passes)
         (cond ((eq? *screen* 'menu) (menu-prepare! *menu*))
               ((eq? *screen* 'entry) (hub-prepare!))                                           ; P5: the entry screen carries the bake (D65)
@@ -2298,6 +2348,12 @@
         (if (null? bad)
             (say "literal-check" "ok")
             (apply say "literal-check" "FAILED" bad)))
+      ;; every table record complete (t-90ec6b; an unwired field is the
+      ;; design's S13): one line the arm asserts
+      (let ((bad (tables-check TABLES)))
+        (if (null? bad)
+            (say "table-check" "ok")
+            (apply say "table-check" "FAILED" bad)))
       ;; A boot that throws on the MENU path says why: the loader prints only
       ;; the message, and a menu that never opened is a struct-ref storm every
       ;; frame after, so the first line is worth naming (S8, 2026-09-19). Each

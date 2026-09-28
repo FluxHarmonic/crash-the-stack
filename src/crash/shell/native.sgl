@@ -108,6 +108,7 @@
           (crash sfx)
           (crash audio)
           (crash shell)
+          (crash table)          ; t-90ec6b: one record per table (native-tables)
           (crash code)
           (crash store)
           (crash save)
@@ -424,28 +425,156 @@
             (set-active-game! 'stack)
             (stage a screen: 'stack session: s fx: (fx-new)))))
 
+    ;; --- the tables' records (t-90ec6b) ----------------------------------------------
+    ;;
+    ;; One (crash table) record per table, built once the loop's layout, card
+    ;; geometry, model and key log exist (stage-loop). Every field takes the
+    ;; stage `a` first; tick answers the next stage; open is CONTINUE's (a
+    ;; seed fresh?).
+    (define *tables* '())
+    (define (table-up a) (table-of *tables* (stage-screen a)))
+    (define (table-named name) (table-of *tables* name))
+
+    ;; The tables whose own share code the pause menu shows (SCAN's format-1
+    ;; codes are not offered there yet: on SCAN in a run the run's shows).
+    (define CODE-TABLES (list 'stack 'cards))
+
+    (define (native-tables lay card-geom model log-keys?)
+      (list
+       (table-kind name: 'stack
+                   board?: (lambda (a) (and (stage-session a) #t))
+                   live?: (lambda (a) (and (stage-session a) #t))
+                   tick: (lambda (a f dt) (tick-stack-table a f dt lay model log-keys?))
+                   draw: (lambda (a)
+                           (if *bg-only*
+                               (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (stage-background a) *copper*)
+                               (draw-session (stage-session a) *geom* (stage-fx a) (stage-background a) *copper* (and (stage-overlay a) #t))))
+                   hud-h: (lambda (a) (geometry-hud-h *geom*))
+                   ticks: (lambda (a) (trace-ticks (session-trace (stage-session a))))
+                   trace: (lambda (a) (session-trace (stage-session a)))
+                   seed: (lambda (a) (session-seed (stage-session a)))
+                   bar-hit: (lambda (a x y) (hit-control *geom* (session-hud (stage-session a)) x y))
+                   code: (lambda (a) (let ((s (stage-session a))) (and s (not (board-cleared? (session-board s))) (encode (session-spec s)))))
+                   open: (lambda (a seed fresh?) (open-stack a lay seed fresh? model #t))
+                   hold!: (lambda (a) (hub-run-hold! 'stack (session-trace (stage-session a))))
+                   deselect!: (lambda (a) (when (stage-session a) (set-board-selected! (session-board (stage-session a)) #f)))
+                   prepare!: (lambda (a) (tiles-ensure! *geom*))
+                   cascading?: (lambda (a) (and (fx-cleared (stage-fx a)) #t)))
+       (table-kind name: 'cards
+                   board?: (lambda (a) (and (stage-deal a) #t))
+                   live?: (lambda (a) (and (stage-deal a) #t))
+                   tick: (lambda (a f dt) (tick-cards-table a f dt card-geom lay model))
+                   draw: (lambda (a)
+                           (if *bg-only*
+                               (draw-board-background VW VH (- VH (card-geometry-hud-h card-geom)) 0.0 (stage-background a) *copper*)
+                               (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a) *copper* (and (stage-overlay a) #t))))
+                   hud-h: (lambda (a) (card-geometry-hud-h card-geom))
+                   ticks: (lambda (a) (trace-ticks (deal-trace (stage-deal a))))
+                   trace: (lambda (a) (deal-trace (stage-deal a)))
+                   seed: (lambda (a) (deal-seed (stage-deal a)))
+                   bar-hit: (lambda (a x y) (hit-card-control card-geom (deal-hud (stage-deal a)) x y))
+                   code: (lambda (a) (let ((d (stage-deal a))) (and d (not (deal-won? d)) (encode (deal-spec d)))))
+                   open: (lambda (a seed fresh?) (open-cards a seed fresh? #t))
+                   hold!: (lambda (a) (hub-run-hold! 'cards (deal-trace (stage-deal a))))
+                   prepare!: (lambda (a) #f)
+                   cascading?: (lambda (a) (card-fx-cascading? (stage-card-fx a)))
+                   deselect!: (lambda (a) #f))
+       (table-kind name: 'scan
+                   board?: (lambda (a) (and (stage-scan a) #t))
+                   live?: (lambda (a) (and (stage-scan a) (not (scan-table-over (stage-scan a))) #t))
+                   tick: (lambda (a f dt) (tick-scan-table a f dt lay model))
+                   draw: (lambda (a) (draw-scan (stage-scan a) VW VH (stage-background a) *copper* *scan-line*))
+                   hud-h: (lambda (a) (- VH BOARD-H))
+                   ticks: (lambda (a) (scan-table-ticks (stage-scan a)))
+                   trace: (lambda (a) (scan-table-trace (stage-scan a)))   ; #f on CLASSIC
+                   seed: (lambda (a) (scan-session-seed (scan-table-session (stage-scan a))))
+                   bar-hit: (lambda (a x y) (scan-bar-hit (scan-table-session (stage-scan a)) VW VH x y))
+                   code: (lambda (a) #f)
+                   open: (lambda (a seed fresh?) (open-scan a fresh? #t))
+                   hold!: (lambda (a) (hub-run-hold! 'scan (or (scan-table-trace (stage-scan a)) (trace-new 'twist))))   ; P6d
+                   prepare!: (lambda (a) #f)
+                   cascading?: (lambda (a) #f)
+                   deselect!: (lambda (a) #f))))
+
+    ;; STACK's frame: ctrl+e or a severed board's JACK OUT goes to the menu;
+    ;; the session's request: the MENU tool, or NEXT / RETRY inside a run
+    ;; (P4); a run's layer cleared: the ledger once the cascade is over.
+    (define (tick-stack-table a f dt lay model log-keys?)
+      (cond ((menu-frame? f) (open-menu a))
+            ((jack-out? (stage-session a) f VW VH (geometry-hud-h *geom*))
+             (open-menu a))
+            (else
+             (let* ((a (step-stack a f dt *geom* log-keys?))
+                    (s (stage-session a))
+                    (request (session-request s)))
+               (if request
+                   (let ((a (stage a session: (session-clear-request s))))
+                     (case request
+                       ((menu) (open-overlay a))
+                       ((next retry) (run-request a request lay model))
+                       (else a)))
+                   (let ((t (take-layer-cleared!)))
+                     (when t (set! *layer-cleared* t))
+                     (if (and (eq? *layer-cleared* 'stack) (not (fx-cleared (stage-fx a))))
+                         (layer-done a 'stack lay model)
+                         a)))))))
+
+    ;; DEFRAG's frame: the same shape as STACK's.
+    (define (tick-cards-table a f dt card-geom lay model)
+      (cond ((or (menu-frame? f)
+                 (jack-out-tap? (stage-deal a) f card-geom))
+             (open-menu a))
+            (else
+             (let* ((a (step-cards a f dt card-geom))
+                    (d (stage-deal a))
+                    (request (deal-request d)))
+               (if request
+                   (let ((a (stage a deal: (deal-clear-request d))))
+                     (case request
+                       ((menu) (open-overlay a))
+                       ((next retry) (run-request a request lay model))
+                       (else a)))
+                   (let ((t (take-layer-cleared!)))
+                     (when t (set! *layer-cleared* t))
+                     (if (and (eq? *layer-cleared* 'cards) (not (card-fx-cascading? (stage-card-fx a))))
+                         (layer-done a 'cards lay model)
+                         a)))))))
+
+    ;; SCAN's frame (0.1.3): ctrl+e stores the board and goes to the menu;
+    ;; a SCAN node taken (P6d): the hub once the clear has shown.
+    (define (tick-scan-table a f dt lay model)
+      (cond ((menu-frame? f) (scan-save! (stage-scan a)) (open-menu a))
+            (else
+             (let ((a (step-scan a f dt)))
+               (let ((t (take-layer-cleared!)))
+                 (when t (set! *layer-cleared* t)))
+               (if (and (eq? (stage-screen a) 'scan) (not (stage-overlay a)) (eq? *layer-cleared* 'scan)
+                        (scan-table-over (stage-scan a))
+                        (>= (scan-table-over-ms (stage-scan a)) SCAN-NODE-HOLD-MS))
+                   (layer-done a 'scan lay model)
+                   a)))))
+
     ;; The live board's share code for the pause menu, or #f.
     ;; The run held for CONTINUE shows its own code (P5); else the table up, else
     ;; the one the store names.
     (define (live-code a)
-      (case (cond ((and (not (memq (stage-screen a) (list 'stack 'cards))) (hub-run-in-force)) 'run)
-                  ((memq (stage-screen a) (list 'stack 'cards)) (stage-screen a))
-                  (else (active-game)))
-        ((run) (hub-run-code))
-        ((stack) (let ((s (stage-session a))) (and s (not (board-cleared? (session-board s))) (encode (session-spec s)))))
-        ((cards) (let ((d (stage-deal a))) (and d (not (deal-won? d)) (encode (deal-spec d)))))
-        (else #f)))
+      (let ((which (cond ((and (not (memq (stage-screen a) CODE-TABLES)) (hub-run-in-force)) 'run)
+                         ((memq (stage-screen a) CODE-TABLES) (stage-screen a))
+                         (else (active-game)))))
+        (if (eq? which 'run)
+            (hub-run-code)
+            (let ((k (table-named which)))
+              (and k ((table-kind-code k) a))))))
 
     ;; The table's overlay (ruling D51): Escape or the bar's MENU button
     ;; pauses the table under its own menu (the table's step is skipped,
     ;; every face draws hidden); RESUME, Escape or the button again
     ;; returns; the exit row lands on the main menu with CONTINUE.
     (define (open-overlay a)
-      (let ((table (case (stage-screen a) ((cards) 'cards) ((scan) 'scan) (else 'stack))))
-        (when (and (eq? table 'stack) (stage-session a))
-          (set-board-selected! (session-board (stage-session a)) #f))
+      (let ((k (table-up a)))
+        ((table-kind-deselect! k) a)
         (display "crash: pause on") (newline)
-        (stage a overlay: (menu-new-overlay table (and (run-in-force) #t) (settings-in-force) (live-code a) #f (music-title)))))
+        (stage a overlay: (menu-new-overlay (table-kind-name k) (and (run-in-force) #t) (settings-in-force) (live-code a) #f (music-title)))))
 
     (define (close-overlay a)
       (display "crash: pause off") (newline)
@@ -454,11 +583,7 @@
     (define (overlay-button-tap? a f card-geom)
       (let ((click (input-frame-click f)))
         (and click (not (eq? (stage-screen a) 'hub))   ; the hub has no bar button (P5)
-             (eq? 'menu
-                  (case (stage-screen a)
-                    ((cards) (hit-card-control card-geom (deal-hud (stage-deal a)) (car click) (cdr click)))
-                    ((scan) (scan-bar-hit (scan-table-session (stage-scan a)) VW VH (car click) (cdr click)))   ; 0.1.3
-                    (else (hit-control *geom* (session-hud (stage-session a)) (car click) (cdr click))))))))
+             (eq? 'menu ((table-kind-bar-hit (table-up a)) a (car click) (cdr click))))))
 
     ;; A run's layer cleared and its cascade over (David, 2026-09-21): the
     ;; run's ledger over the table with NEXT LAYER, pulled by Enter, a tap,
@@ -490,11 +615,7 @@
               ((eq? choice 'next-layer) (run-request (stage a overlay: #f) 'next lay model))
               ((memq choice (list 'disconnect 'back-to-menu))
                ;; DISCONNECT on a hub-launched board: held at its node, the runner back in the world (ruled 2026-09-22)
-               (if (and (eq? choice 'disconnect) (memq (stage-screen a) (list 'stack 'cards 'scan))
-                        (case (stage-screen a)
-                          ((cards) (hub-run-hold! 'cards (deal-trace (stage-deal a))))
-                          ((scan) (hub-run-hold! 'scan (or (scan-table-trace (stage-scan a)) (trace-new 'twist))))   ; P6d
-                          (else (hub-run-hold! 'stack (session-trace (stage-session a))))))
+               (if (and (eq? choice 'disconnect) (table-up a) ((table-kind-hold! (table-up a)) a))
                    (open-hub (close-overlay a))
                    (open-menu (close-overlay a))))
               (else a))))
@@ -505,12 +626,8 @@
              screen: 'menu
              menu: (let ((m (launch-menu #f
                                 (or (and (hub-run-in-force) #t)   ; P5: a live hub run continues
-                                    (and (case (active-game)
-                                           ((stack) (stage-session a))
-                                           ((cards) (stage-deal a))
-                                           ((scan) (and (stage-scan a) (not (scan-table-over (stage-scan a)))))   ; 0.1.3
-                                           (else #f))
-                                         #t))
+                                    (let ((k (table-named (active-game))))   ; the active game's board in memory
+                                      (and k ((table-kind-live? k) a) #t)))
                                 #f
                                 (live-code a)
                                 #f          ; no COPY natively (no clipboard)
@@ -621,10 +738,7 @@
                  (begin
                    (display "crash: hub launch ") (display (node-index (launch-node l))) (display " ") (display (encode (launch-spec l))) (newline)
                    (if (hub-run-resume?)   ; a held board: back to it as CONTINUE would
-                       (case (node-table (launch-node l))
-                         ((cards) (open-cards a #f #f #t))
-                         ((scan) (open-scan a #f #t))   ; P6d
-                         (else (open-stack a lay #f #f model #t)))
+                       ((table-kind-open (table-named (node-table (launch-node l)))) a #f #f)
                        (if (eq? (node-table (launch-node l)) 'scan)
                            (open-scan-table a (scan-node-table l #f))   ; P6d: a SCAN node's board
                            (open-spec a (launch-spec l) lay model))))
@@ -655,7 +769,7 @@
       (let ((r (run-in-force)))
         (cond ((not r) a)
               (else
-               (when (hub-run-severed! (case (stage-screen a) ((cards) 'cards) ((scan) 'scan) (else 'stack)))
+               (when (hub-run-severed! (let ((k (table-up a))) (if k (table-kind-name k) 'stack)))
                  (display "crash: run reconnect") (newline))
                (display "crash: run back") (newline)
                (open-hub a)))))
@@ -700,10 +814,7 @@
                ((continue)
                 (if (and (hub-run-in-force) (not (hub-run-launch-pending)))   ; P5: the hub, unless its board is the thing to continue
                     (open-hub-entry a)
-                    (case (active-game)
-                    ((cards) (open-cards a seed fresh? #t))
-                    ((scan) (open-scan a fresh? #t))   ; 0.1.3
-                    (else (open-stack a lay seed fresh? model #t)))))
+                    ((table-kind-open (table-named (active-game))) a seed fresh?)))
                ((easy normal elite) (jack-in a (now-second) choice lay model))   ; JACK IN's pick (D65)
                ((stack) (free-play a 'stack lay seed fresh? model))
                ((cards) (free-play a 'cards lay seed fresh? model))
@@ -937,6 +1048,11 @@
                (open (lambda (a choice)
                        (choose a choice lay seed fresh? model))))
           (ensure-geometry! lay)
+          (set! *tables* (native-tables lay card-geom model log-keys?))   ; t-90ec6b: one record per table
+          (let ((bad (tables-check *tables*)))
+            (display "crash: table-check ")
+            (display (if (null? bad) "ok" (cons (quote FAILED) bad)))
+            (newline))
           (let loop ((a (let ((fresh (stage bg: (let ((b (bg-choose (or bg-mode (field-rule-at-boot)) 1 bg-hold)))
                                                  (and b (bg b
                                                            stride: (or *bg-stride* (bg-stride b))
@@ -971,9 +1087,9 @@
                           ((entry) (music-frame! (quote entry) (quote cleared)))   ; silence through the model's own word (see the web shell)
                           ((hub) (music-frame! (quote hub) (hub-music-phase) (hub-music-seed)))
                           ((menu) (music-frame! (quote menu) #f))
-                          ((stack) (music-frame! (quote stack) (session-trace (stage-session a)) (session-seed (stage-session a))))
-                          ((scan) (music-frame! (quote scan) (scan-table-trace (stage-scan a)) (scan-session-seed (scan-table-session (stage-scan a)))))   ; HACKER's trace drives the sections (P6c); #f on CLASSIC
-                          (else (music-frame! (quote cards) (deal-trace (stage-deal a)) (deal-seed (stage-deal a)))))))
+                          ;; a table: its pool by its board's seed, its trace's phase (#f on CLASSIC SCAN)
+                          (else (let ((k (table-up a)))
+                                  (music-frame! (table-kind-name k) ((table-kind-trace k) a) ((table-kind-seed k) a)))))))
                    (click (input-frame-click f))
                    ;; Escape on a table asks for the menu (the session's);
                    ;; Escape on the menu's top screen quits when nothing is
@@ -997,75 +1113,22 @@
                                (stage a menu: (car r)))))
                         ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
-                        ((scan)   ; 0.1.3
-                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
-                               ((menu-frame? f) (scan-save! (stage-scan a)) (open-menu a))
-                               (else
-                                (let ((a (step-scan a f dt)))
-                                  ;; a SCAN node taken (P6d): the hub once the clear has shown
-                                  (let ((t (take-layer-cleared!)))
-                                    (when t (set! *layer-cleared* t)))
-                                  (if (and (eq? (stage-screen a) 'scan) (not (stage-overlay a)) (eq? *layer-cleared* 'scan)
-                                           (scan-table-over (stage-scan a))
-                                           (>= (scan-table-over-ms (stage-scan a)) SCAN-NODE-HOLD-MS))
-                                      (layer-done a 'scan lay model)
-                                      a)))))
-                        ((stack)
-                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
-                               ((menu-frame? f) (open-menu a))
-                               ((jack-out? (stage-session a) f VW VH (geometry-hud-h *geom*))
-                                (open-menu a))
-                               (else
-                                ;; the session's request: the MENU tool, or NEXT /
-                                ;; RETRY inside a run (P4)
-                                (let* ((a (step-stack a f dt *geom* log-keys?))
-                                       (s (stage-session a))
-                                       (request (session-request s)))
-                                  (if request
-                                      (let ((a (stage a session: (session-clear-request s))))
-                                        (case request
-                                          ((menu) (open-overlay a))
-                                          ((next retry) (run-request a request lay model))
-                                          (else a)))
-                                      (let ((t (take-layer-cleared!)))
-                                        (when t (set! *layer-cleared* t))
-                                        ;; a run's layer cleared: the ledger once the cascade is over
-                                        (if (and (eq? *layer-cleared* 'stack) (not (fx-cleared (stage-fx a))))
-                                            (layer-done a 'stack lay model)
-                                            a)))))))
+                        ;; a table: the pause overlay first, else its record's tick (t-90ec6b)
                         (else
-                         (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
-                               ((or (menu-frame? f)
-                                    (jack-out-tap? (stage-deal a) f card-geom))
-                                (open-menu a))
-                               (else
-                                (let* ((a (step-cards a f dt card-geom))
-                                       (d (stage-deal a))
-                                       (request (deal-request d)))
-                                  (if request
-                                      (let ((a (stage a deal: (deal-clear-request d))))
-                                        (case request
-                                          ((menu) (open-overlay a))
-                                          ((next retry) (run-request a request lay model))
-                                          (else a)))
-                                      (let ((t (take-layer-cleared!)))
-                                        (when t (set! *layer-cleared* t))
-                                        (if (and (eq? *layer-cleared* 'cards) (not (card-fx-cascading? (stage-card-fx a))))
-                                            (layer-done a 'cards lay model)
-                                            a))))))))))
+                         (if (stage-overlay a)
+                             (overlay-step a f dt card-geom lay model)
+                             ((table-kind-tick (table-up a)) a f dt))))))
               (present! (and (not (eq? (stage-screen a) 'menu)) (stage-bg a))
                         (lambda ()
-                          (when (eq? (stage-screen a) 'stack)
-                            (tiles-ensure! *geom*))
+                          (let ((k (table-up a)))   ; a table's own bake before the passes (STACK's tiles)
+                            (when k ((table-kind-prepare! k) a)))
                           ;; the menu's and the overlay's bakes, before the passes (they are passes)
                           (cond ((eq? (stage-screen a) 'menu) (menu-prepare! (stage-menu a)))
                                 ((eq? (stage-screen a) 'entry) (hub-prepare!))   ; P5: the entry screen carries the bake (D65)
                                 ((eq? (stage-screen a) 'hub) (hub-prepare!) (when (stage-overlay a) (menu-prepare! (stage-overlay a))))   ; P5: the tile bake is a pass, and the pause panel's
                                 ((stage-overlay a) (menu-prepare! (stage-overlay a)))))
-                        (case (stage-screen a)
-                          ((stack) (and (fx-cleared (stage-fx a)) #t))
-                          ((cards) (card-fx-cascading? (stage-card-fx a)))
-                          (else #f))
+                        (let ((k (table-up a)))   ; the clear's cascade holds the phosphor
+                          (and k ((table-kind-cascading? k) a)))
                         log-keys?   ; the menu's frames too (the credits crawl's cost, 2026-09-21)
                         (lambda ()
                           (case (stage-screen a)
@@ -1073,18 +1136,11 @@
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
-                            ((scan) (draw-scan (stage-scan a) VW VH (stage-background a) *copper* *scan-line*)   ; 0.1.3
-                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
-                            ((stack)
-                             (if *bg-only*
-                                 (draw-board-background VW VH (- VH (geometry-hud-h *geom*)) 0.0 (stage-background a) *copper*)
-                                 (draw-session (stage-session a) *geom* (stage-fx a) (stage-background a) *copper* (and (stage-overlay a) #t)))
-                             (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH (- VH (geometry-hud-h *geom*)))))
+                            ;; a table: its record's draw, the overlay's panel over it
                             (else
-                             (if *bg-only*
-                                 (draw-board-background VW VH (- VH (card-geometry-hud-h card-geom)) 0.0 (stage-background a) *copper*)
-                                 (draw-deal (stage-deal a) card-geom (stage-card-fx a) (texture-path PORTRAITS-PATH) (stage-background a) *copper* (and (stage-overlay a) #t)))
-                             (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH (- VH (card-geometry-hud-h card-geom))))))))
+                             (let ((k (table-up a)))
+                               ((table-kind-draw k) a)
+                               (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH (- VH ((table-kind-hud-h k) a)))))))))
               (say-held! (stage-bg a))
               (audio-pump!)
               (cond (quit? (request-quit))

@@ -1,0 +1,115 @@
+;;; (crash table) - The table record: what a shell needs from a table.
+;;;
+;;; STACK, DEFRAG and SCAN (and every later drop: PATCH, CHECKSUM,
+;;; INTERCEPT) are tables. A shell used to branch on which one is up at
+;;; about forty sites (the music, the tick, the pause overlay and its
+;;; clock, DISCONNECT, the share code, CONTINUE, the draw); a third branch
+;;; at each for SCAN was the moment to stop (the SCAN design's section 10,
+;;; "The third table"; t-90ec6b). Each shell now builds one record per
+;;; table from its own state and asks the record.
+;;;
+;;; The fields are procedures over the shell's own state; their arguments
+;;; are the shell's (the web shell mutates module state and passes the
+;;; frame, the native shell threads its stage `a`), so this module fixes
+;;; the NAMES and the completeness, not the signatures:
+;;;
+;;;   board?         a board of this table is in memory, in any state (the music)
+;;;   live?          a board CONTINUE can offer (the menu): STACK and DEFRAG any in
+;;;                  memory, SCAN one not ended
+;;;   tick           one frame of the table up: its input, its step, its requests
+;;;   draw           the table's frame, alone or under the pause overlay
+;;;   hud-h          the bar's height (the overlay's panel sits above it)
+;;;   ticks          the table's clock, for the pause lines
+;;;   trace          the board's trace, or #f (CLASSIC SCAN; the music's phase)
+;;;   seed           the board's seed (the music's pick)
+;;;   bar-hit        the bar control under a point, or #f (the overlay's MENU tap)
+;;;   code           the live board's share code, or #f
+;;;   open           CONTINUE: the table in memory, else its stored board, else a new one
+;;;   hold!          DISCONNECT in a run: hold the board at its node (#t when held)
+;;;   deselect!      before the overlay opens (STACK drops its selection)
+;;;   prepare!       before the frame's passes (STACK bakes its tiles)
+;;;   cascading?     the clear's cascade runs (the phosphor persistence holds)
+;;;
+;;; tables-check answers the names of records with a field missing, or '()
+;;; for a complete set: the web shell says it at boot (`crash: table-check
+;;; ok`), which the arm asserts, so a field left unwired (the design's S13)
+;;; is red before any play.
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash table)
+  (import (sigil struct))
+
+  (export table-kind table-kind? table-kind-name
+          table-kind-board? table-kind-live? table-kind-tick table-kind-draw table-kind-hud-h
+          table-kind-ticks table-kind-trace table-kind-seed table-kind-bar-hit
+          table-kind-code table-kind-open table-kind-hold! table-kind-deselect!
+          table-kind-prepare! table-kind-cascading?
+          TABLE-FIELDS table-kind-field tables-check table-of TABLE-NAMES)
+
+  (begin
+    (define TABLE-NAMES (list 'stack 'cards 'scan))
+
+    (define-struct table-kind
+      (name default: #f)
+      (board? default: #f)
+      (live? default: #f)
+      (tick default: #f)
+      (draw default: #f)
+      (hud-h default: #f)
+      (ticks default: #f)
+      (trace default: #f)
+      (seed default: #f)
+      (bar-hit default: #f)
+      (code default: #f)
+      (open default: #f)
+      (hold! default: #f)
+      (deselect! default: #f)
+      (prepare! default: #f)
+      (cascading? default: #f))
+
+    (define TABLE-FIELDS
+      (list (cons 'board? table-kind-board?)
+            (cons 'live? table-kind-live?)
+            (cons 'tick table-kind-tick)
+            (cons 'draw table-kind-draw)
+            (cons 'hud-h table-kind-hud-h)
+            (cons 'ticks table-kind-ticks)
+            (cons 'trace table-kind-trace)
+            (cons 'seed table-kind-seed)
+            (cons 'bar-hit table-kind-bar-hit)
+            (cons 'code table-kind-code)
+            (cons 'open table-kind-open)
+            (cons 'hold! table-kind-hold!)
+            (cons 'deselect! table-kind-deselect!)
+            (cons 'prepare! table-kind-prepare!)
+            (cons 'cascading? table-kind-cascading?)))
+
+    (define (table-kind-field k name)
+      (let ((e (assq name TABLE-FIELDS)))
+        (and e ((cdr e) k))))
+
+    ;; The problems of a set of records: (NAME FIELD) for every field that
+    ;; is not a procedure, (missing NAME) for a table in TABLE-NAMES with no
+    ;; record. '() when complete.
+    (define (tables-check tables)
+      (append
+       (filter (lambda (x) x)
+               (map (lambda (name)
+                      (and (not (table-of tables name)) (list 'missing name)))
+                    TABLE-NAMES))
+       (apply append
+              (map (lambda (k)
+                     (filter (lambda (x) x)
+                             (map (lambda (f)
+                                    (and (not (procedure? ((cdr f) k)))
+                                         (list (table-kind-name k) (car f))))
+                                  TABLE-FIELDS)))
+                   tables))))
+
+    ;; The record named name, or #f.
+    (define (table-of tables name)
+      (let loop ((ts tables))
+        (cond ((null? ts) #f)
+              ((eq? (table-kind-name (car ts)) name) (car ts))
+              (else (loop (cdr ts))))))))

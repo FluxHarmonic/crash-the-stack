@@ -474,10 +474,14 @@ const [, seed, tiles0, A, AX, AY, B, BX, BY] = boot.m;
 // the quoted literals' shapes (a sigil wasm runtime bug corrupted one on
 // 2026-09-19; the game checks them at boot and says so)
 const literals = await waitLine(/^crash: literal-check (ok|FAILED.*)$/, 0, 2000);
+// every table's record complete (t-90ec6b): a field left unwired is S13
+const tablesChecked = await waitLine(/^crash: table-check (ok|FAILED.*)$/, 0, 2000);
 if (tiles0 !== "144") fail("boot", `expected a fresh 144-tile board, got tiles ${tiles0}`);
 else if (!literals) fail("boot", "no \"crash: literal-check\" boot line");
 else if (literals.m[1] !== "ok") fail("boot", `the game's literal check: ${literals.m[1]}`);
-else pass("boot", `seed ${seed} tiles ${tiles0} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY}); literals ok`);
+else if (!tablesChecked) fail("boot", "no \"crash: table-check\" boot line");
+else if (tablesChecked.m[1] !== "ok") fail("boot", `the table records: ${tablesChecked.m[1]}`);
+else pass("boot", `seed ${seed} tiles ${tiles0} pair ${A}@(${AX},${AY}) ${B}@(${BX},${BY}); literals ok; table records complete`);
 await sleep(1500); // a few frames so the first draw has happened
 
 // ---- 3. render --------------------------------------------------------------
