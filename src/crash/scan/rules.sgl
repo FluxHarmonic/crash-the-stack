@@ -55,7 +55,7 @@
           segment-ice? segment-reading segment-state segment-visible-reading
           segment-hidden? segment-scanned? segment-flagged?
           segment-scan segment-flag segment-sweep segment-move-ice segment-restore segment-lost
-          segment-won? segment-lost? segment-over? segment-counter
+          segment-won? segment-lost? segment-over? segment-counter segment-demo-near-cleared
           segment-clean-left segment-extracted? segment-cell-state
           segment-tripped segment-equal?
           segment-firewalls segment-masked segment-rng segment-fw-stuck
@@ -325,6 +325,28 @@
 
     ;; The ICE counter: total ICE minus flags minus tripped and defused ICE.
     ;; It goes negative on too many flags, as in Windows.
+    ;; ?demo=cleared (the arms' door): every ICE flagged and every clean
+    ;; host scanned but the last hidden one, so one scan maps the segment.
+    ;; A dealt segment only (the uplink scanned); an over one is unchanged.
+    (define (segment-demo-near-cleared s)
+      (if (or (not (segment-first s)) (segment-over? s))
+          s
+          (let* ((cells (vector-copy (segment-cells s)))
+                 (last (let loop ((i (- (segment-size s) 1)))
+                         (cond ((< i 0) #f)
+                               ((and (not (segment-ice? s i)) (not (eq? (vector-ref cells i) 'scanned))) i)
+                               (else (loop (- i 1)))))))
+            (if (not last)
+                s
+                (begin
+                  (let loop ((i 0))
+                    (when (< i (segment-size s))
+                      (cond ((segment-ice? s i) (vector-set! cells i 'flagged))
+                            ((= i last) (vector-set! cells i 'hidden))
+                            (else (vector-set! cells i 'scanned)))
+                      (loop (+ i 1))))
+                  (segment s cells: cells left: 1 firewalls: '() fw-stuck: #f masked: '() news: '()))))))
+
     (define (segment-counter s)
       (let loop ((i 0) (k (segment-ice-total s)))
         (if (= i (segment-size s))

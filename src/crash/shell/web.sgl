@@ -138,7 +138,7 @@
                 scan-session-first scan-session-w scan-session-h scan-layout scan-map? scan-host-rect)
           (only (crash scan open) scan-open)
           (only (crash scan generate) GEN-BUDGET-MS)
-          (only (crash scan table) scan-table-step scan-table-deal! scan-table-dealing? scan-table-session
+          (only (crash scan table) scan-table-step scan-table-demo-near-cleared scan-table-deal! scan-table-dealing? scan-table-session
                 scan-table-segment scan-table-cues scan-table-requests scan-table-over
                 scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
@@ -197,6 +197,7 @@
     (define *booted* #f)     ; a table has been booted (on the first frame)
     (define *screen* 'menu)  ; menu | stack | cards | hub (P5)
     (define *hub-seed* #f)   ; ?hub=SEED: JACK IN at boot with this run seed (P5; the arms)
+    (define *hub-depth* #f)  ; &hubdepth=N: a door-started run begins on layer N (P6d; the arms)
     (define *hub-at* #f)     ; &hubat=N: the runner set down on key node N after the jack in (P5; the arms)
     (define *pace* 'normal)  ; &pace=easy|normal|elite: the difficulty of a run the doors start (D65; the arms)
     (define *overlay* #f)    ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
@@ -1893,7 +1894,15 @@
                  "frames" *scan-deal-frames* "worst" (exact (round *scan-deal-worst*)))
             (set! *scan-audio-until* (+ (now-ms) AUDIO-WATCH-MS))
             (set! *scan-deal-at* #f))
-          t)))
+          ;; ?demo=cleared on a SCAN board (the arms' hub leg): one scan from
+          ;; mapped once the deal lands; the board is not saved
+          (if (and (eq? *demo* 'cleared) (not (scan-table-dealing? t)) (scan-table-segment t))
+              (begin
+                (set! *demo* #f)
+                (set! *no-save* #t)
+                (say "demo" "cleared" "scan")
+                (scan-table-demo-near-cleared t))
+              t))))
 
     (define (scan-audio-watch!)
       (when (and *scan-audio-until* (>= (now-ms) *scan-audio-until*))
@@ -2009,7 +2018,8 @@
     ;;   crash: run start SEED CODE DIFFICULTY
     (define (jack-in! seed difficulty)
       (enter-hub! (lambda ()
-                    (hub-run-set! (hub-run-start! seed difficulty))
+                    (let ((hs (hub-run-start! seed difficulty)))
+                      (hub-run-set! (if *hub-depth* (hub-screen-at-depth hs *hub-depth*) hs)))
                     (say "run" "start" seed (hub-run-code) difficulty))))
 
     ;; &hubat=N: the runner set down on node N (the arms: a walk is seed-specific).
@@ -2477,6 +2487,7 @@
                                        gc-minor-collect!))   ; for :collect
              0)
             ((string=? type "bpm") (param! (lambda () (hub-run-bpm! payload))))   ; ?bpm=N: the hub's clock pinned (P5, until M1's player)
+            ((string=? type "hubdepth") (param! (lambda () (set! *hub-depth* (string->number payload)))))   ; &hubdepth=N: the run starts on layer N (P6d; the arms)
             ((string=? type "hubat") (param! (lambda () (set! *hub-at* (string->number payload)))))   ; &hubat=N: the runner on key node N at boot (P5; the arms)
             ((string=? type "pace") (param! (lambda () (let ((d (string->symbol payload))) (when (difficulty? d) (set! *pace* d))))))   ; &pace=easy|normal|elite (D65; the arms)
             ((string=? type "bghold") (param! (lambda () (set! *bg-hold* (string->number payload)))))

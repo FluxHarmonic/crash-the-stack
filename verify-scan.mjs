@@ -39,6 +39,13 @@
 //              and the sink starved no frames over it and one second after
 //              ("crash: scan deal-audio underruns 0 ..."). Its sabotage is a
 //              deal in one frame (GEN-BUDGET-MS huge), which must starve it
+//   hub-node   P6d: ?hub=1&hubdepth=2&hubat=3 sets the runner on layer 2's
+//              SCAN node ("crash: hub at 3 CELL scan"); Enter launches it
+//              ("crash: hub launch 3 CODE") and a node board opens; a real
+//              click or tap on the middle host deals it; the demo door
+//              leaves one clean host, a real click or tap on it maps the
+//              segment ("crash: scan won"), and the hub comes back on layer
+//              2 with the node cleared ("crash: hub open 2 N keys K cleared 1")
 //   console    zero error-level console entries and zero exceptions
 //
 // Every sub-arm anchors on a "crash: scan ..." line, which only the SCAN
@@ -70,7 +77,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "open", "render", "tap-scans", "flag", "map", "audio", "console"];
+const planned = ["menu", "open", "render", "tap-scans", "flag", "map", "audio", "hub-node", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -524,6 +531,56 @@ else if (PHONE) {
     }
   }
   if (detail) fail("audio", detail);
+}
+
+// ---- hub-node (P6d) ---------------------------------------------------------------------
+// Every run seed puts a SCAN node on layer 2 at node index 3 (key nodes
+// first); the demo door is dispatched once the hub is up, so it arms the
+// node's board and nothing before it.
+{
+  let detail = "", note = "";
+  const m0 = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubdepth=2&hubat=3` });
+  const at = await waitLine(/^crash: hub at 3 (\d+) (\S+)$/, m0, 30000);
+  const up = at && await waitLine(/^crash: hub open 2 (\d+) keys (\d+) cleared (\d+)$/, m0, 20000);
+  if (!at) detail = "?hub=1&hubdepth=2&hubat=3 did not set the runner on node 3";
+  else if (at.m[2] !== "scan") detail = `node 3 on layer 2 is a ${at.m[2]} node, not SCAN: ${at.m[0]}`;
+  else if (!up) detail = "the hub did not open on layer 2";
+  else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the hub boot";
+  else {
+    await evalJS("window.__crashUpdates.app.dispatch('demo', 'cleared')");
+    const m1 = consoleLines.length;
+    await key("Enter");
+    const launch = await waitLine(/^crash: hub launch 3 (\S+)$/, m1, 5000);
+    const o = launch && await waitLine(OPEN_RE, m1, 10000);
+    if (!launch) detail = "Enter on the SCAN node asked for no launch";
+    else if (!o) detail = "the launch opened no SCAN board";
+    else if (o.m[1] !== "node" || o.m[6] !== "board") detail = `the node's board opened as ${o.m[0]}, not a node board`;
+    else {
+      await sleep(800);
+      const b = { cell: +o.m[3], x0: +o.m[4], y0: +o.m[5] };
+      const m2 = consoleLines.length;
+      await act(...hostCenter(b, 8, 5));
+      const dealt = await waitLine(/^crash: scan dealt /, m2, 20000);
+      const demo = dealt && await waitLine(/^crash: demo cleared scan$/, m2, 3000);
+      const hid = demo && await waitLine(/^crash: scan hidden (-?\d+) (-?\d+) (-?\d+)$/, demo.index, 3000);
+      if (!dealt) detail = `a real ${PHONE ? "tap" : "click"} on the node board's middle host dealt nothing`;
+      else if (!demo) detail = "the demo door did not arm the node's board";
+      else if (!hid || +hid.m[1] < 0) detail = "the demo left no hidden host on screen";
+      else {
+        const m3 = consoleLines.length;
+        await act(+hid.m[2], +hid.m[3]);
+        const won = await waitLine(/^crash: scan won /, m3, 5000);
+        const back = won && await waitLine(/^crash: hub open 2 (\d+) keys (\d+) cleared (\d+)$/, m3, 15000);
+        if (!won) detail = `the ${PHONE ? "tap" : "click"} on the last clean host did not map the segment`;
+        else if (!back) detail = "the mapped node board did not bring the hub back on layer 2";
+        else if (+back.m[3] !== +up.m[3] + 1) detail = `the hub came back with ${back.m[3]} nodes cleared, not ${+up.m[3] + 1}: ${back.m[0]}`;
+        else note = `${at.m[0]}; launch ${launch.m[1]}; ${o.m[0]}; ${won.m[0]}; ${back.m[0]}`;
+      }
+    }
+  }
+  if (detail) fail("hub-node", detail);
+  else pass("hub-node", note);
 }
 
 // ---- console ---------------------------------------------------------------------------
