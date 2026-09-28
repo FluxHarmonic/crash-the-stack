@@ -200,7 +200,10 @@ ws.addEventListener("message", (ev) => {
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
   if (msg.method === "Runtime.consoleAPICalled") {
     const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
-    consoleLines.push(text);
+    // one entry can carry several of the game's lines (a frame's output
+    // flushed together: "crash: scan request won" then "crash: scan won ..."),
+    // and every wait anchors at a line's start, so each line is its own entry
+    for (const line of text.split("\n")) if (line.trim() !== "") consoleLines.push(line);
     if (msg.params.type === "error") consoleErrors.push("console.error: " + text);
   }
   if (msg.method === "Log.entryAdded" && msg.params.entry.level === "error") consoleErrors.push("log: " + msg.params.entry.text);

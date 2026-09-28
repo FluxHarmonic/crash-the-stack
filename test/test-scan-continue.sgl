@@ -1,0 +1,59 @@
+;;; SCAN's CONTINUE through the shell's own store path (0.2): a board in
+;;; play stored by scan-save! comes back from scan-boot, HACKER (the v2
+;;; datum, 13 fields) and CLASSIC alike, with its segment and its clock.
+;;; scan-boot once accepted only v1's 6 fields, so every v2 board was
+;;; dropped and CONTINUE dealt a new one (found by verify-scan --meds);
+;;; test-scan-table's round trip goes around the shell and never saw it.
+
+(import (sigil test)
+        (sigil fs)
+        (sigil math)
+        (sigil time)
+        (sigil process)
+        (sigil list)
+        (crash scan rules)
+        (crash scan input)
+        (crash scan table)
+        (crash shell)
+        (crash store))
+
+(define ROOT (string-append "/tmp/crash-scan-continue-test-" (number->string (exact (floor (current-second))))))
+(set-store-root! ROOT)
+(when (directory-exists? ROOT) (process-run "rm" "-rf" ROOT))
+
+(define (always) #t)
+(define (dealt t) (let loop ((t t)) (if (scan-table-dealing? t) (loop (scan-table-deal! t always)) t)))
+(define (center t i)
+  (let ((r (scan-host-rect (scan-table-session t) i)))
+    (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+(define (click t i)
+  (let ((c (center t i)))
+    (dealt (scan-table-step t (make-scan-frame '() '() (list (list 'down (car c) (cdr c) 'left) (list 'up (car c) (cdr c) 'left)) 16)))))
+
+(define (board version) (click (scan-table-new (scan-session-new 'wan 3 version #f #f) #f) 136))
+
+(test-group "scan: CONTINUE restores the stored board through the shell"
+  (for-each
+   (lambda (version)
+     (test (string-append (symbol->string version) ": scan-save! then scan-boot gives the same segment back")
+       (let* ((t (board version))
+              (_ (scan-save! t))
+              (back (scan-boot #f)))
+         (assert-true (and back #t))
+         (assert-true (segment-equal? (scan-table-segment t) (scan-table-segment back)))
+         (assert-equal (scan-table-ms t) (scan-table-ms back))
+         (assert-equal (and (scan-table-trace t) #t) (and (scan-table-trace back) #t)))))
+   '(hacker original))
+  (test "an ended board is not offered"
+    (let ((t (board 'hacker)))
+      (scan-save! (scan-table-demo-near-cleared t))
+      (assert-true (and (scan-boot #f) #t))
+      (let* ((d (scan-table-demo-near-cleared t))
+             (seg (scan-table-segment d))
+             (last (find (lambda (i) (segment-hidden? seg i)) (iota (segment-size seg))))
+             (won (click d last)))
+        (assert-eq 'won (scan-table-over won))
+        (scan-save! won)
+        (assert-false (scan-boot #f))))))
+
+(process-run "rm" "-rf" ROOT)
