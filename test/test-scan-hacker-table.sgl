@@ -153,7 +153,7 @@
       (assert-equal (trace->datum (scan-table-trace t)) (trace->datum (scan-table-trace back)))
       (assert-equal 2 (scan-table-probes back))
       (assert-equal '(probe) (scan-table-consumed back))
-      (assert-false (datum->scan-table (append (list-head* d 6) (list #f 0 #f 0 '() '())) (scan-table-session t)))))
+      (assert-false (datum->scan-table (append (list-head* d 6) (list #f 0 #f 0 '() '() 0)) (scan-table-session t)))))
   (test "the trace datum refuses what a trace cannot be"
     (let ((d (trace->datum (scan-table-trace (wan 1)))))
       (assert-true (and (datum->trace d) #t))
@@ -165,3 +165,51 @@
   (if (= k 0) '() (cons (car xs) (list-head* (cdr xs) (- k 1)))))
 (define (list-tail* xs k)
   (if (= k 0) xs (list-tail* (cdr xs) (- k 1))))
+
+;; --- the node board and its marks (D74; leg 9 at the table) -----------------
+
+(define (node-table-of seed k)
+  (scan-table-with-launch (scan-table-new (scan-session-node 16 10 20 seed #f) #f) 180 220 #f 0 k))
+
+(define NODE-UPLINK 85)   ; (5, 5) on 16x10
+
+(test-group "scan HACKER table: the node board's marks"
+  (test "the marks are dealt at the uplink from the deal's own line: K of them, clean, each with an ICE neighbor"
+    (let* ((t (click (node-table-of 21 2) NODE-UPLINK 'left 0))
+           (seg (scan-table-segment t)))
+      (assert-equal 2 (length (scan-table-marks t)))
+      (for-each (lambda (m)
+                  (assert-false (segment-ice? seg m))
+                  (assert-true (> (segment-reading seg m) 0)))
+                (scan-table-marks t))
+      (assert-equal (deal-marks (deal-node 16 10 20 21 NODE-UPLINK) 2) (scan-table-marks t))))
+  (test "a mark counts only once every clean host of its 3x3 is scanned; the last one maps the segment"
+    (let* ((t (click (node-table-of 21 2) NODE-UPLINK 'left 0))
+           (marks (scan-table-marks t))
+           (seg (scan-table-segment t))
+           ;; scan every clean host around the first mark only
+           (sector (lambda (m) (filter (lambda (i) (not (segment-ice? seg i))) (cons m (segment-neighbors seg m)))))
+           (t1 (let loop ((t t) (hs (sector (car marks))))
+                 (if (null? hs) t
+                     (loop (if (eq? (segment-state (scan-table-segment t) (car hs)) 'scanned)
+                               t
+                               (scan-table t session: (scan-session (scan-table-session t)
+                                                                    segment: (segment-scan (scan-table-segment t) (car hs)))))
+                           (cdr hs))))))
+      (assert-equal 0 (scan-table-extracted t))
+      (assert-false (scan-table-over (step t1 (frame '() '() 16))))
+      (assert-true (>= (scan-table-extracted t1) 1))
+      (let* ((t2 (let loop ((t t1) (hs (sector (cadr marks))))
+                   (if (null? hs) t
+                       (loop (if (eq? (segment-state (scan-table-segment t) (car hs)) 'scanned)
+                                 t
+                                 (scan-table t session: (scan-session (scan-table-session t)
+                                                                      segment: (segment-scan (scan-table-segment t) (car hs)))))
+                             (cdr hs)))))
+             (t3 (step t2 (frame '() '() 16))))
+        (assert-true (scan-table-won? t3))
+        (assert-equal 0 (segment-clean-left (scan-table-segment t3))))))
+  (test "FREE PLAY has no marks, and a board with none never clears by marks"
+    (let ((t (after-uplink 3)))
+      (assert-equal '() (scan-table-marks t))
+      (assert-equal 0 (scan-table-extracted t)))))

@@ -42,6 +42,7 @@
           (crash trace)
           (crash scan rules)
           (crash scan input)
+          (only (crash scan generate) deal-marks)
           (crash scan trace))
 
   (export RING-MS SHAKE-MS TOAST-MS PANEL-WAIT-MS PANEL-ROWS
@@ -56,7 +57,7 @@
           scan-table-panel-rows scan-table-panel-rect scan-table-panel-hit
           scan-table-won? scan-table-lost? scan-table-cursor?
           scan-table-trace scan-table-elite? scan-table-probes scan-table-consumed
-          scan-table-marks scan-table-severed? scan-table-with-launch
+          scan-table-marks scan-table-mark-count scan-table-extracted scan-table-severed? scan-table-with-launch
           scan-table->datum datum->scan-table trace->datum datum->trace)
 
   (begin
@@ -95,7 +96,8 @@
       (elite? default: #f)       ; an ELITE run's board: a hit in TRACE completes the trace
       (probes default: 0)        ; probes carried in from the hub's bag (free)
       (consumed default: '())    ; bag tools this board used, for the hub's return
-      (marks default: '()))      ; a node board's marked hosts (D74), '() elsewhere
+      (mark-count default: 0)    ; a node board's K (D74): hosts to extract, from the launch
+      (marks default: '()))      ; the marked hosts, dealt from the recorded line at the uplink; '() elsewhere
 
     ;; A board: HACKER's trace at its preset's thresholds ((crash scan
     ;; trace)), none on CLASSIC. A node's launch sets its own
@@ -109,12 +111,21 @@
 
     ;; A node board's launch (JACK IN): its thresholds, the run's ELITE rule,
     ;; the bag's probes, the node's marks.
-    (define (scan-table-with-launch t trace-at sever-at elite? probes marks)
+    (define (scan-table-with-launch t trace-at sever-at elite? probes mark-count)
       (scan-table t
                   trace: (scan-trace-new trace-at sever-at)
                   elite?: elite?
                   probes: probes
-                  marks: marks))
+                  mark-count: mark-count))
+
+    ;; D74: how many marks are extracted now (every clean host of the
+    ;; mark's 3x3 scanned). Derived from the board, never stored: a wipe can
+    ;; take one back, and the player scans it again.
+    (define (scan-table-extracted t)
+      (let ((seg (scan-table-segment t)))
+        (if seg
+            (length (filter (lambda (m) (segment-extracted? seg m)) (scan-table-marks t)))
+            0)))
 
     (define (scan-table-severed? t) (eq? (scan-table-over t) 'severed))
 
@@ -197,11 +208,31 @@
                             cursor?: (cursor-shown? (scan-table-cursor? t) f)))
              (t (refusals t news))
              (t (hacker-step t news dt changed?))
+             (t (extract-step t (origin before after f)))
              ;; the pause overlay swallows the releases that follow: let go now
              (t (if (memq 'menu (scan-table-requests t))
                     (scan-table t session: (scan-session-release (scan-table-session t)))
                     t)))
         (ended t)))
+
+    ;; --- the node objective (D74) ------------------------------------------------
+
+    ;; EXTRACT n OF K: once every mark is extracted at once, the rest of the
+    ;; segment scans itself as the clear (a ripple from the host acted on),
+    ;; and the board ends mapped. o: the frame's host.
+    (define (extract-step t o)
+      (let ((seg (scan-table-segment t))
+            (marks (scan-table-marks t)))
+        (if (and seg
+                 (pair? marks)
+                 (not (segment-over? seg))
+                 (every (lambda (m) (segment-extracted? seg m)) marks))
+            (let ((seg2 (segment-map-all seg)))
+              (cue (scan-table t
+                               session: (scan-session (scan-table-session t) segment: seg2)
+                               reveal: (ripple (scan-table-reveal t) seg seg2 (or o (car marks)) (scan-table-now t)))
+                   'cleared))
+            t)))
 
     ;; --- HACKER: the trace ---------------------------------------------------------
 
@@ -399,9 +430,14 @@
              ;; HACKER: the counter-hacks' stream, a function of the board's seed
              (s (if (and dealt? (scan-session-hacker? s))
                     (scan-session s segment: (segment seg rng: (scan-rng-seed (scan-session-seed s))))
-                    s)))
+                    s))
+             ;; a node board's marks (D74), from the deal's own line
+             (marks (if (and dealt? (> (scan-table-mark-count t) 0) (scan-session-dealt s))
+                        (deal-marks (scan-session-dealt s) (scan-table-mark-count t))
+                        (scan-table-marks t))))
         (scan-table t
                     session: s
+                    marks: marks
                     requests: (append (scan-table-requests t)
                                       (if (memq 'failed (scan-session-requests s)) (list 'failed) '()))
                     reveal: (if dealt?
@@ -480,7 +516,7 @@
 
     ;; --- the datum (CONTINUE) ------------------------------------------------------------
 
-    ;; (scan-table 2 MS MOVES DAILY SESSION TRACE ACC ELITE? PROBES CONSUMED MARKS)
+    ;; (scan-table 2 MS MOVES DAILY SESSION TRACE ACC ELITE? PROBES CONSUMED MARKS MARK-COUNT)
     ;; with SESSION (crash scan save)'s datum and TRACE trace->datum's (#f on
     ;; CLASSIC); the shell's save module converts the session (this module
     ;; stays out of the store). An ended board is never stored: CONTINUE
@@ -498,7 +534,8 @@
             (scan-table-elite? t)
             (scan-table-probes t)
             (scan-table-consumed t)
-            (scan-table-marks t)))
+            (scan-table-marks t)
+            (scan-table-mark-count t)))
 
     (define (count? x) (and (integer? x) (exact? x) (>= x 0)))
 
@@ -521,7 +558,8 @@
                     ((1) (and (= (length d) 6)
                               (not (scan-session-hacker? session))
                               base))
-                    ((2) (and (= (length d) 12)
+                    ((2) (and (= (length d) 13)
+                              (count? (list-ref d 12))
                               (let ((tr (and (list-ref d 6) (datum->trace (list-ref d 6)))))
                                 (and (eq? (and tr #t) (scan-session-hacker? session))
                                      (count? (list-ref d 7))
@@ -540,7 +578,8 @@
                                                  elite?: (list-ref d 8)
                                                  probes: (list-ref d 9)
                                                  consumed: (list-ref d 10)
-                                                 marks: (list-ref d 11)))))))
+                                                 marks: (list-ref d 11)
+                                                 mark-count: (list-ref d 12)))))))
                     (else #f))))))
 
     ;; A loaded board's firewalls: their weakness is derived, never saved.
