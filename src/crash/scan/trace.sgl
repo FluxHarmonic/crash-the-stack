@@ -1,0 +1,341 @@
+;;; (crash scan trace) - The ICE on a SCAN segment: HACKER.
+;;;
+;;; SCAN's trace is the stack's ((crash trace): TRACE, COUNTER-HACK,
+;;; SEVERED; D13, D15), driven through trace-advance* with this table's
+;;; own costs and counter-hacks, as (crash cards trace) does for DEFRAG.
+;;; The design is topics/crash-the-stack-scan-design section 4 (D69, D73).
+;;;
+;;; What feeds the trace: time, ICE hits and probes. Flags and sweeps are
+;;; free, and SCAN has no undo.
+;;;
+;;;   the hit    a scan or a sweep that uncovers ICE trips it and charges
+;;;              half the board's trace-at on the trace, or a fifth of its
+;;;              sever-at off the countdown under COUNTER-HACK
+;;;              (trace-charge). The segment plays on. On an ELITE run a
+;;;              hit in TRACE completes the trace on the spot instead.
+;;;   PROBE      scans one host safely: a clean host is scanned, an ICE
+;;;              host is DEFUSED (shown in brackets, never tripped). It
+;;;              charges a sixth of trace-at, or a fifteenth of sever-at
+;;;              under COUNTER-HACK: a third of a hit, so a blind scan beats
+;;;              a probe below a one-in-three risk on every preset. A probe
+;;;              from the hub's bag charges nothing (the table counts it).
+;;;
+;;; Every price is rounded to whole seconds (a sixth of BACKBONE's 400 is
+;;; 67), so the trace's numbers stay integers.
+;;;
+;;; The counter-hack set, one member per STACK member and one verb each,
+;;; picked uniformly with the segment's own random stream. The standing
+;;; rule (D73): THE ICE HIDES INFORMATION AND NEVER FALSIFIES IT. No member
+;;; changes a reading or moves ICE, so a number on screen is always true
+;;; and a board's layout never changes after the uplink.
+;;;
+;;;   firewall  a 3x3 sector of hidden hosts refuses scans and flags. Placed
+;;;             only where a clean host outside every firewall is still
+;;;             deducible, so it is never weak on arrival (D15's locks). It
+;;;             turns weak after LOCK-DECAY, or when no deducible clean host
+;;;             is left outside the firewalls (derived after every change,
+;;;             never saved); a scan on a weak firewall breaks it and scans
+;;;             that host.
+;;;   mask      MASK-COUNT readings on the frontier draw as noise until the
+;;;             next counter-hack. A sweep still acts on the true count.
+;;;   wipe      a WIPE-SIZE square of scanned hosts turns hidden again;
+;;;             the ICE under it does not move. Placed only where the
+;;;             solver still finishes the board from what is left scanned.
+;;;
+;;; "Deducible" is the solver's ((crash scan solve) solve-from): it starts
+;;; from what the player has scanned and the ICE they have tripped or
+;;; defused, never their flags (flags can be wrong).
+;;;
+;;; Rules family: no platform, no drawing. The numbers are the block at
+;;; the top.
+
+(define-library (crash scan trace)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash stack prng)
+          (crash tween)
+          (crash trace)
+          (crash hub gen)
+          (crash scan rules)
+          (crash scan solve))
+
+  (export SCAN-THRESHOLDS scan-thresholds scan-trace-new
+          ICE-HIT-DIVISOR ICE-HIT-SEVER-DIVISOR PROBE-DIVISOR PROBE-SEVER-DIVISOR
+          MASK-COUNT WIPE-SIZE WIPE-MIN WIPE-TRIES FIREWALL-TRIES
+          hit-trace-cost hit-sever-cost probe-trace-cost probe-sever-cost
+          scan-trace-hit scan-trace-probe
+          SCAN-ICE-SET scan-ice-applicable fire-scan-ice
+          firewall-candidates mask-candidates wipe-candidates
+          firewall-decayed? scan-refresh-firewalls
+          segment-guess-free? segment-deducible-outside?
+          scan-rng-seed
+          MSG-TRIPPED MSG-FIREWALLED MSG-MASKED MSG-WIPED
+          MSG-FIREWALL MSG-FIREWALL-WEAK MSG-FIREWALL-BROKEN
+          MSG-PROBED-CLEAN MSG-PROBED-ICE MSG-PROBE-ARMED)
+
+  (begin
+    ;; --- the numbers David tunes (seconds) -------------------------------------
+
+    ;; (preset trace-at sever-at): one TRACE-AT cannot serve a 9x9 and a
+    ;; 30x16. Placeholders until David's clear times (the P1 rule: trace-at
+    ;; near the last third of a typical clear); WAN takes the stack's.
+    (define SCAN-THRESHOLDS
+      (list (list 'lan 60 90)
+            (list 'wan 180 220)
+            (list 'backbone 400 300)))
+
+    (define ICE-HIT-DIVISOR 2)        ; a hit: trace-at / 2 on the trace (D69)
+    (define ICE-HIT-SEVER-DIVISOR 5)  ; ... or sever-at / 5 off the countdown
+    (define PROBE-DIVISOR 6)          ; a probe: a third of a hit (D73)
+    (define PROBE-SEVER-DIVISOR 15)
+    (define MASK-COUNT 6)             ; readings a mask hides
+    (define WIPE-SIZE 4)              ; the wiped square's side
+    (define WIPE-MIN 8)               ; scanned hosts a square needs to be worth wiping
+    (define WIPE-TRIES 3)             ; squares tried against the solver per wipe
+    (define FIREWALL-TRIES 4)         ; sectors tried against the solver per firewall
+
+    (define MSG-TRIPPED "ICE TRIPPED. TRACE SPIKED.")
+    (define MSG-FIREWALLED "ICE FIREWALLED A SECTOR.")
+    (define MSG-MASKED
+      (string-append "ICE MASKED " (number->string MASK-COUNT) " READINGS."))
+    (define MSG-WIPED "ICE WIPED A SECTOR.")
+    (define MSG-FIREWALL "FIREWALLED.")
+    (define MSG-FIREWALL-WEAK "FIREWALL WEAK. TAP TO BREAK.")
+    (define MSG-FIREWALL-BROKEN "FIREWALL BROKEN.")
+    (define MSG-PROBED-CLEAN "PROBED. CLEAN HOST.")
+    (define MSG-PROBED-ICE "PROBED. ICE DEFUSED.")
+    (define MSG-PROBE-ARMED "PROBE ARMED. PICK A HOST.")
+
+    ;; (trace-at . sever-at) of a preset; WAN's for anything else.
+    (define (scan-thresholds preset)
+      (let ((e (or (assq preset SCAN-THRESHOLDS) (assq 'wan SCAN-THRESHOLDS))))
+        (cons (cadr e) (caddr e))))
+
+    ;; A HACKER segment's trace: twist mode at these thresholds.
+    (define (scan-trace-new trace-at sever-at)
+      (trace-with-thresholds (trace-new 'twist) trace-at sever-at))
+
+    ;; a / b rounded to the nearest whole number (half up), integers only
+    (define (div-round a b)
+      (quotient (+ (* 2 a) b) (* 2 b)))
+
+    (define (hit-trace-cost tr) (div-round (trace-trace-at tr) ICE-HIT-DIVISOR))
+    (define (hit-sever-cost tr) (div-round (trace-sever-at tr) ICE-HIT-SEVER-DIVISOR))
+    (define (probe-trace-cost tr) (div-round (trace-trace-at tr) PROBE-DIVISOR))
+    (define (probe-sever-cost tr) (div-round (trace-sever-at tr) PROBE-SEVER-DIVISOR))
+
+    ;; An ICE hit: (cons trace events). events is '(traced) when an ELITE
+    ;; hit completed the trace on the spot, else '(). Nothing moves once
+    ;; the board is cleared or severed.
+    (define (scan-trace-hit tr elite?)
+      (let ((phase (trace-phase tr)))
+        (cond ((not (memq phase '(trace counter))) (cons tr '()))
+              ((and elite? (eq? phase 'trace))
+               (cons (trace tr
+                            phase: 'counter
+                            countdown: (* (trace-sever-at tr) TICKS-PER-SECOND)
+                            ice-timer: (* ICE-FIRST TICKS-PER-SECOND))
+                     '(traced)))
+              (else (cons (trace-charge tr (hit-trace-cost tr) (hit-sever-cost tr)) '())))))
+
+    (define (scan-trace-probe tr)
+      (if (memq (trace-phase tr) '(trace counter))
+          (trace-charge tr (probe-trace-cost tr) (probe-sever-cost tr))
+          tr))
+
+    ;; The counter-hack stream of a board: a function of its seed, so a
+    ;; board's counter-hacks are the same every time it is played.
+    (define (scan-rng-seed seed)
+      (prng-seed (hub-mix seed 11 2)))
+
+    ;; --- what the solver can still do ----------------------------------------------
+
+    ;; Passes before a solver run is given up as stuck: a run whose only
+    ;; remaining hosts are forbidden would otherwise go round forever.
+    (define (pass-cap s) (* 8 (segment-size s)))
+
+    ;; Can the board be finished from what is on it now, with no guess?
+    (define (segment-guess-free? s)
+      (let ((st (solve-from s #f)))
+        (let loop ((k 0))
+          (let ((status (solver-status st)))
+            (cond ((eq? status 'solved) #t)
+                  ((not (eq? status 'running)) #f)
+                  ((> k (pass-cap s)) #f)
+                  (else (solve-pass! st) (loop (+ k 1))))))))
+
+    ;; Is a clean host outside forbid (a host -> #t vector) deducible now?
+    ;; The solver may not scan a forbidden host, so the first host it scans
+    ;; is outside, and deducible from what the player sees: every reading it
+    ;; had learned by then was already on the board. The first recorded
+    ;; scan is the answer (the line holds the rules' scans; a flood behind
+    ;; one is not in it but needs the scan first).
+    (define (segment-deducible-outside? s forbid)
+      (let ((st (solve-from s forbid)))
+        (let loop ((k 0))
+          (cond ((assq 'scan (solver-line st)) #t)
+                ((not (eq? (solver-status st) 'running)) #f)
+                ((> k (pass-cap s)) #f)
+                (else (solve-pass! st) (loop (+ k 1)))))))
+
+    ;; host -> #t for every host in a firewall, plus the sector of extra
+    ;; (a center) when given.
+    (define (firewall-mask s extra)
+      (let ((v (make-vector (segment-size s) #f)))
+        (for-each (lambda (fw)
+                    (for-each (lambda (i) (vector-set! v i #t))
+                              (segment-sector s (car fw))))
+                  (segment-firewalls s))
+        (when extra
+          (for-each (lambda (i) (vector-set! v i #t)) (segment-sector s extra)))
+        v))
+
+    ;; --- the counter-hack set ---------------------------------------------------------
+
+    ;; The sectors a firewall may take: every host of the (clipped) 3x3
+    ;; hidden and in no firewall, and one of them beside a scanned host (a
+    ;; firewall off the frontier would bite nothing). In index order.
+    (define (firewall-candidates s)
+      (filter (lambda (c)
+                (let ((sector (segment-sector s c)))
+                  (and (every (lambda (i)
+                                (and (eq? (segment-state s i) 'hidden)
+                                     (not (segment-firewalled? s i))))
+                              sector)
+                       (any (lambda (i)
+                              (any (lambda (j) (eq? (segment-state s j) 'scanned))
+                                   (segment-neighbors s i)))
+                            sector))))
+              (iota (segment-size s))))
+
+    (define (firewall-applicable? s)
+      (pair? (firewall-candidates s)))
+
+    ;; Up to FIREWALL-TRIES sectors in the stream's order; the first that
+    ;; leaves a deducible clean host outside every firewall is placed,
+    ;; strong. None: #f (the interval passes with nothing).
+    (define (firewall-apply s now)
+      (let loop ((cands (firewall-candidates s)) (rng (segment-rng s)) (k 0))
+        (if (or (null? cands) (= k FIREWALL-TRIES))
+            #f
+            (let* ((rng (prng-next rng))
+                   (c (list-ref cands (prng-index rng (length cands)))))
+              (if (segment-deducible-outside? s (firewall-mask s c))
+                  (segment s
+                           rng: rng
+                           firewalls: (append (segment-firewalls s) (list (list c now #f)))
+                           fw-stuck: #f)
+                  (loop (filter (lambda (x) (not (= x c))) cands) rng (+ k 1)))))))
+
+    ;; Readings on the frontier: scanned, nonzero, not masked already, and
+    ;; beside a host still unresolved (hidden, suspect or flagged).
+    (define (mask-candidates s)
+      (filter (lambda (i)
+                (and (eq? (segment-state s i) 'scanned)
+                     (> (segment-reading s i) 0)
+                     (not (memv i (segment-masked s)))
+                     (any (lambda (j) (memq (segment-state s j) '(hidden suspect flagged)))
+                          (segment-neighbors s i))))
+              (iota (segment-size s))))
+
+    (define (mask-applicable? s)
+      (>= (length (mask-candidates s)) MASK-COUNT))
+
+    (define (mask-apply s now)
+      (let loop ((left (mask-candidates s)) (rng (segment-rng s)) (k MASK-COUNT) (picked '()))
+        (if (= k 0)
+            (segment s rng: rng masked: (list-sort < picked))
+            (let* ((rng (prng-next rng))
+                   (i (list-ref left (prng-index rng (length left)))))
+              (loop (filter (lambda (x) (not (= x i))) left) rng (- k 1) (cons i picked))))))
+
+    ;; The WIPE-SIZE squares (top-left hosts) holding at least WIPE-MIN
+    ;; scanned hosts, in index order; a grid narrower than a square has none.
+    (define (wipe-square s at)
+      (let ((w (segment-w s)))
+        (let loop ((dy 0) (dx 0) (acc '()))
+          (cond ((= dy WIPE-SIZE) (reverse acc))
+                ((= dx WIPE-SIZE) (loop (+ dy 1) 0 acc))
+                (else (loop dy (+ dx 1) (cons (+ at (* dy w) dx) acc)))))))
+
+    (define (wipe-candidates s)
+      (let ((w (segment-w s))
+            (h (segment-h s)))
+        (filter (lambda (at)
+                  (and (<= (+ (modulo at w) WIPE-SIZE) w)
+                       (<= (+ (quotient at w) WIPE-SIZE) h)
+                       (>= (length (filter (lambda (i) (eq? (segment-state s i) 'scanned))
+                                           (wipe-square s at)))
+                           WIPE-MIN)))
+                  (iota (segment-size s)))))
+
+    (define (wipe-applicable? s)
+      (pair? (wipe-candidates s)))
+
+    ;; Up to WIPE-TRIES squares in the stream's order; the first after
+    ;; which the solver still finishes the board is wiped. None: #f.
+    (define (wipe-apply s now)
+      (let loop ((cands (wipe-candidates s)) (rng (segment-rng s)) (k 0))
+        (if (or (null? cands) (= k WIPE-TRIES))
+            #f
+            (let* ((rng (prng-next rng))
+                   (at (list-ref cands (prng-index rng (length cands))))
+                   (s2 (segment-wipe s (wipe-square s at))))
+              (if (segment-guess-free? s2)
+                  (segment s2 rng: rng)
+                  (loop (filter (lambda (x) (not (= x at))) cands) rng (+ k 1)))))))
+
+    (define SCAN-ICE-SET
+      (list (ice-member name: 'firewall
+                        applicable?: firewall-applicable?
+                        apply: firewall-apply)
+            (ice-member name: 'mask
+                        applicable?: mask-applicable?
+                        apply: mask-apply)
+            (ice-member name: 'wipe
+                        applicable?: wipe-applicable?
+                        apply: wipe-apply)))
+
+    (define (scan-ice-applicable s)
+      (filter (lambda (m) ((ice-member-applicable? m) s)) SCAN-ICE-SET))
+
+    ;; One counter-hack, the shape trace-advance* wants: the last mask
+    ;; lapses first, then a uniform pick over the applicable members with
+    ;; the segment's stream. None applicable, or a member that found no
+    ;; place after all: (cons segment #f), the interval passes.
+    (define (fire-scan-ice s0 now)
+      (let* ((s (if (null? (segment-masked s0)) s0 (segment s0 masked: '())))
+             (members (scan-ice-applicable s)))
+        (if (null? members)
+            (cons s #f)
+            (let* ((rng (prng-next (segment-rng s)))
+                   (m (list-ref members (prng-index rng (length members))))
+                   (hit ((ice-member-apply m) (segment s rng: rng) now)))
+              (if hit
+                  (cons (segment hit news: '()) (ice-member-name m))
+                  (cons (segment s rng: rng) #f))))))
+
+    ;; --- the firewalls' weakness (derived, D15) ---------------------------------------
+
+    (define (firewall-decayed? fw now)
+      (>= (- now (cadr fw)) (* LOCK-DECAY TICKS-PER-SECOND)))
+
+    ;; The segment with every firewall's weak flag brought up to date at
+    ;; tick now. recheck?: the board changed, so whether a clean host is
+    ;; still deducible outside the firewalls is asked of the solver again;
+    ;; otherwise the last answer stands (the solver is not run per frame).
+    ;; The same segment (eq?) when nothing changed.
+    (define (scan-refresh-firewalls s now recheck?)
+      (let ((fws (segment-firewalls s)))
+        (if (or (null? fws) (segment-over? s))
+            s
+            (let* ((stuck? (if recheck?
+                               (not (segment-deducible-outside? s (firewall-mask s #f)))
+                               (segment-fw-stuck s)))
+                   (next (map (lambda (fw)
+                                (list (car fw) (cadr fw) (or stuck? (firewall-decayed? fw now))))
+                              fws)))
+              (if (and (eq? stuck? (segment-fw-stuck s)) (equal? next fws))
+                  s
+                  (segment s firewalls: next fw-stuck: stuck?))))))))

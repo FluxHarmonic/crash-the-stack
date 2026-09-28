@@ -1,0 +1,363 @@
+;;; SCAN's HACKER version (P6c; gate legs 6, 7 and 8 of
+;;; topics/crash-the-stack-scan-design section 11): the ICE hit, the probe,
+;;; and the three counter-hacks with the never-falsify rule.
+;;;
+;;; The prices are worked out by hand from the thresholds, not read back
+;;; from the module. The counter-hack checks that matter most use the
+;;; independent checker ((crash scan check), leg 5's) rather than the
+;;; solver the counter-hacks themselves ask, so a counter-hack that
+;;; mis-asks the solver is caught by a different algorithm.
+
+(import (sigil test)
+        (sigil list)
+        (crash tween)
+        (crash trace)
+        (crash scan rules)
+        (crash scan text)
+        (crash scan solve)
+        (crash scan check)
+        (crash scan generate)
+        (crash scan trace))
+
+;; the first k of xs (all of them when shorter)
+(define (take-up-to xs k)
+  (if (or (= k 0) (null? xs)) (quote ()) (cons (car xs) (take-up-to (cdr xs) (- k 1)))))
+
+;; (x, y) on a w-wide grid
+(define (at w x y) (+ (* y w) x))
+
+(define (trace-in-counter tr)
+  (trace tr
+         phase: 'counter
+         countdown: (* (trace-sever-at tr) TICKS-PER-SECOND)
+         ice-timer: (* ICE-FIRST TICKS-PER-SECOND)))
+
+(define (preset-trace preset)
+  (let ((t (scan-thresholds preset)))
+    (scan-trace-new (car t) (cdr t))))
+
+(define (news-has? s tag)
+  (and (assq tag (segment-news s)) #t))
+
+;; A dealt HACKER board and the segment after its uplink and the first k
+;; scans of its recorded line (its flags left out: a player's flags are
+;; not what the counter-hacks read).
+(define (hacker-deal preset seed first)
+  (deal-segment preset seed first 'hacker #f))
+
+(define (played d k)
+  (let loop ((s (dealt-segment d)) (steps (cdr (dealt-line d))) (k k))
+    (cond ((or (= k 0) (null? steps)) s)
+          ((eq? (car (car steps)) 'scan)
+           (loop (segment-scan s (cadr (car steps))) (cdr steps) (- k 1)))
+          (else (loop s (cdr steps) k)))))
+
+(define (scans-in d)
+  (length (filter (lambda (st) (eq? (car st) 'scan)) (cdr (dealt-line d)))))
+
+;; Half-played boards: seeds 1..n of a preset, uplink at the center.
+(define (half-boards preset n)
+  (let* ((dims (preset-dims preset))
+         (first (+ (* (quotient (cadr dims) 2) (car dims)) (quotient (car dims) 2))))
+    (map (lambda (seed)
+           (let ((d (hacker-deal preset seed first)))
+             (segment (played d (quotient (scans-in d) 2)) rng: (scan-rng-seed seed))))
+         (iota n 1))))
+
+;; Every host of every firewall.
+(define (walled s)
+  (apply append (map (lambda (fw) (segment-sector s (car fw))) (segment-firewalls s))))
+
+;; The independent check: some hidden host outside the firewalls that the
+;; checker proves clean from what the player sees (tripped and defused ICE
+;; known, no flags).
+(define (forced-clean-outside? s)
+  (let ((v (view-of s))
+        (out (walled s)))
+    (any (lambda (h)
+           (and (not (memv h out))
+                (memq (segment-state s h) '(hidden suspect))
+                (eq? #t (step-forced? v 'scan h))))
+         (iota (segment-size s)))))
+
+;; The independent check of "the board can still be finished": the
+;; solver's line from this state, every step proved by the checker as it
+;; replays through the rules. #t, or the refusal.
+(define (finishes-checked? s)
+  (let ((st (solve-from s #f)))
+    (let run ((k 0))
+      (when (and (eq? (solver-status st) 'running) (< k 100000))
+        (solve-pass! st)
+        (run (+ k 1))))
+    (if (not (eq? (solver-status st) 'solved))
+        (list 'solver (solver-status st))
+        (let loop ((s s) (steps (reverse (solver-line st))))
+          (cond ((null? steps) (if (segment-won? s) #t (list 'unfinished)))
+                (else
+                 (let* ((step (car steps))
+                        (forced (step-forced? (view-of s) (car step) (cadr step))))
+                   (if (eq? forced #t)
+                       (loop (if (eq? (car step) 'scan)
+                                 (segment-scan s (cadr step))
+                                 (segment-flag s (cadr step)))
+                             (cdr steps))
+                       (list 'refused forced step)))))))))
+
+;; --- a hand board for the firewalls -------------------------------------------
+;;
+;; 5x5, one ICE at (4,4). Everything scanned but the bottom-right 3x3
+;; (x and y 2..4), as a wipe's edge leaves a board: the scanned zeros
+;; beside it make its hosts deducible. A firewall centred on (3,3) covers
+;; every hidden host, so nothing deducible is left outside it; one on
+;; (4,3) or (3,4) leaves (2,2), (2,3) or (2,4) outside.
+(define CORNER-ICE
+  (list "....."
+        "....."
+        "....."
+        "....."
+        "....*"))
+
+(define (corner-board)
+  (let* ((s (text->segment CORNER-ICE 'hacker #f))
+         (cells (make-vector 25 'scanned)))
+    (for-each (lambda (y)
+                (for-each (lambda (x) (vector-set! cells (at 5 x y) 'hidden))
+                          (list 2 3 4)))
+              (list 2 3 4))
+    (segment s cells: cells left: 8 first: 0)))
+
+(test-group "scan HACKER: the ICE hit (leg 6)"
+  (test "a hit in TRACE adds exactly half of trace-at: 30 on LAN, 90 on WAN, 200 on BACKBONE"
+    (assert-equal (list 30 90 200)
+                  (map (lambda (p)
+                         (let* ((tr (preset-trace p))
+                                (tr2 (car (scan-trace-hit tr #f))))
+                           (- (trace-value tr2) (trace-value tr))))
+                       (list 'lan 'wan 'backbone))))
+  (test "under COUNTER-HACK a hit takes exactly a fifth of sever-at off the countdown: 18, 44, 60 s"
+    (assert-equal (list (* 18 60) (* 44 60) (* 60 60))
+                  (map (lambda (p)
+                         (let* ((tr (trace-in-counter (preset-trace p)))
+                                (tr2 (car (scan-trace-hit tr #f))))
+                           (- (trace-countdown tr) (trace-countdown tr2))))
+                       (list 'lan 'wan 'backbone))))
+  (test "ELITE: a hit in TRACE completes the trace on that step"
+    (let* ((tr (preset-trace 'wan))
+           (r (scan-trace-hit tr #t)))
+      (assert-eq 'counter (trace-phase (car r)))
+      (assert-equal '(traced) (cdr r))
+      (assert-equal (* 220 60) (trace-countdown (car r)))))
+  (test "ELITE under COUNTER-HACK charges the countdown as any hit does"
+    (let* ((tr (trace-in-counter (preset-trace 'wan)))
+           (r (scan-trace-hit tr #t)))
+      (assert-equal (* 44 60) (- (trace-countdown tr) (trace-countdown (car r))))
+      (assert-equal '() (cdr r))))
+  (test "a hit on a severed or cleared trace charges nothing"
+    (let ((sev (trace (preset-trace 'wan) phase: 'severed))
+          (clr (trace (preset-trace 'wan) phase: 'cleared)))
+      (assert-equal (trace-value sev) (trace-value (car (scan-trace-hit sev #f))))
+      (assert-equal (trace-value clr) (trace-value (car (scan-trace-hit clr #f))))))
+  (test "HACKER plays on after a trip: the ICE shows tripped, counts in the counter, and scans still land"
+    (let* ((s (text->segment (list "*...." "....." ".....") 'hacker #f))
+           (s1 (segment-scan s 0))
+           (s2 (segment-scan s1 (at 5 1 0))))
+      (assert-eq 'tripped (segment-state s1 0))
+      (assert-true (news-has? s1 'trip))
+      (assert-false (segment-over? s1))
+      (assert-equal 0 (segment-counter s1))
+      (assert-eq 'scanned (segment-state s2 (at 5 1 0)))))
+  (test "a tripped ICE counts as a flag for a sweep"
+    (let* ((s (text->segment (list "*...." "....." ".....") 'hacker #f))
+           (s1 (segment-scan (segment-scan s 0) (at 5 1 0)))
+           (s2 (segment-sweep s1 (at 5 1 0))))
+      (assert-equal 1 (segment-reading s1 (at 5 1 0)))
+      (assert-eq 'scanned (segment-state s2 (at 5 0 1)))
+      (assert-eq 'scanned (segment-state s2 (at 5 1 1)))
+      (assert-eq 'scanned (segment-state s2 (at 5 2 1)))))
+  (test "the same trip on CLASSIC ends the board: every ICE shown, a wrong flag struck"
+    (let* ((s (text->segment (list "*...*" "....." ".....") 'original #f))
+           (s1 (segment-flag s (at 5 2 2)))
+           (s2 (segment-scan s1 0)))
+      (assert-true (segment-lost? s2))
+      (assert-eq 'tripped (segment-cell-state s2 0))
+      (assert-eq 'ice (segment-cell-state s2 4))
+      (assert-eq 'wrong-flag (segment-cell-state s2 (at 5 2 2)))
+      (assert-eq 'hidden (segment-state (segment-scan s2 (at 5 2 0)) (at 5 2 0))))))
+
+(test-group "scan HACKER: the probe (leg 7)"
+  (test "a probe charges a sixth of trace-at, rounded: 10 on LAN, 30 on WAN, 67 on BACKBONE"
+    (assert-equal (list 10 30 67)
+                  (map (lambda (p)
+                         (let ((tr (preset-trace p)))
+                           (- (trace-value (scan-trace-probe tr)) (trace-value tr))))
+                       (list 'lan 'wan 'backbone))))
+  (test "under COUNTER-HACK a probe takes a fifteenth of sever-at: 6, 15, 20 s"
+    (assert-equal (list (* 6 60) (* 15 60) (* 20 60))
+                  (map (lambda (p)
+                         (let ((tr (trace-in-counter (preset-trace p))))
+                           (- (trace-countdown tr) (trace-countdown (scan-trace-probe tr)))))
+                       (list 'lan 'wan 'backbone))))
+  (test "a probe is a third of a hit on every preset (the blind scan's break-even at one in three)"
+    (for-each (lambda (p)
+                (let ((tr (preset-trace p)))
+                  (assert-true (<= (abs (- (* 3 (probe-trace-cost tr)) (hit-trace-cost tr))) 2))))
+              (list 'lan 'wan 'backbone)))
+  (test "a probe on a clean host scans it (and floods from a zero)"
+    (let* ((s (text->segment (list "*...." "....." ".....") 'hacker #f))
+           (s1 (segment-probe s (at 5 4 2))))
+      (assert-equal (list 'probed (at 5 4 2) 'clean) (car (segment-news s1)))
+      (assert-eq 'scanned (segment-state s1 (at 5 4 2)))
+      (assert-eq 'scanned (segment-state s1 (at 5 2 0)))))
+  (test "a probe on ICE defuses it: shown, counted, never tripped, the board plays on"
+    (let* ((s (text->segment (list "*...." "....." ".....") 'hacker #f))
+           (s1 (segment-probe s 0)))
+      (assert-equal (list 'probed 0 'ice) (car (segment-news s1)))
+      (assert-eq 'defused (segment-cell-state s1 0))
+      (assert-false (news-has? s1 'trip))
+      (assert-equal 0 (segment-counter s1))
+      (assert-false (segment-over? s1))))
+  (test "a probe on a flagged host is refused like a scan"
+    (let* ((s (segment-flag (text->segment (list "*...." "....." ".....") 'hacker #f) 0))
+           (s1 (segment-probe s 0)))
+      (assert-equal (list 'refused 'flagged 0) (car (segment-news s1)))
+      (assert-eq 'flagged (segment-state s1 0)))))
+
+(test-group "scan HACKER: the firewall (leg 8)"
+  (test "the hand board: a firewall over (3,3) would leave nothing deducible outside it; over (4,3) it would not"
+    (let ((s (corner-board)))
+      (assert-true (forced-clean-outside? s))
+      (assert-false (forced-clean-outside? (segment s firewalls: (list (list (at 5 3 3) 0 #f)))))
+      (assert-true (forced-clean-outside? (segment s firewalls: (list (list (at 5 4 3) 0 #f)))))))
+  (test "a firewall is never placed over the last deducible clean host (30 streams, the checker's word)"
+    (let ((s (corner-board)))
+      (for-each (lambda (k)
+                  (let ((hit ((ice-member-apply (car SCAN-ICE-SET)) (segment s rng: (scan-rng-seed k)) 0)))
+                    (when hit
+                      (assert-false (= (at 5 3 3) (car (car (segment-firewalls hit)))))
+                      (assert-true (forced-clean-outside? hit)))))
+                (iota 30 1))))
+  (test "the hand board's candidates are exactly the three hidden sectors beside the scanned hosts"
+    (assert-equal (list (at 5 3 3) (at 5 4 3) (at 5 3 4)) (firewall-candidates (corner-board))))
+  (test "on half-played WAN and BACKBONE boards every placed firewall leaves a checker-forced clean host outside"
+    (let ((placed 0))
+      (for-each (lambda (s)
+                  (let ((hit ((ice-member-apply (car SCAN-ICE-SET)) s 0)))
+                    (when hit
+                      (set! placed (+ placed 1))
+                      (assert-true (forced-clean-outside? hit))
+                      (assert-false (caddr (car (segment-firewalls hit)))))))
+                (append (half-boards 'wan 8) (half-boards 'backbone 4)))
+      ;; a floor: a placement that never happens proves nothing
+      (assert-true (>= placed 8))))
+  (test "a firewall holding the last deducible host reads weak; one that does not reads strong"
+    (let ((s (corner-board)))
+      (assert-eq 'firewall-weak
+                 (segment-cell-state (scan-refresh-firewalls (segment s firewalls: (list (list (at 5 3 3) 0 #f))) 0 #t)
+                                     (at 5 3 3)))
+      (assert-eq 'firewall-strong
+                 (segment-cell-state (scan-refresh-firewalls (segment s firewalls: (list (list (at 5 4 3) 0 #f))) 0 #t)
+                                     (at 5 4 3)))))
+  (test "a firewall turns weak at exactly LOCK-DECAY after it landed, and not a tick before"
+    (let* ((s (segment (corner-board) firewalls: (list (list (at 5 4 3) 100 #f))))
+           (decay (* LOCK-DECAY TICKS-PER-SECOND)))
+      (assert-eq 'firewall-strong (segment-cell-state (scan-refresh-firewalls s (+ 100 decay -1) #t) (at 5 4 3)))
+      (assert-eq 'firewall-weak (segment-cell-state (scan-refresh-firewalls s (+ 100 decay) #t) (at 5 4 3)))))
+  (test "a strong firewall refuses a scan and a flag; the board is unchanged"
+    (let* ((s (segment (corner-board) firewalls: (list (list (at 5 4 3) 0 #f))))
+           (s1 (segment-scan s (at 5 4 2)))
+           (s2 (segment-flag s (at 5 4 2))))
+      (assert-equal (list 'refused 'firewall (at 5 4 2)) (car (segment-news s1)))
+      (assert-equal (list 'refused 'firewall (at 5 4 2)) (car (segment-news s2)))
+      (assert-equal (segment-cells s) (segment-cells s1))
+      (assert-equal (segment-cells s) (segment-cells s2))))
+  (test "one scan breaks a weak firewall and scans that host"
+    (let* ((s (segment (corner-board) firewalls: (list (list (at 5 4 3) 0 #t))))
+           (s1 (segment-scan s (at 5 4 2))))
+      (assert-eq 'scanned (segment-state s1 (at 5 4 2)))
+      (assert-equal '() (segment-firewalls s1))
+      (assert-true (news-has? s1 'broke))))
+  (test "a flood stops at a firewall"
+    (let* ((s (segment (corner-board) firewalls: (list (list (at 5 4 3) 0 #f))))
+           (s1 (segment-scan s (at 5 2 2))))
+      (assert-eq 'scanned (segment-state s1 (at 5 2 3)))
+      (assert-eq 'hidden (segment-state s1 (at 5 3 2)))
+      (assert-eq 'hidden (segment-state s1 (at 5 3 3))))))
+
+(test-group "scan HACKER: the mask and the wipe (leg 8)"
+  (test "a mask hides exactly MASK-COUNT frontier readings, each drawn with the one noise state"
+    (let ((masked 0))
+      (for-each (lambda (s)
+                  (when (>= (length (mask-candidates s)) MASK-COUNT)
+                    (let ((hit ((ice-member-apply (cadr SCAN-ICE-SET)) s 0)))
+                      (set! masked (+ masked 1))
+                      (assert-equal MASK-COUNT (length (segment-masked hit)))
+                      (for-each (lambda (i)
+                                  (assert-eq 'masked (segment-cell-state hit i))
+                                  (assert-true (> (segment-reading hit i) 0)))
+                                (segment-masked hit)))))
+                (half-boards 'wan 6))
+      (assert-true (>= masked 4))))
+  (test "the mask lapses at the next counter-hack: a fire that is not a mask leaves none"
+    (for-each (lambda (s)
+                (let* ((m (segment s masked: (take-up-to (mask-candidates s) 3)))
+                       (r (fire-scan-ice m 0)))
+                  (unless (eq? (cdr r) 'mask)
+                    (assert-equal '() (segment-masked (car r))))))
+              (half-boards 'wan 6)))
+  (test "a sweep on a masked reading acts on its true count"
+    (let* ((s (text->segment (list "*...." "....." ".....") 'hacker #f))
+           (s1 (segment-flag (segment-scan s (at 5 1 0)) 0))
+           (m (segment s1 masked: (list (at 5 1 0))))
+           (s2 (segment-sweep m (at 5 1 0))))
+      (assert-eq 'masked (segment-cell-state m (at 5 1 0)))
+      (assert-eq 'scanned (segment-state s2 (at 5 1 1)))))
+  (test "a wipe leaves the ICE and every reading exactly as they were, host by host"
+    (let ((wiped 0))
+      (for-each (lambda (s)
+                  (let ((hit ((ice-member-apply (caddr SCAN-ICE-SET)) s 0)))
+                    (when hit
+                      (set! wiped (+ wiped 1))
+                      (for-each (lambda (i)
+                                  (assert-equal (segment-ice? s i) (segment-ice? hit i))
+                                  (assert-equal (segment-reading s i) (segment-reading hit i)))
+                                (iota (segment-size s)))
+                      (assert-true (> (segment-clean-left hit) (segment-clean-left s))))))
+                (half-boards 'wan 6))
+      (assert-true (>= wiped 4))))
+  (test "after a wipe the board still finishes with no guess: the solver's line, every step checker-proved"
+    (for-each (lambda (s)
+                (let ((hit ((ice-member-apply (caddr SCAN-ICE-SET)) s 0)))
+                  (when hit
+                    (assert-equal #t (finishes-checked? hit)))))
+              (half-boards 'wan 6)))
+  (test "fire-scan-ice is deterministic per segment: the same stream fires the same counter-hack"
+    (for-each (lambda (s)
+                (let ((a (fire-scan-ice s 0))
+                      (b (fire-scan-ice s 0)))
+                  (assert-equal (cdr a) (cdr b))
+                  (assert-true (segment-equal? (car a) (car b)))
+                  (assert-equal (segment-firewalls (car a)) (segment-firewalls (car b)))
+                  (assert-equal (segment-masked (car a)) (segment-masked (car b)))))
+              (half-boards 'wan 4))))
+
+(test-group "scan HACKER: the ICE never falsifies (leg 8)"
+  (test "over a scripted COUNTER-HACK no reading changes value and no ICE moves, tick by tick"
+    (let loop ((boards (half-boards 'wan 3)) (fired 0))
+      (if (null? boards)
+          ;; a floor: a COUNTER-HACK that fired nothing would pass for free
+          (assert-true (>= fired 6))
+          (let* ((s0 (car boards))
+                 (readings (map (lambda (i) (segment-reading s0 i)) (iota (segment-size s0))))
+                 (ice (map (lambda (i) (segment-ice? s0 i)) (iota (segment-size s0)))))
+            (let tick ((k 0)
+                       (tr (trace-in-counter (preset-trace 'wan)))
+                       (s s0)
+                       (fired fired))
+              (if (= k 120)
+                  (loop (cdr boards) fired)
+                  (let* ((r (trace-advance* tr s TICKS-PER-SECOND fire-scan-ice))
+                         (s1 (cadr r))
+                         (n (length (filter (lambda (e) (memq e '(firewall mask wipe))) (caddr r)))))
+                    (assert-equal readings (map (lambda (i) (segment-reading s1 i)) (iota (segment-size s1))))
+                    (assert-equal ice (map (lambda (i) (segment-ice? s1 i)) (iota (segment-size s1))))
+                    (tick (+ k 1) (car r) s1 (+ fired n))))))))))

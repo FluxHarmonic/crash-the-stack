@@ -57,7 +57,8 @@
   (export QUANTUM
           solver solver? solver-status solver-line solver-passes solver-seg
           solver-open solver-flag solver-frontier solver-around
-          solve-start solve-pass! solve-run! solve-segment solve-perturbed! solve-phase)
+          solve-start solve-pass! solve-run! solve-segment solve-perturbed! solve-phase
+          solve-from solver-opened)
 
   (begin
     ;; Readings taken off the worklist per unit of work.
@@ -88,7 +89,8 @@
       (ice default: 0)                       ; the ICE total (public: the counter)
       (line default: '() mutable: #t)        ; newest first while solving
       (status default: 'running mutable: #t) ; running | solved | stuck
-      (passes default: 0 mutable: #t))
+      (passes default: 0 mutable: #t)
+      (forbid default: #f))                  ; host -> #t for hosts no rule may scan (a firewall), or #f
 
     ;; A solver on a dealt segment, with the uplink scanned.
     (define (solve-start seg first)
@@ -105,6 +107,53 @@
                          clean: (- n ice)
                          ice: ice)))
         (scan-step! st first 'uplink)
+        (when (done? st)
+          (set-solver-status! st 'solved))
+        st))
+
+    ;; A solver on a segment in PLAY (HACKER's counter-hacks ask it what the
+    ;; player can still deduce, (crash scan trace)): what the player has
+    ;; scanned is open, and ICE they tripped or defused is flagged. Their
+    ;; own flags are not trusted (a flag can be wrong). A scanned zero that
+    ;; borders hidden hosts (a wipe's edge) has them scanned by rule (a),
+    ;; which is sound: a zero has no ICE around it. forbid: host -> #t for
+    ;; hosts no rule may scan, or #f. The line it records starts empty and
+    ;; replays from this state through the rules.
+    (define (solve-from seg forbid)
+      (let* ((n (segment-size seg))
+             (ice (segment-ice-total seg))
+             (st (solver seg: seg
+                         open: (make-vector n #f)
+                         flag: (make-vector n #f)
+                         queued: (make-vector n #f)
+                         fringe: (make-vector n #f)
+                         around: (make-vector n 0)
+                         pending: (make-vector n #f)
+                         by-host: (make-vector n '())
+                         clean: (- n ice)
+                         ice: ice
+                         forbid: forbid)))
+        (let loop ((i 0))
+          (when (< i n)
+            (case (segment-state seg i)
+              ((scanned) (open-host! st i))
+              ((tripped defused)
+               (vector-set! (solver-flag st) i #t)
+               (set-solver-flags! st (+ 1 (solver-flags st)))
+               (touch! st i))
+              (else #f))
+            (loop (+ i 1))))
+        ;; a scanned zero beside a hidden host goes on the worklist (enqueue!
+        ;; skips zeros), so rule (a) scans its neighbors as recorded steps:
+        ;; the line then replays through the rules, which never flood from a
+        ;; zero that is already open
+        (let loop ((i 0))
+          (when (< i n)
+            (when (and (vector-ref (solver-open st) i)
+                       (= 0 (segment-reading seg i))
+                       (any (lambda (j) (hidden? st j)) (segment-neighbors seg i)))
+              (queue! st i))
+            (loop (+ i 1))))
         (when (done? st)
           (set-solver-status! st 'solved))
         st))
@@ -172,10 +221,17 @@
                     (segment-neighbors (solver-seg st) c)))
         r))
 
-    ;; Queue c's hidden neighbors for the flood.
+    ;; A host no rule may scan (solve-from's forbid): it stays hidden, so
+    ;; every constraint still counts it as unknown, which keeps the rules
+    ;; sound; only the scan is skipped.
+    (define (forbidden? st i)
+      (let ((f (solver-forbid st)))
+        (and f (vector-ref f i))))
+
+    ;; Queue c's hidden neighbors for the flood (never a forbidden one).
     (define (spread! st c)
       (for-each (lambda (j)
-                  (when (hidden? st j)
+                  (when (and (hidden? st j) (not (forbidden? st j)))
                     (vector-set! (solver-pending st) j #t)
                     (set-solver-flood! st (cons j (solver-flood st)))))
                 (segment-neighbors (solver-seg st) c)))
@@ -202,7 +258,7 @@
     ;; LAN lines as `not-hidden` when this drain was missing).
     (define (scan-step! st i rule)
       (drain-flood! st)
-      (when (and (hidden? st i) (not (done? st)))
+      (when (and (hidden? st i) (not (forbidden? st i)) (not (done? st)))
         (record! st 'scan i rule)
         (reveal! st i)))
 
