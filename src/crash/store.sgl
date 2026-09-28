@@ -1,122 +1,31 @@
-;;; (crash store) - Where a save lives on each target.
+;;; (crash store) - Crash's key-value store: Substratic's, named for Crash.
 ;;;
-;;; One interface, two backends, picked at the import like (crash main):
-;;; on the web, the browser's localStorage through (sigil browser
-;;; local-storage) (blackICE's precedent); natively, one file per key
-;;; under the user's data directory ($XDG_DATA_HOME/crash-the-stack, or
-;;; ~/.local/share/crash-the-stack), which the gate points elsewhere with
-;;; set-store-root!. Keys are short names ("board", "settings"); values
-;;; are text. store-read-datum and store-write-datum! carry an
-;;; s-expression through, which is how (crash save)'s datum travels.
+;;; The store was Crash's own module and is the ancestor of (substratic
+;;; store kv); since t-90ec6b Crash uses Substratic's (the same code, plus
+;;; set-store-app! and set-store-prefix!). This module is the one place
+;;; Crash names itself to it: loading it sets the app to "crash-the-stack",
+;;; so native saves stay in $XDG_DATA_HOME/crash-the-stack (or
+;;; ~/.local/share/crash-the-stack, or %APPDATA%\crash-the-stack) whatever
+;;; imports the store first. Without that, Substratic's default,
+;;; "sigil-game", would move the directory and every native save would look
+;;; lost (topics/substratic-adoption-survey, "Store"). No web prefix: every
+;;; localStorage key stays where players' saves already are.
+;;; test-store-root pins the directory and the key names.
 ;;;
-;;; Nothing here raises: a missing key is #f, a failed write is #f (the
-;;; shell may say so in the HUD), and a save that does not read back as
-;;; one datum is #f. Each verb is one define per target, inside the
-;;; cond-expand.
+;;; The verbs are Substratic's, re-exported unchanged; STORE-KEYS is Crash's.
 
 (define-library (crash store)
-  (cond-expand
-    (wasm (import (sigil io)
-                  (sigil browser local-storage)))
-    (else (import (sigil io)
-                  (sigil fs)
-                  (sigil process))))
+  (import (substratic store kv))
 
   (export store-root set-store-root!
           store-get store-set! store-remove!
           store-read-datum store-write-datum!
           datum->text text->datum
-          STORE-KEYS)
+          STORE-KEYS STORE-APP)
 
   (begin
     (define STORE-KEYS '("board" "settings"))
 
-    ;; Native only: the directory the files live in. #f until first use.
-    (define *root* #f)
-
-    (define (store-root)
-      (or *root*
-          (begin (set! *root* (default-root)) *root*)))
-
-    (define (set-store-root! path)
-      (set! *root* path))
-
-    (define (key-path key)
-      (string-append (store-root) "/" key ".sgl"))
-
-    ;; --- the root and the three verbs, per target ---------------------------
-
-    (cond-expand
-      (wasm
-       (define (default-root)
-         "localStorage")
-
-       (define (store-get key)
-         (guard (e (else #f))
-           (local-storage-get key)))
-
-       (define (store-set! key text)
-         (guard (e (else #f))
-           (local-storage-set! key text)))
-
-       (define (store-remove! key)
-         (guard (e (else #f))
-           (local-storage-remove! key))))
-
-      (else
-       ;; The user data directory, by the first variable set: XDG_DATA_HOME
-       ;; (Linux, and every drive of the game: the arms point it at a
-       ;; scratch directory), APPDATA (Windows: %APPDATA% is the Roaming
-       ;; profile, David's ruling 2026-09-21; real Windows sets neither
-       ;; XDG_DATA_HOME nor HOME, so before this the store fell to the
-       ;; current directory there), then ~/.local/share, then the current
-       ;; directory. (crash tracker files) resolves its tunes directory
-       ;; the same way; keep the two chains identical.
-       (define (default-root)
-         (let ((xdg (getenv "XDG_DATA_HOME"))
-               (appdata (getenv "APPDATA"))
-               (home (getenv "HOME")))
-           (string-append (cond ((and xdg (> (string-length xdg) 0)) xdg)
-                                ((and appdata (> (string-length appdata) 0)) appdata)
-                                (home (string-append home "/.local/share"))
-                                (else "."))
-                          "/crash-the-stack")))
-
-       (define (store-get key)
-         (guard (e (else #f))
-           (read-file-string (key-path key) missing: #f)))
-
-       (define (store-set! key text)
-         (guard (e (else #f))
-           (ensure-directory (store-root))
-           (write-file-string (key-path key) text)
-           #t))
-
-       (define (store-remove! key)
-         (guard (e (else #f))
-           (when (file-exists? (key-path key))
-             (delete-file (key-path key)))
-           #t))))
-
-    ;; --- datums ------------------------------------------------------------------
-
-    (define (datum->text d)
-      (with-output-to-string (lambda () (write d))))
-
-    ;; The one datum in the text, or #f for anything else (empty, more than
-    ;; one, unreadable).
-    (define (text->datum text)
-      (and (string? text)
-           (guard (e (else #f))
-             (let* ((port (open-input-string text))
-                    (d (read port))
-                    (more (read port)))
-               (and (not (eof-object? d))
-                    (eof-object? more)
-                    d)))))
-
-    (define (store-read-datum key)
-      (text->datum (store-get key)))
-
-    (define (store-write-datum! key d)
-      (store-set! key (datum->text d)))))
+    ;; the data directory's name (native): Crash's since 0.1
+    (define STORE-APP "crash-the-stack")
+    (set-store-app! STORE-APP)))
