@@ -2,20 +2,20 @@
 """INTERCEPT drift gate: line the captured output up against an offline render.
 
 Inputs:
-  capture.pcm   s16le stereo 48 kHz from worker-null.monitor (parec), started at
-                CAPTURE_START_MS (epoch ms, from `date +%s%3N` just before parec)
+  capture.pcm   s16le stereo 48 kHz from worker-null.monitor (parec, 20 ms latency)
+  capclock.txt  "EPOCH-MS BYTES" every 100 ms while parec ran (or a bare epoch ms)
   ref.wav       `motif tune render SONG.cts -r 48000`: sample 0 is song time 0
   game.log      the game's stdout: `crash: intercept clock NOW error E audio A wall W`
 
 Method: for reference windows (1.5 s every 5 s of song time), find the lag in
-the capture by normalised cross-correlation of the band-limited envelope, then
-refine at sample level on the raw signal. Each window gives
+the capture by normalised cross-correlation of the amplitude envelopes (3 kHz,
+1/3 ms steps; each window searched around the last one's lag). Each window gives
 capture_sample(T) = offset + slope * T. The slope measures drift between what
 the device played and song time (1.0 exactly means no drift); the residuals
 are the per-window error.
 
 Then the absolute check: the capture maps song time T to epoch wall time
-  heard(T) = CAPTURE_START_MS + capture_sample(T) / 48
+  heard(T) = CAPTURE_START + capture_sample(T) / 48   (the start from capclock.txt)
 and the game's clock lines claim the audio clock read A at wall W. The
 difference W - heard(A) is how far the game's audio clock sits from the sound
 arriving at the null sink's monitor, INCLUDING parec's own start-up and
@@ -53,7 +53,24 @@ def xcorr_lag(a, b):
     return int(np.argmax(c)), float(np.max(c))
 
 def main():
-    cap_path, ref_path, log_path, start_ms = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+    cap_path, ref_path, log_path, clock_arg = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+    # When capture sample 0 was heard, in epoch ms. From the capture's own
+    # clock file (lines "EPOCH-MS BYTES", bytes read before the time, so each
+    # line bounds the start from above: wall - frames/48), the tightest bound
+    # over its first 10 s; a bare number is the old way (when parec was asked
+    # to start), which a loaded box delays by tens of ms.
+    try:
+        start_ms = float(clock_arg)
+        print(f"capture start: {start_ms:.0f} (given)")
+    except ValueError:
+        recs = [tuple(map(float, l.split())) for l in open(clock_arg) if len(l.split()) == 2]
+        recs = [(w, b / 4.0) for w, b in recs if b > 0]
+        if not recs:
+            print("SETUP-FAILED: the capture clock file has no data"); sys.exit(125)
+        first = recs[0][0]
+        bounds = [w - f / (RATE / 1000.0) for w, f in recs if w - first < 10000]
+        start_ms = min(bounds)
+        print(f"capture start: {start_ms:.0f} from {len(bounds)} clock lines (spread of the bounds {max(bounds) - start_ms:.0f} ms)")
     cap = load_capture(cap_path)
     ref = load_wav(ref_path)
     print(f"capture {len(cap)/RATE:.1f} s, reference {len(ref)/RATE:.1f} s, capture rms {np.sqrt(np.mean(cap**2)):.4f}")
@@ -117,9 +134,9 @@ def main():
     lines = [l for l in open(log_path, errors='replace') if 'intercept clock' in l]
     diffs, errs = [], []
     for l in lines:
-        m = re.search(r'intercept clock (-?\d+) error (\S+) audio (\S+) wall (\d+)', l)
+        m = re.search(r'intercept clock (-?\d+) error (\S+) audio (\S+) wall (\S+)', l)
         if not m: continue
-        now, err, aud, wall = int(m.group(1)), m.group(2), m.group(3), int(m.group(4))
+        now, err, aud, wall = int(m.group(1)), m.group(2), m.group(3), float(m.group(4))
         if err != '-': errs.append(float(err))
         if aud == '-' or float(aud) < 1000: continue
         a = float(aud)
@@ -140,12 +157,30 @@ def main():
         print(f"SETUP-FAILED: only {len(diffs)} clock lines with an audio reading"); sys.exit(125)
     d = np.array(diffs)
     head, tail = float(np.median(d[:5])), float(np.median(d[-5:]))
+    # the load during the capture (the drive script's RUNDIR/load: start and end), else now
+    try:
+        import os
+        load = open(os.path.join(os.path.dirname(os.path.abspath(cap_path)), "load")).read().replace("\n", ", ").strip(", ")
+    except OSError:
+        load = "now " + open("/proc/loadavg").read().split()[0]
+    resid_max = float(np.max(np.abs(resid)) / RATE * 1000)
+    median, moved = float(np.median(d)), tail - head
+    # 1. gross errors fail whatever the capture's state: no contention measured
+    #    here moved the clock 100 ms (the sabotages: 382 ms early; 606 ms a minute)
+    if abs(median) > 100 or abs(moved) > 100:
+        print(f"FAIL: the audio clock sits {median:+.1f} ms from the sound and moved {moved:+.1f} ms over the song"); sys.exit(1)
+    # 2. the instrument: a capture with gaps (the null sink or parec starved on a
+    #    loaded box: residuals of 17-31 ms at loadavg 19-24, 8 ms on a quieter
+    #    box) cannot judge a 30 ms limit, so it says so instead of convicting the game
+    if resid_max > 12 or len(good) < 30:
+        print(f"SETUP-FAILED: the capture is not a clean instrument (window residual max {resid_max:.1f} ms, "
+              f"{len(good)} windows; loadavg {load}): the box was contended; rerun on a quiet box. "
+              f"For the record: {median:+.1f} ms from the sound, {moved:+.1f} ms of movement"); sys.exit(125)
     reasons = []
-    if len(good) < 30: reasons.append(f"only {len(good)} windows correlate (30 needed)")
-    if abs(np.median(d)) > 30: reasons.append(f"the audio clock sits {np.median(d):+.1f} ms from the sound (30 allowed)")
-    if abs(tail - head) >= 15: reasons.append(f"the audio clock moved {tail - head:+.1f} ms against the sound over the song (15 allowed)")
+    if abs(median) > 30: reasons.append(f"the audio clock sits {median:+.1f} ms from the sound (30 allowed)")
+    if abs(moved) >= 15: reasons.append(f"the audio clock moved {moved:+.1f} ms against the sound over the song (15 allowed)")
     if reasons:
-        print("FAIL: " + "; ".join(reasons)); sys.exit(1)
+        print("FAIL: " + "; ".join(reasons) + f" (loadavg {load})"); sys.exit(1)
     print(f"PASS: audio clock {np.median(d):+.1f} ms from the sound, {tail - head:+.1f} ms of movement first to last, {len(good)} windows")
 
 main()

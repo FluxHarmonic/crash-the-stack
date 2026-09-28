@@ -337,7 +337,7 @@ const DEVICE = PHONE ? "touch" : "keys";
 const OPEN_RE = /^crash: intercept open (\S+) (\S+) (keys|touch) notes (\d+) hash (\d+) lanes (\d+)$/;
 const START_RE = /^crash: intercept start (\S+) lead (\d+) audio (on|off)$/;
 const PRESS_RE = /^crash: intercept press (\d+) (-?\d+)$/;
-const CLOCK_RE = /^crash: intercept clock (-?\d+) error (\S+) audio (\S+) wall (\d+)$/;
+const CLOCK_RE = /^crash: intercept clock (-?\d+) error (\S+) audio (\S+) wall (\S+)$/;
 const END_RE = /^crash: intercept end (held|severed) score (\d+) acc (\S+) max-combo (\d+) counts (\d+) (\d+) (\d+) (\d+)$/;
 // A real key: keyDown then keyUp from the DevTools Protocol (trusted events).
 const KEYDEF = { s: ["KeyS", 83], d: ["KeyD", 68], f: ["KeyF", 70], j: ["KeyJ", 74], k: ["KeyK", 75], l: ["KeyL", 76],
@@ -453,7 +453,11 @@ let doorMark = 0;
   else pass("clock", `8 s of song: errors ${cl.map((m) => m[2]).join(" ")} ms; audio ${cl[0][3]} .. ${cl[cl.length - 1][3]}`);
 
   // render: a strip of the keycaps (desktop) or of lane 0's pad rule (phone)
-  const [vx, vy, vw, vh] = PHONE ? [8, 262 + 12, 144, 2] : [127, 312 + 9, 38, 10];
+  // desktop: lane 0's keycap, left of its letter (the lanes are 48 px, centred with a 16 px gap between the hands)
+  const doorOpen = linesFrom(OPEN_RE, doorMark)[0];
+  const lanes = doorOpen ? +doorOpen[6] : 6;
+  const x0 = (640 - (lanes * 48 + 16)) / 2;
+  const [vx, vy, vw, vh] = PHONE ? [8, 262 + 12, 144, 2] : [x0 + 6, 312 + 10, 10, 12];
   const a = await client(vx, vy), b = await client(vx + vw, vy + vh);
   const shot = await send("Page.captureScreenshot", { format: "png", clip: { x: a.cx, y: a.cy, width: b.cx - a.cx, height: b.cy - a.cy, scale: 1 } });
   const buf = Buffer.from(shot.data, "base64");
@@ -463,7 +467,8 @@ let doorMark = 0;
   for (let i = 0; i < img.w * img.h; i++) {
     const r = img.px[i * img.bpp], g = img.px[i * img.bpp + 1], bl = img.px[i * img.bpp + 2];
     // C-BAR-C #2E1C4D (keycaps; the lit key flashes C-WIRE-LIT) / C-COLD #1A73D9 (the pad's rule), allowing the scanline pass
-    if (PHONE ? (bl > 120 && bl > r + 80 && g > r + 20) : (Math.abs(r - 46) <= 22 && Math.abs(g - 28) <= 20 && Math.abs(bl - 77) <= 28)) hit++;
+    if (PHONE ? (bl > 120 && bl > r + 80 && g > r + 20)
+              : ((Math.abs(r - 46) <= 22 && Math.abs(g - 28) <= 20 && Math.abs(bl - 77) <= 28) || (g > 180 && bl > 160 && r < 140))) hit++;   // C-BAR-C, or C-WIRE-LIT #4DF2D9 while autoplay presses it
   }
   const share = hit / (img.w * img.h);
   if (share < 0.4) fail("render", `only ${(100 * share).toFixed(1)} % of the ${PHONE ? "pad rule" : "keycap"} strip reads as ${PHONE ? "C-COLD" : "C-BAR-C"} (${img.w}x${img.h} px)`);

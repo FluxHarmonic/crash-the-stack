@@ -11,10 +11,14 @@
 # Audio never reaches a real device: the game runs with PULSE_SINK=worker-null
 # and the drive stops (exit 125) unless every stream of the game is on it.
 #
-# Exit: 0 PASS, 1 FAIL, 125 SETUP-FAILED. PASS means: the game's audio clock
-# sits within 30 ms of the sound (median, incl. parec's own latency) and moves
-# less than 15 ms against it from the song's first second to its last; at
-# least 30 windows of the capture correlate with the render.
+# Exit: 0 PASS, 1 FAIL, 125 SETUP-FAILED. PASS: the game's audio clock sits
+# within 30 ms of the sound (median, incl. parec's own latency) and moves less
+# than 15 ms against it from the song's first second to its last. FAIL: that
+# limit broken, or any error over 100 ms whatever the capture's state.
+# SETUP-FAILED: the capture itself has gaps (window residuals over 12 ms: a
+# contended box starves the null sink or parec; RUNDIR/load says how loaded),
+# so it cannot judge a 30 ms limit; rerun on a quiet box. Measured 2026-09-28:
+# PASS at a moderate load, SETUP-FAILED at loadavg 17-25.
 set -e
 W=$(git rev-parse --show-toplevel)
 SONG=$1; RUN=$2; shift 2
@@ -30,8 +34,12 @@ NULL_ID=$(pactl list short sinks | awk '$2=="worker-null"{print $1}')
 echo "binary $(sha256sum "$BIN" | cut -c1-16) mtime $(stat -c %y "$BIN")" > "$RUN/meta"
 [ -f "$RUN/ref.wav" ] || scripts/dev "$W/build/release/bin/motif" tune render "assets/tunes/$SONG.cts" -o "$RUN/ref.wav" -r 48000 > "$RUN/render.log" 2>&1
 date +%s%3N > "$RUN/cap-start"
-parec --device=worker-null.monitor --format=s16le --rate=48000 --channels=2 --raw "$RUN/cap.pcm" &
+echo "start $(cut -d" " -f1-3 /proc/loadavg)" > "$RUN/load"
+parec --device=worker-null.monitor --format=s16le --rate=48000 --channels=2 --latency-msec=20 --raw "$RUN/cap.pcm" &
 PAREC=$!
+# the capture's own clock: (epoch ms, bytes written) every 100 ms while parec runs; the
+# analysis dates sample 0 from the earliest of these, not from when parec was asked to start
+( while kill -0 $PAREC 2>/dev/null; do b=$(stat -c %s "$RUN/cap.pcm" 2>/dev/null || echo 0); echo "$(date +%s%3N) $b"; sleep 0.1; done ) > "$RUN/capclock.txt" &
 scripts/dev "$BIN" --intercept "$SONG" --autoplay --fresh "$@" > "$RUN/game.log" 2>&1 &
 # the game: exe is the binary and cwd this checkout (scripts/dev execs through guix shell, so $! is not it)
 GAME=""
@@ -56,6 +64,7 @@ done
 sleep 2
 kill $GAME 2>/dev/null || true
 kill $PAREC 2>/dev/null || true
+echo "end $(cut -d" " -f1-3 /proc/loadavg)" >> "$RUN/load"
 grep "crash: intercept \(open\|start\|end\)" "$RUN/game.log" || true
 grep -q "intercept end held" "$RUN/game.log" || { echo "FAIL: the song did not end held"; exit 1; }
-guix shell python python-numpy -- python3 "$W/scripts/intercept-drift.py" "$RUN/cap.pcm" "$RUN/ref.wav" "$RUN/game.log" "$(cat "$RUN/cap-start")"
+guix shell python python-numpy -- python3 "$W/scripts/intercept-drift.py" "$RUN/cap.pcm" "$RUN/ref.wav" "$RUN/game.log" "$RUN/capclock.txt"
