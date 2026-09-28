@@ -1,0 +1,120 @@
+;;; (crash intercept source) - A tune's note onsets, the raw material of a chart
+;;;
+;;; INTERCEPT's charts are generated from the tune, never hand-authored
+;;; (D21, David's rulings 2026-09-28). This module is the one place that
+;;; reads motif: it walks the whole order list with motif's own compiler
+;;; (`compile-tune`, the same walk the player renders from) and lists every
+;;; TRIGGER row, the sample a note starts sounding. A `3xx` slide, a
+;;; vibrato or an arpeggio moves the pitch without a trigger, so none of
+;;; them becomes a note. Each onset carries:
+;;;
+;;;   #(ms channel midi grid bar)
+;;;
+;;;   ms       the note's start in milliseconds from the tune's first sample
+;;;   channel  1..8
+;;;   midi     the pitch as a MIDI number (rounded; drums have one pitch)
+;;;   grid     0 on a beat, 1 on an eighth, 2 on a sixteenth, 3 off the grid
+;;;            (from the row inside its pattern and the tune's rows per beat,
+;;;            the meter's first number: (8 4) is 8 rows a beat)
+;;;   bar      the bar's index in play order (pos * 64 + row div bar-rows),
+;;;            the window the melody lanes are spread over
+;;;
+;;; The list is in time order, ties by channel. (crash intercept chart)
+;;; turns it into lanes; nothing here decides what is played.
+
+(define-library (crash intercept source)
+  (import (sigil math)
+          (sigil list)
+          (motif tune)
+          (motif tune compile))
+
+  (export tune-source tune-onsets tune-rows-per-beat ONSET-RATE)
+
+  (begin
+    ;; The rate the walk counts samples at. Onset times are converted to ms,
+    ;; so the rate only sets their rounding (one tick is rounded to a whole
+    ;; sample: under 0.03 ms at this rate).
+    (define ONSET-RATE 44100)
+
+    ;; A tick row is 7 numbers: start voice freq vol gate trigger dur
+    ;; ([[topics/motif-tracker-tick-engine]]).
+    (define TICK-ELEMS 7)
+
+    (define (tune-rows-per-beat t)
+      (let ((m (tune-meter t)))
+        (if (and (pair? m) (integer? (car m)) (> (car m) 0)) (car m) 4)))
+
+    (define (tune-bar-rows t)
+      (let ((m (tune-meter t)))
+        (if (and (pair? m) (integer? (car m)) (integer? (cdr m)))
+            (max 1 (* (car m) (cdr m)))
+            16)))
+
+    (define (freq->midi f)
+      (if (<= f 0.0)
+          0
+          (exact (round (+ 69.0 (* 12.0 (/ (log (/ f 440.0)) (log 2.0))))))))
+
+    ;; 0 beat, 1 eighth, 2 sixteenth, 3 off the grid, for a row inside its pattern
+    (define (row-grid row rpb)
+      (cond ((= 0 (modulo row rpb)) 0)
+            ((and (even? rpb) (= 0 (modulo row (quotient rpb 2)))) 1)
+            ((and (= 0 (modulo rpb 4)) (= 0 (modulo row (quotient rpb 4)))) 2)
+            (else 3)))
+
+    ;; The timeline as a vector of #(pos row start), in start order, for a
+    ;; binary search from a trigger's start sample to its row.
+    (define (timeline-vector ct)
+      (list->vector (list-sort (lambda (a b) (< (vector-ref a 2) (vector-ref b 2)))
+                               (compiled-tune-timeline ct))))
+
+    ;; The last timeline entry whose start is at or before sample s.
+    (define (row-at tl s)
+      (let loop ((lo 0) (hi (- (vector-length tl) 1)) (best #f))
+        (if (> lo hi)
+            best
+            (let ((mid (quotient (+ lo hi) 2)))
+              (if (<= (vector-ref (vector-ref tl mid) 2) s)
+                  (loop (+ mid 1) hi (vector-ref tl mid))
+                  (loop lo (- mid 1) best))))))
+
+    ;; (length-ms . onsets): one walk gives both.
+    (define (tune-source t)
+      (let ((ct (compile-tune t ONSET-RATE)))
+        (cons (* 1000.0 (/ (compiled-tune-total-samples ct) (* 1.0 ONSET-RATE)))
+              (compiled-onsets t ct))))
+
+    (define (tune-onsets t) (cdr (tune-source t)))
+
+    (define (compiled-onsets t ct)
+      (let* ((tl (timeline-vector ct))
+             (rpb (tune-rows-per-beat t))
+             (bar-rows (tune-bar-rows t))
+             (per-channel
+               (let loop ((cs (compiled-tune-channels ct)) (ch 1) (acc '()))
+                 (if (null? cs)
+                     acc
+                     (let ((ticks (compiled-channel-ticks (car cs))))
+                       (loop (cdr cs)
+                             (+ ch 1)
+                             (let rows ((i 0) (acc acc))
+                               (if (>= i (vector-length ticks))
+                                   acc
+                                   (rows (+ i TICK-ELEMS)
+                                         (if (> (vector-ref ticks (+ i 5)) 0.5)
+                                             (let* ((s (exact (round (vector-ref ticks i))))
+                                                    (e (row-at tl s))
+                                                    (pos (if e (vector-ref e 0) 0))
+                                                    (row (if e (vector-ref e 1) 0)))
+                                               (cons (vector (* 1000.0 (/ s (* 1.0 ONSET-RATE)))
+                                                             ch
+                                                             (freq->midi (vector-ref ticks (+ i 2)))
+                                                             (row-grid row rpb)
+                                                             (+ (* pos 64) (quotient row bar-rows)))
+                                                     acc))
+                                             acc))))))))))
+        (list-sort (lambda (a b)
+                     (or (< (vector-ref a 0) (vector-ref b 0))
+                         (and (= (vector-ref a 0) (vector-ref b 0))
+                              (< (vector-ref a 1) (vector-ref b 1)))))
+                   per-channel)))))

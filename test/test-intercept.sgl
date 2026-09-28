@@ -1,0 +1,206 @@
+;;; INTERCEPT (the rhythm game): the chart generated from a song and the
+;;; judging of presses against it. David's rulings, 2026-09-28: windows
+;;; SYNC 35 / CLEAN 70 / LOSSY 110 ms, else DROP; SIGNAL at 0 fails the
+;;; song; 4 / 6 / 8 keyboard lanes by tier, always 4 on touch; taps only.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (sigil io)
+        (sigil fs)
+        (motif tune)
+        (crash music)
+        (crash intercept source)
+        (crash intercept chart)
+        (crash intercept rules)
+        (crash intercept clock))
+
+(define (tune-of name) (read-tune-string (read-file-string (music-tune-path name))))
+
+(define *sources* '())
+(define (source-of name)
+  (let ((e (assq name *sources*)))
+    (if e
+        (cdr e)
+        (let ((s (tune-source (tune-of name))))
+          (set! *sources* (cons (cons name s) *sources*))
+          s))))
+
+(define *charts* '())
+(define (chart-of name d touch?)
+  (let* ((key (list name d touch?))
+         (e (assoc key *charts*)))
+    (if e
+        (cdr e)
+        (let ((c (make-chart (cdr (source-of name)) d touch?)))
+          (set! *charts* (cons (cons key c) *charts*))
+          c))))
+
+(define SONGS '(black-glass blind-spot sector-drift clock-edge glass-current))
+
+(define (max-in-window chart ms)
+  ;; the most notes within any 1000 ms centred on a note
+  ;; (the chart is in time order: two pointers bracket the window)
+  (let ((n (vector-length chart))
+        (at (lambda (i) (vector-ref (vector-ref chart i) 0)))
+        (half (/ ms 2)))
+    (let loop ((i 0) (lo 0) (hi 0) (best 0))
+      (if (= i n)
+          best
+          (let* ((t (at i))
+                 (lo (let adv ((lo lo)) (if (<= (at lo) (- t half)) (adv (+ lo 1)) lo)))
+                 (hi (let adv ((hi hi)) (if (and (< hi n) (< (at hi) (+ t half))) (adv (+ hi 1)) hi))))
+            (loop (+ i 1) lo hi (max best (- hi lo))))))))
+
+(test-group "intercept: the song's onsets"
+  (test "every INTERCEPT song has the shared layout: a kick on ch1 and notes on ch6"
+    (for-each (lambda (name)
+                (let ((os (cdr (source-of name))))
+                  (assert-true (> (length (filter (lambda (o) (= 1 (vector-ref o 1))) os)) 50))
+                  (assert-true (> (length (filter (lambda (o) (= 6 (vector-ref o 1))) os)) 20))))
+              SONGS))
+  (test "onsets are in time order, and Black Glass's first kick is on a beat"
+    (let* ((os (cdr (source-of 'black-glass)))
+           (kick (list-find (lambda (o) (= 1 (vector-ref o 1))) os)))
+      (assert-true (let loop ((os os)) (or (null? os) (null? (cdr os)) (and (<= (vector-ref (car os) 0) (vector-ref (cadr os) 0)) (loop (cdr os))))))
+      (assert-equal 0 (vector-ref kick 3))))
+  (test "a song runs its whole order list: 150 to 180 s"
+    (for-each (lambda (name)
+                (let ((len (car (source-of name))))
+                  (assert-true (> len 150000.0))
+                  (assert-true (< len 180000.0))))
+              SONGS)))
+
+(test-group "intercept: charts"
+  (test "every lane is inside the tier's lane count, keyboard and touch"
+    (for-each (lambda (name)
+                (for-each (lambda (d)
+                            (for-each (lambda (touch?)
+                                        (let ((c (chart-of name d touch?)) (n (chart-lanes d touch?)))
+                                          (assert-true (> (vector-length c) 100))
+                                          (vector-for-each (lambda (note) (assert-true (and (>= (vector-ref note 1) 0) (< (vector-ref note 1) n)))) c)))
+                                      '(#f #t)))
+                          DIFFICULTIES))
+              SONGS))
+  (test "lanes: 4 / 6 / 8 on keys, 4 on touch at every tier"
+    (assert-equal '(4 6 8) (map (lambda (d) (chart-lanes d #f)) DIFFICULTIES))
+    (assert-equal '(4 4 4) (map (lambda (d) (chart-lanes d #t)) DIFFICULTIES))
+    (assert-equal '(a s d f j k l semicolon) (chart-keys 'elite #f)))
+  (test "the density rises with the tier, and every lane of every tier is used"
+    (for-each (lambda (name)
+                (for-each (lambda (touch?)
+                            (let ((ns (map (lambda (d) (vector-length (chart-of name d touch?))) DIFFICULTIES)))
+                              (assert-true (< (car ns) (cadr ns)))
+                              (assert-true (< (cadr ns) (caddr ns)))))
+                          '(#f #t))
+                (for-each (lambda (d)
+                            (let ((c (chart-of name d #f)))
+                              (let loop ((lane 0))
+                                (when (< lane (chart-lanes d #f))
+                                  (assert-true (and (list-find (lambda (n) (= lane (vector-ref n 1))) (vector->list c)) #t))
+                                  (loop (+ lane 1))))))
+                          DIFFICULTIES))
+              SONGS))
+  (test "the limits hold: never three notes at once, the cap per second, the lane gap"
+    (for-each (lambda (name)
+                (for-each (lambda (d)
+                            (for-each (lambda (touch?)
+                                        (let* ((c (chart-of name d touch?))
+                                               (t (cdr (assq (if touch? 'touch 'keys) (cdr (assq d TIERS)))))
+                                               (lane-gap (list-ref t 1))
+                                               (cap (list-ref t 3)))
+                                          (assert-true (<= (max-in-window c 1000) cap))
+                                          (let loop ((i 0))
+                                            (when (< (+ i 2) (vector-length c))
+                                              (assert-true (> (- (vector-ref (vector-ref c (+ i 2)) 0) (vector-ref (vector-ref c i) 0)) 0.5))
+                                              (loop (+ i 1))))
+                                          (let loop ((lane 0))
+                                            (when (< lane (chart-lanes d touch?))
+                                              (let ((ts (filter (lambda (x) x) (map (lambda (n) (and (= lane (vector-ref n 1)) (vector-ref n 0))) (vector->list c)))))
+                                                (let gaps ((ts ts))
+                                                  (when (and (pair? ts) (pair? (cdr ts)))
+                                                    (assert-true (>= (- (cadr ts) (car ts)) lane-gap))
+                                                    (gaps (cdr ts)))))
+                                              (loop (+ lane 1))))))
+                                      '(#f #t)))
+                          DIFFICULTIES))
+              SONGS))
+  (test "generation is reproducible: the same hash twice from fresh walks"
+    (let ((a (chart-hash (make-chart (tune-onsets (tune-of 'black-glass)) 'runner #f)))
+          (b (chart-hash (make-chart (tune-onsets (tune-of 'black-glass)) 'runner #f))))
+      (assert-equal a b)
+      (assert-false (= a (chart-hash (chart-of 'black-glass 'elite #f)))))))
+
+(define chart (vector (vector 1000.0 0) (vector 1500.0 1) (vector 2000.0 0) (vector 2000.0 1)))
+
+(test-group "intercept: judging"
+  (test "the windows: 35 SYNC, 70 CLEAN, 110 LOSSY, both sides; past 110 nothing"
+    (assert-equal 'sync (judge-delta 35))
+    (assert-equal 'sync (judge-delta -35))
+    (assert-equal 'clean (judge-delta 36))
+    (assert-equal 'clean (judge-delta -70))
+    (assert-equal 'lossy (judge-delta 110))
+    (assert-false (judge-delta 111))
+    (assert-false (judge-delta -111)))
+  (test "a hit scores, builds combo and SIGNAL; a stray press costs nothing"
+    (let* ((r (make-run chart 2))
+           (r (run-advance r 1010.0 (list (cons 0 1010.0))))
+           (r (run-advance r 1200.0 (list (cons 1 1200.0)))))
+      (assert-equal '(sync 0 0 0) (list (run-judgment r 0) 0 0 0))
+      (assert-equal 300 (run-score r))
+      (assert-equal 1 (run-combo r))
+      (assert-equal 53 (run-signal r))
+      (assert-false (run-judgment r 1))
+      (assert-equal 'press (vector-ref (car (run-events r)) 0))))
+  (test "a note whose window passes is a DROP: combo reset, SIGNAL -6"
+    (let* ((r (make-run chart 2))
+           (r (run-advance r 1010.0 (list (cons 0 1010.0))))
+           (r (run-advance r 1611.0 '())))
+      (assert-equal 'drop (run-judgment r 1))
+      (assert-equal 0 (run-combo r))
+      (assert-equal 47 (run-signal r))
+      (assert-equal '(1 0 0 1) (run-counts r))))
+  (test "a chord takes a press in each lane; the multiplier steps every 10"
+    (let* ((r (make-run chart 2))
+           (r (run-advance r 2100.0 (list (cons 0 1000.0) (cons 1 1560.0) (cons 0 2080.0) (cons 1 1990.0)))))
+      (assert-equal '(sync clean lossy sync) (map (lambda (i) (run-judgment r i)) '(0 1 2 3)))
+      (assert-true (run-done? r))
+      (assert-equal 4 (run-max-combo r))
+      (assert-equal 1 (run-multiplier r))))
+  (test "SIGNAL at 0 fails the run (ruling c)"
+    (let* ((n 12)
+           (c (list->vector (map (lambda (i) (vector (* 200.0 (+ i 1)) 0)) (iota n))))
+           (r (run-advance (make-run c 1) 5000.0 '())))
+      (assert-true (run-failed? r))
+      (assert-equal 0 (run-signal r))))
+  (test "accuracy and grade"
+    (let* ((r (make-run chart 2))
+           (r (run-advance r 2200.0 (list (cons 0 1000.0) (cons 1 1500.0) (cons 0 2000.0) (cons 1 2000.0)))))
+      (assert-equal 100.0 (run-accuracy r))
+      (assert-equal "S" (run-grade r)))))
+
+(test-group "intercept: the clock"
+  (test "follows wall time without audio; never runs backwards; snaps past 50 ms"
+    (let* ((c (make-clock -2000 0))
+           (c (clock-tick c 16 #f)))
+      (assert-equal -1984.0 (clock-ms c))
+      (let* ((c (clock-tick c 32 -1900.0)))   ; audio 68 ms ahead: snap
+        (assert-equal -1900.0 (clock-ms c))
+        (let ((c2 (clock-tick c 48 -1990.0)))   ; audio far behind: hold, never back
+          (assert-true (>= (clock-ms c2) -1900.0))))))
+  (test "steers a small error a tenth of the way"
+    (let* ((c (make-clock 0 0))
+           (c (clock-tick c 10 20.0)))
+      ;; est 10, audio 20: 10 + 0.1 * 10
+      (assert-equal 11.0 (clock-ms c))))
+  (test "holds while the audio stalls, then gives the audio up after a second and runs on wall time"
+    (let* ((c (make-clock 0 0))
+           (c (clock-tick c 10 5.0))
+           (c1 (clock-tick c 600 5.0))       ; stalled 590 ms: held (the audio is the truth)
+           (c2 (clock-tick c1 1200 5.0))     ; stalled 1190 ms: given up, wall time from the hold
+           (c3 (clock-tick c2 1300 5.0)))
+      (assert-true (< (clock-ms c1) 20.0))
+      (assert-true (clock-audio? c1))
+      (assert-false (clock-audio? c2))
+      (assert-true (> (clock-ms c2) 600.0))
+      (assert-equal 100.0 (- (clock-ms c3) (clock-ms c2))))))

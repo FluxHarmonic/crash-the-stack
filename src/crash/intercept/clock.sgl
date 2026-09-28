@@ -1,0 +1,69 @@
+;;; (crash intercept clock) - The song clock the notes are drawn and judged on
+;;;
+;;; The audio clock ((crash intercept audio)) is exact but coarse: it moves
+;;; when the sink is pumped and the device drains, in steps of a callback
+;;; or a pump, so notes drawn straight from it stutter. This clock runs on
+;;; the frame's wall time and is steered toward the audio clock:
+;;;
+;;;   - each frame it advances by the wall time since the last one;
+;;;   - then moves STEER of the way toward the audio clock's reading;
+;;;   - it never runs backwards (a note must not climb back up the lane);
+;;;   - past SNAP-MS of disagreement it jumps to the audio (a stall, a
+;;;     suspended context resumed, the song's first frames);
+;;;   - with no audio reading (muted, no sink) it runs on wall time alone,
+;;;     and if the audio stops moving for STALL-MS while wall time runs on
+;;;     (a context that never resumed) it gives up on the audio for the run,
+;;;     so a silent game still plays rather than freezing.
+;;;
+;;;   (make-clock start-ms wall-ms)            -> a clock reading start-ms now
+;;;   (clock-tick clock wall-ms audio-ms)      -> the clock this frame (audio-ms may be #f)
+;;;   (clock-ms clock)  (clock-error clock)    -> the reading; the last audio - reading (or #f)
+;;;   (clock-at clock wall-ms)                 -> the reading at an earlier wall time this frame (a press's)
+;;;   (clock-audio? clock)                     -> still following the audio
+
+(define-library (crash intercept clock)
+  (import (sigil struct)
+          (sigil math))
+
+  (export make-clock clock-tick clock-ms clock-error clock-at clock-audio? clock-wall
+          STEER SNAP-MS STALL-MS)
+
+  (begin
+    (define STEER 0.1)
+    (define SNAP-MS 50.0)
+    (define STALL-MS 1000.0)
+
+    (define-struct clock
+      (ms)                  ; the reading
+      (wall)                ; the wall ms it was read at
+      (error default: #f)   ; audio - reading at the last tick with audio
+      (audio default: #t)   ; still following the audio
+      (last-audio default: #f)
+      (audio-moved-at default: #f))
+
+    (define (clock-audio? c) (clock-audio c))
+
+    (define (make-clock start-ms wall-ms)
+      (clock ms: (* 1.0 start-ms) wall: wall-ms audio-moved-at: wall-ms))
+
+    (define (clock-at c wall-ms)
+      (+ (clock-ms c) (- wall-ms (clock-wall c))))
+
+    (define (clock-tick c wall-ms audio-ms)
+      (let* ((dt (max 0.0 (* 1.0 (- wall-ms (clock-wall c)))))
+             (est (+ (clock-ms c) dt))
+             (moved? (and audio-ms (not (equal? audio-ms (clock-last-audio c)))))
+             (moved-at (if moved? wall-ms (clock-audio-moved-at c)))
+             (follow? (and (clock-audio c)
+                           audio-ms
+                           (< (- wall-ms moved-at) STALL-MS))))
+        (if (not follow?)
+            (clock c ms: est wall: wall-ms error: #f
+                   audio: (and (clock-audio c) (or (not audio-ms) (< (- wall-ms moved-at) STALL-MS)))
+                   last-audio: audio-ms audio-moved-at: moved-at)
+            (let* ((err (- audio-ms est))
+                   (next (if (> (abs err) SNAP-MS)
+                             (max audio-ms (clock-ms c))
+                             (max (clock-ms c) (+ est (* STEER err))))))
+              (clock c ms: next wall: wall-ms error: (- audio-ms next)
+                     last-audio: audio-ms audio-moved-at: moved-at)))))))

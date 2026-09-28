@@ -1,0 +1,388 @@
+;;; (crash intercept table) - INTERCEPT's screen: select a song, play it, the results
+;;;
+;;; One value the shells step once a frame and draw with (crash intercept
+;;; draw). Phases:
+;;;
+;;;   select   the set list (David's ruling d: Black Glass, Blind Spot,
+;;;            Sector Drift, Clock Edge, Glass Current), DIFFICULTY and
+;;;            OFFSET; Enter or a tap on PLAY starts the song
+;;;   loading  the song's text is on its way (the web page's fetch)
+;;;   play     the song runs; presses are judged on the song clock
+;;;   results  LINK HELD or LINK SEVERED, the score; RETRY or SONGS
+;;;
+;;; A frame hands in: the keys pressed (menu keys), the lane presses with
+;;; the wall ms each happened at (the web shell stamps a key when its DOM
+;;; event arrives, the native shell when it polls), the taps in virtual
+;;; px with their wall ms, and the frame's wall ms. The song clock is
+;;; (crash intercept clock) steered by (crash intercept audio)'s count
+;;; of frames heard; a press's song time is the clock's reading at the
+;;; press's wall time, minus OFFSET (a positive offset means the sound
+;;; reaches the player later than the sink says, so presses land later).
+;;;
+;;;   (intercept-open touch? song)         -> a table on the select screen (song: a name or #f)
+;;;   (intercept-step t frame)             -> the table after the frame
+;;;   (intercept-requests t)               -> ('menu) when the player left INTERCEPT
+;;;   (make-intercept-frame keys presses taps wall-ms)
+;;;       keys: symbols pressed; presses: ((key . wall-ms) ...); taps: ((x y wall-ms) ...)
+;;;
+;;; Lines (the shells print what intercept-say! hands them):
+;;;   crash: intercept open SONG DIFFICULTY keys|touch notes N hash H lanes L onsets-ms MS
+;;;   crash: intercept start SONG lead MS audio on|off
+;;;   crash: intercept end held|severed score S acc A max-combo C counts SY CL LO DR
+;;;   crash: intercept clock SONG-MS error MS audio MS wall MS   (each second: the drawn clock, audio minus drawn,
+;;;                                                     the audio clock, the frame's wall ms)
+
+(define-library (crash intercept table)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (sigil string)
+          (motif tune)
+          (crash store)
+          (only (crash music live) live-music-text)
+          (crash intercept source)
+          (crash intercept chart)
+          (crash intercept rules)
+          (crash intercept clock)
+          (crash intercept audio))
+
+  (export intercept-open intercept-step intercept-requests make-intercept-frame
+          intercept-phase intercept-songs intercept-song intercept-difficulty intercept-touch?
+          intercept-focus intercept-offset intercept-run intercept-chart intercept-now
+          intercept-fall-ms intercept-lanes intercept-flashes intercept-over intercept-best
+          intercept-length-ms intercept-over-ms intercept-set-say! intercept-autoplay!
+          intercept-results-rows intercept-select-rows intercept-leave!
+          SONGS LEAD-MS OFFSET-STEP)
+
+  (begin
+    ;; David's ruling d, in his order.
+    (define SONGS
+      (list (list 'black-glass "BLACK GLASS" 140)
+            (list 'blind-spot "BLIND SPOT" 96)
+            (list 'sector-drift "SECTOR DRIFT" 100)
+            (list 'clock-edge "CLOCK EDGE" 128)
+            (list 'glass-current "GLASS CURRENT" 172)))
+    (define (intercept-songs) SONGS)
+
+    (define LEAD-MS 2500)        ; silence before the song: the first bars fall in from the top
+    (define END-HOLD-MS 1200)    ; after the last note's window, the results come up
+    (define OFFSET-STEP 5)
+    (define OFFSET-MAX 300)
+    (define STORE-KEY "intercept")
+
+    (define *say* (lambda parts #f))
+    (define (intercept-set-say! proc) (set! *say* proc))
+
+    ;; --autoplay / ?autoplay: every note pressed on the first frame whose
+    ;; song clock reaches it (the drift gate's driver); presses from the
+    ;; devices still count.
+    (define *autoplay* #f)
+    (define (intercept-autoplay! on) (set! *autoplay* on))
+
+    (define-struct intercept-frame (keys) (presses) (taps) (wall))
+    (define (make-intercept-frame keys presses taps wall)
+      (intercept-frame keys: keys presses: presses taps: taps wall: wall))
+
+    (define-struct itable
+      (phase default: 'select)     ; select | loading | play | results
+      (touch default: #f)
+      (song default: 0)            ; index into SONGS
+      (focus default: 0)           ; the select screen's row: 0..4 songs, 5 difficulty, 6 offset
+      (difficulty default: 'runner)
+      (offset default: 0)          ; ms, OFFSET's value
+      (chart default: #f)
+      (run default: #f)
+      (clock default: #f)
+      (length-ms default: 0.0)     ; the song's end on its clock
+      (lanes default: 4)
+      (flashes default: '())       ; #(kind lane wall-ms judgment) for the draw, newest first
+      (over default: #f)           ; held | severed
+      (over-wall default: 0)       ; wall ms the results came up
+      (best default: #f)           ; the best before this run (the results' line)
+      (said-at default: 0)         ; the song ms the last clock line was said at
+      (requests default: '()))
+
+    (define (intercept-phase t) (itable-phase t))
+    (define (intercept-touch? t) (itable-touch t))
+    (define (intercept-song t) (list-ref SONGS (itable-song t)))
+    (define (intercept-difficulty t) (itable-difficulty t))
+    (define (intercept-focus t) (itable-focus t))
+    (define (intercept-offset t) (itable-offset t))
+    (define (intercept-run t) (itable-run t))
+    (define (intercept-chart t) (itable-chart t))
+    (define (intercept-lanes t) (itable-lanes t))
+    (define (intercept-flashes t) (itable-flashes t))
+    (define (intercept-over t) (itable-over t))
+    (define (intercept-best t) (itable-best t))
+    (define (intercept-length-ms t) (itable-length-ms t))
+    (define (intercept-requests t) (itable-requests t))
+    (define (intercept-fall-ms t) (chart-fall-ms (itable-difficulty t)))
+    (define (intercept-now t) (and (itable-clock t) (clock-ms (itable-clock t))))
+    (define (intercept-over-ms t wall) (- wall (itable-over-wall t)))
+
+    ;; --- the stored choices and bests ----------------------------------------------
+    (define (stored)
+      (let ((d (guard (e (#t #f)) (store-read-datum STORE-KEY))))
+        (if (list? d) d '())))
+    (define (stored-ref key default)
+      (let ((e (assq key (stored)))) (if e (cdr e) default)))
+    (define (store! key value)
+      (guard (e (#t #f))
+        (store-write-datum! STORE-KEY
+                            (cons (cons key value) (filter (lambda (e) (and (pair? e) (not (eq? (car e) key)))) (stored))))))
+    (define (best-key t)
+      (string->symbol (string-append (symbol->string (car (intercept-song t)))
+                                     "/" (symbol->string (itable-difficulty t))
+                                     (if (itable-touch t) "/touch" "/keys"))))
+    (define (best-of t)
+      (let ((e (assq (best-key t) (stored-ref 'best '()))))
+        (and e (cdr e))))
+    (define (record-best! t score)
+      (let ((old (stored-ref 'best '())))
+        (store! 'best (cons (cons (best-key t) score) (filter (lambda (e) (not (eq? (car e) (best-key t)))) old)))))
+
+    (define (song-index name)
+      (let loop ((ss SONGS) (i 0))
+        (cond ((null? ss) 0) ((eq? (car (car ss)) name) i) (else (loop (cdr ss) (+ i 1))))))
+
+    (define (intercept-open touch? song)
+      (let ((d (stored-ref 'difficulty 'runner)))
+        (itable touch: touch?
+                song: (if song (song-index song) (song-index (stored-ref 'song 'black-glass)))
+                difficulty: (if (difficulty? d) d 'runner)
+                offset: (let ((o (stored-ref 'offset 0))) (if (and (integer? o) (<= (abs o) OFFSET-MAX)) o 0)))))
+
+    ;; Leaving the screen (MENU, Escape from the list): the song stops.
+    (define (intercept-leave! t)
+      (intercept-audio-stop!)
+      t)
+
+    ;; --- the rows (the draw and the taps share them) ---------------------------------
+    ;; The select screen: (id x y w h) per tappable row.
+    (define ROW-X 120)
+    (define ROW-W 400)
+    (define ROW-H 22)
+    (define ROWS-Y 96)
+    (define (intercept-select-rows)
+      (append (let loop ((i 0) (acc '()))
+                (if (= i (length SONGS))
+                    (reverse acc)
+                    (loop (+ i 1) (cons (list i ROW-X (+ ROWS-Y (* i ROW-H)) ROW-W (- ROW-H 2)) acc))))
+              (list (list 5 ROW-X 222 ROW-W 20)
+                    (list 6 ROW-X 246 ROW-W 20)
+                    (list 'play 220 290 200 28)
+                    (list 'back 8 8 72 20))))
+    (define (intercept-results-rows)
+      (list (list 'retry 170 318 140 26)
+            (list 'songs 330 318 140 26)))
+
+    (define (hit rows x y)
+      (let ((r (list-find (lambda (r) (and (>= x (list-ref r 1)) (< x (+ (list-ref r 1) (list-ref r 3)))
+                                           (>= y (list-ref r 2)) (< y (+ (list-ref r 2) (list-ref r 4)))))
+                          rows)))
+        (and r (car r))))
+
+    ;; --- select ---------------------------------------------------------------------
+    (define (step-difficulty d delta)
+      (let* ((i (let loop ((ds DIFFICULTIES) (i 0)) (if (eq? (car ds) d) i (loop (cdr ds) (+ i 1)))))
+             (n (length DIFFICULTIES)))
+        (list-ref DIFFICULTIES (modulo (+ i delta) n))))
+
+    (define (adjust t delta)
+      (case (itable-focus t)
+        ((5) (let ((d (step-difficulty (itable-difficulty t) delta)))
+               (store! 'difficulty d)
+               (itable t difficulty: d)))
+        ((6) (let ((o (max (- OFFSET-MAX) (min OFFSET-MAX (+ (itable-offset t) (* delta OFFSET-STEP))))))
+               (store! 'offset o)
+               (itable t offset: o)))
+        (else t)))
+
+    (define (step-select t f)
+      (let loop ((keys (intercept-frame-keys f)) (t t))
+        (if (null? keys)
+            (let tap-loop ((taps (intercept-frame-taps f)) (t t))
+              (if (null? taps)
+                  t
+                  (let* ((tap (car taps))
+                         (id (hit (intercept-select-rows) (car tap) (cadr tap))))
+                    (cond ((not id) (tap-loop (cdr taps) t))
+                          ((eq? id 'play) (begin-song t (caddr tap)))
+                          ((eq? id 'back) (itable t requests: (list 'menu)))
+                          ((and (integer? id) (< id 5))
+                           ;; a tap on the chosen song plays it; on another, chooses it
+                           (if (= id (itable-song t))
+                               (begin-song t (caddr tap))
+                               (tap-loop (cdr taps) (itable t song: id focus: id))))
+                          (else
+                           ;; DIFFICULTY / OFFSET: the right half steps up, the left half down
+                           (tap-loop (cdr taps)
+                                     (adjust (itable t focus: id) (if (>= (car tap) (+ ROW-X (quotient ROW-W 2))) 1 -1))))))))
+            (let ((k (car keys)))
+              (case k
+                ((up) (loop (cdr keys) (let ((i (modulo (- (itable-focus t) 1) 7)))
+                                         (itable t focus: i song: (if (< i 5) i (itable-song t))))))
+                ((down) (loop (cdr keys) (let ((i (modulo (+ (itable-focus t) 1) 7)))
+                                           (itable t focus: i song: (if (< i 5) i (itable-song t))))))
+                ((left) (loop (cdr keys) (adjust t -1)))
+                ((right) (loop (cdr keys) (adjust t 1)))
+                ((return space) (begin-song t (intercept-frame-wall f)))
+                ((escape) (itable t requests: (list 'menu)))
+                (else (loop (cdr keys) t)))))))
+
+    ;; --- a song -----------------------------------------------------------------------
+    (define (begin-song t wall)
+      (store! 'song (car (intercept-song t)))
+      (itable t phase: 'loading requests: '() over: #f run: #f chart: #f clock: #f flashes: '()))
+
+    ;; The text is asked for every frame until it lands (natively at once).
+    (define (step-loading t f)
+      (if (memq 'escape (intercept-frame-keys f))
+          (itable t phase: 'select)
+          (let ((text (live-music-text (car (intercept-song t)))))
+            (if (not text)
+                t
+                (start-song t text (intercept-frame-wall f))))))
+
+    (define (start-song t text wall)
+      (let* ((tune (read-tune-string text))
+             (src (tune-source tune))
+             (d (itable-difficulty t))
+             (touch? (itable-touch t))
+             (chart (make-chart (cdr src) d touch?))
+             (lanes (chart-lanes d touch?))
+             (sounding (intercept-audio-start! tune LEAD-MS)))
+        (*say* "intercept open" (car (intercept-song t)) d (if touch? "touch" "keys")
+               "notes" (vector-length chart) "hash" (chart-hash chart) "lanes" lanes)
+        (*say* "intercept start" (car (intercept-song t)) "lead" LEAD-MS "audio" (if sounding "on" "off"))
+        (itable t
+                phase: 'play
+                chart: chart
+                run: (make-run chart lanes)
+                clock: (make-clock (- LEAD-MS) wall)
+                length-ms: (car src)
+                lanes: lanes
+                best: (best-of t)
+                said-at: 0
+                flashes: '())))
+
+    ;; A key's lane on this chart, or #f. The web reports ; as |;|, the
+    ;; native shell as semicolon: both are the eighth lane.
+    (define (key-lane t k)
+      (let* ((k (if (eq? k (string->symbol ";")) 'semicolon k))
+             (keys (chart-keys (itable-difficulty t) (itable-touch t))))
+        (let loop ((ks keys) (i 0))
+          (cond ((null? ks) #f) ((eq? (car ks) k) i) (else (loop (cdr ks) (+ i 1)))))))
+
+    ;; A tap's lane: the touch lanes are 160 px wide across the whole
+    ;; width; a tap in the lower 60% of the screen counts (the thumbs).
+    (define (tap-lane t x y)
+      (and (itable-touch t)
+           (>= y 150)
+           (< -1 x 640)
+           (min 3 (quotient (exact (floor x)) 160))))
+
+
+    (define (autoplay-presses t now)
+      (let* ((r (itable-run t))
+             (chart (itable-chart t)))
+        (let loop ((i (run-judged-floor r)) (acc '()))
+          (if (>= i (vector-length chart))
+              acc
+              (let ((note (vector-ref chart i)))
+                ;; pressed at this frame's reading, the first frame at or past
+                ;; the note: the judgment then shows the frame and clock jitter
+                ;; a player's press carries, not a delta of 0 by construction
+                (cond ((> (vector-ref note 0) now) acc)
+                      ((run-judgment r i) (loop (+ i 1) acc))
+                      (else (loop (+ i 1) (cons (cons (vector-ref note 1) now) acc)))))))))
+
+    ;; The first index worth checking: notes before the last judged one are
+    ;; done (they are judged in time order per lane; a small look-back covers chords).
+    (define (run-judged-floor r) (max 0 (- (run-judged r) 16)))
+
+    (define FLASH-KEEP-MS 600)
+
+    (define (step-play t f)
+      (let* ((wall (intercept-frame-wall f))
+             (clock (clock-tick (itable-clock t) wall (intercept-audio-ms)))
+             (now (clock-ms clock))
+             (off (itable-offset t))
+             (lane-presses
+               (append
+                 (filter (lambda (p) p)
+                         (map (lambda (p)
+                                (let ((lane (key-lane t (car p))))
+                                  (and lane (cons lane (- (clock-at clock (min wall (cdr p))) off)))))
+                              (intercept-frame-presses f)))
+                 (filter (lambda (p) p)
+                         (map (lambda (tap)
+                                (let ((lane (tap-lane t (car tap) (cadr tap))))
+                                  (and lane (cons lane (- (clock-at clock (min wall (caddr tap))) off)))))
+                              (intercept-frame-taps f)))
+                 (if *autoplay* (autoplay-presses t now) '())))
+             (r (run-advance (itable-run t) now lane-presses))
+             (flashes (append (reverse (map (lambda (e) (vector (vector-ref e 0) (vector-ref e 1) wall
+                                                                (if (eq? (vector-ref e 0) 'hit) (vector-ref e 3) #f)))
+                                            (run-events r)))
+                              (filter (lambda (fl) (< (- wall (vector-ref fl 2)) FLASH-KEEP-MS))
+                                      (itable-flashes t))))
+             (t (itable t clock: clock run: r flashes: flashes)))
+        (when (>= now (+ (itable-said-at t) 1000))
+          (*say* "intercept clock" (exact (round now)) "error"
+                 (let ((e (clock-error clock))) (if e (exact (round e)) "-"))
+                 "audio" (let ((a (intercept-audio-ms))) (if a (/ (round (* 10.0 a)) 10.0) "-"))
+                 "wall" (exact (round wall))))
+        (let ((t (if (>= now (+ (itable-said-at t) 1000)) (itable t said-at: now) t)))
+          (cond ((memq 'escape (intercept-frame-keys f))
+                 (intercept-audio-stop!)
+                 (itable t phase: 'select))
+                ((run-failed? r) (finish t 'severed wall))
+                ((and (run-done? r)
+                      (> now (+ (last-note-ms t) LOSSY-MS END-HOLD-MS)))
+                 (finish t 'held wall))
+                (else t)))))
+
+    (define (last-note-ms t)
+      (let ((c (itable-chart t)))
+        (if (= 0 (vector-length c)) 0.0 (vector-ref (vector-ref c (- (vector-length c) 1)) 0))))
+
+    (define (finish t how wall)
+      (let ((r (itable-run t)))
+        (when (eq? how 'severed) (intercept-audio-stop!))
+        (when (and (eq? how 'held) (> (run-score r) (or (itable-best t) -1)))
+          (record-best! t (run-score r)))
+        (*say* "intercept end" how "score" (run-score r)
+               "acc" (/ (round (* 10.0 (run-accuracy r))) 10.0)
+               "max-combo" (run-max-combo r)
+               "counts" (list-ref (run-counts r) 0) (list-ref (run-counts r) 1)
+               (list-ref (run-counts r) 2) (list-ref (run-counts r) 3))
+        (itable t phase: 'results over: how over-wall: wall)))
+
+    ;; --- results ------------------------------------------------------------------------
+    (define RESULTS-WAIT-MS 600)   ; a press still ringing from the song does not choose
+
+    (define (step-results t f)
+      (let ((wall (intercept-frame-wall f)))
+        (if (< (- wall (itable-over-wall t)) RESULTS-WAIT-MS)
+            t
+            (let ((choice (or (let ((ks (intercept-frame-keys f)))
+                                (cond ((or (memq 'return ks) (memq 'space ks) (memq 'r ks)) 'retry)
+                                      ((memq 'escape ks) 'songs)
+                                      (else #f)))
+                              (let tap-loop ((taps (intercept-frame-taps f)))
+                                (and (pair? taps)
+                                     (or (hit (intercept-results-rows) (car (car taps)) (cadr (car taps)))
+                                         (tap-loop (cdr taps))))))))
+              (case choice
+                ((retry) (intercept-audio-stop!) (begin-song t wall))
+                ((songs) (intercept-audio-stop!) (itable t phase: 'select))
+                (else t))))))
+
+    (define (intercept-step t f)
+      (let ((t (itable t requests: '())))
+        (case (itable-phase t)
+          ((select) (step-select t f))
+          ((loading) (step-loading t f))
+          ((play) (step-play t f))
+          (else (step-results t f)))))))

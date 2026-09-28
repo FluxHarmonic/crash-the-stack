@@ -142,6 +142,10 @@
                 scan-table-segment scan-table-cues scan-table-requests scan-table-over
                 scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
+          ;; INTERCEPT, the rhythm game: its screen and its draw
+          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame
+                intercept-leave! intercept-set-say! intercept-autoplay!)
+          (only (crash intercept draw) draw-intercept)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -503,7 +507,10 @@
         ;; as pressed, matching sigil-app's edge semantics.
         (unless (memq sym *keys*)
           (set! *keys* (cons sym *keys*))
-          (set! *pressed* (cons sym *pressed*)))))
+          (set! *pressed* (cons sym *pressed*))
+          ;; INTERCEPT judges a key at the time its DOM event arrived, not at the frame
+          (when (eq? *screen* (quote intercept))
+            (set! *intercept-presses* (cons (cons sym (now-ms)) *intercept-presses*))))))
 
     (define (key-up! k)
       (let ((sym (dom-key->sym k)))
@@ -1339,6 +1346,7 @@
           ((hub) (music-frame! 'hub (hub-music-phase) (hub-music-seed)))
           ;; a table: its pool by its board's seed, its trace's phase (#f on
           ;; CLASSIC SCAN), once a board is in memory
+          ((intercept) #f)   ; the song is the screen's own source
           (else
            (let ((k (table-up)))
              (when (and k ((table-kind-board? k)))
@@ -1397,6 +1405,7 @@
         ((menu) (menu-tick f dt))
         ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
         ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
+        ((intercept) (intercept-tick f))
         (else
          (if *overlay*
              (overlay-tick f dt)                                     ; the pause panel stops the table's clock
@@ -1788,12 +1797,61 @@
     ;;   crash: scan state SCANNED FLAGGED TRIPPED MODE ZOOM COUNTER   after a frame that changed it
     ;;   crash: scan won SECONDS MOVES LINE | scan lost SECONDS
     ;;   crash: scan request NAME
+    ;; INTERCEPT: the screen, and what arrived between frames: lane keys
+    ;; ((sym . ms) ...) and pointer downs ((x y ms) ...), each stamped when
+    ;; its event reached the game (a press is judged at that time)
+    (define *intercept* #f)
+    (define *intercept-presses* (quote ()))
+    (define *intercept-taps* (quote ()))
+    (define *intercept-door* #f)   ; ?intercept=SONG: the song starts at boot
+
     (define *scan* #f)           ; the table, (crash scan table), once opened
     (define *scan-events* '())   ; the page's pointer events since the last frame, newest first, virtual
     (define *scan-line* #f)      ; the end panel's score line
     (define *scan-bg-acc* 0.0)   ; the field's ticks owed (60 a second)
     (define *scan-deal-at* #f)   ; now-ms when the uplink's deal began
     (define SCAN-NODE-HOLD-MS 1500)   ; a taken SCAN node's clear shows this long before the hub comes back (P6d)
+
+    ;; SCAN's pointer stream carries every finger's down separately (two
+    ;; thumbs are two downs), so INTERCEPT takes its taps from it too.
+    (define (intercept-pointer! payload)
+      (let ((parts (string-split payload ",")))
+        (when (and (eq? *screen* (quote intercept)) (= (length parts) 4) (string=? (car parts) "down"))
+          (let ((x (string->number (caddr parts)))
+                (y (string->number (cadddr parts))))
+            (when (and x y)
+              (let ((p (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y)))
+                (when p
+                  (set! *intercept-taps* (cons (list (exact (floor (car p))) (exact (floor (cdr p))) (now-ms))
+                                               *intercept-taps*)))))))))
+
+    ;; The screen owns the music while it is up (the song is (crash audio)'s
+    ;; source): the soundtrack stops on the way in; the menu's theme comes
+    ;; back on the way out through music-frame!.
+    (define (open-intercept! song)
+      (live-music-stop!)
+      (set! *screen* 'intercept)
+      (set! *overlay* #f)
+      (set! *intercept-presses* '())
+      (set! *intercept-taps* '())
+      (set! *intercept* (intercept-open *touch* song)))
+
+    (define (intercept-tick f)
+      (let* ((wall (now-ms))
+             (frame (make-intercept-frame (input-frame-pressed f)
+                                          (reverse *intercept-presses*)
+                                          (reverse *intercept-taps*)
+                                          wall))
+             (t (intercept-step *intercept* frame)))
+        (set! *intercept-presses* '())
+        (set! *intercept-taps* '())
+        (if (memq 'menu (intercept-requests t))
+            (begin (intercept-leave! t)
+                   (set! *intercept* #f)
+                   (open-menu!))
+            (begin
+              (set! *intercept* t)
+              (present! #f (lambda () (draw-intercept t VW VH (background) *copper* wall)))))))
 
     (define (scan-pointer! payload)
       (let ((parts (string-split payload ",")))
@@ -2227,6 +2285,7 @@
                ((daily-cards) (set-run! #f) (say-daily!) (open-spec! (daily-spec 'cards)))
                ((scan) (set-run! #f) (open-scan-table! (scan-new-table (menu-scan-size *menu*) *touch*)))   ; 0.1.3
                ((daily-scan) (set-run! #f) (say-daily!) (open-scan-table! (scan-daily-table *touch*)))
+               ((intercept) (set-run! #f) (open-intercept! #f))   ; FREE PLAY's INTERCEPT row: the song select
                ((update) (update-chosen!))
                ;; NEWS (P4b): the screen opened, its posts seen: the store remembers
                ((news-seen) (news-seen! (menu-news-newest-date *menu*)))
@@ -2333,6 +2392,7 @@
       (live-music-prefetch! MENU-THEME)
       (set! *theme-asked-at* *since-boot*)
       (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
+      (intercept-set-say! (lambda parts (apply say parts)))
       ;; the music's render rate (M1): the ladder's last choice on this device
       ;; from the store, kept for the next boot when the ladder steps
       (let ((r (store-get "music-rate")))
@@ -2401,6 +2461,10 @@
             ((memq *scan-door* (list 'lan 'wan 'backbone))   ; ?scan=PRESET (0.1.3)
              (say "boot" "step" "scan")
              (open-scan-table! (scan-open-table *scan-door* (or *seed* (scan-seed-next!)) #f *touch*)))
+            (*intercept-door*   ; ?intercept=SONG: the song starts at boot (its select screen, Enter pressed)
+             (say "boot" "step" "intercept")
+             (open-intercept! *intercept-door*)
+             (set! *intercept* (intercept-step *intercept* (make-intercept-frame (list (quote return)) (quote ()) (quote ()) (now-ms)))))
             ((and (eq? *hub-seed* 'continue) (hub-run-in-force)) (open-hub-entry!))   ; ?hub=continue: the saved run (P5; the arms)
             ((number? *hub-seed*) (jack-in! *hub-seed* *pace*))   ; ?hub=SEED: JACK IN at boot (&hubat=N lands when the entry screen opens the hub; P5, the arms)
             ;; S8's line, and then the error goes on its way: the loader reports
@@ -2452,7 +2516,9 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "pointerup") (set! *pointer-up* #t) 0)   ; P5: the hub's hold-to-walk ends on the release
-            ((string=? type "scan-pointer") (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button
+            ((string=? type "scan-pointer") (intercept-pointer! payload) (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button; INTERCEPT's taps
+            ((string=? type "intercept") (param! (lambda () (set! *intercept-door* (string->symbol payload)))))   ; ?intercept=SONG
+            ((string=? type "autoplay") (param! (lambda () (intercept-autoplay! (string=? payload "on")))))   ; ?autoplay: every note pressed on the song clock
             ;; ?scan=lan|wan|backbone: straight to a new SCAN board (the arms' door; ?seed=N its seed)
             ((string=? type "scan") (param! (lambda () (set! *scan-door* (string->symbol payload)))))
             ((string=? type "trace") (set! *trace* (string=? payload "on")) 0)

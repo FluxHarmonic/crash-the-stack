@@ -1,0 +1,107 @@
+;;; (crash intercept audio) - The song through motif's player, and its clock
+;;;
+;;; The song plays as (crash audio)'s source on its own sink, the way the
+;;; tracker and the live soundtrack do: a (motif tune player) walked from
+;;; the top, no loop, rendered at the music's rate ((crash music live)'s
+;;; choice for this device, upsampled when it is below the device's rate,
+;;; exactly as the soundtrack is).
+;;;
+;;; The clock is the heart of INTERCEPT. Every device frame the source
+;;; hands the sink is counted; the frames the sink still holds have not
+;;; been heard. So the song's time at the speaker is
+;;;
+;;;   (delivered - depth - lead) / device rate
+;;;
+;;; with no reference to the player's own position, the resampler's
+;;; window or any wall clock. `lead` is a run of silence sent before the
+;;; first frame of the song, so the notes of the opening bars fall in from
+;;; the top on the same clock the audio runs on (there is no switch from a
+;;; wall-clock count-in to the audio). Output latency past the sink (the
+;;; device's own buffer, Bluetooth) is not visible here: the OFFSET
+;;; setting is its correction.
+;;;
+;;;   (intercept-audio-start! tune lead-ms)  -> #t when a sink took the source, #f when silent
+;;;   (intercept-audio-ms)                   -> the song ms at the speaker, or #f (no sink)
+;;;   (intercept-audio-ended?)               -> the player walked past the end and released
+;;;   (intercept-audio-stop!)
+
+(define-library (crash intercept audio)
+  (import (sigil math)
+          (motif tune)
+          (motif tune player)
+          (crash audio)
+          (crash music resample)
+          (only (crash music live) live-music-rate LIVE-GAIN))
+
+  (export intercept-audio-start! intercept-audio-ms intercept-audio-ended? intercept-audio-stop!
+          intercept-audio-playing? intercept-audio-rate)
+
+  (begin
+    (define *player* #f)
+    (define *rate* 44100)          ; the player's render rate
+    (define *device* 44100)        ; the sink's rate
+    (define *delivered* 0)         ; device frames handed to the sink since the start
+    (define *lead* 0)              ; device frames of silence before the song
+    (define *ended* #f)
+    (define *sounding* #f)         ; a sink took the source (not muted, a context open)
+    (define *rs* (make-resampler))
+
+    (define (intercept-audio-playing?) (and *player* #t))
+    (define (intercept-audio-rate) *rate*)
+
+    (define (silence! out byte-offset n)
+      (let loop ((i 0))
+        (when (< i (* 2 n))
+          (bytevector-ieee-single-set! out (+ byte-offset (* 4 i)) 0.0 'little)
+          (loop (+ i 1)))))
+
+    (define (resampling?) (< *rate* *device*))
+
+    (define (song! out byte-offset n)
+      (if (resampling?)
+          (resampler-pull! *rs*
+                           (lambda (buf off frames) (player-pull! *player* buf off frames))
+                           out byte-offset n
+                           (/ (* 1.0 *rate*) *device*))
+          (player-pull! *player* out byte-offset n)))
+
+    ;; The source: n stereo f32 frames at the device's rate. #f ends it
+    ;; (the player walked past the end and released its last note).
+    (define (pull! out byte-offset n)
+      (cond ((not *player*) #f)
+            (else
+             (let* ((quiet (max 0 (min n (- *lead* *delivered*))))
+                    (_ (when (> quiet 0) (silence! out byte-offset quiet)))
+                    (rest (- n quiet))
+                    (on (or (= rest 0) (song! out (+ byte-offset (* 8 quiet)) rest))))
+               (set! *delivered* (+ *delivered* n))
+               (if on
+                   #t
+                   (begin (set! *ended* #t) #f))))))
+
+    (define (intercept-audio-stop!)
+      (when *player*
+        (audio-set-source! #f 0.0)
+        (player-close! *player*)
+        (set! *player* #f))
+      (set! *sounding* #f))
+
+    (define (intercept-audio-start! t lead-ms)
+      (intercept-audio-stop!)
+      (set! *device* (audio-rate))
+      (set! *rate* (min (live-music-rate) *device*))
+      (set! *delivered* 0)
+      (set! *lead* (exact (round (* *device* (/ lead-ms 1000.0)))))
+      (set! *ended* #f)
+      (resampler-reset! *rs*)
+      (set! *player* (open-tune-player t *rate* loop: #f))
+      (set! *sounding* (and (audio-open?) (not (audio-muted?))))
+      (audio-set-source! pull! (* LIVE-GAIN (audio-volume)))
+      *sounding*)
+
+    (define (intercept-audio-ended?) *ended*)
+
+    (define (intercept-audio-ms)
+      (and *sounding*
+           (or *player* *ended*)
+           (* 1000.0 (/ (- *delivered* (audio-source-depth) *lead*) (* 1.0 *device*)))))))

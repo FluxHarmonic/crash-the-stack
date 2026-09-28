@@ -1,0 +1,172 @@
+;;; (crash intercept rules) - Judging presses against a chart
+;;;
+;;; David's rulings (2026-09-28): SYNC within 35 ms of the note, CLEAN
+;;; within 70, LOSSY within 110, else DROP; SYNC 300, CLEAN 200, LOSSY 100
+;;; points times a multiplier that steps x1..x4 every 10 notes of combo; a
+;;; DROP resets the combo; a press with no note near it costs nothing in
+;;; CLASSIC. SIGNAL runs 0..100 from 50: +3 / +2 / +1 per hit, -6 per
+;;; DROP; at 0 the link is severed and the song fails.
+;;;
+;;; A run holds the chart (a vector of #(ms lane) in time order), a
+;;; judgment per note (#f until judged) and the totals. Time is the song's
+;;; own clock in ms (the note times are on it); the caller works out when
+;;; each press happened on that clock. The judgment and cursor vectors
+;;; are filled in place (a song has a few hundred notes and a frame
+;;; judges a handful): a run value is the latest state, never a snapshot
+;;; to go back to.
+;;;
+;;;   (make-run chart lanes)               -> a fresh run
+;;;   (run-advance run now presses)        -> the run after every press and every note that
+;;;                                           passed its window up to now; presses: ((lane . ms) ...)
+;;;   (run-events run)                     -> what the last advance did, oldest first:
+;;;                                           #(hit lane ms judgment delta) | #(drop lane ms) | #(press lane ms)
+;;;   (run-score run) (run-combo run) (run-max-combo run) (run-signal run) (run-failed? run)
+;;;   (run-counts run)                     -> (sync clean lossy drop)
+;;;   (run-judged run) (run-done? run)     -> notes judged; every note judged
+;;;   (run-accuracy run)                   -> 0..100 over the judged notes
+;;;   (run-grade run)                      -> "S" "A" "B" "C" "D"
+;;;   (run-multiplier run)
+
+(define-library (crash intercept rules)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list))
+
+  (export make-run run? run-advance run-events run-score run-combo run-max-combo run-signal
+          run-failed? run-counts run-judged run-done? run-accuracy run-grade run-multiplier
+          run-chart run-judgment run-lanes judge-delta
+          SYNC-MS CLEAN-MS LOSSY-MS SIGNAL-START SIGNAL-MAX)
+
+  (begin
+    (define SYNC-MS 35)
+    (define CLEAN-MS 70)
+    (define LOSSY-MS 110)
+    (define SIGNAL-START 50)
+    (define SIGNAL-MAX 100)
+
+    (define (points j) (case j ((sync) 300) ((clean) 200) ((lossy) 100) (else 0)))
+    (define (signal-step j) (case j ((sync) 3) ((clean) 2) ((lossy) 1) (else -6)))
+
+    ;; The judgment for a press delta ms from its note (either side), or #f.
+    (define (judge-delta d)
+      (let ((a (abs d)))
+        (cond ((<= a SYNC-MS) 'sync)
+              ((<= a CLEAN-MS) 'clean)
+              ((<= a LOSSY-MS) 'lossy)
+              (else #f))))
+
+    (define-struct run
+      (chart)                  ; vector of #(ms lane)
+      (lanes)                  ; lane count
+      (judgments)              ; vector per note: #f | sync | clean | lossy | drop (filled in place)
+      (lane-notes)             ; vector per lane: vector of note indices in time order
+      (cursors)                ; vector per lane: the first note not yet judged (moved in place)
+      (score default: 0)
+      (combo default: 0)
+      (max-combo default: 0)
+      (signal default: SIGNAL-START)
+      (failed default: #f)
+      (judged default: 0)
+      (counts default: '(0 0 0 0))
+      (events default: '()))
+
+    (define (run-failed? r) (run-failed r))
+    (define (run-judgment r i) (vector-ref (run-judgments r) i))
+
+    (define (make-run chart lanes)
+      (let ((per-lane (make-vector lanes '())))
+        (let loop ((i (- (vector-length chart) 1)))
+          (when (>= i 0)
+            (let ((lane (vector-ref (vector-ref chart i) 1)))
+              (when (< lane lanes)
+                (vector-set! per-lane lane (cons i (vector-ref per-lane lane)))))
+            (loop (- i 1))))
+        (run chart: chart
+             lanes: lanes
+             judgments: (make-vector (vector-length chart) #f)
+             lane-notes: (vector-map list->vector per-lane)
+             cursors: (make-vector lanes 0))))
+
+    (define (run-multiplier r) (min 4 (+ 1 (quotient (run-combo r) 10))))
+    (define (run-done? r) (= (run-judged r) (vector-length (run-chart r))))
+
+    (define (count-add counts j)
+      (let ((k (case j ((sync) 0) ((clean) 1) ((lossy) 2) (else 3))))
+        (let loop ((cs counts) (i 0) (acc '()))
+          (if (null? cs)
+              (reverse acc)
+              (loop (cdr cs) (+ i 1) (cons (if (= i k) (+ (car cs) 1) (car cs)) acc))))))
+
+    (define (note-ms r i) (vector-ref (vector-ref (run-chart r) i) 0))
+
+    ;; The lane's first unjudged note index, or #f.
+    (define (lane-head r lane)
+      (let ((notes (vector-ref (run-lane-notes r) lane))
+            (c (vector-ref (run-cursors r) lane)))
+        (and (< c (vector-length notes)) (vector-ref notes c))))
+
+    (define (lane-pop! r lane)
+      (vector-set! (run-cursors r) lane (+ 1 (vector-ref (run-cursors r) lane))))
+
+    ;; Judge note i as j (a hit's delta d, or #f for a DROP).
+    (define (judge r i lane j d)
+      (vector-set! (run-judgments r) i j)
+      (lane-pop! r lane)
+      (let* ((mult (run-multiplier r))
+             (hit? (not (eq? j 'drop)))
+             (combo (if hit? (+ 1 (run-combo r)) 0))
+             (signal (max 0 (min SIGNAL-MAX (+ (run-signal r) (signal-step j))))))
+        (run r
+             score: (+ (run-score r) (* mult (points j)))
+             combo: combo
+             max-combo: (max combo (run-max-combo r))
+             signal: signal
+             failed: (or (run-failed r) (<= signal 0))
+             judged: (+ 1 (run-judged r))
+             counts: (count-add (run-counts r) j)
+             events: (cons (if hit? (vector 'hit lane (note-ms r i) j d) (vector 'drop lane (note-ms r i)))
+                           (run-events r)))))
+
+    ;; Every note whose window closed before t is a DROP.
+    (define (expire r t)
+      (let loop ((lane 0) (r r))
+        (if (= lane (run-lanes r))
+            r
+            (let inner ((r r))
+              (let ((i (lane-head r lane)))
+                (if (and i (> (- t (note-ms r i)) LOSSY-MS))
+                    (inner (judge r i lane 'drop #f))
+                    (loop (+ lane 1) r)))))))
+
+    ;; A press at t in lane: the lane's first unjudged note, if the press
+    ;; falls in its window; a press with no note near it is only a press.
+    (define (press r lane t)
+      (if (or (< lane 0) (>= lane (run-lanes r)))
+          r
+          (let* ((r (expire r t))
+                 (i (lane-head r lane))
+                 (d (and i (- t (note-ms r i))))
+                 (j (and d (judge-delta d))))
+            (if j
+                (judge r i lane j d)
+                (run r events: (cons (vector 'press lane t) (run-events r)))))))
+
+    (define (run-advance r now presses)
+      (let loop ((ps (list-sort (lambda (a b) (< (cdr a) (cdr b))) presses))
+                 (r (run r events: '())))
+        (if (or (null? ps) (run-failed r))
+            (let ((r (if (run-failed r) r (expire r now))))
+              (run r events: (reverse (run-events r))))
+            (loop (cdr ps) (press r (car (car ps)) (min now (cdr (car ps))))))))
+
+    (define (run-accuracy r)
+      (let ((n (run-judged r)))
+        (if (= n 0)
+            100.0
+            (let ((c (run-counts r)))
+              (/ (* 100.0 (+ (* 300 (list-ref c 0)) (* 200 (list-ref c 1)) (* 100 (list-ref c 2))))
+                 (* 300.0 n))))))
+
+    (define (run-grade r)
+      (let ((a (run-accuracy r)))
+        (cond ((>= a 95.0) "S") ((>= a 90.0) "A") ((>= a 80.0) "B") ((>= a 70.0) "C") (else "D"))))))

@@ -12,6 +12,8 @@
 ;;;                   [--bench-probe N]   time the PROBE solver over the first N winnable seeds, no window
 ;;;                   [--cards]
 ;;;                   [--scan lan|wan|backbone]  straight to a SCAN board (0.1.3), of --seed or the next free seed
+;;;                   [--intercept SONG] [--autoplay]  straight to INTERCEPT's song select on SONG (Enter plays);
+;;;                                       --autoplay presses every note on the song clock (the drift gate)
 ;;;                   [--mute]            no sound (the context still opens)
 ;;;                   [--bg reaction|cyclic|flow|signal|echo|synapse|flame|still|reaction-cpu|off]
 ;;;                                       the living background's rule (reaction on the GPU by default;
@@ -97,6 +99,10 @@
                 scan-table-segment scan-table-cues scan-table-requests scan-table-over
                 scan-table-ticks scan-table-moves scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
+          ;; INTERCEPT, the rhythm game: its screen and its draw
+          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame
+                intercept-leave! intercept-set-say! intercept-autoplay! intercept-phase)
+          (only (crash intercept draw) draw-intercept)
           (only (sigil time) current-jiffy jiffies-per-second)
           (only (sigil gc) gc-allocated-bytes gc-young-occupancy gc-minor-collect!)   ; the --scanbench door's GC probes
           (crash hud)
@@ -333,6 +339,7 @@
       (card-fx default: #f)
       (overlay default: #f)       ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
       (scan default: #f)          ; SCAN's table, (crash scan table), once opened (0.1.3)
+      (intercept default: #f)     ; INTERCEPT's screen, (crash intercept table), while it is up
       (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
@@ -824,6 +831,7 @@
                ((daily-cards) (set-run! #f) (open-spec a (daily-spec 'cards) lay model))
                ((scan) (set-run! #f) (open-scan-table a (scan-new-table (menu-scan-size (stage-menu a)) #f)))   ; 0.1.3
                ((daily-scan) (set-run! #f) (open-scan-table a (scan-daily-table #f)))
+               ((intercept) (set-run! #f) (open-intercept a #f))   ; FREE PLAY's INTERCEPT row: the song select
                ((copy)
                 (let ((code (live-code a)))
                   (when code (display "crash: copy ") (display (code-display code)) (newline)))
@@ -986,6 +994,35 @@
                (else (open-scan-table a (scan-new-table (scan-session-preset (scan-table-session t)) #f)))))
         (else a)))
 
+    ;; --- INTERCEPT, the rhythm game ---------------------------------------------
+    ;; Its screen owns the music while it is up (the song is (crash audio)'s
+    ;; source), so the soundtrack stops on the way in and the menu's theme
+    ;; comes back on the way out. A lane press is stamped with the wall ms
+    ;; of the poll that saw it: GLFW has no event times, so a press is
+    ;; known to one frame.
+    (define INTERCEPT-KEYS '(a s d f j k l semicolon up down left right return space escape r))
+    (define *intercept-door* #f)   ; --intercept SONG: the song starts at boot
+    (define *autoplay* #f)         ; --autoplay: every note pressed on the song clock
+
+    (define (open-intercept a song)
+      (live-music-stop!)
+      (stage a screen: 'intercept overlay: #f intercept: (intercept-open #f song)))
+
+    (define (step-intercept a f)
+      (let* ((wall (current-milliseconds))
+             (pressed (filter key-pressed? INTERCEPT-KEYS))
+             (click (input-frame-click f))
+             (frame (make-intercept-frame pressed
+                                          (map (lambda (k) (cons k wall)) pressed)
+                                          (if click
+                                              (list (list (exact (floor (car click))) (exact (floor (cdr click))) wall))
+                                              '())
+                                          wall))
+             (t (intercept-step (stage-intercept a) frame)))
+        (if (memq 'menu (intercept-requests t))
+            (begin (intercept-leave! t) (open-menu (stage a intercept: #f)))
+            (stage a intercept: t))))
+
     (define (stage-background a) (stage-bg a))
 
     ;; The sound: the context and the sink, the ambient from its file (a
@@ -1024,6 +1061,7 @@
                                 (let ((path (music-tune-path name)))
                                   (and (file-exists? path) (read-file-string path)))))
       (live-music-set-say! (lambda parts (display "crash:") (for-each (lambda (p) (display " ") (display p)) parts) (newline)))
+      (intercept-set-say! (lambda parts (display "crash:") (for-each (lambda (p) (display " ") (display p)) parts) (newline)))
       ;; the music's render rate (M1): the ladder's last choice on this device
       ;; from the store, kept for the next boot when the ladder steps
       (let ((r (store-get "music-rate")))
@@ -1069,6 +1107,9 @@
                                 (*hub-seed* (jack-in (open-menu fresh) *hub-seed* *pace* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
                                 (*scan-door*   ; --scan PRESET (0.1.3): a SCAN board of --seed, else the next free seed
                                  (open-scan-table (open-menu fresh) (scan-open-table *scan-door* (or seed (scan-seed-next!)) #f #f)))
+                                (*intercept-door*   ; --intercept SONG: the song starts at boot (its select screen, Enter pressed)
+                                 (let ((a (open-intercept (open-menu fresh) *intercept-door*)))
+                                   (stage a intercept: (intercept-step (stage-intercept a) (make-intercept-frame (list (quote return)) (quote ()) (quote ()) (current-milliseconds))))))
                                 (cards?
                                  (open-cards (open-menu fresh) seed fresh? #t))
                                 (else (open-menu fresh))))))
@@ -1090,6 +1131,7 @@
                           ((hub) (music-frame! (quote hub) (hub-music-phase) (hub-music-seed)))
                           ((menu) (music-frame! (quote menu) #f))
                           ;; a table: its pool by its board's seed, its trace's phase (#f on CLASSIC SCAN)
+                          ((intercept) #f)   ; the song is the screen's own source
                           (else (let ((k (table-up a)))
                                   (music-frame! (table-kind-name k) ((table-kind-trace k) a) ((table-kind-seed k) a)))))))
                    (click (input-frame-click f))
@@ -1115,6 +1157,7 @@
                                (stage a menu: (car r)))))
                         ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
+                        ((intercept) (step-intercept a f))
                         ;; a table: the pause overlay first, else its record's tick (t-90ec6b)
                         (else
                          (if (stage-overlay a)
@@ -1138,6 +1181,7 @@
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
+                            ((intercept) (draw-intercept (stage-intercept a) VW VH (stage-background a) *copper* (current-milliseconds)))
                             ;; a table: its record's draw, the overlay's panel over it
                             (else
                              (let ((k (table-up a)))
@@ -1410,6 +1454,9 @@
         (set! *demo* (and (equal? (arg-value args "--demo" #f) "cleared") (quote cleared)))
         (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
         (set! *scan-door* (let ((p (arg-value args "--scan" #f))) (and p (memq (string->symbol p) (list (quote lan) (quote wan) (quote backbone))) (string->symbol p))))   ; --scan PRESET (0.1.3)
+        (set! *intercept-door* (let ((s (arg-value args "--intercept" #f))) (and s (string->symbol s))))   ; --intercept SONG: the song at boot
+        (set! *autoplay* (and (member "--autoplay" args) #t))
+        (intercept-autoplay! *autoplay*)
         (set! *pace* (let ((p (arg-value args "--pace" #f))) (if (and p (difficulty? (string->symbol p))) (string->symbol p) 'normal)))
         (set! *hub-seed* (let* ((h (arg-value args "--hub" #f)) (n (and h (string->number h))))
                            (and n (exact? n) (integer? n) (>= n 0) (min SEED-MAX (max 1 n)))))   ; --hub SEED: JACK IN at boot with this run seed (P5; the arms)
