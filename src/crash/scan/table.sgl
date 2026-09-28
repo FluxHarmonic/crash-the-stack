@@ -22,6 +22,16 @@
 ;;;   won lost  the board ended this frame (the shell records the score)
 ;;;   buzz      the page's vibrate (a long press flagged)
 ;;;   tools     ctrl+Space (CLASSIC has no tools; the shell ignores it)
+;;;   severed   HACKER: the countdown ran out this frame (the link is cut)
+;;;
+;;; HACKER (P6c, (crash scan trace)): the table carries the trace. It runs
+;;; from the uplink's deal on the frame's dt (60 ticks a second, the
+;;; remainder carried), charges each trip and probe the frame's news
+;;; reports (a probe from the hub's bag charges nothing and is counted in
+;;; `consumed`), fires the counter-hacks through trace-advance*, keeps the
+;;; firewalls' weakness current, and says what happened in a toast. A
+;;; cleared board freezes the trace with its phase (CLEAN RUN or UNDER
+;;; ICE); a severed one ends the board with LINK SEVERED.
 ;;;
 ;;; Rules family: no platform, no clock of its own (the frame carries dt).
 
@@ -29,8 +39,10 @@
   (import (sigil struct)
           (sigil math)
           (sigil list)
+          (crash trace)
           (crash scan rules)
-          (crash scan input))
+          (crash scan input)
+          (crash scan trace))
 
   (export RING-MS SHAKE-MS TOAST-MS PANEL-WAIT-MS PANEL-ROWS
           scan-table scan-table?
@@ -43,13 +55,15 @@
           scan-table-revealed? scan-table-reveal-age
           scan-table-panel-rows scan-table-panel-rect scan-table-panel-hit
           scan-table-won? scan-table-lost? scan-table-cursor?
-          scan-table->datum datum->scan-table)
+          scan-table-trace scan-table-elite? scan-table-probes scan-table-consumed
+          scan-table-marks scan-table-severed? scan-table-with-launch
+          scan-table->datum datum->scan-table trace->datum datum->trace)
 
   (begin
     (define RING-MS 33)       ; a ripple ring every two ticks (the design's section 6)
     (define SHAKE-MS 240)
     (define TOAST-MS 1600)
-    (define TABLE-SAVE-VERSION 1)
+    (define TABLE-SAVE-VERSION 2)
 
     ;; The end panel's rows. After a trip (CLASSIC's lost board) RETRY LINK
     ;; deals a fresh segment of the same size; a mapped segment offers the
@@ -74,10 +88,35 @@
       (toast-ms default: 0)
       (cues default: '())        ; this frame's, for the shell
       (requests default: '())    ; this frame's, for the shell
-      (cursor? default: #f))     ; the keyboard cursor shows: a key moved or acted since the last pointer press
+      (cursor? default: #f)      ; the keyboard cursor shows: a key moved or acted since the last pointer press
+      ;; HACKER
+      (trace default: #f)        ; the board's trace ((crash trace)), #f on CLASSIC
+      (acc default: 0)           ; ms x 60 not yet a whole tick
+      (elite? default: #f)       ; an ELITE run's board: a hit in TRACE completes the trace
+      (probes default: 0)        ; probes carried in from the hub's bag (free)
+      (consumed default: '())    ; bag tools this board used, for the hub's return
+      (marks default: '()))      ; a node board's marked hosts (D74), '() elsewhere
 
+    ;; A board: HACKER's trace at its preset's thresholds ((crash scan
+    ;; trace)), none on CLASSIC. A node's launch sets its own
+    ;; (scan-table-with-launch).
     (define (scan-table-new session daily)
-      (scan-table session: session daily: daily))
+      (scan-table session: session
+                  daily: daily
+                  trace: (and (scan-session-hacker? session)
+                              (let ((th (scan-thresholds (scan-session-preset session))))
+                                (scan-trace-new (car th) (cdr th))))))
+
+    ;; A node board's launch (JACK IN): its thresholds, the run's ELITE rule,
+    ;; the bag's probes, the node's marks.
+    (define (scan-table-with-launch t trace-at sever-at elite? probes marks)
+      (scan-table t
+                  trace: (scan-trace-new trace-at sever-at)
+                  elite?: elite?
+                  probes: probes
+                  marks: marks))
+
+    (define (scan-table-severed? t) (eq? (scan-table-over t) 'severed))
 
     ;; RETRY LINK's seed (David, 2026-09-26: re-dealing the SAME board after
     ;; a loss was trivial, since the loss shows every ICE). next-seed is the
@@ -157,11 +196,92 @@
                             cues: (news-cues news seg0 seg1)
                             cursor?: (cursor-shown? (scan-table-cursor? t) f)))
              (t (refusals t news))
+             (t (hacker-step t news dt changed?))
              ;; the pause overlay swallows the releases that follow: let go now
              (t (if (memq 'menu (scan-table-requests t))
                     (scan-table t session: (scan-session-release (scan-table-session t)))
                     t)))
-        (ended t seg1)))
+        (ended t)))
+
+    ;; --- HACKER: the trace ---------------------------------------------------------
+
+    (define (toast t line)
+      (scan-table t toast: line toast-ms: TOAST-MS))
+
+    (define (cue t c)
+      (scan-table t cues: (append (scan-table-cues t) (list c))))
+
+    ;; The frame's charges and the ICE's own clock, on a dealt HACKER board
+    ;; still in play. changed?: the frame changed the board, so the
+    ;; firewalls' weakness is asked of the solver again.
+    (define (hacker-step t news dt changed?)
+      (let ((seg (scan-table-segment t)))
+        (if (or (not (scan-table-trace t)) (not seg) (segment-over? seg))
+            t
+            (advance (charges t news) dt changed?))))
+
+    ;; Each trip charges a hit, each probe a probe (a bag probe nothing).
+    (define (charges t news)
+      (let loop ((ns news) (t t))
+        (if (null? ns)
+            t
+            (let ((n (car ns)))
+              (loop (cdr ns)
+                    (cond ((not (pair? n)) t)
+                          ((eq? (car n) 'trip)
+                           (let ((r (scan-trace-hit (scan-table-trace t) (scan-table-elite? t))))
+                             (toast (scan-table t trace: (car r))
+                                    (if (memq 'traced (cdr r)) MSG-TRACED MSG-TRIPPED))))
+                          ((eq? (car n) 'probed)
+                           (let ((t (if (> (scan-table-probes t) 0)
+                                        (scan-table t
+                                                    probes: (- (scan-table-probes t) 1)
+                                                    consumed: (cons 'probe (scan-table-consumed t)))
+                                        (scan-table t trace: (scan-trace-probe (scan-table-trace t))))))
+                             (toast t (if (eq? (caddr n) 'ice) MSG-PROBED-ICE MSG-PROBED-CLEAN))))
+                          ((eq? (car n) 'broke) (cue (toast t MSG-FIREWALL-BROKEN) 'match))
+                          (else t)))))))
+
+    ;; dt ms of the ICE's clock: whole ticks through trace-advance* with
+    ;; SCAN's counter-hacks, the remainder carried; then the firewalls'
+    ;; weakness at the new tick, and a line for what the ICE did.
+    (define (advance t dt recheck?)
+      (let* ((s (scan-table-session t))
+             (seg (scan-session-segment s))
+             (acc (+ (scan-table-acc t) (* 60 dt)))
+             (n (quotient acc 1000))
+             (r (trace-advance* (scan-table-trace t) seg n fire-scan-ice))
+             (tr (car r))
+             (seg2 (cadr r))
+             (seg3 (scan-refresh-firewalls seg2 (trace-ticks tr) (or recheck? (not (eq? seg2 seg)))))
+             (t (scan-table t
+                            trace: tr
+                            acc: (- acc (* n 1000))
+                            session: (if (eq? seg3 seg) s (scan-session s segment: seg3))))
+             (t (if (turned-weak? seg2 seg3) (toast t MSG-FIREWALL-WEAK) t)))
+        (events t (caddr r))))
+
+    ;; Did a firewall turn weak between the two segments?
+    (define (turned-weak? a b)
+      (any (lambda (fw)
+             (and (caddr fw)
+                  (let ((was (assv (car fw) (segment-firewalls a))))
+                    (and was (not (caddr was))))))
+           (segment-firewalls b)))
+
+    (define (events t es)
+      (let loop ((es es) (t t))
+        (if (null? es)
+            t
+            (loop (cdr es)
+                  (case (car es)
+                    ((traced) (toast t MSG-TRACED))
+                    ((firewall) (cue (toast t MSG-FIREWALLED) 'lock))
+                    ((mask) (cue (toast t MSG-MASKED) 'scramble))
+                    ((wipe) (cue (toast t MSG-WIPED) 'shuffle))
+                    ((nothing) (toast t MSG-NOTHING))
+                    ((severed) (cue (toast t MSG-SEVERED) 'severed))
+                    (else t))))))
 
     ;; The keyboard cursor shows once a cursor key is used, and hides at the
     ;; next pointer press: a mouse or touch player never sees a ring they
@@ -216,7 +336,7 @@
                     (if (and (pair? n) (eq? (car n) 'refused))
                         (scan-table t
                                     shake: (and (caddr n) (cons (caddr n) SHAKE-MS))
-                                    toast: (if (eq? (cadr n) 'flagged) "FLAGGED. UNFLAG FIRST." "PICK AN UPLINK FIRST.")
+                                    toast: (case (cadr n) ((flagged) "FLAGGED. UNFLAG FIRST.") ((firewall) MSG-FIREWALL) (else "PICK AN UPLINK FIRST."))
                                     toast-ms: TOAST-MS
                                     cues: (append (scan-table-cues t) (list 'mismatch)))
                         t))))))
@@ -238,23 +358,38 @@
                                  ((= (cadr n) 1) (cons 'select acc))
                                  (else acc)))
                           ((memq (car n) '(flagged hidden suspect)) (cons 'select acc))   ; a flag's cycle
-                          ((eq? (car n) 'trip) (cons 'severed acc))
+                          ((eq? (car n) 'trip) (cons (if (and seg1 (eq? (segment-version seg1) 'hacker)) 'mismatch 'severed) acc))   ; HACKER plays on: no sever sound
+                          ((and (eq? (car n) 'probed) (eq? (caddr n) 'ice)) (cons 'select acc))
                           ((eq? (car n) 'mapped) (cons 'cleared acc))
                           (else acc)))))))
 
-    (define (ended t seg)
-      (cond ((not seg) t)
-            ((segment-won? seg)
-             (scan-table t over: 'won over-ms: 0 panel: 0 requests: (append (scan-table-requests t) (list 'won))))
-            ((segment-lost? seg)
-             (scan-table t over: 'lost over-ms: 0 panel: 0 requests: (append (scan-table-requests t) (list 'lost))))
-            (else t)))
+    ;; The board's end this frame: mapped (HACKER's trace freezes with its
+    ;; phase), tripped on CLASSIC, or severed on HACKER.
+    (define (ended t)
+      (let ((seg (scan-table-segment t))
+            (tr (scan-table-trace t)))
+        (define (end how)
+          (scan-table t
+                      over: how
+                      over-ms: 0
+                      panel: 0
+                      trace: (if (and tr (eq? how 'won)) (trace-finish tr) tr)
+                      requests: (append (scan-table-requests t) (list how))))
+        (cond ((not seg) t)
+              ((segment-won? seg) (end 'won))
+              ((segment-lost? seg) (end 'lost))
+              ((and tr (trace-severed? tr)) (end 'severed))
+              (else t))))
 
     ;; The deal's slice (D81): the shell's budget as more?.
     (define (scan-table-deal! t more?)
       (let* ((s (scan-session-deal! (scan-table-session t) more?))
              (seg (scan-session-segment s))
-             (dealt? (and seg (not (scan-table-segment t)))))
+             (dealt? (and seg (not (scan-table-segment t))))
+             ;; HACKER: the counter-hacks' stream, a function of the board's seed
+             (s (if (and dealt? (scan-session-hacker? s))
+                    (scan-session s segment: (segment seg rng: (scan-rng-seed (scan-session-seed s))))
+                    s)))
         (scan-table t
                     session: s
                     requests: (append (scan-table-requests t)
@@ -272,7 +407,9 @@
     ;; --- the end panel ---------------------------------------------------------------
 
     (define (scan-table-panel-rows t)
-      (if (scan-table-lost? t) (list 'retry 'quit) (list 'new 'quit)))
+      (cond ((scan-table-lost? t) (list 'retry 'quit))
+            ((scan-table-severed? t) (list 'retry 'new 'quit))
+            (else (list 'new 'quit))))
 
     (define (panel-label id) (cadr (assq id PANEL-ROWS)))
 
@@ -333,28 +470,108 @@
 
     ;; --- the datum (CONTINUE) ------------------------------------------------------------
 
-    ;; (scan-table 1 MS MOVES DAILY SESSION) with SESSION (crash scan save)'s
-    ;; datum; the shell's save module converts the session (this module
+    ;; (scan-table 2 MS MOVES DAILY SESSION TRACE ACC ELITE? PROBES CONSUMED MARKS)
+    ;; with SESSION (crash scan save)'s datum and TRACE trace->datum's (#f on
+    ;; CLASSIC); the shell's save module converts the session (this module
     ;; stays out of the store). An ended board is never stored: CONTINUE
-    ;; offers a board still in play.
+    ;; offers a board still in play. Version 1 (0.1.3, CLASSIC only) is the
+    ;; first six fields and still loads.
     (define (scan-table->datum t session-datum)
-      (list 'scan-table TABLE-SAVE-VERSION (scan-table-ms t) (scan-table-moves t) (scan-table-daily t) session-datum))
+      (list 'scan-table
+            TABLE-SAVE-VERSION
+            (scan-table-ms t)
+            (scan-table-moves t)
+            (scan-table-daily t)
+            session-datum
+            (and (scan-table-trace t) (trace->datum (scan-table-trace t)))
+            (scan-table-acc t)
+            (scan-table-elite? t)
+            (scan-table-probes t)
+            (scan-table-consumed t)
+            (scan-table-marks t)))
+
+    (define (count? x) (and (integer? x) (exact? x) (>= x 0)))
 
     ;; The table from a datum, given the session it names (or #f).
     (define (datum->scan-table d session)
       (and session
            (list? d)
-           (= (length d) 6)
+           (>= (length d) 6)
            (eq? (car d) 'scan-table)
-           (eqv? (cadr d) TABLE-SAVE-VERSION)
-           (integer? (list-ref d 2))
-           (>= (list-ref d 2) 0)
-           (integer? (list-ref d 3))
-           (>= (list-ref d 3) 0)
+           (count? (list-ref d 2))
+           (count? (list-ref d 3))
            (or (not (list-ref d 4)) (integer? (list-ref d 4)))
-           (let ((seg (scan-session-segment session)))
+           (let ((seg (scan-session-segment session))
+                 (base (scan-table session: session
+                                   ms: (list-ref d 2)
+                                   moves: (list-ref d 3)
+                                   daily: (list-ref d 4))))
              (and (not (and seg (segment-over? seg)))
-                  (scan-table session: session
-                              ms: (list-ref d 2)
-                              moves: (list-ref d 3)
-                              daily: (list-ref d 4))))))))
+                  (case (cadr d)
+                    ((1) (and (= (length d) 6)
+                              (not (scan-session-hacker? session))
+                              base))
+                    ((2) (and (= (length d) 12)
+                              (let ((tr (and (list-ref d 6) (datum->trace (list-ref d 6)))))
+                                (and (eq? (and tr #t) (scan-session-hacker? session))
+                                     (count? (list-ref d 7))
+                                     (< (list-ref d 7) 1000)
+                                     (boolean? (list-ref d 8))
+                                     (count? (list-ref d 9))
+                                     (list? (list-ref d 10))
+                                     (every symbol? (list-ref d 10))
+                                     (list? (list-ref d 11))
+                                     (every (lambda (i) (and (count? i) (< i (* (scan-session-w session) (scan-session-h session)))))
+                                            (list-ref d 11))
+                                     (refresh-loaded
+                                      (scan-table base
+                                                 trace: tr
+                                                 acc: (list-ref d 7)
+                                                 elite?: (list-ref d 8)
+                                                 probes: (list-ref d 9)
+                                                 consumed: (list-ref d 10)
+                                                 marks: (list-ref d 11)))))))
+                    (else #f))))))
+
+    ;; A loaded board's firewalls: their weakness is derived, never saved.
+    (define (refresh-loaded t)
+      (let ((seg (scan-table-segment t))
+            (tr (scan-table-trace t)))
+        (if (and seg tr (pair? (segment-firewalls seg)))
+            (scan-table t session: (scan-session (scan-table-session t)
+                                                 segment: (scan-refresh-firewalls seg (trace-ticks tr) #t)))
+            t)))
+
+    ;; A trace as a datum and back: every field, in the struct's order.
+    ;; Anything malformed is #f.
+    (define (trace->datum tr)
+      (list (trace-mode tr) (trace-phase tr) (trace-trace-at tr) (trace-sever-at tr)
+            (trace-ticks tr) (trace-hints tr) (trace-shuffles tr) (trace-countdown tr)
+            (trace-ice-timer tr) (trace-ice-count tr) (trace-last-ice tr) (trace-cleared-in tr)
+            (trace-extra tr)))
+
+    (define (datum->trace d)
+      (and (list? d)
+           (= (length d) 13)
+           (memq (list-ref d 0) MODES)
+           (memq (list-ref d 1) PHASES)
+           (every count? (list (list-ref d 2) (list-ref d 3) (list-ref d 4) (list-ref d 5)
+                               (list-ref d 6) (list-ref d 7) (list-ref d 8) (list-ref d 9)
+                               (list-ref d 12)))
+           (> (list-ref d 2) 0)
+           (> (list-ref d 3) 0)
+           (or (not (list-ref d 10)) (symbol? (list-ref d 10)))
+           (or (not (list-ref d 11)) (memq (list-ref d 11) '(trace counter)))
+           (trace mode: (list-ref d 0)
+                  phase: (list-ref d 1)
+                  trace-at: (list-ref d 2)
+                  sever-at: (list-ref d 3)
+                  ticks: (list-ref d 4)
+                  hints: (list-ref d 5)
+                  shuffles: (list-ref d 6)
+                  countdown: (list-ref d 7)
+                  ice-timer: (list-ref d 8)
+                  ice-count: (list-ref d 9)
+                  last-ice: (list-ref d 10)
+                  cleared-in: (list-ref d 11)
+                  extra: (list-ref d 12))))))

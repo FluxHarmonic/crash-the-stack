@@ -33,6 +33,12 @@
 ;;;             frontier host; ctrl+Space asks for the tool stack, Escape
 ;;;             for the menu, ctrl+n for a new segment; ? shows the keys.
 ;;;
+;;; HACKER adds a fourth action, PROBE (D73): o, or the bar's PROBE button
+;;; (the `probe` pseudo-key), arms it, and the next scan of a hidden host
+;;; by any device probes that host instead (a sweep stays a sweep, and a
+;;; second press disarms); ctrl+p probes the cursor's host at once. CLASSIC
+;;; has no PROBE: the keys do nothing there.
+;;;
 ;;; The first scan is the UPLINK: it names the host the deal is built
 ;;; around, and starts the deal ((crash scan generate)); the session holds
 ;;; the generator and the shell steps it with its own clock and budget
@@ -56,7 +62,8 @@
           scan-session-w scan-session-h scan-session-m scan-session-preset scan-session-seed
           scan-session-version scan-session-suspects? scan-session-mode scan-session-cursor
           scan-session-press scan-session-zoom scan-session-touch?
-          scan-session-requests scan-session-news scan-session-keys?
+          scan-session-requests scan-session-news scan-session-keys? scan-session-armed?
+          scan-session-hacker?
           scan-session-new scan-session-node
           scan-step scan-session-dealing? scan-session-deal! scan-session-release
           scan-layout scan-map? scan-host-at scan-host-rect)
@@ -101,8 +108,11 @@
       (chord? default: #f)      ; a chord began with this press
       (zoom default: #f)        ; the map view's window (col . row), or #f on the map
       (keys? default: #f)       ; the keys line shows
+      (armed? default: #f)      ; HACKER: PROBE is armed, the next scan of a hidden host probes it
       (requests default: '())   ; for the shell, this frame: menu tools new buzz
       (news default: '()))      ; what this frame did, for cues and motion
+
+    (define (scan-session-hacker? s) (eq? (scan-session-version s) 'hacker))
 
     ;; A FREE PLAY or daily segment: a preset, a seed, nothing dealt yet. The
     ;; grid's neighbor table is built now, when the board opens, not in the
@@ -262,7 +272,8 @@
       (cond ((not i) s)
             ((scan-session-deal s) s)
             ((not (scan-session-segment s))
-             (if (eq? kind 'scan)
+             ;; a probe before the uplink is the uplink: it is clean by the deal
+             (if (memq kind '(scan probe))
                  (start-deal s i)
                  (say s (list 'refused 'no-uplink i))))
             (else
@@ -272,10 +283,22 @@
                             ((scan) (if reading? (segment-sweep seg i) (segment-scan seg i)))
                             ((flag) (segment-flag seg i))
                             ((sweep) (segment-sweep seg i))
+                            ((probe) (segment-probe seg i))
                             (else seg))))
                (scan-session s
                              segment: seg2
                              news: (append (reverse (segment-news seg2)) (scan-session-news s)))))))
+
+    ;; A scan from any device: a probe instead when PROBE is armed and the
+    ;; host is one a probe can take (hidden or suspect, or any host before
+    ;; the uplink), which disarms it. A reading still sweeps, armed or not.
+    (define (scan-or-probe s i)
+      (let ((seg (scan-session-segment s)))
+        (if (and i
+                 (scan-session-armed? s)
+                 (or (not seg) (memq (segment-state seg i) '(hidden suspect))))
+            (act (scan-session s armed?: #f) 'probe i)
+            (act s 'scan i))))
 
     (define (say s item)
       (scan-session s news: (cons item (scan-session-news s))))
@@ -309,12 +332,22 @@
                (scan-session s mode: (if (eq? (scan-session-mode s) 'scan) 'flag 'scan)))
               ((eq? k 'map) (scan-session s zoom: #f))
               ((eq? k '?) (scan-session s keys?: (not (scan-session-keys? s))))
+              ;; HACKER's PROBE: ctrl+p on the cursor's host now; o or the
+              ;; bar's button arms it for the next scan
+              ((and ctrl (eq? k 'p))
+               (if (scan-session-hacker? s)
+                   (act (scan-session s armed?: #f) 'probe (scan-session-cursor s))
+                   s))
+              ((and (not ctrl) (memq k '(o probe)))
+               (if (scan-session-hacker? s)
+                   (scan-session s armed?: (not (scan-session-armed? s)))
+                   s))
               (ctrl s)
               ((memq k '(left h)) (move s (- step) 0))
               ((memq k '(right l)) (move s step 0))
               ((memq k '(up k)) (move s 0 (- step)))
               ((memq k '(down j)) (move s 0 step))
-              ((memq k '(return space)) (act s 'scan (scan-session-cursor s)))
+              ((memq k '(return space)) (scan-or-probe s (scan-session-cursor s)))
               ((eq? k 'f) (act s 'flag (scan-session-cursor s)))
               ((eq? k 'n) (jump s (if (held? f 'shift) -1 1)))   ; shift+n: back
               (else s))))
@@ -421,7 +454,7 @@
                  ((eq? button 'left)
                   (let ((s (scan-session s press: #f)))
                     (if (and p (eq? (press-button p) 'left))
-                        (act s 'scan (scan-host-at s x y))
+                        (scan-or-probe s (scan-host-at s x y))
                         s)))
                  (else s)))
           ((middle)
@@ -445,7 +478,7 @@
                      ((eq? (scan-session-mode s) 'flag) (act s 'flag i))
                      ((and seg (eq? (segment-state seg i) 'flagged))
                       (say s (list 'refused 'flagged i)))
-                     (else (act s 'scan i)))))))
+                     (else (scan-or-probe s i)))))))
 
     ;; A touch held still for LONG-PRESS-MS flags, once, with a buzz.
     (define (long-press s f)

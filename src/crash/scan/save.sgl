@@ -3,13 +3,17 @@
 ;;; A board is a function of (seed, uplink) (D68, D76), so the datum stores
 ;;; what the deal was made from and what play did to it, not the ICE:
 ;;;
-;;;   (scan-board 1 PRESET W H M SEED VERSION SUSPECTS? FIRST LOST MODE CURSOR CELLS)
+;;;   (scan-board 2 PRESET W H M SEED VERSION SUSPECTS? FIRST LOST MODE CURSOR CELLS
+;;;               FIREWALLS MASKED RNG)
 ;;;
 ;;; PRESET lan | wan | backbone | node (a node carries its grid in W H M);
 ;;; FIRST the uplink, or #f before it; LOST the trip that ended a CLASSIC
 ;;; board, or #f; MODE scan | flag; CELLS the host states run-length
 ;;; encoded, a flat list of code and count (h hidden, s scanned, f flagged,
-;;; q suspect, t tripped, d defused), or #f before the uplink.
+;;; q suspect, t tripped, d defused), or #f before the uplink. Version 2
+;;; (HACKER, P6c) adds the counter-hacks: FIREWALLS as (center tick) (their
+;;; weakness is derived on load, never stored), the MASKED hosts, and the
+;;; stream RNG. A version 1 datum (0.1.3) still loads, with none.
 ;;;
 ;;; scan-load re-deals from the seed and the uplink (the deal is
 ;;; deterministic) and lays the cells over it through segment-restore,
@@ -30,7 +34,7 @@
   (export SCAN-SAVE-VERSION scan-save scan-load cells->rle rle->cells)
 
   (begin
-    (define SCAN-SAVE-VERSION 1)
+    (define SCAN-SAVE-VERSION 2)
 
     (define CODES
       (list (cons 'hidden 'h)
@@ -96,14 +100,18 @@
               (and seg (segment-lost seg))
               (scan-session-mode s)
               (scan-session-cursor s)
-              (and seg (cells->rle (segment-cells seg))))))
+              (and seg (cells->rle (segment-cells seg)))
+              ;; version 2: HACKER's counter-hacks (the weak flags are derived on load)
+              (if seg (map (lambda (fw) (list (car fw) (cadr fw))) (segment-firewalls seg)) '())
+              (if seg (segment-masked seg) '())
+              (if seg (segment-rng seg) 1))))
 
     ;; A session from a datum, or #f.
     (define (scan-load d touch?)
       (and (list? d)
-           (= (length d) 14)
+           (or (and (= (length d) 14) (eqv? (list-ref d 1) 1))
+               (and (= (length d) 17) (eqv? (list-ref d 1) SCAN-SAVE-VERSION)))
            (eq? (list-ref d 0) 'scan-board)
-           (eqv? (list-ref d 1) SCAN-SAVE-VERSION)
            (let ((preset (list-ref d 2))
                  (w (list-ref d 3))
                  (h (list-ref d 4))
@@ -115,7 +123,10 @@
                  (lost (list-ref d 10))
                  (mode (list-ref d 11))
                  (cursor (list-ref d 12))
-                 (rle (list-ref d 13)))
+                 (rle (list-ref d 13))
+                 (walls (if (= (length d) 17) (list-ref d 14) (quote ())))
+                 (masked (if (= (length d) 17) (list-ref d 15) (quote ())))
+                 (rng (if (= (length d) 17) (list-ref d 16) 1)))
              (and (memq version '(original hacker))
                   (boolean? suspects?)
                   (memq mode '(scan flag))
@@ -129,7 +140,26 @@
                         (and (not rle) (scan-session s mode: mode cursor: cursor))
                         (and (index? first (* w h))
                              (list? rle)
-                             (restored s first lost mode cursor rle))))))))
+                             (hacker-ok? walls masked rng (* w h))
+                             (let ((r (restored s first lost mode cursor rle)))
+                               (and r
+                                    (scan-session r
+                                                  segment: (segment (scan-session-segment r)
+                                                                    firewalls: (map (lambda (fw) (list (car fw) (cadr fw) #f)) walls)
+                                                                    masked: masked
+                                                                    rng: rng)))))))))))
+
+    ;; The counter-hacks' part of a version 2 datum: firewalls as (center
+    ;; tick), masked hosts, the stream (MINSTD: 1 .. 2^31 - 2).
+    (define (hacker-ok? walls masked rng n)
+      (and (list? walls)
+           (every (lambda (fw)
+                    (and (list? fw) (= (length fw) 2) (index? (car fw) n) (index? (cadr fw) 1099511627776)))
+                  walls)
+           (list? masked)
+           (every (lambda (i) (index? i n)) masked)
+           (index? rng 2147483647)
+           (> rng 0)))
 
     (define (restored s first lost mode cursor rle)
       (let* ((w (scan-session-w s))

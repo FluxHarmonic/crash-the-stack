@@ -1,0 +1,167 @@
+;;; SCAN HACKER at the table (P6c): the trace runs from the uplink, trips
+;;; and probes charge it from the frame's news, a bag probe is free and
+;;; counted, the counter-hacks fire under COUNTER-HACK and say so, the
+;;; board severs, a clear freezes the trace with its phase, PROBE arms
+;;; from the keys and the bar, and the datum round-trips the trace.
+;;;
+;;; Every play goes through (crash scan input)'s raw frames, as the shells
+;;; hand them over. Prices are the design's, worked out by hand for WAN
+;;; (trace-at 180, sever-at 220): a hit 90, a probe 30.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash tween)
+        (crash trace)
+        (crash scan rules)
+        (crash scan generate)
+        (crash scan input)
+        (crash scan table)
+        (crash scan trace))
+
+(define (always) #t)
+
+(define (frame pressed pointer dt) (make-scan-frame pressed '() pointer dt))
+(define (ctrl-frame pressed dt) (make-scan-frame pressed '(ctrl) '() dt))
+
+(define (dealt t)
+  (let loop ((t t))
+    (if (scan-table-dealing? t) (loop (scan-table-deal! t always)) t)))
+
+(define (step t f) (dealt (scan-table-step t f)))
+
+(define (wan seed) (scan-table-new (scan-session-new 'wan seed 'hacker #f #f) #f))
+(define (wan-classic seed) (scan-table-new (scan-session-new 'wan seed 'original #f #f) #f))
+
+(define (center t i)
+  (let ((r (scan-host-rect (scan-table-session t) i)))
+    (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+
+(define (click t i button dt)
+  (let ((c (center t i)))
+    (step t (frame '() (list (list 'down (car c) (cdr c) button) (list 'up (car c) (cdr c) button)) dt))))
+
+(define UPLINK 136)   ; the middle of 16x16
+
+(define (after-uplink seed) (click (wan seed) UPLINK 'left 0))
+
+(define (hidden-where t pred)
+  (let ((seg (scan-table-segment t)))
+    (find (lambda (i) (and (segment-hidden? seg i) (pred seg i))) (iota (segment-size seg)))))
+
+(define (ice-host t) (hidden-where t (lambda (seg i) (segment-ice? seg i))))
+(define (clean-host t) (hidden-where t (lambda (seg i) (not (segment-ice? seg i)))))
+
+(define (value t) (trace-value (scan-table-trace t)))
+
+(define (with-trace t f) (scan-table t trace: (f (scan-table-trace t))))
+
+(test-group "scan HACKER table: the trace"
+  (test "CLASSIC has no trace; HACKER's starts at the preset's thresholds"
+    (assert-false (scan-table-trace (wan-classic 3)))
+    (let ((tr (scan-table-trace (wan 3))))
+      (assert-equal 180 (trace-trace-at tr))
+      (assert-equal 220 (trace-sever-at tr))))
+  (test "the trace waits for the uplink, then runs 60 ticks a second, the remainder carried"
+    (let* ((t (step (wan 3) (frame '() '() 700))))
+      (assert-equal 0 (trace-ticks (scan-table-trace t)))
+      (let* ((t (after-uplink 3))
+             (t0 (trace-ticks (scan-table-trace t)))
+             (t (step t (frame '() '() 1000)))
+             (t (step t (frame '() '() 10)))
+             (t (step t (frame '() '() 10))))
+        (assert-equal 61 (- (trace-ticks (scan-table-trace t)) t0)))))
+  (test "a trip charges a hit (90 on WAN) and the board plays on"
+    (let* ((t (after-uplink 3))
+           (v0 (value t))
+           (t2 (click t (ice-host t) 'left 0)))
+      (assert-equal 90 (- (value t2) v0))
+      (assert-false (scan-table-over t2))
+      (assert-equal MSG-TRIPPED (scan-table-toast t2))))
+  (test "an ELITE board's trip completes the trace"
+    (let* ((t (scan-table (after-uplink 3) elite?: #t))
+           (t2 (click t (ice-host t) 'left 0)))
+      (assert-eq 'counter (trace-phase (scan-table-trace t2)))))
+  (test "an armed probe (o, then a click) charges 30 and defuses ICE; the next click scans"
+    (let* ((t (after-uplink 3))
+           (v0 (value t))
+           (t (step t (frame (list 'o) '() 0)))
+           (_ (assert-true (scan-session-armed? (scan-table-session t))))
+           (i (ice-host t))
+           (t2 (click t i 'left 0)))
+      (assert-equal 30 (- (value t2) v0))
+      (assert-eq 'defused (segment-state (scan-table-segment t2) i))
+      (assert-false (scan-session-armed? (scan-table-session t2)))
+      (assert-equal MSG-PROBED-ICE (scan-table-toast t2))))
+  (test "the bar's PROBE button arms it; ctrl+p probes the cursor's host at once"
+    (let* ((t (after-uplink 3))
+           (t (step t (frame (list 'probe) '() 0))))
+      (assert-true (scan-session-armed? (scan-table-session t))))
+    (let* ((t (after-uplink 3))
+           (i (clean-host t))
+           (t (scan-table t session: (scan-session (scan-table-session t) cursor: i)))
+           (v0 (value t))
+           (t2 (step t (ctrl-frame (list 'p) 0))))
+      (assert-eq 'scanned (segment-state (scan-table-segment t2) i))
+      (assert-equal 30 (- (value t2) v0))))
+  (test "CLASSIC has no PROBE: o and ctrl+p do nothing"
+    (let* ((t (click (wan-classic 3) UPLINK 'left 0))
+           (t2 (step (step t (frame (list 'o) '() 0)) (ctrl-frame (list 'p) 0))))
+      (assert-false (scan-session-armed? (scan-table-session t2)))
+      (assert-equal (segment-cells (scan-table-segment t)) (segment-cells (scan-table-segment t2)))))
+  (test "a probe from the bag charges nothing and is reported consumed"
+    (let* ((t (scan-table (after-uplink 3) probes: 1))
+           (v0 (value t))
+           (t (step t (frame (list 'o) '() 0)))
+           (t2 (click t (ice-host t) 'left 0)))
+      (assert-equal 0 (- (value t2) v0))
+      (assert-equal 0 (scan-table-probes t2))
+      (assert-equal '(probe) (scan-table-consumed t2)))))
+
+(test-group "scan HACKER table: the ICE and the end"
+  (test "under COUNTER-HACK the ICE fires on its timer and says which member it was"
+    (let* ((t (after-uplink 5))
+           (t (with-trace t (lambda (tr) (trace tr phase: 'counter countdown: (* 220 60) ice-timer: 1))))
+           (t2 (step t (frame '() '() 17))))
+      (assert-equal 1 (trace-ice-count (scan-table-trace t2)))
+      (assert-true (and (member (scan-table-toast t2) (list MSG-FIREWALLED MSG-MASKED MSG-WIPED MSG-NOTHING)) #t))))
+  (test "the countdown's end severs the board: LINK SEVERED, RETRY LINK / NEW SEGMENT / JACK OUT"
+    (let* ((t (after-uplink 5))
+           (t (with-trace t (lambda (tr) (trace tr phase: 'counter countdown: 1 ice-timer: 600))))
+           (t2 (step t (frame '() '() 17))))
+      (assert-true (scan-table-severed? t2))
+      (assert-true (and (memq 'severed (scan-table-requests t2)) #t))
+      (assert-equal (list 'retry 'new 'quit) (scan-table-panel-rows t2))))
+  (test "a clear freezes the trace with its phase: CLEAN RUN in TRACE"
+    (let* ((t (after-uplink 5))
+           (d (deal-segment 'wan 5 UPLINK 'hacker #f))
+           (t (let loop ((t t) (steps (cdr (dealt-line d))))
+                (if (or (null? steps) (scan-table-over t))
+                    t
+                    (loop (click t (cadr (car steps)) (if (eq? (car (car steps)) 'scan) 'left 'right) 16)
+                          (cdr steps))))))
+      (assert-true (scan-table-won? t))
+      (assert-eq 'cleared (trace-phase (scan-table-trace t)))
+      (assert-eq 'trace (trace-cleared-in (scan-table-trace t)))
+      (let ((ticks (trace-ticks (scan-table-trace t))))
+        (assert-equal ticks (trace-ticks (scan-table-trace (step t (frame '() '() 1000))))))))
+  (test "the datum round-trips the trace, the stream and the bag"
+    (let* ((t (scan-table (click (after-uplink 5) (ice-host (after-uplink 5)) 'left 500) probes: 2 consumed: '(probe)))
+           (d (scan-table->datum t 'session))
+           (back (datum->scan-table d (scan-table-session t))))
+      (assert-true (and back #t))
+      (assert-equal (trace->datum (scan-table-trace t)) (trace->datum (scan-table-trace back)))
+      (assert-equal 2 (scan-table-probes back))
+      (assert-equal '(probe) (scan-table-consumed back))
+      (assert-false (datum->scan-table (append (list-head* d 6) (list #f 0 #f 0 '() '())) (scan-table-session t)))))
+  (test "the trace datum refuses what a trace cannot be"
+    (let ((d (trace->datum (scan-table-trace (wan 1)))))
+      (assert-true (and (datum->trace d) #t))
+      (assert-false (datum->trace (cons 'loose (cdr d))))
+      (assert-false (datum->trace (reverse (cdr (reverse d)))))
+      (assert-false (datum->trace (append (list-head* d 2) (list 0) (list-tail* d 3)))))))
+
+(define (list-head* xs k)
+  (if (= k 0) '() (cons (car xs) (list-head* (cdr xs) (- k 1)))))
+(define (list-tail* xs k)
+  (if (= k 0) xs (list-tail* (cdr xs) (- k 1))))

@@ -37,6 +37,10 @@
        (eq? (scan-session-mode a) (scan-session-mode b))
        (= (scan-session-cursor a) (scan-session-cursor b))))
 
+;; The first k of a list.
+(define (list-head* xs k)
+  (if (= k 0) (quote ()) (cons (car xs) (list-head* (cdr xs) (- k 1)))))
+
 ;; The datum with one field replaced.
 (define (with d k v)
   (let loop ((d d) (i 0))
@@ -82,7 +86,8 @@
     (test "the positive control: the untouched datum loads"
       (assert-true (and (scan-load d #f) #t)))
     (test "another version, another tag, a missing field"
-      (assert-false (scan-load (with d 1 2) #f))
+      (assert-false (scan-load (with d 1 3) #f))
+      (assert-false (scan-load (with d 1 1) #f))   ; version 1 has 14 fields, not 17
       (assert-false (scan-load (with d 0 'stack-board) #f))
       (assert-false (scan-load (reverse (cdr (reverse d))) #f)))
     (test "a grid that is not the preset's, a mode or version that does not exist"
@@ -96,3 +101,32 @@
     (test "states play cannot produce: every host scanned (ICE included), a lost host that is not tripped"
       (assert-false (scan-load (with d 13 (list 's 81)) #f))
       (assert-false (scan-load (with d 10 5) #f)))))
+
+(test-group "scan save: version 2 (HACKER's counter-hacks)"
+  (let* ((s (played 8))
+         (seg (scan-session-segment s))
+         (hidden (find (lambda (i) (segment-hidden? seg i)) (iota (segment-size seg))))
+         (reading (find (lambda (i) (and (segment-scanned? seg i) (> (segment-reading seg i) 0))) (iota (segment-size seg))))
+         (h (scan-session s segment: (segment seg
+                                              firewalls: (list (list hidden 1234 #t))
+                                              masked: (list reading)
+                                              rng: 987654))))
+    (test "firewalls (center and tick), masks and the stream load back; a firewall's weakness is not stored"
+      (let* ((back (scan-load (scan-save h) #f))
+             (bseg (scan-session-segment back)))
+        (assert-true (same? h back))
+        (assert-equal (list (list hidden 1234 #f)) (segment-firewalls bseg))
+        (assert-equal (list reading) (segment-masked bseg))
+        (assert-equal 987654 (segment-rng bseg))))
+    (test "a version 1 datum (0.1.3) still loads, with no counter-hacks"
+      (let* ((d (scan-save s))
+             (v1 (with (list-head* d 14) 1 1))
+             (back (scan-load v1 #f)))
+        (assert-true (and back (same? s back)))
+        (assert-equal '() (segment-firewalls (scan-session-segment back)))))
+    (test "malformed counter-hacks are refused whole"
+      (let ((d (scan-save h)))
+        (assert-false (scan-load (with d 14 (list (list 9999 0))) #f))
+        (assert-false (scan-load (with d 14 (list (list hidden))) #f))
+        (assert-false (scan-load (with d 15 (list -1)) #f))
+        (assert-false (scan-load (with d 16 0) #f))))))
