@@ -22,7 +22,7 @@
           (crash atlas)
           (crash geometry)
           (only (crash trace) trace-phase trace-cleared-in TAG-CLEAN-RUN TAG-UNDER-ICE)
-          (only (crash render) draw-board-background draw-menu-button draw-keys-button draw-meter-in
+          (only (crash render) draw-board-background draw-menu-button draw-keys-button draw-meter-in draw-end-panel
                 draw-line-2 draw-toast-in text-cache cached-text)
           (crash scan rules)
           (crash scan cells)
@@ -221,7 +221,7 @@
             ((not (scan-table-revealed? t i)) 'hidden)
             (else
              (let ((st (segment-cell-state seg i)))
-               (if (and (eq? st 'hidden) (pressed-host? s i)) 'pressed st)))))
+               (if (and (eq? st 'hidden) (or (pressed-host? s i) (swept-host? t s seg i))) 'pressed st)))))
 
     (define (pressed-host? s i)
       (let ((p (scan-session-press s)))
@@ -229,6 +229,24 @@
              (eqv? (list-ref p 0) i)
              (memq (list-ref p 1) '(left touch middle))
              #t)))
+
+    ;; Windows' chord look (David, 2026-09-28): while a press is held on a
+    ;; reading, and for a moment after a sweep its flags refused, the hidden
+    ;; hosts around it draw pressed, so the player sees what a sweep takes.
+    (define (swept-host? t s seg i)
+      (let* ((p (scan-session-press s))
+             (held (and p (memq (list-ref p 1) '(left touch middle)) (list-ref p 0)))
+             (fl (scan-table-flash t))
+             (flashed (and fl (car fl))))
+        (or (around-reading? seg held i)
+            (around-reading? seg flashed i))))
+
+    (define (around-reading? seg r i)
+      (and r
+           (eq? (segment-state seg r) 'scanned)
+           (> (segment-reading seg r) 0)
+           (memv i (segment-neighbors seg r))
+           #t))
 
     ;; The wiring between two scanned zeros, right and down, lit while the
     ;; ripple is fresh (C-WIRE-LIT fading to C-WIRE-DARK over 330 ms).
@@ -286,6 +304,12 @@
             (when r
               (draw-scan-cell (if (eq? (scan-session-mode s) 'flag) 'cursor-flag 'cursor)
                               (car r) (cadr r) (caddr r)))))
+        ;; a node board's marks (D74): the notch and ring over the host, drawn
+        ;; last so nothing covers them
+        (for-each (lambda (m)
+                    (let ((r (scan-host-rect s m)))
+                      (when r (draw-scan-cell 'marked (car r) (cadr r) (caddr r)))))
+                  (scan-table-marks t))
         ;; FLAG mode's frame: the board's edge dashed, so the mode shows
         ;; without colour (D70)
         (when (eq? (scan-session-mode s) 'flag)
@@ -341,6 +365,29 @@
                (car (car cs)))
               (else (loop (cdr cs))))))
 
+    ;; EXTRACT n OF K., kept by its two numbers so a frame allocates nothing
+    ;; while they hold (the instruction is asked every frame).
+    (define *extract-key* #f)
+    (define *extract-text* "")
+    (define (extract-line n k)
+      (let ((key (+ (* 100 k) n)))
+        (unless (eqv? key *extract-key*)
+          (set! *extract-key* key)
+          (set! *extract-text* (string-append "EXTRACT " (number->string n) " OF " (number->string k) ".")))
+        *extract-text*))
+
+    ;; MORE FLAGS THAN ICE, with the least number of wrong ones, kept by that
+    ;; number (the line is asked every frame).
+    (define *wrong-key* #f)
+    (define *wrong-text* "")
+    (define (wrong-flags-line n)
+      (unless (eqv? n *wrong-key*)
+        (set! *wrong-key* n)
+        (set! *wrong-text* (if (= n 1)
+                               "MORE FLAGS THAN ICE: A FLAG IS ON A CLEAN HOST."
+                               (string-append "MORE FLAGS THAN ICE: " (number->string n) " ARE ON CLEAN HOSTS."))))
+      *wrong-text*)
+
     ;; The instruction line: what to do now, in the design's words.
     (define (scan-instruction t)
       (let ((s (scan-table-session t)))
@@ -355,6 +402,14 @@
               ((and (scan-map? s) (not (scan-session-zoom s))) "TAP THE MAP TO ZOOM IN.")
               ((not (scan-table-segment t)) "PICK AN UPLINK. IT IS CLEAN.")
               ((scan-session-armed? s) MSG-PROBE-ARMED)
+              ;; the flags against the counter (David, 2026-09-28)
+              ((scan-table-flag-hint t)
+               => (lambda (h)
+                    (if (eq? h 'over-flagged)
+                        (wrong-flags-line (- (scan-table-counter t)))
+                        "ICE 0: THE REST ARE CLEAN, OR A FLAG IS WRONG.")))
+              ((pair? (scan-table-marks t))   ; a node board (D74)
+               (extract-line (scan-table-extracted t) (length (scan-table-marks t))))
               ((scan-session-touch? s)
                (if (eq? (scan-session-mode s) 'flag)
                    "TAP TO FLAG. SCAN MODE: THE BUTTON AT RIGHT."
@@ -383,7 +438,8 @@
                         (- vw (* 2 TOUCH-BUTTON) 16)
                         (- vw 36)))
              (ice (cached-text *ice-text* (scan-table-counter t) ice-text))
-             (ice-color (if (< (scan-table-counter t) 0) C-TRACE-HOT C-ICE)))
+             ;; the counter burns hot while the flags say something is off
+             (ice-color (if (or (< (scan-table-counter t) 0) (scan-table-flag-hint t)) C-TRACE-HOT C-ICE)))
         (color! C-BG)
         (draw-filled-rect 0 top vw (- vh top))
         (color! C-BAR-C)
@@ -405,6 +461,7 @@
                      (cond ((or (scan-table-lost? t) (scan-table-severed? t)) C-ICE)
                            ((scan-table-won? t) C-SELECTED)
                            ((scan-session-armed? s) C-LABEL-LIT)
+                           ((scan-table-flag-hint t) C-TRACE-HOT)
                            (else C-TEXT-DIM)))
         (if (scan-session-touch? s)
             (begin
@@ -491,32 +548,17 @@
              (tr (scan-table-trace t))
              ;; HACKER's clear carries the phase it was cleared in
              (tag (and won? tr (if (eq? (trace-cleared-in tr) 'counter) TAG-UNDER-ICE TAG-CLEAN-RUN)))
-             (first (scan-table-panel-rect t 0))
-             (top (- (cadr first) 60))
-             (bottom (+ (cadr first) (* n 32) 8)))
-        (color-alpha! C-BG 0.88)
-        (draw-filled-rect 120 top 400 (- bottom top))
-        (color! (cond (won? C-SELECTED) (severed? C-TRACE-HOT) (else C-ICE)))
-        (draw-filled-rect 120 top 400 1)
-        (draw-filled-rect 120 (- bottom 1) 400 1)
-        (text! title (quotient (- BAND-W (text-width title 3)) 2) (+ top 10) 3)
-        (let ((line (cond (best-line (if tag (string-append tag ". " best-line) best-line))
-                          (tag (string-append tag ". " (time-text (scan-table-seconds t))))
-                          (won? (time-text (scan-table-seconds t)))
-                          (else (string-append "TIME " (clock-string (scan-table-seconds t)))))))
-          (color! C-TEXT)
-          (text! line (quotient (- BAND-W (text-width line 1)) 2) (+ top 38) 1))
-        (let loop ((rs rows) (i 0))
-          (when (pair? rs)
-            (let* ((r (scan-table-panel-rect t i))
-                   (hi? (= i (scan-table-panel t)))
-                   (label (panel-label (car rs))))
-              (when hi?
-                (color! C-BAR-C)
-                (draw-filled-rect (car r) (cadr r) (caddr r) (cadddr r)))
-              (color! (if hi? C-HIGHLIGHT C-TEXT))
-              (text! label (+ (car r) (quotient (- (caddr r) (text-width label 2)) 2)) (+ (cadr r) 7) 2))
-            (loop (cdr rs) (+ i 1))))))
+             (line (cond (best-line (if tag (string-append tag ". " best-line) best-line))
+                         (tag (string-append tag ". " (time-text (scan-table-seconds t))))
+                         (else (time-text (scan-table-seconds t))))))
+        ;; the shared end panel ((crash render), t-6a2d35): STACK's and
+        ;; DEFRAG's severed screens draw the same one since P6c
+        (draw-end-panel title
+                        (cond (won? C-SELECTED) (severed? C-TRACE-HOT) (else C-ICE))
+                        line
+                        (map panel-label rows)
+                        (min (scan-table-panel t) (- n 1))
+                        1.0)))
 
     ;; --- the frame -------------------------------------------------------------------
 

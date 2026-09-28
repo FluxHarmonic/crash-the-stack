@@ -95,7 +95,7 @@
           (only (crash scan generate) GEN-BUDGET-MS)
           (only (crash scan table) scan-table-step scan-table-deal! scan-table-dealing? scan-table-session
                 scan-table-segment scan-table-cues scan-table-requests scan-table-over
-                scan-table-ticks scan-table-moves scan-table-seconds scan-table-trace)
+                scan-table-ticks scan-table-moves scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
           (only (sigil time) current-jiffy jiffies-per-second)
           (only (sigil gc) gc-allocated-bytes gc-young-occupancy gc-minor-collect!)   ; the --scanbench door's GC probes
@@ -490,10 +490,11 @@
               ((eq? choice 'next-layer) (run-request (stage a overlay: #f) 'next lay model))
               ((memq choice (list 'disconnect 'back-to-menu))
                ;; DISCONNECT on a hub-launched board: held at its node, the runner back in the world (ruled 2026-09-22)
-               (if (and (eq? choice 'disconnect) (memq (stage-screen a) (list 'stack 'cards))
-                        (if (eq? (stage-screen a) 'cards)
-                            (hub-run-hold! 'cards (deal-trace (stage-deal a)))
-                            (hub-run-hold! 'stack (session-trace (stage-session a)))))
+               (if (and (eq? choice 'disconnect) (memq (stage-screen a) (list 'stack 'cards 'scan))
+                        (case (stage-screen a)
+                          ((cards) (hub-run-hold! 'cards (deal-trace (stage-deal a))))
+                          ((scan) (hub-run-hold! 'scan (or (scan-table-trace (stage-scan a)) (trace-new 'twist))))   ; P6d
+                          (else (hub-run-hold! 'stack (session-trace (stage-session a))))))
                    (open-hub (close-overlay a))
                    (open-menu (close-overlay a))))
               (else a))))
@@ -620,8 +621,13 @@
                  (begin
                    (display "crash: hub launch ") (display (node-index (launch-node l))) (display " ") (display (encode (launch-spec l))) (newline)
                    (if (hub-run-resume?)   ; a held board: back to it as CONTINUE would
-                       (if (eq? (node-table (launch-node l)) 'cards) (open-cards a #f #f #t) (open-stack a lay #f #f model #t))
-                       (open-spec a (launch-spec l) lay model)))
+                       (case (node-table (launch-node l))
+                         ((cards) (open-cards a #f #f #t))
+                         ((scan) (open-scan a #f #t))   ; P6d
+                         (else (open-stack a lay #f #f model #t)))
+                       (if (eq? (node-table (launch-node l)) 'scan)
+                           (open-scan-table a (scan-node-table l #f))   ; P6d: a SCAN node's board
+                           (open-spec a (launch-spec l) lay model))))
                  a)))
           ((menu)
            (hub-run-set! (cdr (hub-screen-take-request hs)))
@@ -649,7 +655,7 @@
       (let ((r (run-in-force)))
         (cond ((not r) a)
               (else
-               (when (hub-run-severed! (if (eq? (stage-screen a) 'cards) 'cards 'stack))
+               (when (hub-run-severed! (case (stage-screen a) ((cards) 'cards) ((scan) 'scan) (else 'stack)))
                  (display "crash: run reconnect") (newline))
                (display "crash: run back") (newline)
                (open-hub a)))))
@@ -773,6 +779,7 @@
     (define *scan-bg-acc* 0.0)
     (define *scan-deal-at* #f)
     (define *scan-door* #f)     ; --scan lan|wan|backbone: straight to a SCAN board
+    (define SCAN-NODE-HOLD-MS 1500)   ; a taken SCAN node's clear shows this long before the hub comes back (P6d)
 
     (define (say-scan . parts)
       (display "crash: scan")
@@ -847,18 +854,23 @@
           (let loop ((rs (scan-table-requests after)) (a a))
             (if (null? rs) a (loop (cdr rs) (scan-request a (car rs) after)))))))
 
+    ;; A SCAN node's board (P6d) answers the hub, as on the web: its clear
+    ;; opens the node, and leaving it any other way is its sever.
     (define (scan-request a r t)
       (case r
         ((won)
-         (set! *scan-line* (scan-record! t))
+         (set! *scan-line* (or (scan-run-clear-line! t) (scan-record! t)))
          (say-scan "won" (scan-table-seconds t) (scan-table-moves t) (or *scan-line* "-"))
          a)
         ((lost) (say-scan "lost" (scan-table-seconds t)) a)
         ((severed) (say-scan "severed" (scan-table-seconds t)) a)   ; HACKER (P6c): the panel offers RETRY LINK, NEW SEGMENT, JACK OUT
         ((menu) (unless (scan-table-over t) (scan-save! t)) (open-overlay a))
         ((quit) (open-menu a))
-        ((new failed) (open-scan-table a (scan-new-table (scan-session-preset (scan-table-session t)) #f)))
-        ((retry) (open-scan-table a (scan-retry-table t #f)))   ; a FRESH board of the same size, never the lost one
+        ((new failed retry)
+         (cond ((eq? *layer-cleared* 'scan) (layer-done a 'scan #f #f))   ; the node is taken: back to the hub
+               ((scan-in-run?) (run-request a 'retry #f #f))
+               ((eq? r 'retry) (open-scan-table a (scan-retry-table t #f)))   ; a FRESH board of the same size, never the lost one
+               (else (open-scan-table a (scan-new-table (scan-session-preset (scan-table-session t)) #f)))))
         (else a)))
 
     (define (stage-background a) (stage-bg a))
@@ -988,7 +1000,16 @@
                         ((scan)   ; 0.1.3
                          (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((menu-frame? f) (scan-save! (stage-scan a)) (open-menu a))
-                               (else (step-scan a f dt))))
+                               (else
+                                (let ((a (step-scan a f dt)))
+                                  ;; a SCAN node taken (P6d): the hub once the clear has shown
+                                  (let ((t (take-layer-cleared!)))
+                                    (when t (set! *layer-cleared* t)))
+                                  (if (and (eq? (stage-screen a) 'scan) (not (stage-overlay a)) (eq? *layer-cleared* 'scan)
+                                           (scan-table-over (stage-scan a))
+                                           (>= (scan-table-over-ms (stage-scan a)) SCAN-NODE-HOLD-MS))
+                                      (layer-done a 'scan lay model)
+                                      a)))))
                         ((stack)
                          (cond ((stage-overlay a) (overlay-step a f dt card-geom lay model))
                                ((menu-frame? f) (open-menu a))

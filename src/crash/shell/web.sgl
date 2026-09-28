@@ -139,7 +139,7 @@
           (only (crash scan generate) GEN-BUDGET-MS)
           (only (crash scan table) scan-table-step scan-table-deal! scan-table-dealing? scan-table-session
                 scan-table-segment scan-table-cues scan-table-requests scan-table-over
-                scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace)
+                scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
           (crash title card)
           (crash title logo)
@@ -1392,7 +1392,12 @@
           ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
           ((scan) (cond (*overlay* (overlay-tick f dt))                 ; 0.1.3: the pause panel stops the clock
                         ((menu-frame? f) (scan-save! *scan*) (open-menu!))
-                        (else (scan-tick f dt))))
+                        (else
+                         (scan-tick f dt)
+                         ;; a SCAN node taken (P6d): the hub once the clear has shown
+                         (when (and (eq? *screen* 'scan) (not *overlay*) (eq? *layer-cleared* 'scan)
+                                    *scan* (scan-table-over *scan*) (>= (scan-table-over-ms *scan*) SCAN-NODE-HOLD-MS))
+                           (layer-done! 'scan)))))
           ((stack)
            (cond (*overlay* (overlay-tick f dt))
                  ((or (menu-frame? f)
@@ -1502,7 +1507,7 @@
                (when (eq? (car choice) 'set) (apply-setting! (cadr choice) (cddr choice))))
               ((eq? choice 'resume) (close-overlay!))
               ((eq? choice 'next-layer)
-               (let ((table (if (eq? *screen* 'cards) 'cards 'stack)))
+               (let ((table (case *screen* ((cards) 'cards) ((scan) 'scan) (else 'stack))))
                  (set! *overlay* #f)
                  (run-request! 'next table)))
               ((eq? choice 'copy) (copy-code!))
@@ -1510,10 +1515,11 @@
                (close-overlay!)
                ;; DISCONNECT on a hub-launched board: the board is held at its node and the
                ;; runner is back in the world there (ruled 2026-09-22); else the main menu
-               (if (and (eq? choice 'disconnect) (memq *screen* (list 'stack 'cards))
-                        (if (eq? *screen* 'cards)
-                            (hub-run-hold! 'cards (deal-trace *deal*))
-                            (hub-run-hold! 'stack (session-trace *session*))))
+               (if (and (eq? choice 'disconnect) (memq *screen* (list 'stack 'cards 'scan))
+                        (case *screen*
+                          ((cards) (hub-run-hold! 'cards (deal-trace *deal*)))
+                          ((scan) (hub-run-hold! 'scan (or (scan-table-trace *scan*) (trace-new 'twist))))   ; P6d
+                          (else (hub-run-hold! 'stack (session-trace *session*)))))
                    (open-hub!)
                    (open-menu!)))
               (else #f)))
@@ -1722,6 +1728,7 @@
     (define *scan-line* #f)      ; the end panel's score line
     (define *scan-bg-acc* 0.0)   ; the field's ticks owed (60 a second)
     (define *scan-deal-at* #f)   ; now-ms when the uplink's deal began
+    (define SCAN-NODE-HOLD-MS 1500)   ; a taken SCAN node's clear shows this long before the hub comes back (P6d)
 
     (define (scan-pointer! payload)
       (let ((parts (string-split payload ",")))
@@ -1872,19 +1879,27 @@
         (when (eq? *screen* 'scan)
           (present! #f (lambda () (draw-scan *scan* VW VH (background) *copper* *scan-line*))))))
 
+    ;; A SCAN node's board (P6d) answers the hub, not the scoreboard: its
+    ;; clear opens the node (and the layer's ledger comes up once the panel
+    ;; has shown), and leaving it any other way (RETRY LINK, NEW SEGMENT,
+    ;; ctrl+n, a failed deal) is its sever: RECONNECT at the node, as the
+    ;; other tables do.
     (define (scan-request! r t)
       (say "scan" "request" r)
       (case r
         ((won)
-         (set! *scan-line* (and (not *no-save*) (scan-record! t)))
+         (set! *scan-line* (or (scan-run-clear-line! t)
+                               (and (not *no-save*) (scan-record! t))))
          (say "scan" "won" (scan-table-seconds t) (scan-table-moves t) (or *scan-line* "-")))
         ((lost) (say "scan" "lost" (scan-table-seconds t)))
         ((severed) (say "scan" "severed" (scan-table-seconds t)))   ; HACKER (P6c)
         ((menu) (unless (scan-table-over t) (scan-save! t)) (open-overlay!))
         ((quit) (open-menu!))
-        ((new failed)
-         (open-scan-table! (scan-new-table (scan-session-preset (scan-table-session t)) *touch*)))
-        ((retry) (open-scan-table! (scan-retry-table t *touch*)))   ; a FRESH board of the same size, never the lost one
+        ((new failed retry)
+         (cond ((eq? *layer-cleared* 'scan) (layer-done! 'scan))   ; the node is taken: back to the hub
+               ((scan-in-run?) (run-request! 'retry 'scan))
+               ((eq? r 'retry) (open-scan-table! (scan-retry-table t *touch*)))   ; a FRESH board of the same size, never the lost one
+               (else (open-scan-table! (scan-new-table (scan-session-preset (scan-table-session t)) *touch*)))))
         ((buzz) (set! *vibrate-asked* #t))
         (else #f)))
 
@@ -1939,14 +1954,17 @@
                     (hub-run-set! (hub-run-start! seed difficulty))
                     (say "run" "start" seed (hub-run-code) difficulty))))
 
-    ;; &hubat=N: the runner set down on key node N (the arms: a walk is seed-specific).
+    ;; &hubat=N: the runner set down on node N (the arms: a walk is seed-specific).
+    ;; Key nodes are placed first, so N below the key count is key node N as
+    ;; before; a SCAN node (P6d) is reached by its own index (the say line
+    ;; names its table).
     (define (hub-at! n)
       (let* ((hs (hub-run-in-force))
              (w (hub-screen-world hs))
-             (node (find (lambda (x) (and (node-key x) (= (node-index x) n))) (world-nodes w))))
+             (node (find (lambda (x) (= (node-index x) n)) (world-nodes w))))
         (when node
           (hub-run-set! (hub-screen-teleport hs (node-cell node)))
-          (say "hub" "at" n (node-cell node)))))
+          (say "hub" "at" n (node-cell node) (node-table node)))))
 
     ;; The hub screen up behind the entry screen (a new run, CONTINUE): the
     ;; layer's generation and the bake happen there, not on one frame.
@@ -2008,8 +2026,13 @@
              (when l
                (say "hub" "launch" (node-index (launch-node l)) (encode (launch-spec l)))
                (if (hub-run-resume?)   ; a held board: back to it as CONTINUE would
-                   (if (eq? (node-table (launch-node l)) 'cards) (open-cards! #t) (open-stack! #t))
-                   (open-spec! (launch-spec l))))))
+                   (case (node-table (launch-node l))
+                     ((cards) (open-cards! #t))
+                     ((scan) (open-scan! #t))   ; P6d
+                     (else (open-stack! #t)))
+                   (if (eq? (node-table (launch-node l)) 'scan)
+                       (open-scan-table! (scan-node-table l *touch*))   ; P6d: a SCAN node's board
+                       (open-spec! (launch-spec l)))))))
           ((menu)
            (hub-run-set! (cdr (hub-screen-take-request hs)))
            ;; the pause panel over the world (P5): RESUME, SETTINGS, DISCONNECT = RUN HELD

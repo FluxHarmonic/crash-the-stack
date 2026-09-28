@@ -1,0 +1,143 @@
+;;; SCAN's chord and the feedback around it (David and trev, 2026-09-28,
+;;; from the HACKER build): every desktop binding of the sweep (a left
+;;; click on a number, a right click on a number, the middle button, both
+;;; buttons), a right click on a hidden host still flags, a sweep whose
+;;; flags do not match says so and flashes the hosts it would take, the
+;;; win ends the board whatever the flags say (after ICE hits too), and
+;;; the bar's flag hint tells a wrong flag from a board still in play.
+;;; Both versions; every play through raw mouse frames, as the page sends.
+
+(import (sigil test)
+        (sigil list)
+        (sigil math)
+        (crash scan rules)
+        (crash scan input)
+        (crash scan table))
+
+(define (always) #t)
+
+(define (dealt t)
+  (let loop ((t t))
+    (if (scan-table-dealing? t) (loop (scan-table-deal! t always)) t)))
+
+(define (center t i)
+  (let ((r (scan-host-rect (scan-table-session t) i)))
+    (cons (+ (car r) (quotient (caddr r) 2)) (+ (cadr r) (quotient (caddr r) 2)))))
+
+(define (frame events) (make-scan-frame '() '() events 16))
+
+;; A press and release of one button on host i, in one frame.
+(define (click t i b)
+  (let ((c (center t i)))
+    (dealt (scan-table-step t (frame (list (list 'down (car c) (cdr c) b) (list 'up (car c) (cdr c) b)))))))
+
+;; Both buttons on host i: left down, right down, then both up.
+(define (both t i)
+  (let ((c (center t i)))
+    (dealt (scan-table-step t (frame (list (list 'down (car c) (cdr c) 'left)
+                                           (list 'down (car c) (cdr c) 'right)
+                                           (list 'up (car c) (cdr c) 'right)
+                                           (list 'up (car c) (cdr c) 'left)))))))
+
+(define (board version) (click (scan-table-new (scan-session-new 'wan 3 version #f #f) #f) 136 'left))
+
+(define (scanned-count t)
+  (length (filter (lambda (i) (segment-scanned? (scan-table-segment t) i)) (iota 256))))
+
+;; A reading with a clean hidden neighbor, and the table with exactly its
+;; ICE neighbors flagged.
+(define (reading-of t)
+  (let ((seg (scan-table-segment t)))
+    (find (lambda (i)
+            (and (segment-scanned? seg i)
+                 (> (segment-reading seg i) 0)
+                 (any (lambda (j) (and (segment-hidden? seg j) (not (segment-ice? seg j))))
+                      (segment-neighbors seg i))))
+          (iota 256))))
+
+(define (flag-its-ice t r)
+  (let ((seg (scan-table-segment t)))
+    (fold-left (lambda (t j) (click t j 'right))
+               t
+               (filter (lambda (j) (and (segment-hidden? seg j) (segment-ice? seg j))) (segment-neighbors seg r)))))
+
+(test-group "scan chord: every desktop binding sweeps a number whose flags match"
+  (for-each
+   (lambda (version)
+     (test (string-append (symbol->string version) ": left, right, middle and both buttons each sweep")
+       (for-each (lambda (how)
+                   (let* ((t (board version))
+                          (r (reading-of t))
+                          (t (flag-its-ice t r))
+                          (n0 (scanned-count t))
+                          (t2 (case how
+                                ((left right middle) (click t r how))
+                                (else (both t r)))))
+                     (assert-equal (list how 'swept) (list how (if (> (scanned-count t2) n0) 'swept 'not-swept)))))
+                 '(left right middle both))))
+   '(hacker original))
+  (test "a right click on a hidden host still flags it"
+    (let* ((t (board 'hacker))
+           (seg (scan-table-segment t))
+           (h (find (lambda (i) (segment-hidden? seg i)) (iota 256)))
+           (t2 (click t h 'right)))
+      (assert-eq 'flagged (segment-state (scan-table-segment t2) h))))
+  (test "a right click on a number scans nothing when its flags do not match, and flags nothing"
+    (let* ((t (board 'original))
+           (r (reading-of t))
+           (t2 (click t r 'right)))
+      (assert-equal (scanned-count t) (scanned-count t2))
+      (assert-eq 'scanned (segment-state (scan-table-segment t2) r)))))
+
+(test-group "scan chord: a refused sweep says so"
+  (test "no scan, the toast, the refusal cue, and the hosts it would take flash"
+    (let* ((t (board 'hacker))
+           (r (reading-of t))
+           (t2 (click t r 'left)))
+      (assert-equal (scanned-count t) (scanned-count t2))
+      (assert-equal "SWEEP NEEDS ITS FLAGS." (scan-table-toast t2))
+      (assert-equal '(mismatch) (scan-table-cues t2))
+      (assert-equal r (car (scan-table-flash t2)))))
+  (test "the flash lapses"
+    (let* ((t (board 'hacker))
+           (t2 (click t (reading-of t) 'left))
+           (t3 (scan-table-step t2 (make-scan-frame '() '() '() 1000))))
+      (assert-false (scan-table-flash t3)))))
+
+(test-group "scan chord: the win and the flags"
+  (test "HACKER with ICE tripped, and CLASSIC: the board ends the moment the last clean host is scanned"
+    (for-each
+     (lambda (case*)
+       (let* ((version (car case*))
+              (trips (cdr case*))
+              (t (board version))
+              (seg (scan-table-segment t))
+              (ices (filter (lambda (j) (and (segment-hidden? seg j) (segment-ice? seg j))) (iota 256)))
+              (t (let loop ((t t) (k trips) (is ices))
+                   (if (= k 0) t (loop (click t (car is) 'left) (- k 1) (cdr is)))))
+              (clean (filter (lambda (j) (not (segment-ice? seg j))) (iota 256))))
+         (let loop ((t t) (cs clean))
+           (cond ((scan-table-over t)
+                  (assert-equal (list version 'won) (list version (scan-table-over t)))
+                  (assert-equal 0 (segment-clean-left (scan-table-segment t))))
+                 ((null? cs) (assert-equal (list version 'won) (list version 'never-ended)))
+                 (else (loop (if (segment-hidden? (scan-table-segment t) (car cs)) (click t (car cs) 'left) t)
+                             (cdr cs)))))))
+     (list (cons 'hacker 0) (cons 'hacker 2) (cons 'original 0))))
+  (test "every hidden host flagged on an unfinished board: over-flagged, the counter below 0 by at least the clean hosts left"
+    (let* ((t (board 'original))
+           (seg (scan-table-segment t))
+           (t2 (fold-left (lambda (t j) (if (segment-hidden? (scan-table-segment t) j) (click t j 'right) t))
+                          t
+                          (iota 256))))
+      (assert-false (scan-table-over t2))
+      (assert-eq 'over-flagged (scan-table-flag-hint t2))
+      (assert-true (<= (scan-table-counter t2) (- (segment-clean-left (scan-table-segment t2)))))))
+  (test "the counter at 0 on an unfinished board reads counted; a board still short of flags reads nothing"
+    (let* ((t (board 'original))
+           (seg (scan-table-segment t))
+           (t2 (fold-left (lambda (t j) (if (segment-hidden? (scan-table-segment t) j) (click t j 'right) t))
+                          t
+                          (filter (lambda (j) (segment-ice? seg j)) (iota 256)))))
+      (assert-false (scan-table-flag-hint t))
+      (assert-eq 'counted (scan-table-flag-hint t2)))))

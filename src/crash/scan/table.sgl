@@ -43,13 +43,14 @@
           (crash scan rules)
           (crash scan input)
           (only (crash scan generate) deal-marks)
+          (only (crash geometry) panel-row-rect panel-row-hit)   ; the shared end panel (t-6a2d35)
           (crash scan trace))
 
   (export RING-MS SHAKE-MS TOAST-MS PANEL-WAIT-MS PANEL-ROWS
           scan-table scan-table?
           scan-table-session scan-table-ms scan-table-over scan-table-over-ms
           scan-table-moves scan-table-daily scan-table-cues scan-table-requests
-          scan-table-panel scan-table-shake scan-table-toast scan-table-toast-ms
+          scan-table-panel scan-table-shake scan-table-flash scan-table-flag-hint scan-table-toast scan-table-toast-ms
           scan-table-new scan-table-retry-seed
           scan-table-step scan-table-deal! scan-table-dealing?
           scan-table-segment scan-table-seconds scan-table-ticks scan-table-counter
@@ -63,6 +64,8 @@
   (begin
     (define RING-MS 33)       ; a ripple ring every two ticks (the design's section 6)
     (define SHAKE-MS 240)
+    (define FLASH-MS 360)      ; a refused sweep's hosts show pressed this long
+    (define MSG-SWEEP-FLAGS "SWEEP NEEDS ITS FLAGS.")
     (define TOAST-MS 1600)
     (define TABLE-SAVE-VERSION 2)
 
@@ -85,6 +88,7 @@
       (now default: 0)           ; ms since the board opened (the ripple's clock; runs before the uplink too)
       (panel default: 0)         ; the end panel's highlight
       (shake default: #f)        ; (host . ms left) of a refusal
+      (flash default: #f)        ; (reading . ms left): a refused sweep's hosts flash pressed
       (toast default: #f)        ; the line a refusal says, or #f
       (toast-ms default: 0)
       (cues default: '())        ; this frame's, for the shell
@@ -182,7 +186,9 @@
                             now: (+ (scan-table-now t) dt)
                             toast-ms: (max 0 (- (scan-table-toast-ms t) dt))
                             shake: (let ((sh (scan-table-shake t)))
-                                     (and sh (> (cdr sh) dt) (cons (car sh) (- (cdr sh) dt)))))))
+                                     (and sh (> (cdr sh) dt) (cons (car sh) (- (cdr sh) dt))))
+                            flash: (let ((fl (scan-table-flash t)))
+                                     (and fl (> (cdr fl) dt) (cons (car fl) (- (cdr fl) dt)))))))
         (if (scan-table-over t)
             (panel-step (scan-table t over-ms: (+ (scan-table-over-ms t) dt)) f)
             (play-step t f dt))))
@@ -214,6 +220,26 @@
                     (scan-table t session: (scan-session-release (scan-table-session t)))
                     t)))
         (ended t)))
+
+    ;; --- what the flags say is off (David, 2026-09-28) ----------------------------
+
+    ;; A board that would not end with every host flagged read as a bug.
+    ;; Flags never count toward the map, so an unfinished board with every
+    ;; unscanned host flagged always has more flags than ICE: at least as
+    ;; many flags are on clean hosts as the counter is below 0. #f, or
+    ;;   over-flagged  the counter is below 0 (its negation is the least
+    ;;                 number of wrong flags)
+    ;;   counted       the counter reads 0 and the board is not mapped: the
+    ;;                 unflagged hosts are clean, or a flag is wrong
+    (define (scan-table-flag-hint t)
+      (let ((seg (scan-table-segment t)))
+        (and seg
+             (not (scan-table-over t))
+             (not (segment-over? seg))
+             (let ((c (segment-counter seg)))
+               (cond ((< c 0) 'over-flagged)
+                     ((= c 0) 'counted)
+                     (else #f))))))
 
     ;; --- the node objective (D74) ------------------------------------------------
 
@@ -364,13 +390,22 @@
             t
             (let ((n (car ns)))
               (loop (cdr ns)
-                    (if (and (pair? n) (eq? (car n) 'refused))
-                        (scan-table t
-                                    shake: (and (caddr n) (cons (caddr n) SHAKE-MS))
-                                    toast: (case (cadr n) ((flagged) "FLAGGED. UNFLAG FIRST.") ((firewall) MSG-FIREWALL) (else "PICK AN UPLINK FIRST."))
-                                    toast-ms: TOAST-MS
-                                    cues: (append (scan-table-cues t) (list 'mismatch)))
-                        t))))))
+                    (cond ((not (and (pair? n) (eq? (car n) 'refused))) t)
+                          ;; a sweep whose flags do not match its reading: the
+                          ;; hosts it would take flash pressed, and the toast
+                          ;; says why (David, 2026-09-28: it read as a dead click)
+                          ((eq? (cadr n) 'sweep)
+                           (scan-table t
+                                       flash: (cons (caddr n) FLASH-MS)
+                                       toast: MSG-SWEEP-FLAGS
+                                       toast-ms: TOAST-MS
+                                       cues: (append (scan-table-cues t) (list 'mismatch))))
+                          (else
+                           (scan-table t
+                                       shake: (and (caddr n) (cons (caddr n) SHAKE-MS))
+                                       toast: (case (cadr n) ((flagged) "FLAGGED. UNFLAG FIRST.") ((firewall) MSG-FIREWALL) (else "PICK AN UPLINK FIRST."))
+                                       toast-ms: TOAST-MS
+                                       cues: (append (scan-table-cues t) (list 'mismatch))))))))))
 
     ;; The frame's cues from what the segment did (the design's section 7,
     ;; P6c): an opening of two or more hosts is one sweep, never a ping per
@@ -459,26 +494,13 @@
 
     (define (panel-label id) (cadr (assq id PANEL-ROWS)))
 
-    ;; (x y w h) of the index-th row, centered in the band under the
-    ;; end line.
-    (define PANEL-ROW-W 240)
-    (define PANEL-ROW-H 28)
-    (define PANEL-ROW-GAP 4)
-    (define PANEL-Y 150)
+    ;; (x y w h) of the index-th row: the shared end panel's ((crash
+    ;; geometry), t-6a2d35), so every table's rows sit and hit alike.
     (define (scan-table-panel-rect t index)
-      (list (quotient (- BAND-W PANEL-ROW-W) 2)
-            (+ PANEL-Y (* index (+ PANEL-ROW-H PANEL-ROW-GAP)))
-            PANEL-ROW-W
-            PANEL-ROW-H))
+      (panel-row-rect index))
 
     (define (scan-table-panel-hit t x y)
-      (let loop ((i 0))
-        (cond ((= i (length (scan-table-panel-rows t))) #f)
-              ((let ((r (scan-table-panel-rect t i)))
-                 (and (>= x (car r)) (< x (+ (car r) (caddr r)))
-                      (>= y (cadr r)) (< y (+ (cadr r) (cadddr r)))))
-               i)
-              (else (loop (+ i 1))))))
+      (panel-row-hit (length (scan-table-panel-rows t)) x y))
 
     ;; The panel takes a tap on a row (on release, as the board does), the
     ;; arrows and Return or Space, r for RETRY LINK, n for NEW SEGMENT,

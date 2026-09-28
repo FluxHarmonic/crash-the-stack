@@ -2295,7 +2295,7 @@ async function dealFrom(free, table, row = "new-board") {
   if (!detail) {
     const m0 = consoleLines.length;
     await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=0`);
-    const at = await waitLine(/^crash: hub at 0 (\d+)$/, m0, 20000);
+    const at = await waitLine(/^crash: hub at 0 (\d+)(?: \S+)?$/, m0, 20000);   // P6d: the node's table after the cell
     if (!at) detail = "?hub=1&hubat=0 did not set the runner on key node 0";
     else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the hub boot";
     else {
@@ -2323,7 +2323,7 @@ async function dealFrom(free, table, row = "new-board") {
   if (!detail) {
     const m0 = consoleLines.length;
     await navigate(`http://127.0.0.1:${PORT}/index.html?trace&fresh&hub=1&bpm=120&hubat=1`);
-    const at = await waitLine(/^crash: hub at 1 (\d+)$/, m0, 20000);
+    const at = await waitLine(/^crash: hub at 1 (\d+)(?: \S+)?$/, m0, 20000);   // P6d: the node's table after the cell
     if (!at) detail = "?hub=1&hubat=1 did not set the runner on key node 1";
     else if (!(await waitLine(/^crash: boot done /, m0, 20000))) detail = "no \"crash: boot done\" on the second hub boot";
     else {
