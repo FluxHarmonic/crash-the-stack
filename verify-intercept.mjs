@@ -302,6 +302,31 @@ async function key(k) {
   await sleep(150);
 }
 
+// A PNG from Page.captureScreenshot, decoded (8-bit RGB or RGBA, no interlace).
+function decodePng(buf) {
+  let off = 8, w = 0, h = 0, ct = 0; const idat = [];
+  while (off < buf.length) {
+    const len = buf.readUInt32BE(off), type = buf.toString("ascii", off + 4, off + 8), data = buf.subarray(off + 8, off + 8 + len);
+    if (type === "IHDR") { w = data.readUInt32BE(0); h = data.readUInt32BE(4); ct = data[9]; if (data[8] !== 8 || data[12] !== 0) throw new Error("png: not 8-bit non-interlaced"); }
+    else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    off += 12 + len;
+  }
+  const bpp = ct === 6 ? 4 : ct === 2 ? 3 : 0; if (!bpp) throw new Error("png: colour type " + ct);
+  const raw = zlib.inflateSync(Buffer.concat(idat)), stride = w * bpp, px = Buffer.alloc(h * stride);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], line = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= bpp ? px[y * stride + x - bpp] : 0, b = y ? px[(y - 1) * stride + x] : 0, c = x >= bpp && y ? px[(y - 1) * stride + x - bpp] : 0;
+      let v = line[x];
+      if (f === 1) v += a; else if (f === 2) v += b; else if (f === 3) v += (a + b) >> 1;
+      else if (f === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      px[y * stride + x] = v & 255;
+    }
+  }
+  return { w, h, bpp, px };
+}
+
 // ---- INTERCEPT's helpers -------------------------------------------------------
 // test/test-intercept.sgl's PINNED rows for Black Glass (notes hash), keyed tier/device
 const PINNED = {
