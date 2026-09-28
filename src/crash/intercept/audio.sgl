@@ -36,6 +36,7 @@
 
   (export intercept-audio-start! intercept-audio-ms intercept-audio-ended? intercept-audio-stop!
           intercept-audio-set-latency! intercept-audio-latency DEVICE-LATENCY-MS
+          intercept-audio-pause! intercept-audio-resume!
           intercept-audio-playing? intercept-audio-rate)
 
   (begin
@@ -45,6 +46,8 @@
     (define *delivered* 0)         ; device frames handed to the sink since the start
     (define *lead* 0)              ; device frames of silence before the song
     (define *ended* #f)
+    (define *paused* #f)
+    (define *paused-frames* 0)     ; silence sent while paused (not song time)
     (define *final-ms* #f)         ; the reading when the song ended (the review's L1: the sink closes
                                    ; then, its depth reads 0, and the reading would jump by it)
     (define *sounding* #f)         ; a sink took the source (not muted, a context open)
@@ -83,8 +86,10 @@
     ;; (the player walked past the end and released its last note).
     (define (pull! out byte-offset n)
       (cond ((not *player*) #f)
+            ;; paused: silence, counted apart so the clock stands still
+            (*paused* (silence! out byte-offset n) (set! *paused-frames* (+ *paused-frames* n)) (set! *delivered* (+ *delivered* n)) #t)
             (else
-             (let* ((quiet (max 0 (min n (- *lead* *delivered*))))
+             (let* ((quiet (max 0 (min n (- *lead* (- *delivered* *paused-frames*)))))   ; song frames only: a pause in the lead-in does not shorten it
                     (_ (when (> quiet 0) (silence! out byte-offset quiet)))
                     (rest (- n quiet))
                     (on (or (= rest 0) (song! out (+ byte-offset (* 8 quiet)) rest))))
@@ -108,6 +113,8 @@
       (set! *lead* (exact (round (* *device* (/ lead-ms 1000.0)))))
       (set! *ended* #f)
       (set! *final-ms* #f)
+      (set! *paused* #f)
+      (set! *paused-frames* 0)
       (resampler-reset! *rs*)
       (set! *player* (open-tune-player t *rate* loop: #f))
       (set! *sounding* (and (audio-open?) (not (audio-muted?))))
@@ -123,4 +130,11 @@
 
     ;; The song ms at the speaker when delivered frames have gone to the sink.
     (define (reading delivered)
-      (audible-ms delivered (audio-source-depth) *lead* *device* *latency-ms*))))
+      (audible-ms (- delivered *paused-frames*) (audio-source-depth) *lead* *device* *latency-ms*))
+
+    ;; PAUSE (David on the phone: no way out of a song): the source sends
+    ;; silence and the player stands; those frames are not song time. What
+    ;; the sink already held (up to SOURCE-DEPTH, a third of a second) still
+    ;; plays out. RESUME carries on from where the player stood.
+    (define (intercept-audio-pause!) (set! *paused* #t))
+    (define (intercept-audio-resume!) (set! *paused* #f))))

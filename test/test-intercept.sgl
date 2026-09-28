@@ -291,28 +291,58 @@
     (test "control: the same tap, the latency not subtracted (the clock 150 ms ahead of the ear), is DROP"
       (assert-equal 'drop (run-judgment (intercept-run render-clock) 0)))))
 
-(test-group "intercept: CALIBRATE sets OFFSET from the median tap"
-  ;; no audio: the clock runs on the frames' wall time; taps land 60 ms after each kick
+(test-group "intercept: CALIBRATE on the click track: from the first tap, the median, outliers out"
+  ;; no audio: the clock runs on the frames' wall time
   (set-store-root! (string-append (make-temp-directory) "/crash-store"))
   (intercept-set-audio-reader! (lambda () #f))
   (let* ((w0 3000000.0)
-         (kicks (map (lambda (o) (vector-ref o 0))
-                     (filter (lambda (o) (= 1 (vector-ref o 1))) (vector-ref (walk-of 'black-glass) 1))))
+         (clicks (map (lambda (o) (vector-ref o 0))
+                      (filter (lambda (o) (= 1 (vector-ref o 1))) (vector-ref (walk-of CALIBRATE-TUNE) 1))))
          (t (intercept-open #f 'black-glass))
          (t (intercept-step t (frame '(tab down down) '() w0)))    ; Tab to the settings, down twice: CALIBRATE
          (t (intercept-step t (frame '(return) '() w0)))
-         (t (intercept-step t (frame '() '() w0)))                 ; the text lands: calibrating, clock -LEAD-MS at w0
+         (t (intercept-step t (frame '() '() w0)))                 ; the click track lands: calibrating, clock -CALIBRATE-LEAD-MS at w0
          (phase (intercept-phase t))
-         (t (let loop ((ks kicks) (n 0) (t t))
-              (if (or (null? ks) (= n CALIBRATE-TAPS))
+         ;; the first tap starts it (far off, 190 ms late: it must not count);
+         ;; then taps 60 ms late, one of them an outlier 200 ms late
+         (lates (append '(190.0) '(60.0 60.0 60.0 200.0 60.0 60.0 60.0 60.0)))
+         (t (let loop ((cs (cdr clicks)) (ls lates) (t t))
+              (if (or (null? cs) (null? ls) (not (eq? (intercept-phase t) 'calibrate)))
                   t
-                  (let ((w (+ w0 LEAD-MS (car ks) 60.0)))
-                    (loop (cdr ks) (+ n 1) (intercept-step t (frame '() (list (cons 'f w)) w))))))))
+                  (let ((w (+ w0 CALIBRATE-LEAD-MS (car cs) (car ls))))
+                    (loop (cdr cs) (cdr ls) (intercept-step t (frame '() (list (cons 'f w)) w))))))))
+    (test "a click a beat at 120 BPM: the track's clicks are 500 ms apart"
+      (assert-equal 500.0 (- (cadr clicks) (car clicks))))
     (test "the eighth row starts a calibration"
       (assert-equal 'calibrate phase))
-    (test "eight taps 60 ms after the kick: OFFSET +60, back on the song screen"
+    (test "the first tap and the 200 ms outlier left out: OFFSET +60, back on the song screen"
       (assert-equal 'select (intercept-phase t))
       (assert-equal 60 (intercept-offset t)))))
+
+(test-group "intercept: PAUSE, by Escape and by a tap on the top-left button"
+  (set-store-root! (string-append (make-temp-directory) "/crash-store"))
+  (intercept-set-audio-reader! (lambda () #f))
+  (let* ((w0 4000000.0)
+         (tap (lambda (x y w) (make-intercept-frame '() '() (list (list x y w)) w)))
+         (t (intercept-open #t 'black-glass))                       ; touch
+         (t (intercept-step t (frame '(return) '() w0)))
+         (t (intercept-step t (frame '() '() w0)))                  ; playing
+         (t1 (intercept-step t (tap 20 10 (+ w0 500.0))))           ; the pause button
+         (now1 (intercept-now t1))
+         (t2 (intercept-step t1 (frame '() '() (+ w0 5000.0))))     ; 4.5 s paused: nothing moves
+         (t3 (intercept-step t2 (tap 320 165 (+ w0 5100.0))))       ; RESUME
+         (t4 (intercept-step t3 (frame '(escape) '() (+ w0 5200.0))))  ; Escape pauses too
+         (t5 (intercept-step t4 (tap 320 245 (+ w0 5300.0)))))      ; SONGS
+    (test "a tap on the top-left button pauses; the song clock stands while paused"
+      (assert-equal 'paused (intercept-phase t1))
+      (assert-equal 'paused (intercept-phase t2))
+      (assert-equal now1 (intercept-now t2)))
+    (test "RESUME plays on from where it stood, not from where the wall clock went"
+      (assert-equal 'play (intercept-phase t3))
+      (assert-true (< (abs (- (intercept-now t3) now1)) 1.0)))
+    (test "Escape pauses; SONGS goes back to the song screen (a touch player's way out)"
+      (assert-equal 'paused (intercept-phase t4))
+      (assert-equal 'select (intercept-phase t5)))))
 
 (test-group "intercept: judging"
   (test "the windows: 35 SYNC, 70 CLEAN, 110 LOSSY, both sides; past 110 nothing"

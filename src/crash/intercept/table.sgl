@@ -54,7 +54,7 @@
           intercept-fall-ms intercept-lanes intercept-flashes intercept-over intercept-best
           intercept-length-ms intercept-sections intercept-message intercept-last-note-ms intercept-over-ms intercept-set-say! intercept-autoplay!
           intercept-results-rows intercept-select-rows intercept-leave! intercept-set-audio-reader!
-          intercept-taps CALIBRATE-TAPS
+          intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS
           SONGS LEAD-MS OFFSET-STEP)
 
   (begin
@@ -197,6 +197,16 @@
                     (list 7 ROW-X 268 ROW-W 18)   ; CALIBRATE
                     (list 'play 220 292 200 26)
                     (list 'back 8 8 72 20))))
+    ;; The pause button, top left over the song's name (a thumb reaches it and
+    ;; no lane is there), and the pause panel's choices.
+    (define PAUSE-RECT (list 0 0 72 28))
+    (define (intercept-pause-rows)
+      (list (list (quote resume) 220 150 200 30)
+            (list (quote retry) 220 190 200 30)
+            (list (quote songs) 220 230 200 30)))
+    (define (in-rect? r x y)
+      (and (>= x (list-ref r 0)) (< x (+ (list-ref r 0) (list-ref r 2)))
+           (>= y (list-ref r 1)) (< y (+ (list-ref r 1) (list-ref r 3)))))
     (define (intercept-results-rows)
       (list (list 'retry 170 318 140 26)
             (list 'songs 330 318 140 26)))
@@ -294,7 +304,7 @@
                (*say* "intercept lost" (car (intercept-song t)))
                (itable t phase: 'select message: "NO SIGNAL: THE TRANSMISSION DID NOT ARRIVE"))
               (else
-               (let ((text (live-music-text (car (intercept-song t)))))
+               (let ((text (live-music-text (if (itable-calibrate t) CALIBRATE-TUNE (car (intercept-song t))))))
                  (if (not text)
                      t
                      (start-song t text wall)))))))
@@ -306,17 +316,37 @@
                    (itable t phase: 'select message: "THE TRANSMISSION IS CORRUPTED"))
             (start-tune t tune wall))))
 
-    ;; CALIBRATE (the leader for David, 2026-09-28: "tap along to a few beats;
-    ;; set OFFSET from the median"): the chosen song plays from its top with
-    ;; nothing falling; any lane key or pad tapped on the kick is measured
-    ;; against the nearest kick on the song clock. After CALIBRATE-TAPS taps
-    ;; OFFSET is their median, rounded to OFFSET-STEP: a player who hears the
-    ;; song late taps late by the same amount, and OFFSET moves the judging
-    ;; that far later. Taps further than CALIBRATE-REACH from any kick are
-    ;; not counted (a stray press, or the lead-in).
+    ;; CALIBRATE (David on the phone: tapping Clock Edge's bass drum was hard;
+    ;; the leader: a dedicated click track, measured from the first tap, audio
+    ;; only): assets/tunes/calibrate.cts, one tick a beat at 120 BPM and
+    ;; nothing else, nothing on screen but the count (a picture would pull the
+    ;; taps toward it and skew what is measured). Any lane key or pad counts.
+    ;; The first tap starts the measurement and is not counted; each tap after
+    ;; it is measured against the nearest tick (within CALIBRATE-REACH: half a
+    ;; beat is 250 ms). After CALIBRATE-TAPS of them, the taps further than
+    ;; CALIBRATE-OUTLIER from their median are dropped and OFFSET is the median
+    ;; of the rest, rounded to OFFSET-STEP (at least CALIBRATE-KEEP must stay,
+    ;; else it keeps listening, up to twice as many taps). A player who hears
+    ;; the song late taps late by as much, and OFFSET moves the judging that
+    ;; far later.
+    (define CALIBRATE-TUNE 'calibrate)
+    (define CALIBRATE-LEAD-MS 500)
     (define CALIBRATE-TAPS 8)
-    (define CALIBRATE-REACH 300)
-    (define CALIBRATE-MS 40000)   ; the song ms by which it gives up
+    (define CALIBRATE-KEEP 5)
+    (define CALIBRATE-OUTLIER 80)
+    (define CALIBRATE-REACH 240)
+    (define CALIBRATE-MS 60000)   ; the song ms by which it gives up (the track is 64 s)
+    ;; (median . kept) once the taps decide OFFSET, else #f. taps: every
+    ;; in-reach tap's delta in order, the first (the start) not counted.
+    (define (calibration-offset taps)
+      (let ((measured (if (pair? taps) (cdr taps) '())))
+        (and (>= (length measured) CALIBRATE-TAPS)
+             (let* ((m (median measured))
+                    (kept (filter (lambda (d) (<= (abs (- d m)) CALIBRATE-OUTLIER)) measured)))
+               (cond ((>= (length kept) CALIBRATE-KEEP) (cons (median kept) (length kept)))
+                     ((>= (length measured) (* 2 CALIBRATE-TAPS)) (cons m (length measured)))
+                     (else #f))))))
+
     (define (begin-calibrate t)
       (itable (begin-song t 0) calibrate: #t))
 
@@ -338,13 +368,13 @@
             (/ (+ (list-ref s (- (quotient n 2) 1)) (list-ref s (quotient n 2))) 2.0))))
 
     (define (start-calibration t tune w wall)
-      (let ((sounding (intercept-audio-start! tune LEAD-MS)))
+      (let ((sounding (intercept-audio-start! tune CALIBRATE-LEAD-MS)))
         (*say* "intercept calibrate start" (car (intercept-song t)) "audio" (if sounding "on" "off"))
         (itable t
                 phase: 'calibrate
                 chart: (vector)
                 run: (make-run (vector) 4)
-                clock: (make-clock (- LEAD-MS) wall)
+                clock: (make-clock (- CALIBRATE-LEAD-MS) wall)
                 length-ms: (vector-ref w 0)
                 sections: (vector-ref w 2)
                 lanes: 4
@@ -371,22 +401,25 @@
              (flashes (append (map (lambda (x) (vector 'press 0 wall #f)) times)
                               (filter (lambda (fl) (< (- wall (vector-ref fl 2)) FLASH-KEEP-MS)) (itable-flashes t))))
              (t (itable t clock: clock taps: taps flashes: flashes)))
-        (cond ((memq 'escape (intercept-frame-keys f))
+        (cond ((or (memq 'escape (intercept-frame-keys f))
+                   (list-find (lambda (tap) (in-rect? PAUSE-RECT (car tap) (cadr tap))) (intercept-frame-taps f)))
                (intercept-audio-stop!)
                (itable t phase: 'select calibrate: #f))
-              ((>= (length taps) CALIBRATE-TAPS)
-               (let* ((m (median taps))
-                      (o (max (- OFFSET-MAX) (min OFFSET-MAX (* OFFSET-STEP (exact (round (/ m OFFSET-STEP))))))))
-                 (intercept-audio-stop!)
-                 (store! 'offset o)
-                 (*say* "intercept calibrate done" o "median" (exact (round m)) "taps" (length taps))
-                 (itable t phase: 'select calibrate: #f offset: o focus: 6
-                         message: (string-append "OFFSET SET TO " (if (> o 0) "+" "") (number->string o)
-                                                 " MS FROM " (number->string (length taps)) " TAPS"))))
+              ((calibration-offset taps)
+               (let ((r (calibration-offset taps)))
+                    (let* ((m (car r))
+                           (n (cdr r))
+                           (o (max (- OFFSET-MAX) (min OFFSET-MAX (* OFFSET-STEP (exact (round (/ m OFFSET-STEP))))))))
+                      (intercept-audio-stop!)
+                      (store! 'offset o)
+                      (*say* "intercept calibrate done" o "median" (exact (round m)) "kept" n "taps" (- (length taps) 1))
+                      (itable t phase: 'select calibrate: #f offset: o focus: 6
+                              message: (string-append "OFFSET SET TO " (if (> o 0) "+" "") (number->string o)
+                                                      " MS FROM " (number->string n) " TAPS")))))
               ((> now CALIBRATE-MS)
                (intercept-audio-stop!)
                (itable t phase: 'select calibrate: #f
-                       message: (string-append "CALIBRATION NEEDS " (number->string CALIBRATE-TAPS) " TAPS ON THE KICK")))
+                       message: (string-append "CALIBRATION NEEDS " (number->string CALIBRATE-TAPS) " TAPS ON THE CLICK")))
               (else t))))
 
     (define (start-tune t tune wall)
@@ -494,14 +527,45 @@
                  "audio" (let ((a (intercept-audio-ms))) (if a (number->string (/ (round (* 10.0 a)) 10.0)) "-"))
                  "wall" (number->string (round wall))))   ; a float through number->string: an exact epoch integer wraps on wasm (32-bit small integers) and display rounds a float to 6 digits
         (let ((t (if (>= now (+ (itable-said-at t) 1000)) (itable t said-at: now) t)))
-          (cond ((memq 'escape (intercept-frame-keys f))
-                 (intercept-audio-stop!)
-                 (itable t phase: 'select))
+          (cond ((or (memq (quote escape) (intercept-frame-keys f))
+                     (list-find (lambda (tap) (in-rect? PAUSE-RECT (car tap) (cadr tap))) (intercept-frame-taps f)))
+                 (pause t wall))
                 ((run-failed? r) (finish t 'severed wall))
                 ((and (run-done? r)
                       (> j (+ (last-note-ms t) LOSSY-MS END-HOLD-MS)))
                  (finish t 'held wall))
                 (else t)))))
+
+    ;; PAUSE (David on the phone: "no way to get out of INTERCEPT"): Escape or
+    ;; the pause button. The song holds (the source sends silence); the panel
+    ;; offers RESUME (Enter, Escape again, or a tap), RETRY (R) and SONGS.
+    (define (pause t wall)
+      (intercept-audio-pause!)
+      (*say* "intercept pause" (exact (round (or (intercept-now t) 0.0))))
+      (itable t phase: 'paused))
+
+    (define (resume t wall)
+      (intercept-audio-resume!)
+      (*say* "intercept resume")
+      ;; the clock restarts from where it stood; the sound the sink held
+      ;; through the pause is ahead of it, and the clock catches it up
+      (itable t phase: 'play clock: (make-clock (clock-ms (itable-clock t)) wall)))
+
+    (define (step-paused t f)
+      (let* ((wall (intercept-frame-wall f))
+             (keys (intercept-frame-keys f))
+             (tapped (let loop ((taps (intercept-frame-taps f)))
+                       (and (pair? taps)
+                            (or (hit (intercept-pause-rows) (car (car taps)) (cadr (car taps)))
+                                (loop (cdr taps))))))
+             (choice (cond ((or (memq 'return keys) (memq 'space keys) (memq 'escape keys)) 'resume)
+                           ((memq 'r keys) 'retry)
+                           (else tapped))))
+        (case choice
+          ((resume) (resume t wall))
+          ((retry) (intercept-audio-stop!) (begin-song t wall))
+          ((songs) (intercept-audio-stop!) (*say* "intercept songs") (itable t phase: 'select))
+          (else t))))
 
     (define (last-note-ms t)
       (let ((c (itable-chart t)))
@@ -536,7 +600,7 @@
                                          (tap-loop (cdr taps))))))))
               (case choice
                 ((retry) (intercept-audio-stop!) (begin-song t wall))
-                ((songs) (intercept-audio-stop!) (itable t phase: 'select))
+                ((songs) (intercept-audio-stop!) (*say* "intercept songs") (itable t phase: (quote select)))
                 (else t))))))
 
     (define (intercept-step t f)
@@ -546,4 +610,5 @@
           ((loading) (step-loading t f))
           ((play) (step-play t f))
           ((calibrate) (step-calibrate t f))
+          ((paused) (step-paused t f))
           (else (step-results t f)))))))

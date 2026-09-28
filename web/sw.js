@@ -45,6 +45,7 @@ var SHELL = [
   "assets/tunes/blind-spot.cts",
   "assets/tunes/breach-vector.cts",
   "assets/tunes/breaker.cts",
+  "assets/tunes/calibrate.cts",
   "assets/tunes/clock-edge.cts",
   "assets/tunes/closed-loop.cts",
   "assets/tunes/cold-boot.cts",

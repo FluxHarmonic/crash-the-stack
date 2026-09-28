@@ -26,6 +26,8 @@
 //           ("crash: intercept press LANE MS" before the song's 0); phone, a
 //           real TWO-FINGER touch reaches lanes 0 and 3 in one frame, then
 //           single taps lanes 1 and 2
+//   exit    out of the song and INTERCEPT by touch alone on the phone (the
+//           pause button, SONGS, MENU), by Escape and clicks on the desktop
 //   clock   ?intercept=SONG&autoplay: over 8 s of song, every clock line has
 //           an audio reading and a drawn clock following it (error not "-")
 //           within 50 ms, and the audio advances 1000 +- 100 ms a line
@@ -68,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "select", "open", "hash", "input", "clock", "render", ...(FULL ? ["full"] : []), "console"];
+const planned = ["menu", "select", "open", "hash", "input", "exit", "clock", "render", ...(FULL ? ["full"] : []), "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -434,6 +436,28 @@ await waitForWorker();
     else if (!together) fail("input", `the two-finger touch's presses were ${two.map((m) => m[2]).join(" / ")} ms apart on the song clock (more than 25)`);
     else pass("input", `two-finger touch -> lanes 0 and 3 at ${two.map((m) => m[2]).join(" / ")} ms, then taps -> lanes 1, 2`);
   }
+}
+
+// ---- exit: out of a song and out of INTERCEPT without a keyboard ----------------------
+// David on the phone: "no way to get out of INTERCEPT". The song from the input
+// leg is still playing. Phone: a real touch on the pause button (top left), a
+// real touch on SONGS, a real touch on the song screen's MENU. Desktop: Escape,
+// then clicks on SONGS and MENU. Each step anchors on a line only it prints.
+{
+  const m0 = consoleLines.length;
+  const at = (vx, vy) => (PHONE ? touch(vx, vy, 60) : click(vx, vy));
+  if (PHONE) await at(20, 12); else await key("Escape");
+  const paused = await waitLine(/^crash: intercept pause (-?\d+)$/, m0, 3000);
+  const m1 = consoleLines.length;
+  if (paused) await at(320, 245);   // SONGS on the pause panel
+  const songs = paused && await waitLine(/^crash: intercept songs$/, m1, 3000);
+  const m2 = consoleLines.length;
+  if (songs) await at(44, 18);      // MENU on the song screen
+  const menu = songs && await waitLine(/^crash: menu (top|free) /, m2, 3000);
+  if (!paused) fail("exit", `${PHONE ? "a touch on the pause button" : "Escape"} did not pause the song`);
+  else if (!songs) fail("exit", "SONGS on the pause panel did not leave the song");
+  else if (!menu) fail("exit", "MENU on the song screen did not reach the game's menu");
+  else pass("exit", `${PHONE ? "touch" : "keys and clicks"}: paused at ${paused.m[1]} ms, SONGS, then MENU -> ${menu.m[0].slice(0, 40)}`);
 }
 
 // ---- clock, render, full (the door, on autoplay) -------------------------------------
