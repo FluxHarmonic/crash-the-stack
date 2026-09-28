@@ -26,7 +26,9 @@
 ;;;       keys: symbols pressed; presses: ((key . wall-ms) ...); taps: ((x y wall-ms) ...)
 ;;;
 ;;; Lines (the shells print what intercept-say! hands them):
-;;;   crash: intercept open SONG DIFFICULTY keys|touch notes N hash H lanes L onsets-ms MS
+;;;   crash: intercept select SONG DIFFICULTY keys|touch       the song select opened
+;;;   crash: intercept open SONG DIFFICULTY keys|touch notes N hash H lanes L
+;;;   crash: intercept press LANE SONG-MS             a song's first 16 lane presses (the arms: input reached the lane)
 ;;;   crash: intercept start SONG lead MS audio on|off
 ;;;   crash: intercept end held|severed score S acc A max-combo C counts SY CL LO DR
 ;;;   crash: intercept clock SONG-MS error MS audio MS wall MS   (each second: the drawn clock, audio minus drawn,
@@ -100,6 +102,7 @@
       (over-wall default: 0)       ; wall ms the results came up
       (best default: #f)           ; the best before this run (the results' line)
       (said-at default: 0)         ; the song ms the last clock line was said at
+      (presses-said default: 0)    ; the song's lane presses said so far (the first PRESS-LINES)
       (requests default: '()))
 
     (define (intercept-phase t) (itable-phase t))
@@ -145,12 +148,15 @@
       (let loop ((ss SONGS) (i 0))
         (cond ((null? ss) 0) ((eq? (car (car ss)) name) i) (else (loop (cdr ss) (+ i 1))))))
 
+    (define PRESS-LINES 16)
     (define (intercept-open touch? song)
-      (let ((d (stored-ref 'difficulty 'runner)))
-        (itable touch: touch?
-                song: (if song (song-index song) (song-index (stored-ref 'song 'black-glass)))
-                difficulty: (if (difficulty? d) d 'runner)
-                offset: (let ((o (stored-ref 'offset 0))) (if (and (integer? o) (<= (abs o) OFFSET-MAX)) o 0)))))
+      (let* ((d (stored-ref 'difficulty 'runner))
+             (t (itable touch: touch?
+                        song: (if song (song-index song) (song-index (stored-ref 'song 'black-glass)))
+                        difficulty: (if (difficulty? d) d 'runner)
+                        offset: (let ((o (stored-ref 'offset 0))) (if (and (integer? o) (<= (abs o) OFFSET-MAX)) o 0)))))
+        (*say* "intercept select" (car (intercept-song t)) (itable-difficulty t) (if touch? "touch" "keys"))
+        t))
 
     ;; Leaving the screen (MENU, Escape from the list): the song stops.
     (define (intercept-leave! t)
@@ -264,6 +270,7 @@
                 lanes: lanes
                 best: (best-of t)
                 said-at: 0
+                presses-said: 0
                 flashes: '())))
 
     ;; A key's lane on this chart, or #f. The web reports ; as |;|, the
@@ -321,13 +328,18 @@
                                   (and lane (cons lane (- (clock-at clock (min wall (caddr tap))) off)))))
                               (intercept-frame-taps f)))
                  (if *autoplay* (autoplay-presses t now) '())))
+             (_ (let loop ((ps lane-presses) (n (itable-presses-said t)))
+                  (when (and (pair? ps) (< n PRESS-LINES))
+                    (*say* "intercept press" (car (car ps)) (exact (round (cdr (car ps)))))
+                    (loop (cdr ps) (+ n 1)))))
              (r (run-advance (itable-run t) now lane-presses))
              (flashes (append (reverse (map (lambda (e) (vector (vector-ref e 0) (vector-ref e 1) wall
                                                                 (if (eq? (vector-ref e 0) 'hit) (vector-ref e 3) #f)))
                                             (run-events r)))
                               (filter (lambda (fl) (< (- wall (vector-ref fl 2)) FLASH-KEEP-MS))
                                       (itable-flashes t))))
-             (t (itable t clock: clock run: r flashes: flashes)))
+             (t (itable t clock: clock run: r flashes: flashes
+                        presses-said: (min PRESS-LINES (+ (itable-presses-said t) (length lane-presses))))))
         (when (>= now (+ (itable-said-at t) 1000))
           (*say* "intercept clock" (exact (round now)) "error"
                  (let ((e (clock-error clock))) (if e (exact (round e)) "-"))

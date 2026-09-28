@@ -502,7 +502,7 @@ if (flag("--meds")) {
   let detail = "";
   if (!booted || !settled) detail = "the menu never went live (no boot done / title settled)";
   else if (!free) detail = "ArrowDown, Enter did not open FREE PLAY";
-  else if (rows.join(" ") !== "stack cards scan code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan code scores back`;
+  else if (rows.join(" ") !== "stack cards scan intercept code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept code scores back`;
   else {
     m0 = consoleLines.length;
     await key("ArrowDown"); await key("ArrowDown"); await key("Enter");

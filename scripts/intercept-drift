@@ -1,0 +1,61 @@
+#!/bin/sh
+# INTERCEPT's drift gate, native: one song on --autoplay under an X server you
+# name, its output captured from the worker-null sink's monitor, then lined up
+# against motif's offline render of the same song (scripts/intercept-drift.py).
+#
+#   DISPLAY=:N scripts/intercept-drift SONG RUNDIR [extra game flags...]
+#
+# Needs: a release build (build/release/bin/crash-the-stack and .../motif), an
+# X server on $DISPLAY that serves clients (start Xvfb from tmux: see the
+# headless-native-drive procedure), pactl/parec, and guix for python + numpy.
+# Audio never reaches a real device: the game runs with PULSE_SINK=worker-null
+# and the drive stops (exit 125) unless every stream of the game is on it.
+#
+# Exit: 0 PASS, 1 FAIL, 125 SETUP-FAILED. PASS means: the game's audio clock
+# sits within 30 ms of the sound (median, incl. parec's own latency) and moves
+# less than 15 ms against it from the song's first second to its last; at
+# least 30 windows of the capture correlate with the render.
+set -e
+W=$(git rev-parse --show-toplevel)
+SONG=$1; RUN=$2; shift 2
+[ -n "$DISPLAY" ] || { echo "SETUP-FAILED: set DISPLAY to a headless X server"; exit 125; }
+BIN=$W/build/release/bin/crash-the-stack
+[ -x "$BIN" ] || { echo "SETUP-FAILED: no $BIN (build the release config)"; exit 125; }
+mkdir -p "$RUN/xdg"
+cd "$W"
+unset WAYLAND_DISPLAY
+export SIGIL_APP_PLATFORM=x11 PULSE_SINK=worker-null PIPEWIRE_NODE=worker-null XDG_DATA_HOME="$RUN/xdg"
+pactl list short sinks | grep -q worker-null || pactl load-module module-null-sink sink_name=worker-null >/dev/null
+NULL_ID=$(pactl list short sinks | awk '$2=="worker-null"{print $1}')
+echo "binary $(sha256sum "$BIN" | cut -c1-16) mtime $(stat -c %y "$BIN")" > "$RUN/meta"
+[ -f "$RUN/ref.wav" ] || scripts/dev "$W/build/release/bin/motif" tune render "assets/tunes/$SONG.cts" -o "$RUN/ref.wav" -r 48000 > "$RUN/render.log" 2>&1
+date +%s%3N > "$RUN/cap-start"
+parec --device=worker-null.monitor --format=s16le --rate=48000 --channels=2 --raw "$RUN/cap.pcm" &
+PAREC=$!
+scripts/dev "$BIN" --intercept "$SONG" --autoplay --fresh "$@" > "$RUN/game.log" 2>&1 &
+# the game: exe is the binary and cwd this checkout (scripts/dev execs through guix shell, so $! is not it)
+GAME=""
+for i in $(seq 1 60); do
+  for p in $(pgrep -u "$(id -u)" crash-the-stac 2>/dev/null || true); do
+    [ "$p" = "$$" ] && continue; [ "$p" = "$PPID" ] && continue
+    if [ "$(readlink /proc/$p/exe 2>/dev/null)" = "$(readlink -f "$BIN")" ] && [ "$(readlink /proc/$p/cwd)" = "$W" ]; then GAME=$p; fi
+  done
+  [ -n "$GAME" ] && break; sleep 1
+done
+[ -n "$GAME" ] || { echo "SETUP-FAILED: no game process"; kill $PAREC; exit 125; }
+sleep 6
+pactl list sink-inputs | awk '/^Sink Input/{s=""} /Sink:/{s=$2} /application.process.id = "'"$GAME"'"/{print s}' > "$RUN/sinks"
+if [ ! -s "$RUN/sinks" ] || grep -vqx "$NULL_ID" "$RUN/sinks"; then
+  echo "SETUP-FAILED: the game's streams are on sink(s) $(tr '\n' ' ' < "$RUN/sinks"), not worker-null $NULL_ID"; kill $GAME; kill $PAREC; exit 125
+fi
+for i in $(seq 1 260); do
+  grep -q "intercept end" "$RUN/game.log" && break
+  kill -0 $GAME 2>/dev/null || break
+  sleep 1
+done
+sleep 2
+kill $GAME 2>/dev/null || true
+kill $PAREC 2>/dev/null || true
+grep "crash: intercept \(open\|start\|end\)" "$RUN/game.log" || true
+grep -q "intercept end held" "$RUN/game.log" || { echo "FAIL: the song did not end held"; exit 1; }
+guix shell python python-numpy -- python3 "$W/scripts/intercept-drift.py" "$RUN/cap.pcm" "$RUN/ref.wav" "$RUN/game.log" "$(cat "$RUN/cap-start")"
