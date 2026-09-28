@@ -31,9 +31,11 @@
           (motif tune player)
           (crash audio)
           (crash music resample)
-          (only (crash music live) live-music-rate LIVE-GAIN))
+          (only (crash music live) live-music-rate LIVE-GAIN)
+          (only (crash intercept clock) audible-ms))
 
   (export intercept-audio-start! intercept-audio-ms intercept-audio-ended? intercept-audio-stop!
+          intercept-audio-set-latency! intercept-audio-latency DEVICE-LATENCY-MS
           intercept-audio-playing? intercept-audio-rate)
 
   (begin
@@ -43,8 +45,20 @@
     (define *delivered* 0)         ; device frames handed to the sink since the start
     (define *lead* 0)              ; device frames of silence before the song
     (define *ended* #f)
+    (define *final-ms* #f)         ; the reading when the song ended (the review's L1: the sink closes
+                                   ; then, its depth reads 0, and the reading would jump by it)
     (define *sounding* #f)         ; a sink took the source (not muted, a context open)
     (define *rs* (make-resampler))
+    ;; The device's own latency past the sink, ms. Natively miniaudio plays from
+    ;; two periods of 1024 frames (46 ms at 44.1 kHz); the drift gate read the
+    ;; audio clock 35 ms ahead of the sound at the null sink on two runs, so
+    ;; 35 until something better says. The web page reports the context's
+    ;; outputLatency + baseLatency ("audio-latency") every half second.
+    (define DEVICE-LATENCY-MS 35.0)
+    (define *latency-ms* DEVICE-LATENCY-MS)
+    (define (intercept-audio-set-latency! ms)
+      (when (and (real? ms) (>= ms 0) (< ms 1000)) (set! *latency-ms* (* 1.0 ms))))
+    (define (intercept-audio-latency) *latency-ms*)
 
     (define (intercept-audio-playing?) (and *player* #t))
     (define (intercept-audio-rate) *rate*)
@@ -77,7 +91,7 @@
                (set! *delivered* (+ *delivered* n))
                (if on
                    #t
-                   (begin (set! *ended* #t) #f))))))
+                   (begin (set! *final-ms* (reading (- *delivered* n))) (set! *ended* #t) #f))))))
 
     (define (intercept-audio-stop!)
       (when *player*
@@ -93,6 +107,7 @@
       (set! *delivered* 0)
       (set! *lead* (exact (round (* *device* (/ lead-ms 1000.0)))))
       (set! *ended* #f)
+      (set! *final-ms* #f)
       (resampler-reset! *rs*)
       (set! *player* (open-tune-player t *rate* loop: #f))
       (set! *sounding* (and (audio-open?) (not (audio-muted?))))
@@ -104,4 +119,8 @@
     (define (intercept-audio-ms)
       (and *sounding*
            (or *player* *ended*)
-           (* 1000.0 (/ (- *delivered* (audio-source-depth) *lead*) (* 1.0 *device*)))))))
+           (if *ended* *final-ms* (reading *delivered*))))
+
+    ;; The song ms at the speaker when delivered frames have gone to the sink.
+    (define (reading delivered)
+      (audible-ms delivered (audio-source-depth) *lead* *device* *latency-ms*))))

@@ -1,10 +1,13 @@
 ;;; (crash intercept chart) - A tune's onsets turned into lanes
 ;;;
 ;;; David's rulings (2026-09-28): charts are generated from the song, never
-;;; hand-authored; three difficulties SCRIPT KID / RUNNER / ELITE; on a
-;;; keyboard they play 4 / 6 / 8 lanes of the home row, on a touch screen
-;;; always 4 wide lanes (two per thumb) with the difficulty scaling the
-;;; note density and the fall speed instead; taps only in this build.
+;;; hand-authored; three difficulties SCRIPT KID / RUNNER / ELITE; taps only
+;;; in this build. After his first play the same evening: ALWAYS FOUR LANES,
+;;; on every difficulty and every device ("RUNNER's 6 keys are too many to
+;;; map at once"), so a keyboard and a touch screen play the same chart. The
+;;; keys are D F J K (index and middle fingers; F and J carry the home-row
+;;; bumps); on touch, four wide pads, two per thumb. Difficulty scales the
+;;; density, the fall speed and the patterns instead.
 ;;;
 ;;; The left hand plays the beat, the right hand the tune. Channel roles
 ;;; come from the soundtrack's shared layout (every song generated from
@@ -12,34 +15,35 @@
 ;;; kick, ch2 snare or clap, ch3 hats, ch4 bass, ch5 chord stab, ch6 and
 ;;; ch7 the melody, ch8 clicks.
 ;;;
-;;;   keyboard  SCRIPT KID  D F | J K          snare kick | melody x2
-;;;             RUNNER      S D F | J K L      hats snare kick | melody x3
-;;;             ELITE       A S D F | J K L ;  stab+clicks hats snare kick | melody x4
-;;;   touch     every tier  1 2 | 3 4          snare kick | melody x2
+;;;   lanes         D       F       J       K
+;;;   SCRIPT KID    snare   kick    melody  melody    no chords, beats and eighths
+;;;   RUNNER        snare   kick    melody  melody    chords of two, sixteenths
+;;;   ELITE         snare   kick    melody  melody    + hats on D (quick repeats), the melody
+;;;                 +hats   +melody                     crossing onto D and F, anything on the grid
 ;;;
-;;; The melody's notes spread over the right hand's lanes by pitch, bar by
-;;; bar: the distinct pitches of the bar in rising order take the lanes
-;;; left to right (a bar with one pitch uses its pitch class). Then every
-;;; candidate is offered in priority order (on the beat before off it,
-;;; kick before snare before melody before hats, earlier first) and kept
-;;; only if it leaves the tier's limits whole: the grid it may sit on,
-;;; a gap to the last note in its lane, a gap to any note (a chord of two
-;;; at one instant is allowed, never three), and a cap on notes within
-;;; any second around it. The result is a pure function of the onsets and
+;;; The melody's notes spread over its lanes by pitch, bar by bar: the
+;;; distinct pitches of the bar in rising order take the lanes left to
+;;; right (a bar with one pitch uses its pitch class). Then every candidate
+;;; is offered in priority order (on the beat before off it, kick before
+;;; snare before melody before hats, earlier first) and kept only if it
+;;; leaves the tier's limits whole: the grid it may sit on, a gap to the
+;;; last note in its lane, a gap to any note (notes at one instant are a
+;;; chord: at most the tier's chord size), and a cap on notes in every
+;;; second that holds it. The result is a pure function of the onsets and
 ;;; the tier, so `chart-hash` pins it.
 ;;;
-;;;   (make-chart onsets difficulty touch?)  -> vector of #(ms lane), in time order
-;;;   (chart-lanes difficulty touch?)        -> the lane count
-;;;   (chart-keys difficulty touch?)         -> the key symbol per lane (keyboard)
-;;;   (chart-fall-ms difficulty)             -> how long a note falls before the hit line
-;;;   (chart-hash chart)                     -> an integer over every note (the gate pins it)
+;;;   (make-chart onsets difficulty)  -> vector of #(ms lane), in time order
+;;;   (chart-lanes difficulty)        -> 4
+;;;   (chart-keys difficulty)         -> the key symbol per lane: (d f j k)
+;;;   (chart-fall-ms difficulty)      -> how long a note falls before the hit line
+;;;   (chart-hash chart)              -> an integer over every note (the gate pins it)
 
 (define-library (crash intercept chart)
   (import (sigil math)
           (sigil list))
 
   (export make-chart chart-lanes chart-keys chart-fall-ms chart-hash chart-rate
-          DIFFICULTIES difficulty-name difficulty? TIERS)
+          DIFFICULTIES difficulty-name difficulty? TIERS KEYS)
 
   (begin
     (define DIFFICULTIES (list 'script-kid 'runner 'elite))
@@ -47,46 +51,35 @@
     (define (difficulty-name d)
       (case d ((script-kid) "SCRIPT KID") ((runner) "RUNNER") (else "ELITE")))
 
-    ;; Per tier: (grid-max lane-gap any-gap cap) for keyboard and for touch.
+    ;; Per tier: (grid-max lane-gap any-gap cap chord)
     ;; grid-max: 1 beats and eighths, 2 to sixteenths, 3 anything; gaps in
-    ;; ms; cap: notes within any 1000 ms centred on a note.
+    ;; ms (ELITE's 110 ms lane gap is the quick repeats); cap: notes in any
+    ;; second; chord: notes allowed at one instant.
     (define TIERS
-      '((script-kid (keys 1 250 150 3) (touch 1 300 200 2))
-        (runner     (keys 2 150 100 5) (touch 2 220 140 3))
-        (elite      (keys 3 100  50 8) (touch 2 170 100 5))))
+      '((script-kid 1 300 200 2 1)
+        (runner     2 200 120 4 2)
+        (elite      3 110  70 6 2)))
 
-    (define (tier difficulty touch?)
-      (cdr (assq (if touch? 'touch 'keys) (cdr (assq difficulty TIERS)))))
+    (define (tier difficulty) (cdr (assq difficulty TIERS)))
 
-    (define KEYS
-      '((script-kid d f j k)
-        (runner s d f j k l)
-        (elite a s d f j k l semicolon)))
-
-    (define (chart-keys difficulty touch?)
-      (if touch? '(d f j k) (cdr (assq difficulty KEYS))))
-
-    (define (chart-lanes difficulty touch?)
-      (length (chart-keys difficulty touch?)))
+    (define KEYS '(d f j k))
+    (define (chart-keys difficulty) KEYS)
+    (define (chart-lanes difficulty) 4)
 
     ;; Fall time from the top of the lanes to the hit line (the tiers scale
     ;; speed as well as density, David via the leader 2026-09-28).
     (define (chart-fall-ms difficulty)
       (case difficulty ((script-kid) 1700) ((runner) 1400) (else 1150)))
 
-    ;; The layout: which lanes the left hand's channels take, where the
-    ;; right hand's melody lanes start and how many there are, and which
-    ;; channels feed the melody.
-    ;;   (left-roles melody-base melody-lanes melody-channels)
-    ;; left-roles: ((channel . lane) ...)
-    (define (layout difficulty touch?)
-      (if touch?
-          (list '((2 . 0) (1 . 1)) 2 2 '(6 4 7))
-          (case difficulty
-            ((script-kid) (list '((2 . 0) (1 . 1)) 2 2 '(6 4 7)))
-            ((runner) (list '((3 . 0) (2 . 1) (1 . 2)) 3 3 '(6 4 7)))
-            (else (list '((5 . 0) (8 . 0) (3 . 1) (2 . 2) (1 . 3)) 4 4 '(6 4 7))))))
-
+    ;; The layout: which lanes the beat's channels take, where the melody's
+    ;; lanes start and how many there are, and which channels feed it.
+    ;;   (beat-roles melody-base melody-lanes melody-channels)
+    ;; beat-roles: ((channel . lane) ...). ELITE's melody spans all four
+    ;; lanes (it crosses onto the left hand) and its hats join the snare's.
+    (define (layout difficulty)
+      (case difficulty
+        ((elite) (list '((2 . 0) (1 . 1) (3 . 0)) 0 4 '(6 4 7)))
+        (else (list '((2 . 0) (1 . 1)) 2 2 '(6 4 7)))))
     ;; Priority of a channel's notes when the limits force a choice.
     (define (role-rank ch)
       (case ch ((1) 0) ((2) 1) ((6) 2) ((4) 3) ((7) 4) ((3) 5) ((5) 6) (else 7)))
@@ -116,8 +109,8 @@
                  (else (quotient (* (index-of midi pitches) n) k))))))
 
     ;; Candidates: (ms lane grid rank) for every onset a lane takes.
-    (define (candidates onsets difficulty touch?)
-      (let* ((lay (layout difficulty touch?))
+    (define (candidates onsets difficulty)
+      (let* ((lay (layout difficulty))
              (left (list-ref lay 0))
              (base (list-ref lay 1))
              (n (list-ref lay 2))
@@ -162,14 +155,15 @@
     (define BUCKET-MS 10)
     (define CHORD-MS 1.0)   ; two notes this close are one instant (a chord)
 
-    (define (make-chart onsets difficulty touch?)
-      (let* ((t (tier difficulty touch?))
+    (define (make-chart onsets difficulty)
+      (let* ((t (tier difficulty))
              (grid-max (list-ref t 0))
              (lane-gap (list-ref t 1))
              (any-gap (list-ref t 2))
              (cap (list-ref t 3))
+             (chord (list-ref t 4))
              (cands (filter (lambda (c) (<= (list-ref c 2) grid-max))
-                            (candidates onsets difficulty touch?)))
+                            (candidates onsets difficulty)))
              (end-ms (fold-left (lambda (m c) (max m (car c))) 0.0 cands))
              (nb (+ 2 (exact (floor (/ end-ms BUCKET-MS)))))
              (buckets (make-vector nb '()))
@@ -219,7 +213,7 @@
                                          ((< d any-gap) #f)
                                          (else (loop b (cdr es) same)))))
                                 ((<= b last) (loop (+ b 1) (vector-ref buckets b) same))
-                                (else (and (< same 2) (under-cap? ms)))))))))
+                                (else (and (< same chord) (under-cap? ms)))))))))
         (for-each (lambda (c)
                     (when (fits? c)
                       (let ((b (bucket-of (car c))))

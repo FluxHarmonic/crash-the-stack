@@ -75,7 +75,8 @@ def main():
     ref = load_wav(ref_path)
     print(f"capture {len(cap)/RATE:.1f} s, reference {len(ref)/RATE:.1f} s, capture rms {np.sqrt(np.mean(cap**2)):.4f}")
     if np.sqrt(np.mean(cap ** 2)) < 1e-4:
-        print("SETUP-FAILED: the capture is silent"); sys.exit(125)
+        # the drive checked every stream of the game was on the null sink: silence there is the game's
+        print("FAIL: the capture is silent though the game played into the null sink"); sys.exit(1)
 
     # coarse: the first 20 s of the song against the first 60 s of the capture, on decimated envelopes
     dec = 48
@@ -118,9 +119,9 @@ def main():
     good = [(t, o) for t, o, n in rows if n > 0.5]
     print(f"windows {len(rows)}, correlated above 0.5: {len(good)}")
     if len(good) < 10:
-        print("SETUP-FAILED: too few windows correlate (is it the same song?)")
+        print("FAIL: the capture is not the song (fewer than 10 windows correlate with its render)")
         for r in rows[:12]: print("  ", r)
-        sys.exit(125)
+        sys.exit(1)
     t = np.array([g[0] for g in good]); o = np.array([g[1] for g in good], dtype=float)
     slope, icpt = np.polyfit(t, o, 1)   # samples of offset per second of song
     resid = o - (slope * t + icpt)
@@ -154,7 +155,7 @@ def main():
     # The verdict. The first and last differences are each a median of five
     # lines, so one noisy line cannot decide it.
     if len(diffs) < 20:
-        print(f"SETUP-FAILED: only {len(diffs)} clock lines with an audio reading"); sys.exit(125)
+        print(f"FAIL: only {len(diffs)} clock lines carry an audio reading: the game's audio clock is missing"); sys.exit(1)
     d = np.array(diffs)
     head, tail = float(np.median(d[:5])), float(np.median(d[-5:]))
     # the load during the capture (the drive script's RUNDIR/load: start and end), else now
@@ -169,10 +170,14 @@ def main():
     #    here moved the clock 100 ms (the sabotages: 382 ms early; 606 ms a minute)
     if abs(median) > 100 or abs(moved) > 100:
         print(f"FAIL: the audio clock sits {median:+.1f} ms from the sound and moved {moved:+.1f} ms over the song"); sys.exit(1)
+    # 1b. the drawn clock (what the notes are drawn and judged on) against the
+    #     audio clock, from the game's own lines: no capture involved
+    if errs and float(np.percentile(np.abs(np.array(errs)), 95)) > 30:
+        print(f"FAIL: the drawn clock strays from the audio clock (p95 {np.percentile(np.abs(np.array(errs)), 95):.0f} ms, 30 allowed)"); sys.exit(1)
     # 2. the instrument: a capture with gaps (the null sink or parec starved on a
     #    loaded box: residuals of 17-31 ms at loadavg 19-24, 8 ms on a quieter
     #    box) cannot judge a 30 ms limit, so it says so instead of convicting the game
-    if resid_max > 12 or len(good) < 30:
+    if resid_max > 12 or len(good) < 0.9 * len(rows):
         print(f"SETUP-FAILED: the capture is not a clean instrument (window residual max {resid_max:.1f} ms, "
               f"{len(good)} windows; loadavg {load}): the box was contended; rerun on a quiet box. "
               f"For the record: {median:+.1f} ms from the sound, {moved:+.1f} ms of movement"); sys.exit(125)

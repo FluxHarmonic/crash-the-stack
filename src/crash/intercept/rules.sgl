@@ -146,10 +146,24 @@
           (let* ((r (expire r t))
                  (i (lane-head r lane))
                  (d (and i (- t (note-ms r i))))
-                 (j (and d (judge-delta d))))
-            (if j
-                (judge r i lane j d)
-                (run r events: (cons (vector 'press lane t) (run-events r)))))))
+                 (next (and i (lane-next r lane))))
+            (if (and next (< (abs (- t (note-ms r next))) (abs d)))
+                ;; the press is nearer the lane's next note than its head: the
+                ;; head was missed (a DROP) and the press takes the next one.
+                ;; Windows overlap when a lane's notes sit under 220 ms apart
+                ;; (the review's M3: a press exactly on the second of two notes
+                ;; 100 ms apart judged the first LOSSY and dropped the second)
+                (press (judge r i lane 'drop #f) lane t)
+                (let ((j (and d (judge-delta d))))
+                  (if j
+                      (judge r i lane j d)
+                      (run r events: (cons (vector 'press lane t) (run-events r)))))))))
+
+    ;; The note after the lane's head, or #f.
+    (define (lane-next r lane)
+      (let ((notes (vector-ref (run-lane-notes r) lane))
+            (c (+ 1 (vector-ref (run-cursors r) lane))))
+        (and (< c (vector-length notes)) (vector-ref notes c))))
 
     (define (run-advance r now presses)
       (let loop ((ps (list-sort (lambda (a b) (< (cdr a) (cdr b))) presses))

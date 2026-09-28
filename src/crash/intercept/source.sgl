@@ -28,7 +28,7 @@
           (motif tune)
           (motif tune compile))
 
-  (export tune-source tune-onsets tune-rows-per-beat ONSET-RATE)
+  (export tune-source tune-walk tune-onsets tune-rows-per-beat ONSET-RATE)
 
   (begin
     ;; The rate the walk counts samples at. Onset times are converted to ms,
@@ -80,9 +80,34 @@
 
     ;; (length-ms . onsets): one walk gives both.
     (define (tune-source t)
-      (let ((ct (compile-tune t ONSET-RATE)))
-        (cons (* 1000.0 (/ (compiled-tune-total-samples ct) (* 1.0 ONSET-RATE)))
-              (compiled-onsets t ct))))
+      (let ((w (tune-walk t)))
+        (cons (vector-ref w 0) (vector-ref w 1))))
+
+    ;; #(length-ms onsets sections): one walk. sections: ((ms . major?) ...)
+    ;; in time order, one per order position whose pattern differs from the
+    ;; one before it (the song's structure, for the progress bar's ticks);
+    ;; major? when a mark region (calm, fill, tense) starts there.
+    (define (tune-walk t)
+      (let* ((ct (compile-tune t ONSET-RATE))
+             (to-ms (lambda (s) (* 1000.0 (/ s (* 1.0 ONSET-RATE)))))
+             (marks (map cadr (tune-mark-regions t)))
+             (order (tune-order t))
+             (starts (filter (lambda (e) (= 0 (vector-ref e 1)))
+                             (vector->list (timeline-vector ct))))
+             (sections
+               (let loop ((es starts) (prev #f) (acc '()))
+                 (if (null? es)
+                     (reverse acc)
+                     (let* ((pos (vector-ref (car es) 0))
+                            (pat (and (< pos (length order)) (list-ref order pos))))
+                       (loop (cdr es)
+                             pat
+                             (if (and prev (not (equal? pat prev)))
+                                 (cons (cons (to-ms (vector-ref (car es) 2)) (and (memv pos marks) #t)) acc)
+                                 acc)))))))
+        (vector (to-ms (compiled-tune-total-samples ct))
+                (compiled-onsets t ct)
+                sections)))
 
     (define (tune-onsets t) (cdr (tune-source t)))
 

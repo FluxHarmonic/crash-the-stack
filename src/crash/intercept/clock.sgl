@@ -12,23 +12,35 @@
 ;;;     suspended context resumed, the song's first frames);
 ;;;   - with no audio reading (muted, no sink) it runs on wall time alone,
 ;;;     and if the audio stops moving for STALL-MS while wall time runs on
-;;;     (a context that never resumed) it gives up on the audio for the run,
-;;;     so a silent game still plays rather than freezing.
+;;;     (a context not resumed yet, a device switch) it runs on wall time
+;;;     until the audio moves again, then follows it again (snapping, or
+;;;     holding while the sound catches up), so a silent game still plays
+;;;     and a resumed one comes back in step (the review's M2).
 ;;;
 ;;;   (make-clock start-ms wall-ms)            -> a clock reading start-ms now
 ;;;   (clock-tick clock wall-ms audio-ms)      -> the clock this frame (audio-ms may be #f)
 ;;;   (clock-ms clock)  (clock-error clock)    -> the reading; the last audio - reading (or #f)
 ;;;   (clock-at clock wall-ms)                 -> the reading at an earlier wall time this frame (a press's)
-;;;   (clock-audio? clock)                     -> still following the audio
+;;;   (clock-audio? clock)                     -> following the audio this tick
 
 (define-library (crash intercept clock)
   (import (sigil struct)
           (sigil math))
 
-  (export make-clock clock-tick clock-ms clock-error clock-at clock-audio? clock-wall
+  (export make-clock clock-tick clock-ms clock-error clock-at clock-audio? clock-wall audible-ms
           STEER SNAP-MS STALL-MS)
 
   (begin
+    ;; The song ms reaching the ear: of the frames handed to the sink, those
+    ;; it still holds are not played yet, the lead-in was silence before the
+    ;; song's first frame, and what the device plays leaves the speaker
+    ;; latency-ms later (the device's own buffer: the web's outputLatency +
+    ;; baseLatency, natively miniaudio's periods). David, 2026-09-28: "when I
+    ;; tap on the rhythm it tells me drop, I have to tap earlier than the
+    ;; beat" -- the latency past the sink was not subtracted.
+    (define (audible-ms delivered depth lead rate latency-ms)
+      (- (* 1000.0 (/ (- delivered depth lead) (* 1.0 rate))) latency-ms))
+
     (define STEER 0.1)
     (define SNAP-MS 50.0)
     (define STALL-MS 1000.0)
@@ -54,16 +66,16 @@
              (est (+ (clock-ms c) dt))
              (moved? (and audio-ms (not (equal? audio-ms (clock-last-audio c)))))
              (moved-at (if moved? wall-ms (clock-audio-moved-at c)))
-             (follow? (and (clock-audio c)
-                           audio-ms
+             (follow? (and audio-ms
+                           ;; moved within the last second (a stall that ends re-arms it)
                            (< (- wall-ms moved-at) STALL-MS))))
         (if (not follow?)
             (clock c ms: est wall: wall-ms error: #f
-                   audio: (and (clock-audio c) (or (not audio-ms) (< (- wall-ms moved-at) STALL-MS)))
+                   audio: #f
                    last-audio: audio-ms audio-moved-at: moved-at)
             (let* ((err (- audio-ms est))
                    (next (if (> (abs err) SNAP-MS)
                              (max audio-ms (clock-ms c))
                              (max (clock-ms c) (+ est (* STEER err))))))
-              (clock c ms: next wall: wall-ms error: (- audio-ms next)
+              (clock c ms: next wall: wall-ms error: (- audio-ms next) audio: #t
                      last-audio: audio-ms audio-moved-at: moved-at)))))))

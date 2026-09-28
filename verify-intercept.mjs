@@ -15,31 +15,33 @@
 //
 //   menu    a fresh origin's FREE PLAY lists INTERCEPT after SCAN:
 //           stack cards scan intercept code scores back
-//   select  Enter on INTERCEPT opens the song select on Black Glass,
-//           RUNNER, keys (desktop) or touch (phone): "crash: intercept select"
+//   select  Enter on INTERCEPT opens the song select on Black Glass, RUNNER,
+//           keys (desktop) or touch (phone): "crash: intercept select"
 //   open    Enter plays it: "crash: intercept open ..." and "start ... audio on"
-//   hash    the chart's note count and hash equal the native build's pinned
-//           values (test/test-intercept.sgl's PINNED): the same song makes the
-//           same chart on both targets
-//   input   in the lead-in: desktop, real key events S D F J K L reach lanes
-//           0..5 ("crash: intercept press LANE MS" before the song's 0);
-//           phone, a real TWO-FINGER touch reaches lanes 0 and 3 in one frame,
-//           then single taps lanes 1 and 2
+//   hash    the chart's note count and hash equal the native pins
+//           (test/test-intercept.sgl's PINNED): the same song makes the same
+//           chart on both targets. Desktop plays RUNNER, the phone ELITE, so a
+//           build's two runs cover two of the three tiers
+//   input   in the lead-in: desktop, real key events D F J K reach lanes 0..3
+//           ("crash: intercept press LANE MS" before the song's 0); phone, a
+//           real TWO-FINGER touch reaches lanes 0 and 3 in one frame, then
+//           single taps lanes 1 and 2
 //   clock   ?intercept=SONG&autoplay: over 8 s of song, every clock line has
-//           an audio reading, the drawn clock sits within 50 ms of it, and the
-//           audio reading advances 1000 +- 100 ms a line
-//   render  the lanes are drawn: desktop, the keycap band is mostly C-BAR-C;
-//           phone, lane 0's pad carries its C-COLD rule
+//           an audio reading and a drawn clock following it (error not "-")
+//           within 50 ms, and the audio advances 1000 +- 100 ms a line
+//   render  lane 0's C-COLD rule is drawn under its keycap (desktop) or along
+//           its pad (phone), and a control strip beside it is not that blue
 //   full    (--full) the song plays to its end on autoplay: "intercept end
 //           held" with no DROP; the judgment counts are the web's frame jitter
 //   console zero error-level console entries and zero exceptions
 //
-// A wait that runs out prints TIMED-OUT with everything collected and exits 2;
-// SETUP-FAILED (exit 2) when the build is not there.
-
-// Every sub-arm anchors on a "crash: scan ..." line, which only the SCAN
-// screen prints. A wait that runs out prints TIMED-OUT with everything
+// Every sub-arm anchors on a "crash: intercept ..." line, which only
+// INTERCEPT prints. A wait that runs out prints TIMED-OUT with everything
 // collected and exits 2; SETUP-FAILED (exit 2) when the build is not there.
+//
+// Not covered here: a real press TIMED against a note (autoplay presses on
+// the song clock itself, so it cannot see a wrong clock-at or OFFSET);
+// test-intercept's table test holds OFFSET's judging, and David's play the rest.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -330,8 +332,7 @@ function decodePng(buf) {
 // ---- INTERCEPT's helpers -------------------------------------------------------
 // test/test-intercept.sgl's PINNED rows for Black Glass (notes hash), keyed tier/device
 const PINNED = {
-  "black-glass": { "script-kid/keys": [355, 4169077], "runner/keys": [635, 7179930], "elite/keys": [1130, 15798323],
-                   "script-kid/touch": [220, 5601628], "runner/touch": [363, 1728596], "elite/touch": [620, 13057553] },
+  "black-glass": { "script-kid": [219, 2172806], "runner": [483, 3062157], "elite": [852, 7809115] },   // one chart per tier since the four-lane ruling
 };
 const DEVICE = PHONE ? "touch" : "keys";
 const OPEN_RE = /^crash: intercept open (\S+) (\S+) (keys|touch) notes (\d+) hash (\d+) lanes (\d+)$/;
@@ -387,27 +388,30 @@ await waitForWorker();
 // ---- open, hash, input (the menu's path, no autoplay) --------------------------------
 {
   const m0 = consoleLines.length;
+  // the phone plays ELITE (right on a song row steps DIFFICULTY: RUNNER to ELITE),
+  // so the two runs of the arm cover two tiers' charts against the native pins
+  if (PHONE) await key("ArrowRight");
   await key("Enter");
   const o = await waitLine(OPEN_RE, m0, 30000);
   const s = await waitLine(START_RE, m0, 5000);
   if (!o || !s) { fail("open", `no ${o ? "start" : "open"} line within 30 s of Enter`); timedOut("open"); await new Promise(() => {}); }
   if (o.m[1] !== "black-glass" || o.m[3] !== DEVICE || s.m[3] !== "on") fail("open", `${o.m[0]} / ${s.m[0]}`);
   else pass("open", `${o.m[0]}; ${s.m[0]}`);
-  const want = PINNED["black-glass"][`${o.m[2]}/${o.m[3]}`];
+  const want = PINNED["black-glass"][o.m[2]];
   if (!want) fail("hash", `no pinned value for ${o.m[2]}/${o.m[3]}`);
   else if (+o.m[4] !== want[0] || +o.m[5] !== want[1]) fail("hash", `web: notes ${o.m[4]} hash ${o.m[5]}; native pinned: notes ${want[0]} hash ${want[1]}`);
   else pass("hash", `notes ${o.m[4]} hash ${o.m[5]} = the native pin (${o.m[2]}/${o.m[3]})`);
 
   const pm = consoleLines.length;
   if (!PHONE) {
-    for (const k of ["s", "d", "f", "j", "k", "l"]) { await realKey(k); await sleep(30); }
+    for (const k of ["d", "f", "j", "k"]) { await realKey(k); await sleep(30); }
     await sleep(600);
     const ps = linesFrom(PRESS_RE, pm);
     const lanes = ps.map((m) => +m[1]);
     const early = ps.every((m) => +m[2] < 0);
-    if (lanes.join(" ") !== "0 1 2 3 4 5") fail("input", `real keys S D F J K L reached lanes [${lanes.join(" ")}], not [0 1 2 3 4 5]`);
+    if (lanes.join(" ") !== "0 1 2 3") fail("input", `real keys D F J K reached lanes [${lanes.join(" ")}], not [0 1 2 3]`);
     else if (!early) fail("input", `the presses were not in the lead-in: ${ps.map((m) => m[0]).join("; ")}`);
-    else pass("input", `real keys S D F J K L -> lanes 0..5 at song ms ${ps.map((m) => m[2]).join(" ")}`);
+    else pass("input", `real keys D F J K -> lanes 0..3 at song ms ${ps.map((m) => m[2]).join(" ")}`);
   } else {
     const a = await padCenter(0), b = await padCenter(3);
     await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.cx, y: a.cy, id: 1 }, { x: b.cx, y: b.cy, id: 2 }] });
@@ -446,33 +450,39 @@ let doorMark = 0;
   if (cl.length < 9) bad.push(`only ${cl.length} clock lines in 25 s`);
   cl.forEach((m, i) => {
     if (m[3] === "-") bad.push(`no audio reading at ${m[1]}`);
-    else if (m[2] !== "-" && Math.abs(+m[2]) > 50) bad.push(`drawn clock ${m[2]} ms off the audio at ${m[1]}`);
+    else if (m[2] === "-") bad.push(`the drawn clock is not following the audio at ${m[1]} (error "-")`);
+    else if (Math.abs(+m[2]) > 50) bad.push(`drawn clock ${m[2]} ms off the audio at ${m[1]}`);
     if (i > 0 && m[3] !== "-" && cl[i - 1][3] !== "-") { const d = +m[3] - +cl[i - 1][3]; if (d < 900 || d > 1100) bad.push(`audio advanced ${d.toFixed(0)} ms between lines`); }
   });
   if (bad.length) fail("clock", bad.join("; "));
   else pass("clock", `8 s of song: errors ${cl.map((m) => m[2]).join(" ")} ms; audio ${cl[0][3]} .. ${cl[cl.length - 1][3]}`);
 
-  // render: a strip of the keycaps (desktop) or of lane 0's pad rule (phone)
-  // desktop: lane 0's keycap, left of its letter (the lanes are 48 px, centred with a 16 px gap between the hands)
-  const doorOpen = linesFrom(OPEN_RE, doorMark)[0];
-  const lanes = doorOpen ? +doorOpen[6] : 6;
-  const x0 = (640 - (lanes * 48 + 16)) / 2;
-  const [vx, vy, vw, vh] = PHONE ? [8, 262 + 12, 144, 2] : [x0 + 6, 312 + 10, 10, 12];
-  const a = await client(vx, vy), b = await client(vx + vw, vy + vh);
-  const shot = await send("Page.captureScreenshot", { format: "png", clip: { x: a.cx, y: a.cy, width: b.cx - a.cx, height: b.cy - a.cy, scale: 1 } });
-  const buf = Buffer.from(shot.data, "base64");
-  if (SHOT) fs.writeFileSync(SHOT, buf);
-  const img = decodePng(buf);
-  let hit = 0;
-  for (let i = 0; i < img.w * img.h; i++) {
-    const r = img.px[i * img.bpp], g = img.px[i * img.bpp + 1], bl = img.px[i * img.bpp + 2];
-    // C-BAR-C #2E1C4D (keycaps; the lit key flashes C-WIRE-LIT) / C-COLD #1A73D9 (the pad's rule), allowing the scanline pass
-    if (PHONE ? (bl > 120 && bl > r + 80 && g > r + 20)
-              : ((Math.abs(r - 46) <= 22 && Math.abs(g - 28) <= 20 && Math.abs(bl - 77) <= 28) || (g > 180 && bl > 160 && r < 140))) hit++;   // C-BAR-C, or C-WIRE-LIT #4DF2D9 while autoplay presses it
-  }
-  const share = hit / (img.w * img.h);
-  if (share < 0.4) fail("render", `only ${(100 * share).toFixed(1)} % of the ${PHONE ? "pad rule" : "keycap"} strip reads as ${PHONE ? "C-COLD" : "C-BAR-C"} (${img.w}x${img.h} px)`);
-  else pass("render", `${(100 * share).toFixed(1)} % of the ${PHONE ? "pad rule" : "keycap"} strip is ${PHONE ? "C-COLD" : "C-BAR-C"}`);
+  // render: the lane-coloured rule of lane 0 (C-COLD #1A73D9, the left hand's
+  // colour): under the keycap on a keyboard, along the pad's top on a phone.
+  // No layer behind the lanes uses that blue (the review: C-BAR-C, which the
+  // first version read, is also a tone of the living background, so a strip
+  // with no keycaps could pass). The control: a strip of the same size in
+  // the pad or under the keycaps, where the rule is not, must not read blue.
+  const HIT_Y = PHONE ? 262 : 312;
+  const x0 = PHONE ? 0 : (640 - (4 * 48 + 16)) / 2;
+  const blueShare = async (vx, vy, vw, vh) => {
+    const a = await client(vx, vy), b = await client(vx + vw, vy + vh);
+    const shot = await send("Page.captureScreenshot", { format: "png", clip: { x: a.cx, y: a.cy, width: b.cx - a.cx, height: b.cy - a.cy, scale: 1 } });
+    const buf = Buffer.from(shot.data, "base64");
+    if (SHOT) fs.writeFileSync(SHOT, buf);
+    const img = decodePng(buf);
+    let hit = 0;
+    for (let i = 0; i < img.w * img.h; i++) {
+      const r = img.px[i * img.bpp], g = img.px[i * img.bpp + 1], bl = img.px[i * img.bpp + 2];
+      if (bl > 120 && bl > r + 80 && g > r + 20 && bl > g) hit++;   // C-COLD, allowing the scanline pass; not C-WIRE-LIT (a lit pad), whose green beats its blue
+    }
+    return hit / (img.w * img.h);
+  };
+  const rule = PHONE ? await blueShare(x0 + 8, HIT_Y + 12, 144, 2) : await blueShare(x0 + 6, HIT_Y + 30, 36, 2);
+  const control = PHONE ? await blueShare(x0 + 8, HIT_Y + 40, 144, 2) : await blueShare(x0 + 6, HIT_Y + 40, 36, 2);
+  if (rule < 0.6) fail("render", `only ${(100 * rule).toFixed(1)} % of lane 0's rule reads C-COLD: the ${PHONE ? "pads" : "keycaps"} are not drawn`);
+  else if (control > 0.1) fail("render", `the control strip reads ${(100 * control).toFixed(1)} % C-COLD: the colour test cannot tell the rule from its surroundings`);
+  else pass("render", `lane 0's rule ${(100 * rule).toFixed(1)} % C-COLD; the control strip ${(100 * control).toFixed(1)} %`);
 
   if (FULL) {
     const e = await waitLine(END_RE, doorMark, 220000);
