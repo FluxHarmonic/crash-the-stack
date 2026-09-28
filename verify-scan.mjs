@@ -396,7 +396,8 @@ async function starvedCount() {
 async function allocated() {
   const m0 = consoleLines.length;
   await evalJS("window.__crashUpdates.app.dispatch('soak', '')");
-  const s = await waitLine(/^crash: soak gc (\d+) peak \d+ next \d+ young \d+ minor (\d+) major (\d+) gcms ([\d.]+)/, m0, 3000);
+  const s = await waitLine(/^crash: soak gc (\S+) peak \S+ next \S+ young \S+ minor (\S+) major (\S+) gcms (\S+)/, m0, 3000);   // wasm may print the counts as floats
+  if (!s) console.log(`MEASURE note: no soak line; lines after the dispatch: ${JSON.stringify(consoleLines.slice(m0, m0 + 6))}`);
   return s && { bytes: +s.m[1], minor: +s.m[2], major: +s.m[3], gcms: +s.m[4] };
 }
 async function trustedShift() {
