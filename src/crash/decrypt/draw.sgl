@@ -67,14 +67,72 @@
                     (car rows))
           (loop (cdr rows) (+ r 1)))))
 
+    ;; --- the bevel (David, 2026-09-29: the glyphs "look a little plain") ----------
+    ;; Each glyph is drawn as a solid piece lit from the top left: a drop shadow
+    ;; two pixels down and right, the shape, a lit one-pixel strip along every
+    ;; top and left edge and a shaded one along every bottom and right edge.
+    ;; The strips are found once per shape from its 7x7 grid (a cell is an edge
+    ;; where its neighbor on that side is not lit) and merged into runs.
+    (define (lit? rows c r)
+      (and (>= c 0) (< c 7) (>= r 0) (< r 7) (char=? (string-ref (list-ref rows r) c) #\#)))
+    ;; runs along rows (horizontal edges) or columns (vertical ones) of the cells
+    ;; that are lit with their (dc, dr) neighbor unlit, as rects in glyph pixels
+    ;; offset inside the cell: (x y w h), the strip ONE screen pixel thick
+    (define (edge-strips rows dc dr)
+      (let* ((along-row? (= dc 0))
+             (edge? (lambda (c r) (and (lit? rows c r) (not (lit? rows (+ c dc) (+ r dr))))))
+             (strip (lambda (c r len)
+                      (let ((x (* PX c)) (y (* PX r)))
+                        (cond ((= dr -1) (list x y (* PX len) 1))
+                              ((= dr 1) (list x (+ y (- PX 1)) (* PX len) 1))
+                              ((= dc -1) (list x y 1 (* PX len)))
+                              (else (list (+ x (- PX 1)) y 1 (* PX len))))))))
+        (let outer ((line 0) (acc '()))
+          (if (= line 7)
+              acc
+              (let inner ((k 0) (start #f) (acc acc))
+                (let* ((c (if along-row? k line))
+                       (r (if along-row? line k))
+                       (on (and (< k 7) (edge? c r)))
+                       (flush (lambda (acc)
+                                (if start
+                                    (cons (if along-row? (strip start line (- k start)) (strip line start (- k start))) acc)
+                                    acc))))
+                  (cond ((= k 7) (outer (+ line 1) (flush acc)))
+                        (on (inner (+ k 1) (or start k) acc))
+                        (else (inner (+ k 1) #f (flush acc))))))))))
+    (define *bevels* #f)
+    ;; (lights . shades) of shape k
+    (define (bevel k)
+      (unless *bevels*
+        (set! *bevels*
+              (list->vector
+               (map (lambda (rows)
+                      (cons (append (edge-strips rows 0 -1) (edge-strips rows -1 0))
+                            (append (edge-strips rows 0 1) (edge-strips rows 1 0))))
+                    (append GLYPHS (list STAR))))))
+      (vector-ref *bevels* k))
+    (define (draw-strips strips x y)
+      (for-each (lambda (s) (draw-filled-rect (+ x (car s)) (+ y (cadr s)) (caddr s) (cadddr s))) strips))
+    ;; shape k in color c at alpha a, shadowed and bevelled
+    (define (draw-glyph k x y c a)
+      (color-alpha! C-BG (* 0.75 a))
+      (draw-shape k (+ x 2) (+ y 2) PX)
+      (color-alpha! c a)
+      (draw-shape k x y PX)
+      (let ((b (bevel k)))
+        (color-alpha! C-FACE-EDGE (* 0.55 a))
+        (draw-strips (car b) x y)
+        (color-alpha! C-BG (* 0.5 a))
+        (draw-strips (cdr b) x y)))
+
     ;; a cell's glyph at (x, y) = the cell's top left, alpha a
     (define (draw-cell v x y a ms)
       (let* ((sp (cell-special v))
              (gx (+ x 8)) (gy (+ y 8)))
         (cond ((not sp) #f)
               ((= sp 3)
-               (color-alpha! (list-ref KIND-COLORS (modulo (quotient (exact (floor ms)) 120) 6)) a)
-               (draw-shape 6 gx gy PX))
+               (draw-glyph 6 gx gy (list-ref KIND-COLORS (modulo (quotient (exact (floor ms)) 120) 6)) a))
               (else
                (let ((c (list-ref KIND-COLORS (cell-kind v))))
                  (when (= sp 2)
@@ -92,8 +150,7 @@
                                (list (+ x 2) (+ x 40) (+ x 2) (+ x 40))
                                (list (+ y 2) (+ y 2) (+ y 40) (+ y 40))
                                '(1 -1 1 -1) '(1 1 -1 -1))))
-                 (color-alpha! c a)
-                 (draw-shape (cell-kind v) gx gy PX))))))
+                 (draw-glyph (cell-kind v) gx gy c a))))))
 
     ;; draw-filled-rect with a negative size (the BURST's mirrored corners)
     ;; is normalised here so the graphics layer only sees positive sizes
@@ -237,7 +294,7 @@
           (color! C-TEXT)
           (text-center! "PAUSE" (+ (car pr) (quotient (caddr pr) 2)) (+ (cadr pr) 10) 1))
         (color! C-TEXT-DIM)
-        (text! (if daily? "DAILY" "ENDLESS") x 50 1)
+        (text! (case (decrypt-table-mode t) ((daily) "DAILY") ((timed) "TIMED") (else "ENDLESS")) x 50 1)
         (color! C-TEXT-DIM)
         (text! "SCORE" x 74 1)
         (color! C-TEXT)
@@ -248,10 +305,22 @@
           (let ((left (decrypt-moves-left t)))
             (color! (if (<= left 5) C-TRACE-HOT C-TEXT))
             (text! (number->string left) x 132 2)))
+        ;; TIMED: the seconds left, hot in the last ten
+        (let ((tl (decrypt-table-time-left t)))
+          (when tl
+            (color! C-TEXT-DIM)
+            (text! "TIME" x 120 1)
+            (let ((s (exact (ceiling (/ tl 1000.0)))))
+              (color! (if (<= tl TENSE-MS) C-TRACE-HOT C-TEXT))
+              (text! (number->string s) x 132 2))))
         (color! C-TEXT-DIM)
         (text! "BEST" x 166 1)
         (color! C-TEXT)
-        (text! (number->string (if daily? (if (eqv? (drecord-day r) (decrypt-table-day t)) (drecord-day-best r) 0) (drecord-best r))) x 178 1)
+        (text! (number->string (case (decrypt-table-mode t)
+                                 ((daily) (if (eqv? (drecord-day r) (decrypt-table-day t)) (drecord-day-best r) 0))
+                                 ((timed) (drecord-timed-best r))
+                                 (else (drecord-best r))))
+               x 178 1)
         (when daily?
           (color! C-TEXT-DIM)
           (text! "STREAK" x 200 1)
@@ -273,8 +342,9 @@
         ;; the keys, on the right
         (color! C-TEXT-DIM)
         (for-each (lambda (line y) (text! line 510 y 1))
-                  (list "SWIPE OR TAP" "TWO GLYPHS" "" "ARROWS MOVE" "SPACE THEN" "AN ARROW SWAPS" "" "ESC PAUSES")
-                  (list 60 72 84 96 108 120 132 144))))
+                  ;; h j k l named on screen (David, 2026-09-29: "it took me a moment to realize that hjkl works")
+                  (list "SWIPE OR TAP" "TWO GLYPHS" "" "ARROWS OR H J K L" "MOVE THE CURSOR" "SPACE THEN" "AN ARROW SWAPS" "" "ESC PAUSES")
+                  (list 60 72 84 96 108 120 132 144 156))))
 
     (define (draw-popups t)
       (let ((ms (decrypt-table-ms t)))
@@ -298,13 +368,17 @@
              (r (decrypt-table-record t))
              (a (clamp01 (/ (- (decrypt-table-ms t) (decrypt-table-panel-at t)) 200.0)))
              (a (if (decrypt-table-paused t) 1.0 (max a 0.0))))
-        (draw-end-panel (if over? "DECRYPTED" "PAUSED")
+        (draw-end-panel (decrypt-panel-title t)
                         (if over? C-SELECTED C-TEXT)
-                        (if over?
-                            (string-append "SCORE " (number->string (decrypt-table-score t))
-                                           "   BEST " (number->string (drecord-day-best r))
-                                           "   STREAK " (number->string (drecord-streak r)))
-                            (string-append "SCORE " (number->string (decrypt-table-score t))))
+                        (cond ((not over?)
+                               (string-append "SCORE " (number->string (decrypt-table-score t))))
+                              ((eq? (decrypt-table-mode t) 'timed)
+                               (string-append "SCORE " (number->string (decrypt-table-score t))
+                                              "   BEST " (number->string (drecord-timed-best r))))
+                              (else
+                               (string-append "SCORE " (number->string (decrypt-table-score t))
+                                              "   BEST " (number->string (drecord-day-best r))
+                                              "   STREAK " (number->string (drecord-streak r)))))
                         (map cadr rows)
                         (decrypt-table-panel t)
                         (if over? (max a 0.05) 1.0))))

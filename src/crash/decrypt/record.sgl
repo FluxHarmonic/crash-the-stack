@@ -1,19 +1,20 @@
 ;;; (crash decrypt record) - DECRYPT's bests and its DAILY streak.
 ;;;
-;;; ENDLESS keeps its best score. The DAILY (a seeded board, 40 moves, the
-;;; same for everyone on a UTC day) keeps the day's best and a streak: the
-;;; number of consecutive days whose DAILY was played to its last move,
-;;; SCAN's Daily Board rule ((crash scores) scores-daily-clear). Kept in
-;;; the store under "decrypt" as a datum; an unreadable datum reads as
-;;; empty.
+;;; ENDLESS keeps its best score, TIMED its best (David, 2026-09-29). The
+;;; DAILY (a seeded board, 40 moves, the same for everyone on a UTC day)
+;;; keeps the day's best and a streak: the number of consecutive days whose
+;;; DAILY was played to its last move, SCAN's Daily Board rule ((crash
+;;; scores) scores-daily-clear). Kept in the store under "decrypt" as a
+;;; datum; version 1 (no TIMED best) still loads; an unreadable datum reads
+;;; as empty.
 ;;;
 ;;; Rules family: no platform.
 
 (define-library (crash decrypt record)
   (import (sigil struct))
 
-  (export drecord drecord? drecord-best drecord-day drecord-day-best drecord-streak
-          empty-record record-endless record-daily record-streak-on
+  (export drecord drecord? drecord-best drecord-day drecord-day-best drecord-streak drecord-timed-best
+          empty-record record-endless record-timed record-daily record-streak-on
           record->datum datum->record)
 
   (begin
@@ -21,12 +22,16 @@
       (best default: 0)          ; ENDLESS's best score
       (day default: #f)          ; the last DAILY played to its end (a day number)
       (day-best default: 0)      ; that day's best
-      (streak default: 0))       ; consecutive days up to `day`
+      (streak default: 0)        ; consecutive days up to `day`
+      (timed-best default: 0))   ; TIMED's best score
 
     (define (empty-record) (drecord))
 
     (define (record-endless r score)
       (drecord r best: (max (drecord-best r) score)))
+
+    (define (record-timed r score)
+      (drecord r timed-best: (max (drecord-timed-best r) score)))
 
     ;; A DAILY played to its end on `day` with `score`
     (define (record-daily r day score)
@@ -45,11 +50,17 @@
         (if (and last today (>= last (- today 1))) (drecord-streak r) 0)))
 
     (define (record->datum r)
-      (list 'decrypt-record 1 (drecord-best r) (drecord-day r) (drecord-day-best r) (drecord-streak r)))
+      (list 'decrypt-record 2 (drecord-best r) (drecord-day r) (drecord-day-best r) (drecord-streak r)
+            (drecord-timed-best r)))
 
+    (define (int-or-false? x) (or (not x) (integer? x)))
+
+    ;; version 1: (decrypt-record 1 best day day-best streak); version 2 adds timed-best
     (define (datum->record d)
-      (if (and (list? d) (= (length d) 6) (eq? (car d) 'decrypt-record)
-               (integer? (list-ref d 2)) (integer? (list-ref d 4)) (integer? (list-ref d 5))
-               (or (not (list-ref d 3)) (integer? (list-ref d 3))))
-          (drecord best: (list-ref d 2) day: (list-ref d 3) day-best: (list-ref d 4) streak: (list-ref d 5))
+      (if (and (list? d) (>= (length d) 6) (eq? (car d) 'decrypt-record)
+               (integer? (list-ref d 2)) (int-or-false? (list-ref d 3))
+               (integer? (list-ref d 4)) (integer? (list-ref d 5))
+               (or (= (length d) 6) (and (= (length d) 7) (integer? (list-ref d 6)))))
+          (drecord best: (list-ref d 2) day: (list-ref d 3) day-best: (list-ref d 4) streak: (list-ref d 5)
+                   timed-best: (if (= (length d) 7) (list-ref d 6) 0))
           (empty-record)))))

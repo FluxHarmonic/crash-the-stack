@@ -11,8 +11,8 @@
 // --phone is a landscape phone (844x390, touch, coarse pointer). Sub-arms:
 //
 //   menu     a fresh origin's FREE PLAY lists DECRYPT after INTERCEPT; Enter
-//            opens its screen (NEW BOARD, DAILY BOARD, BACK); NEW BOARD opens
-//            ENDLESS ("crash: decrypt open endless SEED")
+//            opens its screen (TIMED, DAILY BOARD, ENDLESS, BACK); TIMED opens
+//            a 90-second board ("crash: decrypt open timed SEED")
 //   swipe    desktop: a real mouse DRAG from a glyph toward its neighbor;
 //            phone: a real touch swipe. A move lands ("crash: decrypt move 1")
 //   tap      tap then tap (phone: two touches; desktop: click, click)
@@ -322,7 +322,7 @@ function decodePng(buf) {
 
 
 // ---- DECRYPT's helpers -------------------------------------------------------------
-const OPEN_RE = /^crash: decrypt open (endless|daily) (\d+)$/;
+const OPEN_RE = /^crash: decrypt open (endless|daily|timed) (\d+)$/;
 const BOARD_RE = /^crash: decrypt board (\S{64}) cursor (\d+)$/;
 const MOVE_RE = /^crash: decrypt move (\d+) score (\d+) level (\d+) underruns (\d+) source (\d+)$/;
 const CUE_RE = /^crash: decrypt cue (\S+) delay (-?\d+) slot (-?\d+)$/;
@@ -442,13 +442,13 @@ const r1 = (x) => Math.round(x * 10) / 10;
     const scr = await waitLine(/^crash: menu free-decrypt (.+)$/, m0, 3000);
     const srows = scr ? scr.m[1].split(" ").filter((_, i) => i % 3 === 0).map((id) => id.split("=")[0]) : [];
     if (!scr) detail = "Enter on DECRYPT did not open its screen";
-    else if (srows.join(" ") !== "new-board daily-board back") detail = `DECRYPT's rows are ${srows.join(" ")}`;
+    else if (srows.join(" ") !== "decrypt-timed daily-board decrypt-endless back") detail = `DECRYPT's rows are ${srows.join(" ")}`;
     else {
       m0 = consoleLines.length;
       await realKey("Enter");
       const open = await waitLine(OPEN_RE, m0, 10000);
       const b = open && await waitLine(BOARD_RE, open.index, 3000);
-      if (!open || open.m[1] !== "endless") detail = "NEW BOARD did not open ENDLESS";
+      if (!open || open.m[1] !== "timed") detail = "TIMED (the first row) did not open a TIMED board";
       else if (!b) detail = "no board line after the open";
       else pass("menu", `FREE PLAY ${rows.join(" ")}; DECRYPT ${srows.join(" ")}; ${open.m[0]}`);
     }
@@ -471,6 +471,7 @@ await sleep(500);
 await controlLeg("swipe", (i, j) => swipe(i, j));
 await sleep(300);
 await controlLeg("tap", (i, j) => tapTap(i, j));
+await sleep(250); await shot("timed");   // the TIMED board with its clock, for David
 if (!PHONE) {
   await sleep(300);
   await controlLeg("keys", async (i, j, b) => {

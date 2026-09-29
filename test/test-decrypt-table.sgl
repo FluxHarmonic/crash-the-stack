@@ -134,7 +134,7 @@
               (assert-equal 100 (drecord-day (decrypt-table-record t)))
               (assert-equal 4 (drecord-streak (decrypt-table-record t)))
               (assert-equal (decrypt-table-score t) (drecord-day-best (decrypt-table-record t)))
-              (assert-equal '("RETRY DAILY" "ENDLESS" "JACK OUT") (map cadr (decrypt-panel-rows t)))
+              (assert-equal '("RETRY DAILY" "TIMED" "JACK OUT") (map cadr (decrypt-panel-rows t)))
               ;; the panel's fade runs on the table clock: it must go on after the end
               (let ((t2 (decrypt-step (decrypt-step t (fr (+ now 16.0) '() '())) (fr (+ now 300.0) '() '()))))
                 (assert-true (>= (- (decrypt-table-ms t2) (decrypt-table-panel-at t2)) 200))))
@@ -221,3 +221,73 @@
   (test "ENDLESS keeps its best"
     (assert-equal 900 (drecord-best (record-endless (drecord best: 900) 400)))
     (assert-equal 950 (drecord-best (record-endless (drecord best: 900) 950)))))
+
+;; a board with no run: kinds 4 and 5 in a checkerboard, row 3 replaced
+(define (checker-board row3)
+  (list->vector (map (lambda (i)
+                       (if (and (= (quotient i 8) 3) (< (modulo i 8) (length row3)))
+                           (list-ref row3 (modulo i 8))
+                           (+ 4 (modulo (+ (modulo i 8) (quotient i 8)) 2))))
+                     (iota 64))))
+
+(define (open-timed) (decrypt-step (decrypt-open 'timed 7 #f #f) (fr 1000.0 '() '())))
+(define (run-frames t from to)
+  (let loop ((t t) (now from)) (if (> now to) t (loop (decrypt-step t (fr now '() '())) (+ now 16.0)))))
+
+(test-group "decrypt table: TIMED (David, 2026-09-29)"
+  (test "TIMED opens with 90 s; the clock runs on the table clock and a pause holds it"
+    (let* ((t (open-timed))
+           (_ (assert-true (= TIMED-MS (decrypt-table-time-left t))))   ; numerically: the first frame makes it a float
+           (t (run-frames t 1016.0 2000.0)))
+      (assert-true (< (decrypt-table-time-left t) (- TIMED-MS 900)))
+      (let* ((left (decrypt-table-time-left t))
+             (t (decrypt-step t (fr 2016.0 (list 'escape) '())))
+             (t (run-frames t 2032.0 6000.0)))
+        (assert-true (decrypt-table-paused t))
+        ;; only the Escape frame itself (24 ms after the last) runs; nothing while paused
+        (assert-true (<= (abs (- left (decrypt-table-time-left t))) 30)))))
+  (test "out of time on a still board: TIME'S UP, the best recorded and saved, PLAY AGAIN first"
+    (let* ((t (decrypt-table (open-timed) time-left: 50 score: 1234))
+           (r (let loop ((t t) (now 1016.0) (saved #f) (k 0))
+                (if (or (= k 20) (eq? (decrypt-table-phase t) 'over))
+                    (cons t saved)
+                    (let ((t (decrypt-step t (fr now '() '()))))
+                      (loop t (+ now 16.0) (or saved (and (memq 'save (decrypt-requests t)) #t)) (+ k 1))))))
+           (t (car r)))
+      (assert-equal 'over (decrypt-table-phase t))
+      (assert-true (cdr r))
+      (assert-equal 1234 (drecord-timed-best (decrypt-table-record t)))
+      (assert-equal "TIME'S UP" (decrypt-panel-title t))
+      (assert-equal '("PLAY AGAIN" "DAILY BOARD" "JACK OUT") (map cadr (decrypt-panel-rows t)))
+      (assert-true (memq 'timed (decrypt-requests (decrypt-step t (fr 2000.0 (list 'return) '())))))))
+  (test "out of time mid-move: no new swap starts; the move in play settles and scores, then the end"
+    (let* ((t (open-timed)) (m (a-move t)) (i (car m)) (j (cdr m)) (d (direction i j))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx i) (cy i) 'touch) (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d)))))))
+           (t (decrypt-table t time-left: 30))
+           (t (run-frames t 1032.0 4000.0)))
+      (assert-equal 'over (decrypt-table-phase t))
+      (assert-equal 1 (decrypt-table-moves t))
+      (assert-true (> (decrypt-table-score t) 0))
+      ;; and a swap after the end is refused: nothing moves
+      (let ((t2 (decrypt-step (decrypt-table t phase: 'idle) (fr 4100.0 '() (list (list 'down (cx i) (cy i) 'touch) (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d))))))))
+        (assert-false (eq? (decrypt-table-phase t2) 'swap)))))
+  (test "a cascade's second link buys a second, a special made two: +3 s for a BURST at level 2"
+    (let* ((t (open-timed))
+           ;; by hand: 1000 x (2 - 1) for the link + 2000 for the BURST = 3000
+           (b (dboard-with-cells (decrypt-table-board t) (checker-board (list 1 1 1 1)))))
+      (let* ((t (decrypt-table t phase: 'fall phase-ms: (decrypt-table-ms t) level: 1 time-left: 50000
+                               fall: (dfall board: b drops: '())))
+             (t (decrypt-step t (fr 1200.0 '() '()))))
+        (assert-equal 'clear (decrypt-table-phase t))
+        (assert-equal 2 (decrypt-table-level t))
+        ;; 50000 - the frame's 200 ms + 3000
+        (assert-equal 52800.0 (* 1.0 (decrypt-table-time-left t))))))
+  (test "the last ten seconds push the music tense; ENDLESS and DAILY have no clock"
+    (assert-true (decrypt-hot? (decrypt-table (open-timed) time-left: 9000)))
+    (assert-false (decrypt-hot? (decrypt-table (open-timed) time-left: 30000)))
+    (assert-false (decrypt-table-time-left (open))))
+  (test "the record: version 1 (no TIMED best) loads with 0; version 2 round-trips"
+    (assert-equal 0 (drecord-timed-best (datum->record '(decrypt-record 1 900 12 300 2))))
+    (assert-equal 900 (drecord-best (datum->record '(decrypt-record 1 900 12 300 2))))
+    (let ((r (drecord best: 1 day: 2 day-best: 3 streak: 4 timed-best: 5)))
+      (assert-equal 5 (drecord-timed-best (datum->record (record->datum r)))))))

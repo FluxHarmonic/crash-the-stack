@@ -37,7 +37,8 @@
           decrypt-table-armed decrypt-table-ms decrypt-table-panel decrypt-table-panel-at decrypt-table-paused decrypt-table-hot
           decrypt-table-popups decrypt-table-level decrypt-table-heat decrypt-table-record
           decrypt-table-day decrypt-table-seed decrypt-table-toast decrypt-table-toast-ms
-          decrypt-cues decrypt-requests decrypt-hot? decrypt-moves-left decrypt-panel-rows
+          decrypt-cues decrypt-requests decrypt-hot? decrypt-moves-left decrypt-panel-rows decrypt-panel-title
+          decrypt-table-time-left TIMED-MS LINK-BONUS-MS SPECIAL-BONUS-MS TENSE-MS
           decrypt-cell-at decrypt-cell-rect decrypt-with-record
           BOARD-X BOARD-Y CELL PAUSE-RECT DAILY-MOVES
           SWAP-MS CLEAR-MS REKEY-MS FALL-ROW-MS FALL-BASE-MS)
@@ -71,6 +72,13 @@
     (define TOAST-MS 1400)
     (define POPUP-MS 700)
     (define DAILY-MOVES 40)
+    ;; TIMED (the design's third mode; David, 2026-09-29: ENDLESS "felt endless"):
+    ;; 90 seconds; each chain link past the first buys a second per level past
+    ;; the first, each special made two; the last TENSE-MS push the music tense
+    (define TIMED-MS 90000)
+    (define LINK-BONUS-MS 1000)
+    (define SPECIAL-BONUS-MS 2000)
+    (define TENSE-MS 10000)
     ;; the chains' heat (the music's tension): each chain step past the first
     ;; adds its level; it cools a unit a second; tense from HOT, calm below COOL
     (define HOT 5.0)
@@ -88,12 +96,13 @@
 
     ;; --- the table -----------------------------------------------------------------
     (define-struct decrypt-table
-      (mode default: 'endless)      ; endless | daily
+      (mode default: 'endless)      ; endless | daily | timed
       (seed default: 1)
       (day default: #f)             ; the DAILY's day number
       (board default: #f)           ; the settled board (under an animation: the board it started from)
       (score default: 0)
       (moves default: 0)            ; swaps that stood
+      (time-left default: #f)       ; TIMED: ms left on the table clock, else #f
       (phase default: 'idle)        ; idle swap unswap clear fall rekey over
       (phase-ms default: 0)         ; the table clock when the phase began
       (swap default: #f)            ; (i j wild) of the swap in play
@@ -124,12 +133,17 @@
                      seed: seed
                      day: day
                      board: (decrypt-deal seed)
+                     time-left: (and (eq? mode 'timed) TIMED-MS)
                      record: (or record (empty-record))))
 
     (define (decrypt-with-record t r) (decrypt-table t record: r))
     (define (decrypt-cues t) (decrypt-table-cues t))
     (define (decrypt-requests t) (decrypt-table-requests t))
-    (define (decrypt-hot? t) (decrypt-table-hot t))
+    ;; the chains' heat, or TIMED's last seconds
+    (define (decrypt-hot? t)
+      (or (decrypt-table-hot t)
+          (let ((tl (decrypt-table-time-left t)))
+            (and tl (> tl 0) (<= tl TENSE-MS) (not (eq? (decrypt-table-phase t) 'over))))))
     (define (decrypt-moves-left t)
       (and (eq? (decrypt-table-mode t) 'daily) (max 0 (- DAILY-MOVES (decrypt-table-moves t)))))
 
@@ -140,21 +154,33 @@
     (define (toast t text) (decrypt-table t toast: text toast-ms: (decrypt-table-ms t)))
 
     ;; --- the panels ----------------------------------------------------------------
-    ;; paused: RESUME and a way on; over (the DAILY's last move settled): the
-    ;; DAILY again, ENDLESS, JACK OUT
+    ;; paused: RESUME and a way on; over (the DAILY's last move settled, or
+    ;; TIMED's clock out): the same again, the other scored mode, JACK OUT.
+    ;; Requests: daily, timed, new (ENDLESS), quit.
     (define (decrypt-panel-rows t)
-      (cond ((eq? (decrypt-table-phase t) 'over)
-             (list (list 'daily "RETRY DAILY") (list 'new "ENDLESS") (list 'quit "JACK OUT")))
-            ((eq? (decrypt-table-mode t) 'daily)
-             (list (list 'resume "RESUME") (list 'daily "RESTART DAILY") (list 'quit "JACK OUT")))
-            (else
-             (list (list 'resume "RESUME") (list 'new "NEW BOARD") (list 'quit "JACK OUT")))))
+      (let ((mode (decrypt-table-mode t)))
+        (cond ((and (eq? (decrypt-table-phase t) 'over) (eq? mode 'timed))
+               (list (list 'timed "PLAY AGAIN") (list 'daily "DAILY BOARD") (list 'quit "JACK OUT")))
+              ((eq? (decrypt-table-phase t) 'over)
+               (list (list 'daily "RETRY DAILY") (list 'timed "TIMED") (list 'quit "JACK OUT")))
+              ((eq? mode 'daily)
+               (list (list 'resume "RESUME") (list 'daily "RESTART DAILY") (list 'quit "JACK OUT")))
+              ((eq? mode 'timed)
+               (list (list 'resume "RESUME") (list 'timed "NEW BOARD") (list 'quit "JACK OUT")))
+              (else
+               (list (list 'resume "RESUME") (list 'new "NEW BOARD") (list 'quit "JACK OUT"))))))
+
+    ;; The end panel's title
+    (define (decrypt-panel-title t)
+      (cond ((not (eq? (decrypt-table-phase t) 'over)) "PAUSED")
+            ((eq? (decrypt-table-mode t) 'timed) "TIME'S UP")
+            (else "DECRYPTED")))
 
     (define (pick-row t key)
       (case key
         ((resume) (decrypt-table t paused: #f panel: #f drag: #f sel: #f))
         ;; leaving: an ENDLESS score counts toward the best
-        ((quit new daily) (request (save-endless t) key))
+        ((quit new daily timed) (request (save-endless t) key))
         (else t)))
 
     (define (save-endless t)
@@ -188,9 +214,18 @@
              ;; hosted build froze it at 'over and the panel stayed at alpha 0.05)
              (t (if (decrypt-table-paused t)
                     t
-                    (cool (decrypt-table t ms: (+ (decrypt-table-ms t) dt)) dt))))
+                    (cool (decrypt-table t ms: (+ (decrypt-table-ms t) dt)) dt)))
+             ;; TIMED's clock runs on the table clock: a pause holds it, the end stops it
+             (tl (decrypt-table-time-left t))
+             (t (if (and tl (not (decrypt-table-paused t)) (not (eq? (decrypt-table-phase t) 'over)))
+                    (decrypt-table t time-left: (max 0 (- tl dt)))
+                    t)))
         (cond ((or (decrypt-table-paused t) (eq? (decrypt-table-phase t) 'over))
                (panel-input t f))
+              ;; out of time: no new swap; the move in play settles, then the end
+              ((and tl (<= (decrypt-table-time-left t) 0))
+               (let ((t (animate t)))
+                 (if (eq? (decrypt-table-phase t) 'idle) (time-up t) t)))
               ((or (memq 'escape (decrypt-frame-pressed f))
                    (any (lambda (e) (and (eq? (car e) 'down) (in-rect? PAUSE-RECT (cadr e) (caddr e))))
                         (decrypt-frame-events f)))
@@ -342,8 +377,19 @@
              (t (cond ((dstep-wild st) (toast t "WILDCARD: A KIND DECRYPTED."))
                       ((any (lambda (m) (= (cdr m) WILD)) (dstep-made st)) (toast t "WILDCARD COMPILED."))
                       ((>= lv 4) (toast t (string-append "EXPLOIT CHAIN X" (number->string lv))))
-                      (else t))))
-        (phase t 'clear)))
+                      (else t)))
+             ;; TIMED: a link past the first buys a second per level past the first,
+             ;; a special made two; the gain rises as a popup beside the score
+             (bonus (if (decrypt-table-time-left t)
+                        (+ (* LINK-BONUS-MS (max 0 (- lv 1))) (* SPECIAL-BONUS-MS (length (dstep-made st))))
+                        0))
+             (t (if (> bonus 0)
+                    (decrypt-table t
+                                   time-left: (+ (decrypt-table-time-left t) bonus)
+                                   popups: (cons (list 68 146 (string-append "+" (number->string (quotient bonus 1000)) "S") (decrypt-table-ms t))
+                                                 (decrypt-table-popups t)))
+                    t)))
+        (phase t (quote clear))))
 
     ;; The move settled: REKEY when no move is left, then the DAILY's budget
     (define (settle t)
@@ -351,6 +397,12 @@
         (if (needs-rekey? (dboard-cells b))
             (cue (toast (phase (decrypt-table t board: (rekey b)) 'rekey) "REKEY.") 'shuffle #f)
             (after-move (phase t 'idle)))))
+
+    ;; TIMED's clock is out and the board has settled: the end, its best recorded
+    (define (time-up t)
+      (let ((r (record-timed (decrypt-table-record t) (decrypt-table-score t))))
+        (request (cue (decrypt-table (phase t 'over) record: r panel: 0 panel-at: (decrypt-table-ms t)) 'cleared #f)
+                 'save)))
 
     (define (after-move t)
       (if (and (eq? (decrypt-table-mode t) 'daily) (>= (decrypt-table-moves t) DAILY-MOVES))
