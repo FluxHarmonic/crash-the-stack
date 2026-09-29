@@ -47,6 +47,8 @@
     (define *device* 44100)
     (define *rs* (make-resampler))
     (define *say* (lambda parts #f))
+    (define *refused* (quote ()))   ; songs whose text would not read
+    (define *said-at* 0)            ; the last underruns line (once a second, for the arm)
     (define (preview-set-say! proc) (set! *say* proc))
     (define (preview-name) *name*)
     (define (preview-gain) *gain*)
@@ -79,7 +81,8 @@
       (set! *gain* 0.0))
 
     (define (open! name text now)
-      (let ((tune (guard (e (#t #f)) (read-tune-string text))))
+      (let ((tune (and (not (memq name *refused*)) (guard (e (#t #f)) (read-tune-string text)))))
+        (unless tune (set! *refused* (cons name *refused*)))   ; a text that will not read is not parsed again every frame
         (when tune
           (set! *device* (audio-rate))
           (set! *rate* (min (live-music-rate) *device*))
@@ -106,13 +109,25 @@
       (let ((c (audio-cue-at)))
         (if (and c (< (- (current-milliseconds) c) DUCK-MS)) DUCK-GAIN 1.0)))
 
-    ;; Once a frame from the song list.
+    ;; Once a second on the list: the sinks' starved frames so far (the source's
+    ;; count carries over closed sinks), for the arm's scroll check (the review's M3:
+    ;; the page's own stats read only the first two sinks)
+    ;;   crash: intercept preview underruns SOURCE CUES
+    (define (say-underruns! now)
+      (when (>= (- now *said-at*) 1000)
+        (set! *said-at* now)
+        (*say* "intercept" "preview" "underruns" (audio-source-underruns) (audio-underruns))))
+
     (define (preview-want! name text now)
+      (say-underruns! now)
       (unless (and *want* (eq? (car *want*) name))
         (set! *want* (cons name now)))
       (cond
-        ;; the wanted song plays: keep its gain moving
-        ((eq? *name* name) #t)
+        ;; the wanted song plays: if it was fading out (the list moved away and back
+        ;; inside the fade), fade it back in from where it stands (the review's M1)
+        ((eq? *name* name)
+         (when (and *fade* (= (cadr *fade*) 0.0))
+           (set! *fade* (list (ramp now) 1.0 now))))
         ;; another plays: fade it out, then close it
         (*player*
          (unless (and *fade* (= (cadr *fade*) 0.0))

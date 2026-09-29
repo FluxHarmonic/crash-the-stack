@@ -56,7 +56,7 @@
           intercept-length-ms intercept-sections intercept-message intercept-last-note-ms intercept-over-ms intercept-set-say! intercept-autoplay!
           intercept-results-rows intercept-select-rows intercept-leave! intercept-set-audio-reader!
           intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS
-          intercept-list-first VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE
+          intercept-list-first VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE ROW-X
           SONGS LEAD-MS OFFSET-STEP)
 
   (begin
@@ -109,6 +109,7 @@
       (phase default: 'select)     ; select | loading | play | results
       (touch default: #f)
       (song default: 0)            ; index into SONGS
+      (first default: 0)           ; the song list's window: its first song index
       (focus default: 0)           ; the select screen's row: a song index, or ROW-DIFFICULTY / ROW-OFFSET / ROW-CALIBRATE
       (difficulty default: 'runner)
       (offset default: 0)          ; ms, OFFSET's value
@@ -188,6 +189,7 @@
              (t (itable touch: touch?
                         song: i
                         focus: i
+                        first: (centered-first i)
                         difficulty: (if (difficulty? d) d 'runner)
                         offset: (let ((o (stored-ref 'offset 0))) (if (and (integer? o) (<= (abs o) OFFSET-MAX)) o 0)))))
         (when (and song (not (assq song SONGS))) (*say* "intercept unknown" song))   ; a door's name not on the set list: the list opens on the stored song
@@ -216,16 +218,29 @@
     (define ROW-CALIBRATE 102)
     (define (settings-row? id) (and (integer? id) (>= id ROW-DIFFICULTY)))
     (define (song-row? id) (and (integer? id) (< id ROW-DIFFICULTY)))
-    ;; the first song index the window shows
-    (define (intercept-list-first t)
-      (max 0 (min (- (length SONGS) VISIBLE) (- (itable-song t) (quotient VISIBLE 2)))))
+    ;; The window's first song index. It is state (the review's M2): centering
+    ;; it on every choice moved a different song under the finger, so a second
+    ;; tap on a chosen row chose the next song instead of playing. It opens
+    ;; centered on the chosen song; keys scroll it only as far as the chosen
+    ;; song needs; the chevron strips above and below page it; a tap on a row
+    ;; never moves it.
+    (define (clamp-first first)
+      (max 0 (min (max 0 (- (length SONGS) VISIBLE)) first)))
+    (define (centered-first song) (clamp-first (- song (quotient VISIBLE 2))))
+    (define (follow-first first song)
+      (clamp-first (cond ((< song first) song)
+                         ((>= song (+ first VISIBLE)) (+ (- song VISIBLE) 1))
+                         (else first))))
+    (define (intercept-list-first t) (clamp-first (itable-first t)))
     (define (intercept-select-rows t)
       (append (let ((first (intercept-list-first t)))
                 (let loop ((k 0) (acc '()))
                   (if (or (= k VISIBLE) (>= (+ first k) (length SONGS)))
                       (reverse acc)
                       (loop (+ k 1) (cons (list (+ first k) ROW-X (+ ROWS-Y (* k ROW-H)) ROW-W (- ROW-H 2)) acc)))))
-              (list (list ROW-DIFFICULTY ROW-X 222 ROW-W 20)
+              (list (list 'list-up ROW-X (- ROWS-Y 14) ROW-W 13)                  ; the chevron strips (touch paging)
+                    (list 'list-down ROW-X (+ ROWS-Y (* VISIBLE ROW-H)) ROW-W 14)
+                    (list ROW-DIFFICULTY ROW-X 222 ROW-W 20)
                     (list ROW-OFFSET ROW-X 246 ROW-W 20)
                     (list ROW-CALIBRATE ROW-X 268 ROW-W 18)
                     (list 'play 220 292 200 26)
@@ -262,7 +277,7 @@
       (let ((i (itable-focus t)))
         (if (song-row? i)
             (let ((j (modulo (+ i delta) (length SONGS))))
-              (itable t focus: j song: j))
+              (itable t focus: j song: j first: (follow-first (itable-first t) j)))
             (itable t focus: (+ ROW-DIFFICULTY (modulo (+ (- i ROW-DIFFICULTY) delta) 3))))))
 
     ;; left/right on a song row step DIFFICULTY (no need to leave the list)
@@ -296,6 +311,8 @@
                           ((eq? id 'play) (begin-song t (caddr tap)))
                           ((eqv? id ROW-CALIBRATE) (begin-calibrate t))
                           ((eq? id 'back) (itable t requests: (list 'menu)))
+                          ((eq? id 'list-up) (tap-loop (cdr taps) (itable t first: (clamp-first (- (itable-first t) (- VISIBLE 1))))))
+                          ((eq? id 'list-down) (tap-loop (cdr taps) (itable t first: (clamp-first (+ (itable-first t) (- VISIBLE 1))))))
                           ((song-row? id)
                            ;; a tap on the chosen song plays it; on another, chooses it
                            (if (= id (itable-song t))

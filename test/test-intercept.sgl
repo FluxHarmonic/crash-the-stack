@@ -494,7 +494,7 @@
     (assert-true (< (car (source-of 'fault-line)) 60000.0))))
 
 (test-group "intercept: the song list scrolls (13 songs, 5 rows)"
-  (test "the window keeps the chosen song in its middle, clamped at both ends"
+  (test "the window opens with the chosen song in its middle, clamped at both ends"
     (let ((t (intercept-open #f 'black-glass)))
       (assert-equal 0 (intercept-list-first t))
       (assert-equal '(0 1 2 3 4) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t)))))
@@ -503,19 +503,33 @@
     (let ((t (intercept-open #f 'breach-vector)))   ; the last, index 12
       (assert-equal 8 (intercept-list-first t))
       (assert-equal '(8 9 10 11 12) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t))))))
-  (test "down walks past the fifth song and wraps from the last to the first"
+  (test "down walks past the fifth song, the window scrolling only as far as it needs, and wraps from the last to the first"
     (let* ((t (intercept-open #f 'black-glass))
            (t (intercept-step t (frame (repeat 6 'down) '() 1.0))))
       (assert-equal 'quiet-array (car (intercept-song t)))   ; index 6
-      (assert-equal 4 (intercept-list-first t))
+      (assert-equal 2 (intercept-list-first t))              ; the window's last row
       (let ((t (intercept-step (intercept-open #f 'breach-vector) (frame '(down) '() 1.0))))
-        (assert-equal 'black-glass (car (intercept-song t))))))
-  (test "a tap on the bottom visible row chooses it and scrolls the next songs up"
+        (assert-equal 'black-glass (car (intercept-song t)))
+        (assert-equal 0 (intercept-list-first t)))))
+  (test "a tap on a row chooses it and leaves the window where it is, so a second tap there plays it (the review's M2)"
     (let* ((t (intercept-open #f 'sector-drift))   ; index 2: rows 0..4
            (bottom (list-find (lambda (r) (eqv? (car r) 4)) (intercept-select-rows t)))
-           (t (intercept-step t (make-intercept-frame '() '() (list (list (+ (list-ref bottom 1) 20) (+ (list-ref bottom 2) 5) 1.0)) 1.0))))
+           (tap (list (list (+ (list-ref bottom 1) 20) (+ (list-ref bottom 2) 5) 1.0)))
+           (t (intercept-step t (make-intercept-frame '() '() tap 1.0))))
       (assert-equal 'glass-current (car (intercept-song t)))
-      (assert-equal 2 (intercept-list-first t))))
+      (assert-equal 0 (intercept-list-first t))
+      (assert-equal 'loading (intercept-phase (intercept-step t (make-intercept-frame '() '() tap 2.0))))))
+  (test "the chevron strips page the list by four, clamped, without changing the chosen song"
+    (let* ((t (intercept-open #f 'black-glass))
+           (strip (lambda (t id) (let ((r (list-find (lambda (r) (eq? (car r) id)) (intercept-select-rows t))))
+                                   (list (list (+ (list-ref r 1) 50) (+ (list-ref r 2) 4) 1.0)))))
+           (t (intercept-step t (make-intercept-frame '() '() (strip t 'list-down) 1.0))))
+      (assert-equal 4 (intercept-list-first t))
+      (assert-equal 'black-glass (car (intercept-song t)))
+      (let* ((t (intercept-step t (make-intercept-frame '() '() (strip t 'list-down) 2.0)))
+             (t (intercept-step t (make-intercept-frame '() '() (strip t 'list-down) 3.0))))
+        (assert-equal 8 (intercept-list-first t))   ; clamped at 13 - 5
+        (assert-equal 4 (intercept-list-first (intercept-step t (make-intercept-frame '() '() (strip t 'list-up) 4.0)))))))
   (test "the settings rows keep their places whatever the list shows"
     (let ((t (intercept-open #f 'breach-vector)))
       (assert-true (list-find (lambda (r) (eqv? (car r) ROW-CALIBRATE)) (intercept-select-rows t)))

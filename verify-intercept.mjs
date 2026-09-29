@@ -403,17 +403,21 @@ let previewMark = consoleLines.length;
   else if (first.m[1] !== "black-glass" || +first.m[2] <= 0) detail = `${first.m[0]}: expected black-glass from its tense section (a position past 0)`;
   else {
     await sleep(600);
-    const s0 = await starvedCount();
+    // the page says the sinks' starved frames once a second on the list (the source's count
+    // carries over the preview's closed sinks): the last line before the scroll and after
+    const under = () => { const m = [...consoleLines].reverse().map((l) => l.match(/^crash: intercept preview underruns (\d+) (\d+)$/)).find((x) => x); return m ? [+m[1], +m[2]] : null; };
+    const u0 = under();
     const m1 = consoleLines.length;
     for (let i = 0; i < 4; i++) await key("ArrowDown");   // 190 ms apart: under the 250 ms debounce
     const landed = await waitLine(PREVIEW_RE, m1, 5000);
     await sleep(1500);
-    const s1 = await starvedCount();
+    const u1 = under();
     const opened = linesFrom(PREVIEW_RE, m1).map((m) => m[1]);
     if (!landed) detail = "no preview after scrolling four songs down";
     else if (opened.join(" ") !== "glass-current") detail = `the scroll opened ${opened.join(" ")}: only glass-current (where it stopped) should open`;
-    else if (s1 - s0 !== 0) detail = `the audio sink starved ${s1 - s0} times while scrolling`;
-    else pass("preview", `${first.m[0]}; four downs opened only ${landed.m[0]}; sink starvations over the scroll 0`);
+    else if (!u0 || !u1) detail = "no \"crash: intercept preview underruns\" line on the list";
+    else if (u1[0] - u0[0] !== 0 || u1[1] - u0[1] !== 0) detail = `frames starved while scrolling: source ${u1[0] - u0[0]}, cues ${u1[1] - u0[1]}`;
+    else pass("preview", `${first.m[0]}; four downs opened only ${landed.m[0]}; frames starved over the scroll: source 0, cues 0`);
     for (let i = 0; i < 4; i++) await key("ArrowUp");   // back to Black Glass for the legs that follow
     await waitLine(/^crash: intercept preview black-glass at /, m1 + 1, 5000);
   }
@@ -472,16 +476,7 @@ let previewMark = consoleLines.length;
   }
 }
 
-{
-  // preview-stop: Enter stopped the preview before the song opened
-  const stop = linesFrom(/^crash: intercept preview stop$/, previewMark);
-  const openAt = consoleLines.findIndex((l, i) => i >= previewMark && OPEN_RE.test(l));
-  const stopAt = consoleLines.findIndex((l, i) => i >= previewMark && /^crash: intercept preview stop$/.test(l));
-  if (!stop.length) fail("preview-stop", "no \"crash: intercept preview stop\" when the song was entered");
-  else if (openAt >= 0 && stopAt > openAt) fail("preview-stop", "the preview stopped after the song opened");
-  else pass("preview-stop", "the preview stopped before the song opened");
-}
-
+let exitMark = consoleLines.length;
 // ---- exit: out of a song and out of INTERCEPT without a keyboard ----------------------
 // David on the phone: "no way to get out of INTERCEPT". The song from the input
 // leg is still playing. Phone: a real touch on the pause button (top left), a
@@ -502,6 +497,18 @@ let previewMark = consoleLines.length;
   else if (!songs) fail("exit", "SONGS on the pause panel did not leave the song");
   else if (!menu) fail("exit", "MENU on the song screen did not reach the game's menu");
   else pass("exit", `${PHONE ? "touch" : "keys and clicks"}: paused at ${paused.m[1]} ms, SONGS, then MENU -> ${menu.m[0].slice(0, 40)}`);
+}
+
+{
+  // preview-stop: the preview stops on entering a song (before it opens) and on leaving by MENU
+  // (the exit leg above left by the pause's SONGS, then MENU)
+  const openAt = consoleLines.findIndex((l, i) => i >= previewMark && OPEN_RE.test(l));
+  const stopAt = consoleLines.findIndex((l, i) => i >= previewMark && /^crash: intercept preview stop$/.test(l));
+  const menuStop = linesFrom(/^crash: intercept preview stop$/, exitMark).length;
+  if (stopAt < 0) fail("preview-stop", "no \"crash: intercept preview stop\" when the song was entered");
+  else if (openAt >= 0 && stopAt > openAt) fail("preview-stop", "the preview stopped after the song opened");
+  else if (menuStop < 1) fail("preview-stop", "no preview stop after leaving the list by MENU");
+  else pass("preview-stop", "stopped on entering the song, and on MENU");
 }
 
 // ---- clock, render, full (the door, on autoplay) -------------------------------------
@@ -576,18 +583,38 @@ let doorMark = 0;
       requestAnimationFrame(f); })`);
     const errs = linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000 && m[2] !== "-").map((m) => Math.abs(+m[2]));
     const pct = (xs, p) => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : NaN; };
-    return { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), err: pct(errs, 0.5), n: errs.length };
+    // the field itself (the review's M4): desktop only (the phone's four pads fill the width).
+    // Two captures a second apart; the share of pixels that changed in a strip left of the
+    // lanes (virtual x 16..190, y 60..300). With the field it moves; with ?bg=off it holds.
+    let motion = null;
+    if (!PHONE) {
+      const a = await client(16, 60), b = await client(190, 300);
+      const dpr = 2;
+      const box = { x0: Math.round(a.cx * dpr), y0: Math.round(a.cy * dpr), x1: Math.round(b.cx * dpr), y1: Math.round(b.cy * dpr) };
+      const grab = async () => decodePng(Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));
+      const p1 = await grab(); await sleep(1000); const p2 = await grab();
+      let changed = 0, total = 0;
+      for (let y = box.y0; y < box.y1; y += 2) for (let x = box.x0; x < box.x1; x += 2) {
+        const i = (y * p1.w + x) * p1.bpp;
+        const d = Math.abs(p1.px[i] - p2.px[i]) + Math.abs(p1.px[i + 1] - p2.px[i + 1]) + Math.abs(p1.px[i + 2] - p2.px[i + 2]);
+        total++; if (d > 6) changed++;
+      }
+      motion = total ? changed / total : 0;
+    }
+    return { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), err: pct(errs, 0.5), n: errs.length, motion };
   };
   const on = await run("");
   const off = await run("&bg=off");
   if (!on || !off) fail("field", "the door's song did not start");
   else {
     const r = (x) => Math.round(x * 10) / 10;
-    const txt = `on p50 ${r(on.p50)} p95 ${r(on.p95)} ms, clock error median ${on.err} ms; off p50 ${r(off.p50)} p95 ${r(off.p95)} ms, error ${off.err} ms`;
+    const pc = (m) => (m === null ? "-" : `${(m * 100).toFixed(1)} %`);
+    const txt = `on p50 ${r(on.p50)} p95 ${r(on.p95)} ms, clock error median ${on.err} ms, field motion ${pc(on.motion)}; off p50 ${r(off.p50)} p95 ${r(off.p95)} ms, error ${off.err} ms, motion ${pc(off.motion)}`;
     console.log(`MEASURE field ${PHONE ? "phone" : "desktop"}: ${txt}`);
     if (off.p50 > 16.7) fail("field", `INCONCLUSIVE: over 16.7 ms with the field off: ${txt}`);
     else if (on.p50 > 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
     else if (on.err > off.err + 10) fail("field", `the drawn clock strays with the field on: ${txt}`);
+    else if (!PHONE && !(on.motion > 0.01 && on.motion > 3 * off.motion)) fail("field", `the field is not moving behind the wire: ${txt}`);
     else pass("field", txt);
   }
 }

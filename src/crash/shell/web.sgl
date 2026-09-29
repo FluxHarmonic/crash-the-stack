@@ -1837,7 +1837,7 @@
       (set! *overlay* #f)
       (set! *intercept-presses* '())
       (set! *intercept-taps* '())
-      (field-for-deal! (+ 1 (quotient (exact (floor (now-ms))) 1000)))   ; a live field behind the wire (t-15acbf)
+      (field-for-deal! (+ 1 (exact (floor (/ (now-ms) 1000.0)))))   ; a live field behind the wire (t-15acbf); seconds before exact: an epoch-ms exact wraps on wasm
       (set! *intercept-marks* 0)
       (set! *intercept* (intercept-open *touch* song)))
 
@@ -1851,18 +1851,26 @@
     (define (intercept-bg) (if (eq? (setting (quote background)) (quote off)) #f (background)))
     (define (intercept-bg-step! t wall)
       (let* ((dt (if *intercept-bg-last* (max 0.0 (min 0.25 (/ (- wall *intercept-bg-last*) 1000.0))) 0.0))
-             (now (and (eq? (intercept-phase t) (quote play)) (intercept-now t)))
-             (marks (if now (length (filter (lambda (s) (and (cdr s) (<= (car s) now))) (intercept-sections t))) 0)))
+             (ph (intercept-phase t))
+             (now (and (eq? ph (quote play)) (intercept-now t)))
+             ;; the marks change only in play; the list and the loading reset them
+             ;; quietly; a pause, the results and CALIBRATE leave them (so a resume
+             ;; does not burst: the review's L3)
+             (marks (cond (now (length (filter (lambda (s) (and (cdr s) (<= (car s) now))) (intercept-sections t))))
+                          ((memq ph (list (quote select) (quote loading))) 0)
+                          (else *intercept-marks*))))
         (set! *intercept-bg-last* wall)
         (when *bg*
           (unless (= marks *intercept-marks*)
             (set! *bg* (bg-with-phase *bg* (if (odd? marks) (quote counter) (quote trace))))
-            (when (> marks *intercept-marks*) (set! *bg* (bg-with-burst *bg*)))
+            (when (and now (> marks *intercept-marks*)) (set! *bg* (bg-with-burst *bg*)))
             (set! *intercept-marks* marks))
-          (set! *intercept-bg-acc* (+ *intercept-bg-acc* (* 60.0 dt)))
-          (let ((steps (exact (floor *intercept-bg-acc*))))
-            (set! *intercept-bg-acc* (- *intercept-bg-acc* steps))
-            (when (> steps 0) (set! *bg* (bg-tick *bg* (min steps 4))))))))
+          ;; CALIBRATE shows nothing but the count (the review's L4): the field holds
+          (unless (eq? ph (quote calibrate))
+            (set! *intercept-bg-acc* (+ *intercept-bg-acc* (* 60.0 dt)))
+            (let ((steps (exact (floor *intercept-bg-acc*))))
+              (set! *intercept-bg-acc* (- *intercept-bg-acc* steps))
+              (when (> steps 0) (set! *bg* (bg-tick *bg* (min steps 4)))))))))
 
     (define (intercept-tick f)
       (let* ((wall (now-ms))
