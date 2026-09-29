@@ -56,7 +56,7 @@
           intercept-length-ms intercept-sections intercept-message intercept-last-note-ms intercept-over-ms intercept-set-say! intercept-autoplay!
           intercept-results-rows intercept-select-rows intercept-leave! intercept-set-audio-reader!
           intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS
-          intercept-list-first VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE ROW-X
+          intercept-list-first intercept-list-area VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE ROW-X ROW-H PAGE-X PAGE-W PAGE-H
           SONGS LEAD-MS OFFSET-STEP)
 
   (begin
@@ -213,6 +213,13 @@
     ;; tap on the bottom row chooses it and brings the next songs up. The
     ;; settings rows have their own ids, clear of any song index.
     (define VISIBLE 5)
+    ;; the page buttons, right of the list, a thumb's size
+    (define PAGE-X 528)
+    (define PAGE-W 104)
+    (define PAGE-H 52)
+    ;; where a press is the list's (the rows and the chevron strips): the web shell
+    ;; holds such a press until it lifts, a tap if it barely moved, else a swipe
+    (define (intercept-list-area) (list ROW-X (- ROWS-Y 14) ROW-W (+ (* VISIBLE ROW-H) 28)))
     (define ROW-DIFFICULTY 100)
     (define ROW-OFFSET 101)
     (define ROW-CALIBRATE 102)
@@ -238,7 +245,11 @@
                   (if (or (= k VISIBLE) (>= (+ first k) (length SONGS)))
                       (reverse acc)
                       (loop (+ k 1) (cons (list (+ first k) ROW-X (+ ROWS-Y (* k ROW-H)) ROW-W (- ROW-H 2)) acc)))))
-              (list (list 'list-up ROW-X (- ROWS-Y 14) ROW-W 13)                  ; the chevron strips (touch paging)
+              ;; the UP / DOWN buttons (David, 2026-09-29: the chevrons were too small
+              ;; to tap), right of the list, each a page; the chevron strips page too
+              (list (list 'page-up PAGE-X ROWS-Y PAGE-W PAGE-H)
+                    (list 'page-down PAGE-X (+ ROWS-Y (* VISIBLE ROW-H) (- PAGE-H)) PAGE-W PAGE-H)
+                    (list 'list-up ROW-X (- ROWS-Y 14) ROW-W 13)                  ; the chevron strips (touch paging)
                     (list 'list-down ROW-X (+ ROWS-Y (* VISIBLE ROW-H)) ROW-W 14)
                     (list ROW-DIFFICULTY ROW-X 222 ROW-W 20)
                     (list ROW-OFFSET ROW-X 246 ROW-W 20)
@@ -292,8 +303,11 @@
         (else t)))
 
     ;; The list, then the preview of the song it leaves chosen (t-2844c8)
+    ;;   crash: intercept list FIRST     the window moved (the arm's scroll leg)
     (define (step-select t f)
-      (let ((t (step-select* t f)))
+      (let* ((first0 (itable-first t))
+             (t (step-select* t f)))
+        (unless (= first0 (itable-first t)) (*say* "intercept list" (itable-first t)))
         (when (eq? (itable-phase t) (quote select))
           (let ((name (car (intercept-song t))))
             (preview-want! name (live-music-text name) (intercept-frame-wall f))))
@@ -311,8 +325,8 @@
                           ((eq? id 'play) (begin-song t (caddr tap)))
                           ((eqv? id ROW-CALIBRATE) (begin-calibrate t))
                           ((eq? id 'back) (itable t requests: (list 'menu)))
-                          ((eq? id 'list-up) (tap-loop (cdr taps) (itable t first: (clamp-first (- (itable-first t) (- VISIBLE 1))))))
-                          ((eq? id 'list-down) (tap-loop (cdr taps) (itable t first: (clamp-first (+ (itable-first t) (- VISIBLE 1))))))
+                          ((memq id '(list-up page-up)) (tap-loop (cdr taps) (itable t first: (clamp-first (- (itable-first t) (- VISIBLE 1))))))
+                          ((memq id '(list-down page-down)) (tap-loop (cdr taps) (itable t first: (clamp-first (+ (itable-first t) (- VISIBLE 1))))))
                           ((song-row? id)
                            ;; a tap on the chosen song plays it; on another, chooses it
                            (if (= id (itable-song t))
@@ -336,6 +350,10 @@
                 ((return space) (if (= ROW-CALIBRATE (itable-focus t))
                                     (begin-calibrate t)
                                     (begin-song t (intercept-frame-wall f))))
+                ;; a swipe on the list (the web shell turns a drag into one of these per
+                ;; row it travels): the window follows the finger, the chosen song stays
+                ((scroll-up) (loop (cdr keys) (itable t first: (clamp-first (- (itable-first t) 1)))))
+                ((scroll-down) (loop (cdr keys) (itable t first: (clamp-first (+ (itable-first t) 1)))))
                 ((escape) (itable t requests: (list 'menu)))
                 (else (loop (cdr keys) t)))))))
 

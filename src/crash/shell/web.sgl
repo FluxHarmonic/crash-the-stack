@@ -143,7 +143,7 @@
                 scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
           ;; INTERCEPT, the rhythm game: its screen and its draw
-          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame intercept-now intercept-sections intercept-phase
+          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame intercept-now intercept-sections intercept-phase intercept-list-area ROW-H
                 intercept-leave! intercept-set-say! intercept-autoplay!)
           (only (crash intercept draw) draw-intercept)
           (only (crash intercept audio) intercept-audio-set-latency!)
@@ -1817,16 +1817,47 @@
 
     ;; SCAN's pointer stream carries every finger's down separately (two
     ;; thumbs are two downs), so INTERCEPT takes its taps from it too.
+    ;; A press on the song list (David, 2026-09-29: "I tried swiping and that didn't
+    ;; work") is held until it lifts: barely moved, it is a tap where it landed
+    ;; (choose, or play the chosen song); dragged, the list follows the finger a
+    ;; row per ROW-H of travel (scroll-up / scroll-down keys). Anywhere else, and
+    ;; in play (the lanes judge the landing's time), a press is a tap at once.
+    (define *list-press* #f)       ; #(x y rows-applied dragged?) while a list press is down
+    (define *intercept-scroll* (quote ()))
+    (define LIST-DRAG-PX 10)
+    (define (in-list? x y)
+      (let ((a (intercept-list-area)))
+        (and (>= x (car a)) (< x (+ (car a) (caddr a))) (>= y (cadr a)) (< y (+ (cadr a) (cadddr a))))))
     (define (intercept-pointer! payload)
       (let ((parts (string-split payload ",")))
-        (when (and (eq? *screen* (quote intercept)) (= (length parts) 4) (string=? (car parts) "down"))
-          (let ((x (string->number (caddr parts)))
-                (y (string->number (cadddr parts))))
-            (when (and x y)
-              (let ((p (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y)))
-                (when p
-                  (set! *intercept-taps* (cons (list (exact (floor (car p))) (exact (floor (cdr p))) (now-ms))
-                                               *intercept-taps*)))))))))
+        (when (and (eq? *screen* (quote intercept)) *intercept* (= (length parts) 4))
+          (let* ((kind (car parts))
+                 (x (string->number (caddr parts)))
+                 (y (string->number (cadddr parts)))
+                 (p (and x y (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y)))
+                 (vx (and p (exact (floor (car p)))))
+                 (vy (and p (exact (floor (cdr p)))))
+                 (tap! (lambda (tx ty) (set! *intercept-taps* (cons (list tx ty (now-ms)) *intercept-taps*)))))
+            (cond
+              ((string=? kind "down")
+               (when p
+                 (if (and (eq? (intercept-phase *intercept*) (quote select)) (in-list? vx vy))
+                     (set! *list-press* (vector vx vy 0 #f))
+                     (tap! vx vy))))
+              ((and (string=? kind "move") *list-press* p)
+               (let* ((dy (- vy (vector-ref *list-press* 1)))
+                      (rows (quotient dy ROW-H))            ; toward zero: a row per ROW-H of travel
+                      (step (- rows (vector-ref *list-press* 2))))
+                 (when (>= (abs dy) LIST-DRAG-PX) (vector-set! *list-press* 3 #t))
+                 (unless (= step 0)
+                   ;; the finger moving up brings later songs up: the window moves down
+                   (set! *intercept-scroll*
+                         (append *intercept-scroll* (make-list (abs step) (if (< step 0) (quote scroll-down) (quote scroll-up)))))
+                   (vector-set! *list-press* 2 rows))))
+              ((and (string=? kind "up") *list-press*)
+               (unless (vector-ref *list-press* 3)
+                 (tap! (vector-ref *list-press* 0) (vector-ref *list-press* 1)))
+               (set! *list-press* #f)))))))
 
     ;; The screen owns the music while it is up (the song is (crash audio)'s
     ;; source): the soundtrack stops on the way in; the menu's theme comes
@@ -1874,13 +1905,14 @@
 
     (define (intercept-tick f)
       (let* ((wall (now-ms))
-             (frame (make-intercept-frame (input-frame-pressed f)
+             (frame (make-intercept-frame (append (input-frame-pressed f) *intercept-scroll*)
                                           (reverse *intercept-presses*)
                                           (reverse *intercept-taps*)
                                           wall))
              (t (intercept-step *intercept* frame)))
         (set! *intercept-presses* '())
         (set! *intercept-taps* '())
+        (set! *intercept-scroll* '())
         (if (memq 'menu (intercept-requests t))
             (begin (intercept-leave! t)
                    (set! *intercept* #f)
