@@ -1,0 +1,159 @@
+#!/bin/sh
+# The gate for scripts/release-archives: makes the archives for VERSION into a
+# scratch directory and checks what a player would get.
+#
+#   scripts/test-release-archives VERSION      e.g. v0.1.3 (build/release and
+#                                              build/windows-amd64 must be that game)
+#
+# Legs, each printed PASS or FAIL:
+#   refuse     release-archives refuses a version whose game differs from the
+#              working tree's (the tag before VERSION)
+#   sums       SHA256SUMS verifies both archives
+#   layout     each archive's top folder holds exactly bin/ (the executable
+#              alone, no motif), assets/, LICENSE, NOTICE, README-run.txt,
+#              HOW-IT-WAS-MADE.txt, VERSION and .itch.toml
+#   content    assets/ is the build's minus assets/refs and assets/src;
+#              HOW-IT-WAS-MADE.txt is packaging/'s; VERSION says VERSION;
+#              .itch.toml launches bin/<exe>; the README names the disclosure
+#   portable   scripts/check-linux-binary passes on the packed Linux
+#              executable, AND fails on build/release's own (it can go red)
+#   ubuntu     in an Ubuntu 22.04 userland (ubuntu-base, sha256-pinned, cached
+#              under ~/.cache/crash-the-stack-test/), the packed executable
+#              runs --bench-probe 3 (no window) and reports the same deals and
+#              positions as build/release's on this box; AND the unpatched
+#              build/release executable does not start there
+# The Windows executable is not run here (docs/windows/README.md: Wine).
+#
+# Exit: 0 every leg PASS; 1 a FAIL; 125 SETUP-FAILED (a leg could not run).
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+VERSION="${1:-}"
+[ -n "$VERSION" ] || { echo "test-release-archives: give the version, e.g. v0.1.3" >&2; exit 125; }
+T=$(mktemp -d "${TMPDIR:-/tmp}/crash-archive-test.XXXXXX")
+trap 'rm -rf "$T"' EXIT INT TERM
+fails=0; setup=0
+pass() { echo "PASS $*"; }
+fail() { echo "FAIL $*"; fails=$((fails + 1)); }
+setupf() { echo "SETUP-FAILED $*"; setup=$((setup + 1)); }
+NAME="crash-the-stack-$VERSION"
+GAME="src assets package.sgl sigil.lock"
+
+# --- refuse ------------------------------------------------------------------
+prev=$(git tag --list 'v*' --sort=-v:refname | grep -v -x "$VERSION" | head -1)
+# shellcheck disable=SC2086
+if [ -n "$prev" ] && ! git diff --quiet "$prev" -- $GAME; then
+  if DIST="$T/refuse" scripts/release-archives "$prev" > "$T/refuse.log" 2>&1; then
+    fail "refuse: release-archives $prev made archives from a tree holding another game"
+  elif grep -q 'REFUSED: the game files here differ' "$T/refuse.log"; then
+    pass "refuse: $prev refused (the game files differ from it)"
+  else
+    fail "refuse: $prev failed for another reason: $(tail -1 "$T/refuse.log")"
+  fi
+else
+  setupf "refuse: no earlier tag with a different game to try"
+fi
+
+# --- make ----------------------------------------------------------------------
+if ! DIST="$T/dist" scripts/release-archives "$VERSION" > "$T/make.log" 2>&1; then
+  cat "$T/make.log"; echo "SETUP-FAILED release-archives $VERSION did not complete; no other leg ran"; exit 125
+fi
+
+# --- sums --------------------------------------------------------------------
+if (cd "$T/dist" && sha256sum -c SHA256SUMS > /dev/null 2>&1) && [ "$(wc -l < "$T/dist/SHA256SUMS")" = 2 ]; then
+  pass "sums: 2 archives verify"
+else
+  fail "sums: SHA256SUMS does not verify both archives"
+fi
+
+mkdir -p "$T/lin" "$T/win"
+tar -xzf "$T/dist/$NAME-linux-amd64.tar.gz" -C "$T/lin"
+guix shell unzip -- unzip -q "$T/dist/$NAME-windows-amd64.zip" -d "$T/win"
+
+want=".itch.toml
+HOW-IT-WAS-MADE.txt
+LICENSE
+NOTICE
+README-run.txt
+VERSION
+assets
+bin"
+for p in lin:crash-the-stack win:crash-the-stack.exe; do
+  d="$T/${p%%:*}"; exe="${p#*:}"; G="$d/$NAME"
+  # --- layout ----------------------------------------------------------------
+  got=$(ls -A "$G" 2>/dev/null | LC_ALL=C sort)
+  if [ "$(ls -A "$d")" = "$NAME" ] && [ "$got" = "$(printf '%s\n' "$want" | LC_ALL=C sort)" ] && [ "$(ls -A "$G/bin")" = "$exe" ]; then
+    pass "layout ($exe): $NAME/ holds $(printf '%s' "$got" | tr '\n' ' '); bin/ holds $exe alone"
+  else
+    fail "layout ($exe): top $(ls -A "$d" | tr '\n' ' '); inside: $(printf '%s' "$got" | tr '\n' ' '); bin/: $(ls -A "$G/bin" 2>/dev/null | tr '\n' ' ')"
+  fi
+  # --- content ---------------------------------------------------------------
+  src=build/release; [ "$exe" = crash-the-stack.exe ] && src=build/windows-amd64
+  c=0
+  diff -r -x refs -x src "$src/assets" "$G/assets" > /dev/null 2>&1 || { fail "content ($exe): assets/ differs from $src/assets (refs and src aside)"; c=1; }
+  [ ! -e "$G/assets/refs" ] && [ ! -e "$G/assets/src" ] || { fail "content ($exe): assets/refs or assets/src shipped"; c=1; }
+  cmp -s packaging/HOW-IT-WAS-MADE.txt "$G/HOW-IT-WAS-MADE.txt" || { fail "content ($exe): HOW-IT-WAS-MADE.txt missing or changed"; c=1; }
+  [ "$(cat "$G/VERSION")" = "$VERSION" ] || { fail "content ($exe): VERSION says $(cat "$G/VERSION")"; c=1; }
+  grep -q "^path = \"bin/$exe\"\$" "$G/.itch.toml" || { fail "content ($exe): .itch.toml does not launch bin/$exe"; c=1; }
+  grep -q 'HOW-IT-WAS-MADE.txt' "$G/README-run.txt" || { fail "content ($exe): README-run.txt does not name the disclosure"; c=1; }
+  [ "$c" = 0 ] && pass "content ($exe): assets, disclosure, VERSION, .itch.toml, README"
+done
+LG="$T/lin/$NAME"
+grep -q 'glibc [0-9.]* or newer' "$LG/README-run.txt" && pass "readme: the Linux README states its glibc floor" || fail "readme: the Linux README has no glibc floor line"
+
+# --- portable ----------------------------------------------------------------
+if scripts/check-linux-binary "$LG/bin/crash-the-stack" > "$T/check.log" 2>&1; then
+  if scripts/check-linux-binary build/release/bin/crash-the-stack > "$T/check-orig.log" 2>&1; then
+    setupf "portable: build/release's own executable passes the check (not a Guix build?), so the checker's red was not shown"
+  else
+    pass "portable: the packed executable passes ($(grep glibc-floor "$T/check.log")); build/release's own fails ($(grep -m1 '^FAIL' "$T/check-orig.log"))"
+  fi
+else
+  fail "portable: $(grep '^FAIL' "$T/check.log" | head -2 | tr '\n' ' ')"
+fi
+
+# --- ubuntu ------------------------------------------------------------------
+UB_URL=https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04.5-base-amd64.tar.gz
+UB_SHA=242cd8898b33ea806ef5f13b1076ed7c76f9f989d18384452f7166692438ff1a
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/crash-the-stack-test"
+UB="$CACHE/ubuntu-base-22.04.5-base-amd64.tar.gz"
+mkdir -p "$CACHE"
+if [ ! -f "$UB" ] || [ "$(sha256sum "$UB" | cut -d' ' -f1)" != "$UB_SHA" ]; then
+  curl -sSfL -o "$UB.part" "$UB_URL" 2>"$T/curl.log" && mv "$UB.part" "$UB" || true
+fi
+UNSHARE=$(command -v unshare || true); CHROOT=$(command -v chroot || true)
+if [ ! -f "$UB" ] || [ "$(sha256sum "$UB" | cut -d' ' -f1)" != "$UB_SHA" ]; then
+  setupf "ubuntu: no ubuntu-base 22.04.5 with sha256 $UB_SHA"
+elif [ -z "$UNSHARE" ] || [ -z "$CHROOT" ] || ! "$UNSHARE" -r true 2>/dev/null; then
+  setupf "ubuntu: no unprivileged user namespaces (unshare -r)"
+else
+  R="$T/rootfs"; mkdir -p "$R"
+  tar -xzf "$UB" -C "$R" 2>/dev/null || true
+  mkdir -p "$R/game"
+  cp -a "$LG/." "$R/game/"
+  cp build/release/bin/crash-the-stack "$R/game/guix-build"
+  # a fresh mount and pid namespace so /proc (which the game reads to find its
+  # own bundle, /proc/self/exe) can be mounted inside the chroot
+  inside() { "$UNSHARE" -r -m -p -f "$CHROOT" "$R" /usr/bin/env -i PATH=/usr/bin:/bin HOME=/tmp /bin/sh -c "mount -t proc proc /proc && cd /game && $1"; }
+  osr=$(inside 'sed -n "s/^PRETTY_NAME=//p" /etc/os-release' 2>&1 || true)
+  inside 'timeout 300 bin/crash-the-stack --bench-probe 3 > /tmp/probe.out 2> /tmp/probe.err; echo $? > /tmp/probe.rc' > /dev/null 2>&1 || true
+  inside 'timeout 60 ./guix-build --bench-probe 3 > /tmp/neg.out 2> /tmp/neg.err; echo $? > /tmp/neg.rc' > /dev/null 2>&1 || true
+  timeout 300 build/release/bin/crash-the-stack --bench-probe 3 > "$T/probe.host" 2>/dev/null || true
+  prc=$(cat "$R/tmp/probe.rc" 2>/dev/null || echo none); nrc=$(cat "$R/tmp/neg.rc" 2>/dev/null || echo none)
+  # the deals and positions are deterministic; the milliseconds are not
+  shape() { sed -n 's/^bench-probe: \([0-9]*\) deals, [0-9.]* ms, \([0-9]*\) positions.*/\1 deals \2 positions/p' "$1"; }
+  hs=$(shape "$T/probe.host"); us=$(shape "$R/tmp/probe.out" 2>/dev/null || true)
+  echo "ubuntu: $osr"
+  if [ "$prc" = none ] || [ "$nrc" = none ] || [ -z "$hs" ]; then
+    setupf "ubuntu: a command did not run (probe rc $prc, negative rc $nrc, host result '$hs')"
+  else
+    u=0
+    [ "$prc" = 0 ] && [ "$us" = "$hs" ] || { fail "ubuntu: --bench-probe 3 rc=$prc gave '$us' against '$hs' here: $(tail -1 "$R/tmp/probe.err" 2>/dev/null)"; u=1; }
+    [ "$nrc" != 0 ] || { fail "ubuntu: the unpatched Guix build STARTED in Ubuntu, so this leg cannot tell"; u=1; }
+    [ "$u" = 0 ] && pass "ubuntu: --bench-probe 3 gives '$us' as on this box; the unpatched build does not start (rc $nrc: $(head -1 "$R/tmp/neg.err"))"
+  fi
+fi
+
+echo "test-release-archives: $fails FAIL, $setup SETUP-FAILED"
+[ "$fails" = 0 ] || exit 1
+[ "$setup" = 0 ] || exit 125
+exit 0

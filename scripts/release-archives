@@ -1,9 +1,11 @@
 #!/bin/sh
-# The release artifacts (P4b, ruling D37: a Linux and a Windows build every
-# release, attached to the tagged release, sold nowhere): two archives and
-# their SHA256SUMS under dist/.
+# The desktop downloads (P4b, ruling D37: a Linux and a Windows build every
+# release): two archives and their SHA256SUMS under dist/. They are
+# distributed ONLY on itch.io (David, 2026-09-29), never as GitHub or forge
+# release assets; butler pushes them (the itch push script in the ops
+# artifacts, channels linux and windows).
 #
-#   scripts/release-archives VERSION      e.g. v0.1.0; the builds must be there:
+#   scripts/release-archives VERSION      e.g. v0.1.3; the builds must be there:
 #                                          build/release (scripts/dev sigil build --config release)
 #                                          build/windows-amd64 (scripts/dev sigil build --config windows-amd64)
 #
@@ -12,29 +14,56 @@
 # motif declares an entry, and is not part of the artifact), assets/ (the
 # tiles, cards, audio, tunes, the manifest, the credits; never assets/refs,
 # the generator references, nor assets/src, the art sources), LICENSE,
-# NOTICE, assets/LICENSE and assets/RESERVED.md as they are, README-run.txt
-# and a VERSION file the game reads for its title stamp. The binary finds
-# assets/ beside bin/ from wherever it is started (enter-install-dir! in
-# the native shell).
+# NOTICE, assets/LICENSE and assets/RESERVED.md as they are, README-run.txt,
+# HOW-IT-WAS-MADE.txt (the About page's paragraph, packaging/), a VERSION
+# file the game reads for its title stamp, and .itch.toml (the itch app's
+# launch manifest). The binary finds assets/ beside bin/ from wherever it is
+# started (enter-install-dir! in the native shell).
+#
+# THE LINUX EXECUTABLE IS MADE PORTABLE HERE. A build on Guix asks for its
+# ELF interpreter at a /gnu/store path no other distribution has, so the
+# kernel refuses to start it there ("No such file or directory"). The packed
+# copy (never build/release's) gets /lib64/ld-linux-x86-64.so.2 by patchelf,
+# and scripts/check-linux-binary must pass on it or nothing is written.
+# scripts/test-release-archives runs it in an Ubuntu 22.04 userland.
+#
+# Refuses: a VERSION with no tag; game files (src assets package.sgl
+# sigil.lock) that differ from the tag's, or untracked files among them;
+# a build older than any of those files.
 set -eu
 cd "$(dirname "$0")/.." || exit 1
+say() { printf 'release-archives: %s\n' "$*" >&2; }
+die() { say "REFUSED: $*"; exit 1; }
 VERSION="${1:-}"
-[ -n "$VERSION" ] || { echo "release-archives: give the version, e.g. v0.1.0"; exit 1; }
-[ -x build/release/bin/crash-the-stack ] || { echo "release-archives: build/release/bin/crash-the-stack missing; build --config release first"; exit 1; }
-[ -f build/windows-amd64/bin/crash-the-stack.exe ] || { echo "release-archives: build/windows-amd64/bin/crash-the-stack.exe missing; build --config windows-amd64 first"; exit 1; }
+[ -n "$VERSION" ] || { say "give the version, e.g. v0.1.3"; exit 1; }
+git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null || die "no tag $VERSION in this repository"
+GAME="src assets package.sgl sigil.lock"
+# shellcheck disable=SC2086
+git diff --quiet "$VERSION" -- $GAME || die "the game files here differ from $VERSION (git diff $VERSION -- $GAME); the archives would not be $VERSION's game"
+# shellcheck disable=SC2086
+untracked=$(git status --porcelain --untracked-files=all -- $GAME | grep '^??' || true)
+[ -z "$untracked" ] || die "untracked files among the game's: $(printf '%s' "$untracked" | head -3 | tr '\n' ' ')"
+[ -x build/release/bin/crash-the-stack ] || die "build/release/bin/crash-the-stack missing; build --config release first"
+[ -f build/windows-amd64/bin/crash-the-stack.exe ] || die "build/windows-amd64/bin/crash-the-stack.exe missing; build --config windows-amd64 first"
+for exe in build/release/bin/crash-the-stack build/windows-amd64/bin/crash-the-stack.exe; do
+  # shellcheck disable=SC2086
+  newer=$(find $GAME -type f -newer "$exe" | head -3)
+  [ -z "$newer" ] || die "$exe is older than game files it should contain (e.g. $(printf '%s' "$newer" | tr '\n' ' ')); rebuild"
+done
 NAME="crash-the-stack-$VERSION"
-DIST="dist"
+DIST="${DIST:-dist}"
 rm -rf "$DIST/$NAME-linux-amd64" "$DIST/$NAME-windows-amd64"
 mkdir -p "$DIST"
 
-fill() {   # fill DIR SOURCE-BUILD-DIR EXE-NAME
+fill() {   # fill DIR SOURCE-BUILD-DIR EXE-NAME PLATFORM-LINE
   dir="$1"; src="$2"; exe="$3"
   mkdir -p "$dir/bin"
   cp "$src/bin/$exe" "$dir/bin/$exe"
   cp -r "$src/assets" "$dir/assets"
   rm -rf "$dir/assets/refs" "$dir/assets/src"
-  cp LICENSE NOTICE "$dir/"
+  cp LICENSE NOTICE packaging/HOW-IT-WAS-MADE.txt "$dir/"
   printf '%s\n' "$VERSION" > "$dir/VERSION"
+  printf '[[actions]]\nname = "play"\npath = "bin/%s"\n' "$exe" > "$dir/.itch.toml"
   cat > "$dir/README-run.txt" <<TXT
 Crash The Stack $VERSION
 https://crashthestack.com
@@ -51,18 +80,28 @@ crash-the-stack/.
 
 The code is GPL-3.0-or-later (LICENSE); the art, audio and content
 CC-BY-4.0 (assets/LICENSE) except the marks in assets/RESERVED.md;
-the third-party notices are in NOTICE. Windows 10 or later; Linux amd64
-with a GL driver and PulseAudio or PipeWire.
+the third-party notices are in NOTICE. How the game was made, AI
+included, is in HOW-IT-WAS-MADE.txt.
+
+$4
 TXT
 }
 
-fill "$DIST/$NAME-linux-amd64/$NAME" build/release crash-the-stack
-fill "$DIST/$NAME-windows-amd64/$NAME" build/windows-amd64 crash-the-stack.exe
+L="$DIST/$NAME-linux-amd64/$NAME"
+fill "$L" build/release crash-the-stack "PLATFORM"
+guix shell patchelf -- patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 "$L/bin/crash-the-stack"
+check=$(scripts/check-linux-binary "$L/bin/crash-the-stack") || { printf '%s\n' "$check" >&2; rm -rf "$DIST/$NAME-linux-amd64"; die "the packed Linux executable is not portable"; }
+cmp -s build/release/bin/crash-the-stack "$L/bin/crash-the-stack" && die "patchelf left the executable unchanged"
+floor=$(printf '%s\n' "$check" | sed -n 's/^glibc-floor //p')
+sed -i "s|^PLATFORM\$|Linux x86-64 with glibc $floor or newer (Ubuntu 22.04, Debian 12, Fedora 35\nand later), a GL driver, and PulseAudio or PipeWire.|" "$L/README-run.txt"
+grep -q "glibc $floor or newer" "$L/README-run.txt" || die "the Linux README's platform line did not land"
+fill "$DIST/$NAME-windows-amd64/$NAME" build/windows-amd64 crash-the-stack.exe "Windows 10 or later, 64-bit."
 
-(cd "$DIST/$NAME-linux-amd64" && tar czf "../$NAME-linux-amd64.tar.gz" "$NAME")
-(cd "$DIST/$NAME-windows-amd64" && rm -f "../$NAME-windows-amd64.zip" && guix shell zip -- zip -qr "../$NAME-windows-amd64.zip" "$NAME")
+(cd "$DIST/$NAME-linux-amd64" && tar --sort=name --owner=0 --group=0 --numeric-owner -czf "../$NAME-linux-amd64.tar.gz" "$NAME")
+(cd "$DIST/$NAME-windows-amd64" && rm -f "../$NAME-windows-amd64.zip" && guix shell zip -- zip -qrX "../$NAME-windows-amd64.zip" "$NAME")
 rm -rf "$DIST/$NAME-linux-amd64" "$DIST/$NAME-windows-amd64"
 (cd "$DIST" && sha256sum "$NAME-linux-amd64.tar.gz" "$NAME-windows-amd64.zip" > SHA256SUMS)
 echo "release-archives: $DIST/"
+printf '%s\n' "$check" | sed 's/^/release-archives: linux executable: /'
 ls -la "$DIST"
 cat "$DIST/SHA256SUMS"

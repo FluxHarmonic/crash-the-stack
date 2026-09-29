@@ -1,0 +1,47 @@
+#!/bin/sh
+# Does this Linux executable start on an ordinary distribution (Ubuntu,
+# Fedora, Arch, SteamOS), or only on Guix?
+#
+#   scripts/check-linux-binary FILE      exit 0 portable, 1 not, 125 could not check
+#
+# A native build made on this box asks for its ELF interpreter at a
+# /gnu/store path (/gnu/store/...-glibc-2.41/lib/ld-linux-x86-64.so.2),
+# which exists on no other system: there the kernel refuses to start it
+# with "No such file or directory" before a line of the game runs.
+# scripts/release-archives points the interpreter at the standard
+# /lib64/ld-linux-x86-64.so.2 and then runs this check on what it packed.
+#
+# Checked, each printed: the interpreter is /lib64/ld-linux-x86-64.so.2;
+# no /gnu/store path anywhere in the dynamic section (RUNPATH, RPATH,
+# NEEDED); every NEEDED library is one glibc itself provides. The newest
+# GLIBC_ symbol version it needs is printed as "glibc-floor X.Y" (the
+# oldest glibc it can run on), for the README.
+set -eu
+f=${1:-}
+[ -n "$f" ] && [ -f "$f" ] || { echo "check-linux-binary: give an existing file" >&2; exit 125; }
+readelf() { guix shell binutils -- readelf "$@"; }
+hdr=$(readelf -lW "$f" 2>/dev/null) || { echo "check-linux-binary: SETUP-FAILED, readelf could not read $f" >&2; exit 125; }
+dyn=$(readelf -dW "$f" 2>/dev/null) || { echo "check-linux-binary: SETUP-FAILED, readelf -d failed on $f" >&2; exit 125; }
+ver=$(readelf -VW "$f" 2>/dev/null) || ver=""
+interp=$(printf '%s\n' "$hdr" | sed -n 's/.*Requesting program interpreter: \(.*\)\]$/\1/p')
+[ -n "$interp" ] || { echo "check-linux-binary: SETUP-FAILED, no interpreter found in $f (not a dynamic ELF executable?)" >&2; exit 125; }
+bad=0
+echo "interpreter $interp"
+if [ "$interp" != "/lib64/ld-linux-x86-64.so.2" ]; then
+  echo "FAIL interpreter is not /lib64/ld-linux-x86-64.so.2"; bad=1
+fi
+if printf '%s\n' "$dyn" | grep -q '/gnu/store'; then
+  echo "FAIL the dynamic section names a /gnu/store path:"; printf '%s\n' "$dyn" | grep '/gnu/store'; bad=1
+fi
+needed=$(printf '%s\n' "$dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+[ -n "$needed" ] || { echo "check-linux-binary: SETUP-FAILED, no NEEDED entries read" >&2; exit 125; }
+for n in $needed; do
+  case "$n" in
+    libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|ld-linux-x86-64.so.2) echo "needed $n" ;;
+    *) echo "FAIL needs $n, which is not part of glibc"; bad=1 ;;
+  esac
+done
+floor=$(printf '%s\n' "$ver" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -k3,3n -u | tail -1)
+echo "glibc-floor ${floor:-unknown}"
+[ "$bad" = 0 ] && echo "PASS portable" && exit 0
+exit 1
