@@ -1043,7 +1043,6 @@
     ;; store's "decrypt".
     (define *decrypt-bg-acc* 0.0)
     (define *decrypt-deals* 0)
-    (define *decrypt-door* #f)   ; --decrypt endless|daily: the table at boot
 
     (define (decrypt-record-load)
       (datum->record (guard (e (#t #f)) (text->datum (or (store-get "decrypt") "")))))
@@ -1060,17 +1059,22 @@
         (stage (field-for-deal a seed) screen: 'decrypt overlay: #f
                decrypt: (decrypt-open mode seed day (decrypt-record-load)))))
 
-    (define (decrypt-cue! c)
-      (if (cdr c)
-          (audio-cue-in! (car c) (or (live-music-beat-cue! (audio-cue-depth)) 0))
-          (audio-cue! (car c))))
+    ;; one slot per collision, shared by its cues (the web shell's play-decrypt-cues!)
+    (define (play-decrypt-cues! cues)
+      (let ((beat (and (any cdr cues) (live-music-beat-cue! (audio-cue-depth)))))
+        (for-each (lambda (c)
+                    (if (cdr c)
+                        (audio-cue-in! (car c) (if beat (car beat) 0))
+                        (audio-cue! (car c))))
+                  cues))
+      (live-music-beat-verify!))
 
     (define (step-decrypt a f dt)
       (let* ((before (stage-decrypt a))
              (t (decrypt-step before (make-decrypt-frame (input-frame-pressed f) (scan-events) (* 1.0 (current-milliseconds)))))
              (reqs (decrypt-requests t))
              (a (stage a decrypt: t)))
-        (for-each decrypt-cue! (decrypt-cues t))
+        (play-decrypt-cues! (decrypt-cues t))
         (when (memq 'save reqs)
           (store-set! "decrypt" (datum->text (record->datum (decrypt-table-record t)))))
         (set! *decrypt-bg-acc* (+ *decrypt-bg-acc* (* 60.0 dt)))
@@ -1082,7 +1086,7 @@
                (b (and b (if (and (> (decrypt-table-level t) (decrypt-table-level before)) (> (decrypt-table-level t) 1))
                              (bg-with-burst b)
                              b)))
-               (b (and b (> steps 0) (bg-tick b (min steps 4))))
+               (b (and b (if (> steps 0) (bg-tick b (min steps 4)) b)))   ; the phase and the burst stand on a frame with no step (the review, MED 1)
                (a (if b (stage a bg: b) a)))
           (set! *decrypt-bg-acc* (- *decrypt-bg-acc* steps))
           (cond ((memq 'quit reqs) (open-menu (stage a decrypt: #f)))

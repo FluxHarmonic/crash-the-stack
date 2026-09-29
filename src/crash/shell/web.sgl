@@ -1920,12 +1920,23 @@
                                 (list kind (exact (floor (car p))) (exact (floor (cdr p))) (string->symbol (cadr parts))))
                             *decrypt-events*))))))))
 
-    (define (decrypt-cue! c)
-      (if (cdr c)
-          (let ((d (live-music-beat-cue! (audio-cue-depth))))
-            (audio-cue-in! (car c) (or d 0))
-            (when *trace* (say "decrypt" "cue" (car c) "delay" (or d -1))))
-          (audio-cue! (car c))))
+    ;; The frame's cues: every beat cue of one collision shares ONE slot (a
+    ;; special's sound lands with its collision's ping, not a 16th later), and
+    ;; the slots the walk has passed are checked against the rows it walked:
+    ;;   crash: decrypt beat hit|miss SLOT   (?trace; the arm's beat leg)
+    (define (play-decrypt-cues! cues)
+      (let ((beat (and (any cdr cues) (live-music-beat-cue! (audio-cue-depth)))))
+        (for-each (lambda (c)
+                    (if (cdr c)
+                        (begin
+                          (audio-cue-in! (car c) (if beat (car beat) 0))
+                          (when *trace*
+                            (say "decrypt" "cue" (car c) "delay" (if beat (car beat) -1)
+                                 "slot" (if beat (exact (round (cdr beat))) -1))))
+                        (audio-cue! (car c))))
+                  cues))
+      (for-each (lambda (v) (when *trace* (say "decrypt" "beat" (cdr v) (exact (round (car v))))))
+                (live-music-beat-verify!)))
 
     ;; the field behind the board, unless BACKGROUND is OFF (motion sensitivity)
     (define (decrypt-bg) (if (eq? (setting (quote background)) (quote off)) #f (background)))
@@ -1936,7 +1947,7 @@
              (reqs (decrypt-requests t)))
         (set! *decrypt-events* (quote ()))
         (set! *decrypt* t)
-        (for-each decrypt-cue! (decrypt-cues t))
+        (play-decrypt-cues! (decrypt-cues t))
         ;; the field at 60 steps a second: tense while the chains are hot, a
         ;; burst at each link of a cascade past the first
         (when *bg*

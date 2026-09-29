@@ -6,7 +6,11 @@
 ;;; player, models the two sinks' depths, and checks that the moment the
 ;;; delayed cue is heard is exactly the start sample of a walked row whose
 ;;; index is a multiple of the 16th step: the tune's own clock, not a
-;;; wall-clock estimate of it.
+;;; wall-clock estimate of it. (Given the slot, the heard frame equals it by
+;;; construction; what the real-tune test holds is that the slot the arithmetic
+;;; chose lands on a 16th row the player walked, and that no cue waits more than
+;;; RUN-STEPS + 1 sixteenths past the cue sink's latency. beat-now holds the
+;;; depth arithmetic; the browser arm checks the same property on a build.)
 
 (import (sigil test)
         (sigil list)
@@ -41,6 +45,16 @@
     ;; natural 6100; the last slot 12000 is further than 2 x 2000 ahead: the floor is 10100 -> 12000, shared
     (assert-equal 2 RUN-STEPS)
     (assert-equal 12000 (beat-slot 3500 2600 (timeline 16) 2 1000 12000)))
+  (test "the ear's sample: rendered, less the music sink in the player's frames, less the upsampler's unread"
+    ;; the player at half the device rate: 1000 device frames held are 500 of the player's
+    (assert-equal 9300.0 (beat-now 10000 1000 0.5 200))
+    (assert-equal 9000 (beat-now 10000 1000 1 0)))
+  (test "a slot checked against the walk: hit on a 16th row, miss on an odd row or between rows, pending ahead"
+    (assert-equal 'hit (beat-check 8000 (timeline 16) 2))
+    (assert-equal 'miss (beat-check 7000 (timeline 16) 2))    ; row 7: not a 16th
+    (assert-equal 'miss (beat-check 7500 (timeline 16) 2))    ; between rows
+    (assert-equal 'hit (beat-check 8001 (timeline 16) 2))     ; within a frame (extrapolated slots are fractional)
+    (assert-equal 'pending (beat-check 17000 (timeline 16) 2)))
   (test "no timeline, no slot (the cue plays at once)"
     (assert-false (beat-slot 0 0 '() 2 1000 #f)))
   (test "the delay in device frames: (slot - now) / ratio - cue depth, never negative"
@@ -80,7 +94,8 @@
                     (loop (+ k 1)
                           (if (= 0 (modulo k 4)) slot last)   ; a cue every fourth pull keeps its slot (a cascade's run)
                           (cons (+ now cue-depth delay) heards)
-                          (+ negative (if (< (- slot now cue-depth) -0.5) 1 0))))))
+                          ;; late: held more than RUN-STEPS + 1 sixteenths past the cue sink's latency
+                          (+ negative (if (> delay (* (+ RUN-STEPS 1) step row-frames)) 1 0))))))
             ;; render on a second so every slot has been walked, then find each
             (let more ((j 0))
               (if (< j 48)

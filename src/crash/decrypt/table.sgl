@@ -34,7 +34,7 @@
           decrypt-table-board decrypt-table-mode decrypt-table-score decrypt-table-moves
           decrypt-table-phase decrypt-table-phase-ms decrypt-table-step decrypt-table-fall
           decrypt-table-swap decrypt-table-sel decrypt-table-cursor decrypt-table-cursor-shown
-          decrypt-table-armed decrypt-table-ms decrypt-table-panel decrypt-table-panel-at decrypt-table-paused
+          decrypt-table-armed decrypt-table-ms decrypt-table-panel decrypt-table-panel-at decrypt-table-paused decrypt-table-hot
           decrypt-table-popups decrypt-table-level decrypt-table-heat decrypt-table-record
           decrypt-table-day decrypt-table-seed decrypt-table-toast decrypt-table-toast-ms
           decrypt-cues decrypt-requests decrypt-hot? decrypt-moves-left decrypt-panel-rows
@@ -152,7 +152,7 @@
 
     (define (pick-row t key)
       (case key
-        ((resume) (decrypt-table t paused: #f panel: #f))
+        ((resume) (decrypt-table t paused: #f panel: #f drag: #f sel: #f))
         ;; leaving: an ENDLESS score counts toward the best
         ((quit new daily) (request (save-endless t) key))
         (else t)))
@@ -174,7 +174,7 @@
                            (or (panel-row-hit n (cadr (car es)) (caddr (car es))) (loop (cdr es))))
                           (else (loop (cdr es)))))))
         (cond ((and (memq 'escape (decrypt-frame-pressed f)) (decrypt-table-paused t))
-               (decrypt-table t paused: #f panel: #f))
+               (decrypt-table t paused: #f panel: #f drag: #f sel: #f))
               ((cdr k) (pick-row t (car (list-ref rows (cdr k)))))
               (tap (pick-row (decrypt-table t panel: tap) (car (list-ref rows tap))))
               (else t))))
@@ -192,7 +192,8 @@
               ((or (memq 'escape (decrypt-frame-pressed f))
                    (any (lambda (e) (and (eq? (car e) 'down) (in-rect? PAUSE-RECT (cadr e) (caddr e))))
                         (decrypt-frame-events f)))
-               (decrypt-table t paused: #t panel: 0 panel-at: (decrypt-table-ms t)))
+               ;; a press held through the pause must not swipe after it (the review, MED 2)
+               (decrypt-table t paused: #t panel: 0 panel-at: (decrypt-table-ms t) drag: #f sel: #f armed: #f))
               (else (animate (input t f))))))
 
     (define (cool t dt)
@@ -354,4 +355,9 @@
           (let ((r (record-daily (decrypt-table-record t) (decrypt-table-day t) (decrypt-table-score t))))
             (request (cue (decrypt-table (phase t 'over) record: r panel: 0 panel-at: (decrypt-table-ms t)) 'cleared #f)
                      'save))
-          t))))
+          ;; ENDLESS: a new best is saved as the move comes to rest, so a closed
+          ;; tab or window keeps it (the review, MED 6)
+          (if (and (eq? (decrypt-table-mode t) 'endless)
+                   (> (decrypt-table-score t) (drecord-best (decrypt-table-record t))))
+              (request (decrypt-table t record: (record-endless (decrypt-table-record t) (decrypt-table-score t))) 'save)
+              t)))))

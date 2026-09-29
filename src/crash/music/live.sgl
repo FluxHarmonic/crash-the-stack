@@ -49,7 +49,7 @@
           live-music-unavailable! live-music-prefetch! live-music-has-text? live-music-text
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
-          live-music-beat-cue! live-music-beat-phase
+          live-music-beat-cue! live-music-beat-verify! live-music-beat-phase
           live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms live-music-clock-rate
           live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
@@ -392,21 +392,30 @@
     (define (player-rate-of p) (or *player-rate* (audio-rate)))
 
     ;; --- DECRYPT's beat (2026-09-29): a cue held to the tune's next 16th ------------
-    ;; (live-music-beat-cue! cue-depth) -> the delay in device frames a cue
-    ;; added now must wait so it is heard on the next 16th note of the tune
-    ;; playing, or #f with no tune (the cue plays at once). cue-depth: the
-    ;; cues' sink's depth now ((crash audio) audio-cue-depth). Each answer
-    ;; takes a slot after the last one this player gave, so a cascade's
-    ;; collisions land on successive 16ths ((crash music beat)).
-    (define *beat-last* #f)   ; (player . slot) of the last cue's slot
+    ;; (live-music-beat-cue! cue-depth) -> (delay . slot): the delay in device
+    ;; frames a cue added now must wait so it is heard on the next 16th note of
+    ;; the tune playing, and the slot (the player's sample it lands on), or #f
+    ;; with no tune (the cue plays at once). cue-depth: the cues' sink's depth
+    ;; now ((crash audio) audio-cue-depth). Each answer takes a slot after the
+    ;; last one this player gave, so a cascade's links land on successive 16ths
+    ;; ((crash music beat)); the caller asks once per collision, not per cue.
+    ;; (live-music-beat-verify!) -> ((slot . hit|miss) ...): the slots the walk
+    ;; has since passed, each checked against the rows it walked.
+    (define *beat-last* #f)      ; (player . slot) of the last cue's slot
+    (define *beat-pending* '())  ; (player slot) not yet walked past
+    (define (beat-player-now)
+      (let ((ratio (/ (* 1.0 (player-rate-of *player*)) (max 1 (audio-rate)))))
+        (cons ratio
+              (beat-now (player-rendered *player*)
+                        (audio-source-depth)
+                        (if (resampling?) ratio 1.0)
+                        (if (resampling?) (resampler-unread *rs*) 0)))))
     (define (live-music-beat-cue! cue-depth)
       (and *player* *tune* *timing*
            (let* ((rate (player-rate-of *player*))
-                  (ratio (/ (* 1.0 rate) (max 1 (audio-rate))))
-                  (depth-p (if (resampling?)
-                               (+ (* (audio-source-depth) ratio) (resampler-unread *rs*))
-                               (audio-source-depth)))
-                  (now (- (player-rendered *player*) depth-p))
+                  (rn (beat-player-now))
+                  (ratio (car rn))
+                  (now (cdr rn))
                   (step (sixteenth-rows (car (tune-meter *tune*))))
                   (row-frames (* 0.001 (timing-row-ms) rate))
                   (last (and *beat-last* (eq? (car *beat-last*) *player*) (cdr *beat-last*)))
@@ -414,7 +423,18 @@
              (and slot
                   (begin
                     (set! *beat-last* (cons *player* slot))
-                    (beat-delay-frames slot now ratio cue-depth))))))
+                    (set! *beat-pending* (cons (list *player* slot) *beat-pending*))
+                    (cons (beat-delay-frames slot now ratio cue-depth) slot))))))
+    (define (live-music-beat-verify!)
+      (let loop ((ps *beat-pending*) (kept '()) (done '()))
+        (cond ((null? ps) (set! *beat-pending* kept) done)
+              ((not (eq? (car (car ps)) *player*)) (loop (cdr ps) kept done))   ; that player is gone
+              (else
+               (let ((v (beat-check (cadr (car ps)) (player-timeline *player*)
+                                    (sixteenth-rows (car (tune-meter *tune*))))))
+                 (if (eq? v 'pending)
+                     (loop (cdr ps) (cons (car ps) kept) done)
+                     (loop (cdr ps) kept (cons (cons (cadr (car ps)) v) done))))))))
 
     ;; Where the ear is inside the tune's beat, 0..1 (0 the beat's first
     ;; row), or #f with no tune: DECRYPT's field pulses on it

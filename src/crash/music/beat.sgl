@@ -34,7 +34,7 @@
 (define-library (crash music beat)
   (import (sigil math))
 
-  (export beat-slot sixteenth-rows beat-delay-frames RUN-STEPS)
+  (export beat-slot beat-now beat-check sixteenth-rows beat-delay-frames RUN-STEPS)
 
   (begin
     ;; Rows per 16th: the meter's rows per beat over 4 (the soundtrack's
@@ -44,26 +44,32 @@
 
     (define RUN-STEPS 2)
 
+    ;; The player's sample at the ear: what it rendered, less what the music
+    ;; sink still holds (device frames, times ratio = player rate / device
+    ;; rate, into the player's frames) and what the upsampler holds unread
+    ;; (already player frames).
+    (define (beat-now rendered source-depth ratio unread)
+      (- rendered (+ (* source-depth ratio) unread)))
+
     (define (beat-slot now ahead entries step row-frames last)
       (and (pair? entries)
            (let* ((natural (+ now ahead))
                   (floor-at (if last
                                 (max natural (min (+ last 1) (+ natural (* RUN-STEPS step row-frames))))
                                 natural))
-                  ;; the earliest walked grid row at or after the floor
+                  ;; the earliest walked grid row at or after the floor; the
+                  ;; timeline is newest first, its samples falling, so the walk
+                  ;; stops at the first row before the floor (it is never trimmed)
                   (walked (let loop ((es entries) (best #f))
                             (if (null? es)
                                 best
                                 (let* ((e (car es))
                                        (row (exact (vector-ref e 1)))
                                        (s (vector-ref e 2)))
-                                  (loop (cdr es)
-                                        (if (and (>= row 0)
-                                                 (= 0 (modulo row step))
-                                                 (>= s floor-at)
-                                                 (or (not best) (< s best)))
-                                            s
-                                            best)))))))
+                                  (if (< s floor-at)
+                                      best
+                                      (loop (cdr es)
+                                            (if (and (>= row 0) (= 0 (modulo row step))) s best))))))))
              (or walked
                  ;; past the render head: the grid on from the newest row
                  (let* ((e (car entries))
@@ -72,6 +78,23 @@
                         (first (+ s (* row-frames (modulo (- step (modulo row step)) step)))))
                    (let loop ((t first))
                      (if (>= t floor-at) t (loop (+ t (* step row-frames))))))))))
+
+    ;; A slot checked against the rows the player has walked since: 'hit when
+    ;; a 16th row starts within a frame of it, 'miss when the walk has passed
+    ;; it without one, 'pending while it is still ahead of the walk. The page
+    ;; says each verdict, so the browser arm checks the grid on the build
+    ;; itself rather than the arithmetic that chose the slot.
+    (define (beat-check slot entries step)
+      (cond ((or (null? entries) (> slot (vector-ref (car entries) 2))) 'pending)
+            (else
+             (let loop ((es entries))
+               (cond ((null? es) 'miss)
+                     ((< (vector-ref (car es) 2) (- slot 1)) 'miss)
+                     ((and (<= (abs (- (vector-ref (car es) 2) slot)) 1)
+                           (>= (exact (vector-ref (car es) 1)) 0)
+                           (= 0 (modulo (exact (vector-ref (car es) 1)) step)))
+                      'hit)
+                     (else (loop (cdr es))))))))
 
     ;; The cue's delay in device frames for a slot.
     (define (beat-delay-frames slot now ratio cue-depth)

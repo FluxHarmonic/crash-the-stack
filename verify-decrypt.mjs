@@ -325,7 +325,7 @@ function decodePng(buf) {
 const OPEN_RE = /^crash: decrypt open (endless|daily) (\d+)$/;
 const BOARD_RE = /^crash: decrypt board (\S{64}) cursor (\d+)$/;
 const MOVE_RE = /^crash: decrypt move (\d+) score (\d+) level (\d+) underruns (\d+) source (\d+)$/;
-const CUE_RE = /^crash: decrypt cue (\S+) delay (-?\d+)$/;
+const CUE_RE = /^crash: decrypt cue (\S+) delay (-?\d+) slot (-?\d+)$/;
 const OVER_RE = /^crash: decrypt over (\d+)$/;
 // A real key from the DevTools Protocol (a trusted event: it also counts as the gesture that resumes audio)
 const KEYS = { ArrowUp: ["ArrowUp", 38], ArrowDown: ["ArrowDown", 40], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39],
@@ -486,10 +486,11 @@ if (!PHONE) {
 // ---- audio: three moves at a throttled CPU starve the cues' sink of nothing ---------------
 {
   let detail = "";
-  const music = await waitLine(/^crash: music (open|playing) /, 0, 20000);
+  const music = await waitLine(/^crash: music playing (cold-boot|basement-circuit|breach-vector) /, 0, 20000);
   const resumed = await waitLine(/^crash: audio resumed$/, 0, 1000);
   const before = [...consoleLines].reverse().map((l) => l.match(MOVE_RE)).find((m) => m);
-  if (!music) detail = "no \"crash: music open\": the music is not playing, so neither the beat nor an underrun could be seen";
+  if (!music) detail = "DECRYPT's tune never reached the ear (no \"crash: music playing\" of its pool): an underrun could not be seen";
+  else if (!resumed) detail = "the audio context never resumed (no \"crash: audio resumed\"): nothing to starve";
   else if (!before) detail = "no move line to count underruns from";
   else {
     await send("Emulation.setCPUThrottlingRate", { rate: THROTTLE });
@@ -515,16 +516,25 @@ if (!PHONE) {
   if (detail) fail("audio", detail);
 }
 
-// ---- beat: every collision cue once the tune plays was held to its 16th -------------------
+// ---- beat: the page's own verdict on every collision's slot -----------------------------
+// Each collision's cue is held to a slot; once the walk passes it the page
+// checks it against the rows the player walked ("crash: decrypt beat hit|miss
+// SLOT"). Counted from DECRYPT's own tune reaching the ear (its pool's names),
+// not the menu theme's. A slot off the grid is a miss; so the leg can go red
+// for a timing defect, not only for a missing tune.
+const POOL_RE = /^crash: music playing (cold-boot|basement-circuit|breach-vector) /;
+const BEAT_RE = /^crash: decrypt beat (hit|miss) (-?\d+)$/;
 {
-  const playing = await waitLine(/^crash: music playing /, 0, 1000);
+  const playing = await waitLine(POOL_RE, 0, 1000);
   const from = playing ? playing.index : 0;
   const cues = linesFrom(CUE_RE, from);
-  const unheld = cues.filter((m) => +m[2] < 0);
-  if (!playing) fail("beat", "no \"crash: music playing\" line: no tune reached the ear, so there was no beat to hold to");
-  else if (cues.length < 3) fail("beat", `only ${cues.length} collision cues after the music played`);
-  else if (unheld.length) fail("beat", `${unheld.length} of ${cues.length} cues played with no tune clock (delay -1): ${unheld.slice(0, 3).map((m) => m[0]).join("; ")}`);
-  else pass("beat", `${cues.length} cues held to the tune: delays ${cues.slice(0, 8).map((m) => m[2]).join(" ")} frames`);
+  const verdicts = linesFrom(BEAT_RE, from);
+  const misses = verdicts.filter((m) => m[1] === "miss");
+  const hits = verdicts.length - misses.length;
+  if (!playing) fail("beat", "no DECRYPT tune reached the ear (no \"crash: music playing\" of its pool), so there was no beat to hold to");
+  else if (misses.length) fail("beat", `${misses.length} of ${verdicts.length} slots missed the grid: ${misses.slice(0, 3).map((m) => m[0]).join("; ")}`);
+  else if (hits < 3) fail("beat", `only ${hits} slots checked after DECRYPT's tune played (${cues.length} cues)`);
+  else pass("beat", `${hits} slots on the tune's 16ths (${cues.length} cues; delays ${cues.slice(0, 6).map((m) => m[2]).join(" ")} frames)`);
 }
 function linesFrom(re, from) {
   const out = [];
@@ -549,7 +559,8 @@ function linesFrom(re, from) {
   else {
     const txt = `field on p50 ${r1(on.p50)} p95 ${r1(on.p95)} ms (${on.n} frames); off p50 ${r1(off.p50)} p95 ${r1(off.p95)} ms`;
     console.log(`MEASURE field ${PHONE ? "phone" : "desktop"}: ${txt}`);
-    if (on.p50 > 16.7 && off.p50 <= 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
+    if (off.p50 > 16.7) fail("field", `INCONCLUSIVE: the board is over 16.7 ms with the field off, so the field's cost cannot be judged: ${txt}`);
+    else if (on.p50 > 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
     else pass("field", txt);
   }
 }
