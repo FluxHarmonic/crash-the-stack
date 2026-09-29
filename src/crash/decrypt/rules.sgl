@@ -1,0 +1,441 @@
+;;; (crash decrypt rules) - DECRYPT's board: the match-3 rules, pure.
+;;;
+;;; The grid is ciphertext: an 8x8 of glyphs of six kinds. Swap two
+;;; neighbors; the swap stands only if it lines up 3 or more of a kind
+;;; (a COLLISION), and the collided glyphs decrypt and fall away. Gravity
+;;; drops what is above, the column refills from the top, and anything the
+;;; fall lines up collides in turn: a cascade, one CHAIN step at a time.
+;;;
+;;; The specials (Bejeweled's, so players feel at home):
+;;;   4 in a line      BURST     matched later, clears the 3x3 around it
+;;;   an L or T of 5   SWEEP     matched later, clears its row and column
+;;;   5 in a line      WILDCARD  no kind; swapped with a glyph, clears every
+;;;                              glyph of that kind (two wildcards: the board)
+;;; A special caught in another's clear fires too (a wildcard caught that way
+;;; takes the board's most common kind). A new special appears where the
+;;; swap moved a glyph into the collision, else at an L or T's corner, else
+;;; at the run's last cell (bottom, then right).
+;;;
+;;; A deal never starts with a collision and always has a move; a settled
+;;; board with no move left REKEYs: its glyphs reshuffle (same glyphs,
+;;; specials kept) until the board has a move and no collision.
+;;;
+;;; Cells are fixnums: EMPTY (-1); a glyph is its kind 0..5 plus 8 x its
+;;; special (1 BURST, 2 SWEEP); WILD (24) has no kind. The index of (x, y)
+;;; is y*8 + x, y = 0 the top row.
+;;;
+;;; Randomness is (crash stack prng)'s MINSTD, threaded in the board, so a
+;;; board is a pure function of its seed and the moves played (the DAILY).
+;;;
+;;; Scoring: every glyph cleared is 10 x the chain step (1 for the swap's
+;;; own collision, 2 for the first cascade, ...); a special made adds its
+;;; bonus (BURST 50, SWEEP 100, WILDCARD 200) x the chain step.
+;;;
+;;; Rules family: no platform, no clock.
+
+(define-library (crash decrypt rules)
+  (import (sigil struct)
+          (sigil list)
+          (crash stack prng))
+
+  (export W H N KINDS EMPTY WILD BURST SWEEP
+          cell-kind cell-special make-cell
+          dboard dboard? dboard-cells dboard-rng dboard-at dboard-with-cells
+          decrypt-deal decrypt-deal-rng board-from-rows
+          neighbors? swap-ok? swap-cells
+          find-runs board-matches? has-move? find-move
+          dstep dstep? dstep-board dstep-cleared dstep-fired dstep-made dstep-points dstep-level dstep-wild
+          resolve-step
+          dfall dfall? dfall-board dfall-drops
+          fall-and-refill
+          rekey needs-rekey?
+          dplay dplay? dplay-board dplay-steps dplay-points dplay-chains dplay-rekeyed dplay-refused
+          play-swap
+          CHAIN-CAP SPECIAL-BONUS)
+
+  (begin
+    (define W 8)
+    (define H 8)
+    (define N 64)
+    (define KINDS 6)
+    (define EMPTY -1)
+    (define BURST 1)
+    (define SWEEP 2)
+    (define WILD 24)
+    (define CHAIN-CAP 200)   ; a cascade is cut here (never reached: see test-decrypt's sweep)
+    (define SPECIAL-BONUS '((1 . 50) (2 . 100) (3 . 200)))
+    (define DEAL-TRIES 1000)
+    (define REKEY-TRIES 200)
+
+    ;; --- cells ---------------------------------------------------------------
+    (define (make-cell kind special) (+ kind (* 8 special)))
+    ;; the kind 0..5, or #f for EMPTY and WILD
+    (define (cell-kind v)
+      (and (>= v 0) (not (= v WILD)) (modulo v 8)))
+    ;; 0 plain, 1 BURST, 2 SWEEP, 3 WILDCARD (#f for EMPTY)
+    (define (cell-special v)
+      (cond ((< v 0) #f)
+            ((= v WILD) 3)
+            (else (quotient v 8))))
+
+    (define (ix x y) (+ (* y W) x))
+    (define (ix-x i) (modulo i W))
+    (define (ix-y i) (quotient i W))
+
+    ;; --- the board -------------------------------------------------------------
+    (define-struct dboard
+      (cells default: #f)   ; a vector of N cells
+      (rng default: 1))     ; the MINSTD state the next refill or shuffle draws from
+
+    (define (dboard-at b i) (vector-ref (dboard-cells b) i))
+    (define (dboard-with-cells b cells) (dboard cells: cells rng: (dboard-rng b)))
+
+    ;; A board from rows of cells (fixtures): each row a list of W cells.
+    (define (board-from-rows rows rng)
+      (dboard cells: (list->vector (apply append rows)) rng: (prng-seed rng)))
+
+    ;; A draw in [0, n) and the next state
+    (define (draw s n)
+      (let ((s2 (prng-next s)))
+        (cons (prng-index s2 n) s2)))
+
+    ;; --- runs ---------------------------------------------------------------
+    ;; Every horizontal and vertical run of 3 or more of one kind, as
+    ;; (dir . indices), dir 'h or 'v, indices in reading order.
+    (define (find-runs cells)
+      (append (runs-along cells 'h) (runs-along cells 'v)))
+
+    (define (runs-along cells dir)
+      (let outer ((line 0) (acc '()))
+        (if (= line (if (eq? dir 'h) H W))
+            (reverse acc)
+            (let inner ((k 0) (run '()) (kind #f) (acc acc))
+              (let* ((i (and (< k (if (eq? dir 'h) W H))
+                             (if (eq? dir 'h) (ix k line) (ix line k))))
+                     (kd (and i (cell-kind (vector-ref cells i))))
+                     (flush (lambda (acc)
+                              (if (>= (length run) 3) (cons (cons dir (reverse run)) acc) acc))))
+                (cond ((not i) (outer (+ line 1) (flush acc)))
+                      ((and kd (eqv? kd kind)) (inner (+ k 1) (cons i run) kind acc))
+                      (else (inner (+ k 1) (if kd (list i) '()) kd (flush acc)))))))))
+
+    (define (board-matches? cells) (pair? (find-runs cells)))
+
+    ;; --- moves ---------------------------------------------------------------
+    (define (neighbors? i j)
+      (and (>= i 0) (< i N) (>= j 0) (< j N)
+           (or (and (= (ix-y i) (ix-y j)) (= 1 (abs (- (ix-x i) (ix-x j)))))
+               (and (= (ix-x i) (ix-x j)) (= 1 (abs (- (ix-y i) (ix-y j))))))))
+
+    (define (swap-cells cells i j)
+      (let ((c (vector-copy cells)))
+        (vector-set! c i (vector-ref cells j))
+        (vector-set! c j (vector-ref cells i))
+        c))
+
+    ;; A swap stands if either cell is a WILDCARD (with a glyph or another
+    ;; WILDCARD), or if the swapped board lines up a collision.
+    (define (swap-ok? cells i j)
+      (and (neighbors? i j)
+           (let ((a (vector-ref cells i)) (b (vector-ref cells j)))
+             (and (>= a 0) (>= b 0)
+                  (or (= a WILD) (= b WILD)
+                      (run-through? (swap-cells cells i j) i)
+                      (run-through? (swap-cells cells i j) j))))))
+
+    ;; Does a run of 3 pass through cell i? (Checked locally: a swap on a
+    ;; settled board can only make runs through the two cells it moved.)
+    (define (run-through? cells i)
+      (let ((k (cell-kind (vector-ref cells i)))
+            (x (ix-x i))
+            (y (ix-y i)))
+        (and k
+             (let ((same (lambda (xx yy)
+                           (and (>= xx 0) (< xx W) (>= yy 0) (< yy H)
+                                (eqv? k (cell-kind (vector-ref cells (ix xx yy))))))))
+               (let ((count (lambda (dx dy)
+                              (let loop ((n 0) (xx (+ x dx)) (yy (+ y dy)))
+                                (if (same xx yy) (loop (+ n 1) (+ xx dx) (+ yy dy)) n)))))
+                 (or (>= (+ 1 (count -1 0) (count 1 0)) 3)
+                     (>= (+ 1 (count 0 -1) (count 0 1)) 3)))))))
+
+    ;; The first move in reading order, as (i . j), or #f.
+    (define (find-move cells)
+      (let loop ((i 0))
+        (cond ((= i N) #f)
+              ((and (< (ix-x i) (- W 1)) (swap-ok? cells i (+ i 1))) (cons i (+ i 1)))
+              ((and (< (ix-y i) (- H 1)) (swap-ok? cells i (+ i W))) (cons i (+ i W)))
+              (else (loop (+ i 1))))))
+
+    (define (has-move? cells) (and (find-move cells) #t))
+
+    ;; --- the deal --------------------------------------------------------------
+    ;; Row by row, each glyph drawn from the kinds that would not complete
+    ;; a run of three with the two before it (left or above); a deal with
+    ;; no move is dealt again from where the stream stands.
+    (define (deal-once s)
+      (let ((cells (make-vector N EMPTY)))
+        (let loop ((i 0) (s s))
+          (if (= i N)
+              (cons cells s)
+              (let* ((x (ix-x i))
+                     (y (ix-y i))
+                     (bad-h (and (>= x 2)
+                                 (= (vector-ref cells (- i 1)) (vector-ref cells (- i 2)))
+                                 (vector-ref cells (- i 1))))
+                     (bad-v (and (>= y 2)
+                                 (= (vector-ref cells (- i W)) (vector-ref cells (- i W W)))
+                                 (vector-ref cells (- i W))))
+                     (allowed (filter (lambda (k) (not (or (eqv? k bad-h) (eqv? k bad-v))))
+                                      (iota KINDS)))
+                     (d (draw s (length allowed))))
+                (vector-set! cells i (list-ref allowed (car d)))
+                (loop (+ i 1) (cdr d)))))))
+
+    (define (decrypt-deal-rng rng)
+      (let loop ((s (prng-seed rng)) (tries 0))
+        (let* ((d (deal-once s))
+               (cells (car d)))
+          (if (or (has-move? cells) (>= tries DEAL-TRIES))
+              (dboard cells: cells rng: (cdr d))
+              (loop (cdr d) (+ tries 1))))))
+
+    ;; The seed's board. The seed is mixed so neighboring seeds deal apart.
+    (define (decrypt-deal seed)
+      (decrypt-deal-rng (+ (* seed 2654435761) 1013904223)))
+
+    ;; --- one chain step ------------------------------------------------------------
+    ;; dstep: the board after the step's clear (holes EMPTY, new specials
+    ;; placed), what cleared, which specials fired ((i . special) ...),
+    ;; which were made ((i . cell) ...), the points and the step's chain.
+    ;; wild: for a WILDCARD swap's step, the kind it took (#f otherwise,
+    ;; 'all for two WILDCARDs).
+    (define-struct dstep
+      (board default: #f)
+      (cleared default: '())
+      (fired default: '())
+      (made default: '())
+      (points default: 0)
+      (level default: 1)
+      (wild default: #f))
+
+    ;; Runs sharing a cell are one group: ((cells ...) h-runs v-runs)
+    (define (groups-of runs)
+      (let loop ((rs runs) (groups '()))
+        (if (null? rs)
+            groups
+            (let* ((r (car rs))
+                   (touching (filter (lambda (g) (any (lambda (i) (memv i (cdr r))) (car g))) groups))
+                   (rest (filter (lambda (g) (not (memq g touching))) groups))
+                   (cells (dedupe (apply append (cdr r) (map car touching))))
+                   (hs (apply append (if (eq? (car r) 'h) (list (cdr r)) '()) (map cadr touching)))
+                   (vs (apply append (if (eq? (car r) 'v) (list (cdr r)) '()) (map caddr touching))))
+              (loop (cdr rs) (cons (list cells hs vs) rest))))))
+
+    (define (dedupe xs)
+      (let loop ((xs xs) (acc '()))
+        (cond ((null? xs) (reverse acc))
+              ((memv (car xs) acc) (loop (cdr xs) acc))
+              (else (loop (cdr xs) (cons (car xs) acc))))))
+
+    ;; hs / vs are the member runs' index lists (each a list)
+    (define (longest runs) (list-fold (lambda (r m) (max m (length r))) 0 runs))
+
+    ;; The special a group makes: 3 WILDCARD, 2 SWEEP, 1 BURST, 0 none
+    (define (group-special g)
+      (let ((hs (cadr g)) (vs (caddr g)))
+        (cond ((>= (max (longest hs) (longest vs)) 5) 3)
+              ((and (pair? hs) (pair? vs)) 2)
+              ((= (max (longest hs) (longest vs)) 4) 1)
+              (else 0))))
+
+    ;; Where it appears: a moved cell in the group, else an L or T's corner
+    ;; (a cell in both an h and a v run), else the group's last cell.
+    (define (group-spot g moved)
+      (let* ((cells (car g))
+             (m (list-find (lambda (i) (memv i cells)) moved))
+             (corner (list-find (lambda (i)
+                                  (and (any (lambda (r) (memv i r)) (cadr g))
+                                       (any (lambda (r) (memv i r)) (caddr g))))
+                                cells)))
+        (or m corner (list-fold max 0 cells))))
+
+    ;; The cells a special at i clears when it fires (itself included).
+    (define (special-area cells i sp)
+      (let ((x (ix-x i)) (y (ix-y i)))
+        (case sp
+          ((1) (filter (lambda (j) j)
+                       (apply append
+                              (map (lambda (dy)
+                                     (map (lambda (dx)
+                                            (let ((xx (+ x dx)) (yy (+ y dy)))
+                                              (and (>= xx 0) (< xx W) (>= yy 0) (< yy H) (ix xx yy))))
+                                          '(-1 0 1)))
+                                   '(-1 0 1)))))
+          ((2) (dedupe (append (map (lambda (k) (ix k y)) (iota W))
+                               (map (lambda (k) (ix x k)) (iota H)))))
+          ((3) (cons i (kind-cells cells (most-common-kind cells))))
+          (else (list i)))))
+
+    (define (kind-cells cells k)
+      (filter (lambda (j) (eqv? (cell-kind (vector-ref cells j)) k)) (iota N)))
+
+    (define (most-common-kind cells)
+      (let loop ((k 0) (best 0) (n -1))
+        (if (= k KINDS)
+            best
+            (let ((c (length (kind-cells cells k))))
+              (if (> c n) (loop (+ k 1) k c) (loop (+ k 1) best n))))))
+
+    ;; Grow the clear through every special it catches (each fires once).
+    ;; Answers (cleared . fired).
+    (define (expand-clear cells start spared)
+      (let loop ((work start) (cleared '()) (fired '()))
+        (cond ((null? work) (cons (reverse cleared) (reverse fired)))
+              ((memv (car work) cleared) (loop (cdr work) cleared fired))
+              ((< (vector-ref cells (car work)) 0) (loop (cdr work) cleared fired))   ; a hole clears nothing
+              (else
+               (let* ((i (car work))
+                      (sp (cell-special (vector-ref cells i)))
+                      (fires? (and sp (> sp 0) (not (memv i spared)))))
+                 (loop (if fires? (append (cdr work) (special-area cells i sp)) (cdr work))
+                       (cons i cleared)
+                       (if fires? (cons (cons i sp) fired) fired)))))))
+
+    ;; One chain step on a board, or #f when nothing collides.
+    ;;   moved: the cells the swap moved (for a new special's spot), '() in a cascade
+    ;;   wild:  (w . o) when the swap put a WILDCARD at w beside o, else #f
+    (define (resolve-step b chain moved wild)
+      (let* ((cells (dboard-cells b))
+             (runs (find-runs cells))
+             (wild-kind (and wild
+                             (let ((o (vector-ref cells (cdr wild))))
+                               (if (= o WILD) 'all (cell-kind o)))))
+             (wild-cells (cond ((not wild) '())
+                               ((eq? wild-kind 'all) (iota N))
+                               (else (cons (car wild) (kind-cells cells wild-kind)))))
+             (groups (groups-of runs))
+             (makes (filter (lambda (m) (> (cdr m) 0))
+                            (map (lambda (g) (cons (group-spot g moved) (group-special g))) groups)))
+             (made (map (lambda (m)
+                          (let ((sp (cdr m)))
+                            (cons (car m)
+                                  (if (= sp 3)
+                                      WILD
+                                      (make-cell (cell-kind (vector-ref cells (car m))) sp)))))
+                        makes)))
+        (if (and (null? runs) (null? wild-cells))
+            #f
+            (let* ((start (append wild-cells (apply append (map car groups))))
+                   ;; the swapped WILDCARD is spent by its own clear, not fired again
+                   (ex (expand-clear cells start (if wild (list (car wild)) '())))
+                   (cleared (car ex))
+                   (fired (append (if wild (list (cons (car wild) 3)) '()) (cdr ex)))
+                   (out (vector-copy cells)))
+              (for-each (lambda (i) (vector-set! out i EMPTY)) cleared)
+              (for-each (lambda (m) (vector-set! out (car m) (cdr m))) made)
+              (dstep board: (dboard-with-cells b out)
+                     cleared: cleared
+                     fired: fired
+                     made: made
+                     points: (* chain
+                                (+ (* 10 (length cleared))
+                                   (list-fold (lambda (m acc)
+                                                (+ acc (cdr (assv (cell-special (cdr m)) SPECIAL-BONUS))))
+                                              0 made)))
+                     level: chain
+                     wild: wild-kind)))))
+
+    ;; --- gravity and refill ------------------------------------------------------
+    ;; dfall: the settled board and every glyph's drop: (to rows) for each
+    ;; cell that moved or arrived (a new glyph's rows count from above the
+    ;; top, so the first new glyph in a column with k holes falls k rows).
+    (define-struct dfall
+      (board default: #f)
+      (drops default: '()))
+
+    (define (fall-and-refill b)
+      (let ((cells (dboard-cells b))
+            (out (make-vector N EMPTY)))
+        (let col ((x 0) (s (dboard-rng b)) (drops '()))
+          (if (= x W)
+              (dfall board: (dboard cells: out rng: s) drops: (reverse drops))
+              ;; the column's glyphs, bottom first, with their rows
+              (let* ((kept (filter (lambda (p) (>= (car p) 0))
+                                   (map (lambda (y) (cons (vector-ref cells (ix x y)) y))
+                                        (reverse (iota H)))))
+                     (holes (- H (length kept))))
+                (let place ((ps kept) (y (- H 1)) (drops drops))
+                  (if (pair? ps)
+                      (begin
+                        (vector-set! out (ix x y) (car (car ps)))
+                        (place (cdr ps) (- y 1)
+                               (if (= y (cdr (car ps))) drops (cons (list (ix x y) (- y (cdr (car ps)))) drops))))
+                      ;; y is the lowest hole: fill upward from the stream
+                      (let fill ((y y) (s s) (drops drops))
+                        (if (< y 0)
+                            (col (+ x 1) s drops)
+                            (let ((d (draw s KINDS)))
+                              (vector-set! out (ix x y) (car d))
+                              (fill (- y 1) (cdr d) (cons (list (ix x y) holes) drops))))))))))))
+
+    ;; --- REKEY ---------------------------------------------------------------------
+    (define (needs-rekey? cells) (not (has-move? cells)))
+
+    ;; The same glyphs shuffled (Fisher-Yates from the board's stream) until
+    ;; the board has a move and no collision; after REKEY-TRIES, a fresh
+    ;; deal from the stream (a board of all one special could need it).
+    (define (rekey b)
+      (let loop ((s (dboard-rng b)) (tries 0))
+        (if (>= tries REKEY-TRIES)
+            (decrypt-deal-rng s)
+            (let* ((sh (shuffle (dboard-cells b) s))
+                   (cells (car sh)))
+              (if (and (not (board-matches? cells)) (has-move? cells))
+                  (dboard cells: cells rng: (cdr sh))
+                  (loop (cdr sh) (+ tries 1)))))))
+
+    (define (shuffle cells s)
+      (let ((v (vector-copy cells)))
+        (let loop ((k (- N 1)) (s s))
+          (if (<= k 0)
+              (cons v s)
+              (let* ((d (draw s (+ k 1)))
+                     (j (car d))
+                     (t (vector-ref v k)))
+                (vector-set! v k (vector-ref v j))
+                (vector-set! v j t)
+                (loop (- k 1) (cdr d)))))))
+
+    ;; --- a whole move, for the tests and the headless player ------------------------
+    (define-struct dplay
+      (board default: #f)
+      (steps default: '())     ; the dsteps, in order
+      (points default: 0)
+      (chains default: 0)      ; the chain steps (1 for a swap with no cascade)
+      (rekeyed default: #f)
+      (refused default: #f))
+
+    ;; Play the swap i<->j to the settled board: every chain step, the
+    ;; fall after each, and a REKEY at the end when no move is left.
+    (define (play-swap b i j)
+      (if (not (swap-ok? (dboard-cells b) i j))
+          (dplay board: b refused: #t)
+          (let* ((a (vector-ref (dboard-cells b) i))
+                 (c (vector-ref (dboard-cells b) j))
+                 (swapped (dboard-with-cells b (swap-cells (dboard-cells b) i j)))
+                 ;; after the swap the WILDCARD sits where the other was
+                 (wild (cond ((= a WILD) (cons j i))
+                             ((= c WILD) (cons i j))
+                             (else #f))))
+            (let loop ((b swapped) (chain 1) (moved (list i j)) (wild wild) (steps '()) (points 0))
+              (let ((st (and (<= chain CHAIN-CAP) (resolve-step b chain moved wild))))
+                (if st
+                    (loop (dfall-board (fall-and-refill (dstep-board st)))
+                          (+ chain 1) '() #f (cons st steps) (+ points (dstep-points st)))
+                    (let ((rk (needs-rekey? (dboard-cells b))))
+                      (dplay board: (if rk (rekey b) b)
+                             steps: (reverse steps)
+                             points: points
+                             chains: (- chain 1)
+                             rekeyed: rk))))))))))
