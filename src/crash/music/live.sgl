@@ -49,7 +49,7 @@
           live-music-unavailable! live-music-prefetch! live-music-has-text? live-music-text
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
-          live-music-beat-cue!
+          live-music-beat-cue! live-music-beat-phase
           live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms live-music-clock-rate
           live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
@@ -415,6 +415,24 @@
                   (begin
                     (set! *beat-last* (cons *player* slot))
                     (beat-delay-frames slot now ratio cue-depth))))))
+
+    ;; Where the ear is inside the tune's beat, 0..1 (0 the beat's first
+    ;; row), or #f with no tune: DECRYPT's field pulses on it
+    (define (live-music-beat-phase)
+      (and *player* *tune* *timing*
+           (let* ((rate (player-rate-of *player*))
+                  (ratio (/ (* 1.0 rate) (max 1 (audio-rate))))
+                  (depth-p (if (resampling?)
+                               (+ (* (audio-source-depth) ratio) (resampler-unread *rs*))
+                               (audio-source-depth)))
+                  (now (- (player-rendered *player*) depth-p))
+                  (per-beat (car (tune-meter *tune*)))
+                  (row-frames (* 0.001 (timing-row-ms) rate))
+                  (e (list-find (lambda (e) (<= (vector-ref e 2) now)) (player-timeline *player*))))
+             (and e
+                  (let ((rows (+ (modulo (exact (vector-ref e 1)) per-beat)
+                                 (min 1.0 (/ (- now (vector-ref e 2)) (max 1.0 row-frames))))))
+                    (/ rows per-beat))))))
     (define *scratch* #f)
     (define (discard! p frames)
       (unless *scratch* (set! *scratch* (make-bytevector (* 8 SOURCE-PUSH-MAX) 0)))

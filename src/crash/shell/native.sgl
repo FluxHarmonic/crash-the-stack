@@ -103,6 +103,12 @@
           (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame
                 intercept-leave! intercept-set-say! intercept-autoplay! intercept-phase)
           (only (crash intercept draw) draw-intercept)
+          ;; DECRYPT, the match-3 table (the draft)
+          (only (crash decrypt table) decrypt-open decrypt-step make-decrypt-frame decrypt-cues decrypt-requests decrypt-hot?
+                decrypt-table-record decrypt-table-seed decrypt-table-level)
+          (only (crash decrypt draw) draw-decrypt)
+          (only (crash decrypt record) record->datum datum->record)
+          (only (crash daily) daily-decrypt-seed)
           (only (sigil time) current-jiffy jiffies-per-second)
           (only (sigil gc) gc-allocated-bytes gc-young-occupancy gc-minor-collect!)   ; the --scanbench door's GC probes
           (crash hud)
@@ -340,6 +346,7 @@
       (overlay default: #f)       ; the table's own menu (ruling D51), a (crash menu) over the paused table, or #f
       (scan default: #f)          ; SCAN's table, (crash scan table), once opened (0.1.3)
       (intercept default: #f)     ; INTERCEPT's screen, (crash intercept table), while it is up
+      (decrypt default: #f)       ; DECRYPT's table, (crash decrypt table), while it is up
       (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
@@ -832,6 +839,8 @@
                ((scan) (set-run! #f) (open-scan-table a (scan-new-table (menu-scan-size (stage-menu a)) #f)))   ; 0.1.3
                ((daily-scan) (set-run! #f) (open-scan-table a (scan-daily-table #f)))
                ((intercept) (set-run! #f) (open-intercept a #f))   ; FREE PLAY's INTERCEPT row: the song select
+               ((decrypt) (open-decrypt a 'endless))   ; DECRYPT's NEW BOARD: ENDLESS
+               ((daily-decrypt) (open-decrypt a 'daily))
                ((copy)
                 (let ((code (live-code a)))
                   (when code (display "crash: copy ") (display (code-display code)) (newline)))
@@ -1027,6 +1036,62 @@
             (begin (intercept-leave! t) (open-menu (stage a intercept: #f)))
             (stage a intercept: t))))
 
+    ;; --- DECRYPT, the match-3 table (the 2026-09-29 draft) ---------------------------
+    ;; The web shell's twin: its own screen beside the table records, the
+    ;; soundtrack's DECRYPT pool with the chains' heat as its phase, the
+    ;; collisions' cues held to the tune's next 16th, the record in the
+    ;; store's "decrypt".
+    (define *decrypt-bg-acc* 0.0)
+    (define *decrypt-deals* 0)
+    (define *decrypt-door* #f)   ; --decrypt endless|daily: the table at boot
+
+    (define (decrypt-record-load)
+      (datum->record (guard (e (#t #f)) (text->datum (or (store-get "decrypt") "")))))
+
+    (define (open-decrypt a mode)
+      (let* ((day (today))
+             (seed (if (eq? mode 'daily)
+                       (daily-decrypt-seed day)
+                       (+ 1 (modulo (+ (* 7919 (now-second)) (* 104729 *decrypt-deals*)) 4194303)))))
+        (set! *decrypt-deals* (+ *decrypt-deals* 1))
+        (set-run! #f)
+        (music-fresh!)
+        (display "crash: decrypt open ") (display mode) (display " ") (display seed) (newline)
+        (stage (field-for-deal a seed) screen: 'decrypt overlay: #f
+               decrypt: (decrypt-open mode seed day (decrypt-record-load)))))
+
+    (define (decrypt-cue! c)
+      (if (cdr c)
+          (audio-cue-in! (car c) (or (live-music-beat-cue! (audio-cue-depth)) 0))
+          (audio-cue! (car c))))
+
+    (define (step-decrypt a f dt)
+      (let* ((before (stage-decrypt a))
+             (t (decrypt-step before (make-decrypt-frame (input-frame-pressed f) (scan-events) (* 1.0 (current-milliseconds)))))
+             (reqs (decrypt-requests t))
+             (a (stage a decrypt: t)))
+        (for-each decrypt-cue! (decrypt-cues t))
+        (when (memq 'save reqs)
+          (store-set! "decrypt" (datum->text (record->datum (decrypt-table-record t)))))
+        (set! *decrypt-bg-acc* (+ *decrypt-bg-acc* (* 60.0 dt)))
+        (let* ((steps (exact (floor *decrypt-bg-acc*)))
+               (b (stage-bg a))
+               (b (and b (if (eq? (decrypt-hot? t) (decrypt-hot? before))
+                             b
+                             (bg-with-phase b (if (decrypt-hot? t) 'counter 'trace)))))
+               (b (and b (if (and (> (decrypt-table-level t) (decrypt-table-level before)) (> (decrypt-table-level t) 1))
+                             (bg-with-burst b)
+                             b)))
+               (b (and b (> steps 0) (bg-tick b (min steps 4))))
+               (a (if b (stage a bg: b) a)))
+          (set! *decrypt-bg-acc* (- *decrypt-bg-acc* steps))
+          (cond ((memq 'quit reqs) (open-menu (stage a decrypt: #f)))
+                ((memq 'new reqs) (open-decrypt a 'endless))
+                ((memq 'daily reqs) (open-decrypt a 'daily))
+                (else a)))))
+
+    (define (decrypt-bg a) (if (eq? (setting 'background) 'off) #f (stage-background a)))
+
     (define (stage-background a) (stage-bg a))
 
     ;; The sound: the context and the sink, the ambient from its file (a
@@ -1136,6 +1201,7 @@
                           ((menu) (music-frame! (quote menu) #f))
                           ;; a table: its pool by its board's seed, its trace's phase (#f on CLASSIC SCAN)
                           ((intercept) #f)   ; the song is the screen's own source
+                          ((decrypt) (music-frame! (quote decrypt) (if (decrypt-hot? (stage-decrypt a)) (quote counter) (quote trace)) (decrypt-table-seed (stage-decrypt a))))
                           (else (let ((k (table-up a)))
                                   (music-frame! (table-kind-name k) ((table-kind-trace k) a) ((table-kind-seed k) a)))))))
                    (click (input-frame-click f))
@@ -1162,6 +1228,7 @@
                         ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
                         ((intercept) (step-intercept a f))
+                        ((decrypt) (step-decrypt a f dt))
                         ;; a table: the pause overlay first, else its record's tick (t-90ec6b)
                         (else
                          (if (stage-overlay a)
@@ -1186,6 +1253,7 @@
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
                             ((intercept) (draw-intercept (stage-intercept a) VW VH (stage-background a) *copper* (intercept-wall-ms)))
+                            ((decrypt) (draw-decrypt (stage-decrypt a) VW VH (decrypt-bg a) *copper* (live-music-beat-phase)))
                             ;; a table: its record's draw, the overlay's panel over it
                             (else
                              (let ((k (table-up a)))

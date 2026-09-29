@@ -147,6 +147,11 @@
                 intercept-leave! intercept-set-say! intercept-autoplay!)
           (only (crash intercept draw) draw-intercept)
           (only (crash intercept audio) intercept-audio-set-latency!)
+          ;; DECRYPT, the match-3 table (the draft): its screen, its draw, its record
+          (only (crash decrypt table) decrypt-open decrypt-step make-decrypt-frame decrypt-cues decrypt-requests decrypt-hot?
+                decrypt-table-record decrypt-table-seed decrypt-table-level decrypt-table-score decrypt-table-moves decrypt-table-phase)
+          (only (crash decrypt draw) draw-decrypt)
+          (only (crash decrypt record) record->datum datum->record)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -162,7 +167,7 @@
           (crash table)          ; t-90ec6b: one record per table (TABLES below)
           (crash code)
           (only (crash scores) scores-best scores-streak)
-          (only (crash daily) daily-date)
+          (only (crash daily) daily-date daily-decrypt-seed)
           (only (crash native) %b64-decode %fatal!)
           (only (crash credits) credits-parse CREDITS-PATH)
           (crash store)
@@ -1348,6 +1353,7 @@
           ;; a table: its pool by its board's seed, its trace's phase (#f on
           ;; CLASSIC SCAN), once a board is in memory
           ((intercept) #f)   ; the song is the screen's own source
+          ((decrypt) (when *decrypt* (music-frame! (quote decrypt) (if (decrypt-hot? *decrypt*) (quote counter) (quote trace)) (decrypt-table-seed *decrypt*))))
           (else
            (let ((k (table-up)))
              (when (and k ((table-kind-board? k)))
@@ -1407,6 +1413,7 @@
         ((entry) (entry-tick! f dt))                                 ; P5: the hub's entry screen (D65)
         ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
         ((intercept) (intercept-tick f))
+        ((decrypt) (decrypt-tick f dt))
         (else
          (if *overlay*
              (overlay-tick f dt)                                     ; the pause panel stops the table's clock
@@ -1855,6 +1862,97 @@
               (set! *intercept* t)
               (present! #f (lambda () (draw-intercept t VW VH (background) *copper* wall)))))))
 
+    ;; --- DECRYPT, the match-3 table (the 2026-09-29 draft) ----------------------------
+    ;; Its own screen beside the table records, like INTERCEPT's: the board,
+    ;; its pause and end panels are (crash decrypt table)'s. The soundtrack
+    ;; plays DECRYPT's pool; the chains' heat is the phase music-frame! reads
+    ;; (tense while hot). A collision's cue is held to the tune's next 16th
+    ;; ((crash music beat)). The record (bests, the DAILY's streak) is the
+    ;; store's "decrypt".
+    ;;   crash: decrypt open MODE SEED
+    ;;   crash: decrypt cue NAME delay FRAMES            a beat cue (?trace); -1: no tune, played at once
+    ;;   crash: decrypt move N score S level L underruns U source V   a move came to rest
+    ;;   crash: decrypt over SCORE
+    (define *decrypt* #f)
+    (define *decrypt-events* (quote ()))
+    (define *decrypt-door* #f)      ; ?decrypt=endless|daily: the table at boot (the arms)
+    (define *decrypt-bg-acc* 0.0)
+    (define *decrypt-deals* 0)
+
+    (define (decrypt-record-load)
+      (datum->record (guard (e (#t #f)) (text->datum (or (store-get "decrypt") "")))))
+
+    (define (open-decrypt! mode)
+      (let* ((day (today))
+             (seed (if (eq? mode (quote daily))
+                       (daily-decrypt-seed day)
+                       (or *seed* (+ 1 (modulo (+ (* 7919 (now-second)) (* 104729 *decrypt-deals*)) 4194303))))))
+        (set! *decrypt-deals* (+ *decrypt-deals* 1))
+        (set-run! #f)
+        (music-fresh!)
+        (field-for-deal! seed)
+        (set! *screen* (quote decrypt))
+        (set! *overlay* #f)
+        (set! *decrypt-events* (quote ()))
+        (set! *decrypt* (decrypt-open mode seed day (decrypt-record-load)))
+        (say "decrypt" "open" mode seed)))
+
+    ;; the page's pointer stream (SCAN's listener), while DECRYPT is up
+    (define (decrypt-pointer! payload)
+      (let ((parts (string-split payload ",")))
+        (when (and (eq? *screen* (quote decrypt)) (= (length parts) 4))
+          (let ((kind (string->symbol (car parts)))
+                (x (string->number (caddr parts)))
+                (y (string->number (cadddr parts))))
+            (when (and x y (memq kind (list (quote down) (quote up) (quote move))))
+              (let ((p (or (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y) (cons -1 -1))))
+                (set! *decrypt-events*
+                      (cons (if (eq? kind (quote move))
+                                (list (quote move) (exact (floor (car p))) (exact (floor (cdr p))))
+                                (list kind (exact (floor (car p))) (exact (floor (cdr p))) (string->symbol (cadr parts))))
+                            *decrypt-events*))))))))
+
+    (define (decrypt-cue! c)
+      (if (cdr c)
+          (let ((d (live-music-beat-cue! (audio-cue-depth))))
+            (audio-cue-in! (car c) (or d 0))
+            (when *trace* (say "decrypt" "cue" (car c) "delay" (or d -1))))
+          (audio-cue! (car c))))
+
+    ;; the field behind the board, unless BACKGROUND is OFF (motion sensitivity)
+    (define (decrypt-bg) (if (eq? (setting (quote background)) (quote off)) #f (background)))
+
+    (define (decrypt-tick f dt)
+      (let* ((before *decrypt*)
+             (t (decrypt-step before (make-decrypt-frame (input-frame-pressed f) (reverse *decrypt-events*) (now-ms))))
+             (reqs (decrypt-requests t)))
+        (set! *decrypt-events* (quote ()))
+        (set! *decrypt* t)
+        (for-each decrypt-cue! (decrypt-cues t))
+        ;; the field at 60 steps a second: tense while the chains are hot, a
+        ;; burst at each link of a cascade past the first
+        (when *bg*
+          (set! *decrypt-bg-acc* (+ *decrypt-bg-acc* (* 60.0 dt)))
+          (let ((steps (exact (floor *decrypt-bg-acc*))))
+            (set! *decrypt-bg-acc* (- *decrypt-bg-acc* steps))
+            (unless (eq? (decrypt-hot? t) (decrypt-hot? before))
+              (set! *bg* (bg-with-phase *bg* (if (decrypt-hot? t) (quote counter) (quote trace)))))
+            (when (and (> (decrypt-table-level t) (decrypt-table-level before)) (> (decrypt-table-level t) 1))
+              (set! *bg* (bg-with-burst *bg*)))
+            (when (> steps 0) (set! *bg* (bg-tick *bg* (min steps 4))))))
+        (when (and (memq (decrypt-table-phase before) (list (quote fall) (quote rekey)))
+                   (memq (decrypt-table-phase t) (list (quote idle) (quote over))))
+          (say "decrypt" "move" (decrypt-table-moves t) "score" (decrypt-table-score t) "level" (decrypt-table-level t)
+               "underruns" (audio-underruns) "source" (audio-source-underruns)))
+        (when (and (eq? (decrypt-table-phase t) (quote over)) (not (eq? (decrypt-table-phase before) (quote over))))
+          (say "decrypt" "over" (decrypt-table-score t)))
+        (when (memq (quote save) reqs)
+          (store-set! "decrypt" (datum->text (record->datum (decrypt-table-record t)))))
+        (cond ((memq (quote quit) reqs) (set! *decrypt* #f) (open-menu!))
+              ((memq (quote new) reqs) (open-decrypt! (quote endless)))
+              ((memq (quote daily) reqs) (open-decrypt! (quote daily)))
+              (else (present! #f (lambda () (draw-decrypt t VW VH (decrypt-bg) *copper* (live-music-beat-phase))))))))
+
     (define (scan-pointer! payload)
       (let ((parts (string-split payload ",")))
         (when (and (eq? *screen* 'scan) (not *overlay*) (= (length parts) 4))
@@ -2288,6 +2386,8 @@
                ((scan) (set-run! #f) (open-scan-table! (scan-new-table (menu-scan-size *menu*) *touch*)))   ; 0.1.3
                ((daily-scan) (set-run! #f) (say-daily!) (open-scan-table! (scan-daily-table *touch*)))
                ((intercept) (set-run! #f) (open-intercept! #f))   ; FREE PLAY's INTERCEPT row: the song select
+               ((decrypt) (open-decrypt! (quote endless)))   ; DECRYPT's NEW BOARD: ENDLESS
+               ((daily-decrypt) (say-daily!) (open-decrypt! (quote daily)))
                ((update) (update-chosen!))
                ;; NEWS (P4b): the screen opened, its posts seen: the store remembers
                ((news-seen) (news-seen! (menu-news-newest-date *menu*)))
@@ -2463,6 +2563,9 @@
             ((memq *scan-door* (list 'lan 'wan 'backbone))   ; ?scan=PRESET (0.1.3)
              (say "boot" "step" "scan")
              (open-scan-table! (scan-open-table *scan-door* (or *seed* (scan-seed-next!)) #f *touch*)))
+            ((memq *decrypt-door* (list (quote endless) (quote daily)))   ; ?decrypt=MODE: DECRYPT at boot (the arms)
+             (say "boot" "step" "decrypt")
+             (open-decrypt! *decrypt-door*))
             (*intercept-door*   ; ?intercept=SONG: the song starts at boot (its select screen, Enter pressed)
              (say "boot" "step" "intercept")
              (open-intercept! *intercept-door*)
@@ -2518,7 +2621,8 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "pointerup") (set! *pointer-up* #t) 0)   ; P5: the hub's hold-to-walk ends on the release
-            ((string=? type "scan-pointer") (intercept-pointer! payload) (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button; INTERCEPT's taps
+            ((string=? type "scan-pointer") (intercept-pointer! payload) (decrypt-pointer! payload) (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button; INTERCEPT's taps
+            ((string=? type "decrypt") (param! (lambda () (set! *decrypt-door* (string->symbol payload)))))   ; ?decrypt=endless|daily
             ((string=? type "intercept") (param! (lambda () (set! *intercept-door* (string->symbol payload)))))   ; ?intercept=SONG
             ((string=? type "autoplay") (param! (lambda () (intercept-autoplay! (string=? payload "on")))))   ; ?autoplay: every note pressed on the song clock
             ((string=? type "audio-latency")   ; the page: the context's outputLatency + baseLatency, ms (INTERCEPT's audible clock)
