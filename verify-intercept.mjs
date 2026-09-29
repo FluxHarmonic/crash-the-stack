@@ -410,6 +410,7 @@ let previewMark = consoleLines.length;
     const m1 = consoleLines.length;
     for (let i = 0; i < 4; i++) await key("ArrowDown");   // 190 ms apart: under the 250 ms debounce
     const landed = await waitLine(PREVIEW_RE, m1, 5000);
+    if (SHOT && landed) { await sleep(400); fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-list.png", Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64")); }   // the scrolled list, for David
     await sleep(1500);
     const u1 = under();
     const opened = linesFrom(PREVIEW_RE, m1).map((m) => m[1]);
