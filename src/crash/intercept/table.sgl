@@ -55,7 +55,7 @@
           intercept-fall-ms intercept-lanes intercept-flashes intercept-over intercept-best
           intercept-length-ms intercept-sections intercept-message intercept-last-note-ms intercept-over-ms intercept-set-say! intercept-autoplay!
           intercept-results-rows intercept-select-rows intercept-leave! intercept-set-audio-reader!
-          intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS
+          intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS calibration-offset
           intercept-list-first intercept-list-area VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE ROW-X ROW-H PAGE-X PAGE-W PAGE-H
           SONGS LEAD-MS OFFSET-STEP)
 
@@ -84,7 +84,7 @@
     (define LEAD-MS 2500)        ; silence before the song: the first bars fall in from the top
     (define END-HOLD-MS 1200)    ; after the last note's window, the results come up
     (define OFFSET-STEP 5)
-    (define OFFSET-MAX 300)
+    (define OFFSET-MAX 400)      ; CALIBRATE reads up to 400 ms late (its window: -100 .. +400)
     (define STORE-KEY "intercept")
 
     (define *say* (lambda parts #f))
@@ -399,8 +399,8 @@
     ;; nothing else, nothing on screen but the count (a picture would pull the
     ;; taps toward it and skew what is measured). Any lane key or pad counts.
     ;; The first tap starts the measurement and is not counted; each tap after
-    ;; it is measured against the nearest tick (within CALIBRATE-REACH: half a
-    ;; beat is 250 ms). After CALIBRATE-TAPS of them, the taps further than
+    ;; it is measured against the nearest tick, and the group is read together
+    ;; (calibration-offset, below). After CALIBRATE-TAPS of them, the taps further than
     ;; CALIBRATE-OUTLIER from their median are dropped and OFFSET is the median
     ;; of the rest, rounded to OFFSET-STEP (at least CALIBRATE-KEEP must stay,
     ;; else it keeps listening, up to twice as many taps). A player who hears
@@ -411,15 +411,39 @@
     (define CALIBRATE-TAPS 8)
     (define CALIBRATE-KEEP 5)
     (define CALIBRATE-OUTLIER 80)
-    (define CALIBRATE-REACH 240)
     (define CALIBRATE-MS 60000)   ; the song ms by which it gives up (the track is 64 s)
-    ;; (median . kept) once the taps decide OFFSET, else #f. taps: every
-    ;; in-reach tap's delta in order, the first (the start) not counted.
+    ;; (median . kept) once the taps decide OFFSET, else #f. taps: every tap's
+    ;; delta to its nearest click in order, the first (the start) not counted.
+    ;;
+    ;; The clicks are CALIBRATE-BEAT-MS apart, so a delta alone cannot tell a
+    ;; tap 270 ms late from one 230 ms early. Reading each on its own (the first
+    ;; cut: the nearest click, taps past 240 ms dropped) split a player who hears
+    ;; the click about a quarter second late (Bluetooth, many phone speakers)
+    ;; both ways: taps dropped, the rest counted early, OFFSET negative "some of
+    ;; the time" (David, 2026-09-29). So the taps are read as one group: placed on
+    ;; a circle a beat around, their center found, each measured from it; and
+    ;; the answer is read in LATE-WINDOW (-100 .. +400 ms), since a player taps
+    ;; at most a little early and the sound only ever arrives late.
+    (define CALIBRATE-BEAT-MS 500.0)
+    (define EARLIEST -100.0)
+    (define (calibration-center ds)
+      (let* ((k (/ 6.283185307179586 CALIBRATE-BEAT-MS))
+             (c (apply + 0.0 (map (lambda (d) (cos (* k d))) ds)))
+             (s (apply + 0.0 (map (lambda (d) (sin (* k d))) ds))))
+        (/ (atan s c) k)))
+    (define (unwrap d center)
+      (- d (* CALIBRATE-BEAT-MS (round (/ (- d center) CALIBRATE-BEAT-MS)))))
+    (define (in-late-window x)
+      (cond ((< x EARLIEST) (+ x CALIBRATE-BEAT-MS))
+            ((>= x (+ EARLIEST CALIBRATE-BEAT-MS)) (- x CALIBRATE-BEAT-MS))
+            (else x)))
     (define (calibration-offset taps)
       (let ((measured (if (pair? taps) (cdr taps) '())))
         (and (>= (length measured) CALIBRATE-TAPS)
-             (let* ((m (median measured))
-                    (kept (filter (lambda (d) (<= (abs (- d m)) CALIBRATE-OUTLIER)) measured)))
+             (let* ((center (in-late-window (calibration-center measured)))
+                    (us (map (lambda (d) (unwrap d center)) measured))
+                    (m (median us))
+                    (kept (filter (lambda (d) (<= (abs (- d m)) CALIBRATE-OUTLIER)) us)))
                (cond ((>= (length kept) CALIBRATE-KEEP) (cons (median kept) (length kept)))
                      ((>= (length measured) (* 2 CALIBRATE-TAPS)) (cons m (length measured)))
                      (else #f))))))
@@ -469,9 +493,10 @@
                                     (map (lambda (p) (and (key-lane t (car p)) (clock-at clock (min wall (cdr p)))))
                                          (intercept-frame-presses f)))
                             (filter (lambda (x) x)
-                                    (map (lambda (tap) (and (tap-lane t (car tap) (cadr tap)) (clock-at clock (min wall (caddr tap)))))
+                                    ;; on touch a tap anywhere counts (only the pads did: a tap near the count, up top, was lost), but the pause button
+                                    (map (lambda (tap) (and (not (in-rect? PAUSE-RECT (car tap) (cadr tap))) (clock-at clock (min wall (caddr tap)))))
                                          (intercept-frame-taps f)))))
-             (deltas (filter (lambda (d) (and d (<= (abs d) CALIBRATE-REACH)))
+             (deltas (filter (lambda (d) d)   ; every tap counts: the group decides (calibration-offset)
                              (map (lambda (ms) (nearest-delta (itable-kicks t) ms)) times)))
              (_ (for-each (lambda (d) (*say* "intercept calibrate tap" (exact (round d)))) deltas))
              (taps (append (itable-taps t) deltas))

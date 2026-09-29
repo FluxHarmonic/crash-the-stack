@@ -571,3 +571,37 @@
       (let ((a (intercept-list-area)))
         (assert-equal ROW-X (car a))
         (assert-true (<= (+ (car a) (caddr a)) PAGE-X))))))
+
+(test-group "intercept: CALIBRATE reads a late player right (David, 2026-09-29: \"it's missing some taps ... the offset goes negative\")"
+  ;; each tap's delta to its NEAREST click (500 ms apart), as the table measures it,
+  ;; for a player late by L with +-30 ms of jitter; the first delta is the start (not counted)
+  (let ((taps-for (lambda (L)
+                    (map (lambda (j) (let ((d (+ L j))) (- d (* 500.0 (round (/ d 500.0))))))
+                         '(0 -30 12 -7 25 -18 3 29 -22 8)))))
+    (test "a quarter second late (the first cut split these both ways, dropped some and went negative) reads +250"
+      (let ((r (calibration-offset (taps-for 250.0))))
+        (assert-true (and r (> (car r) 230) (< (car r) 270)))
+        (assert-equal 9 (cdr r))))
+    (test "across the window: -60, 0, +60, +150, +300 and +380 ms late each read within 15 ms"
+      (for-each (lambda (L)
+                  (let ((r (calibration-offset (taps-for L))))
+                    (assert-true (and r (< (abs (- (car r) L)) 15)))))
+                '(-60.0 0.0 60.0 150.0 300.0 380.0))))
+  (test "on touch a tap anywhere counts in the calibration (only the pads did), but the pause button"
+    (set-store-root! (string-append (make-temp-directory) "/crash-store"))
+    (intercept-set-audio-reader! (lambda () #f))
+    (let* ((w0 5000000.0)
+           (clicks (map (lambda (o) (vector-ref o 0))
+                        (filter (lambda (o) (= 1 (vector-ref o 1))) (vector-ref (walk-of CALIBRATE-TUNE) 1))))
+           (t (intercept-open #t 'black-glass))
+           (t (intercept-step t (frame '(tab down down) '() w0)))
+           (t (intercept-step t (frame '(return) '() w0)))
+           (t (intercept-step t (frame '() '() w0)))
+           ;; nine taps high on the screen (y 60: above the pads), 280 ms late
+           (t (let loop ((cs (cdr clicks)) (k 0) (t t))
+                (if (or (= k 9) (not (eq? (intercept-phase t) 'calibrate)))
+                    t
+                    (let ((w (+ w0 CALIBRATE-LEAD-MS (car cs) 280.0)))
+                      (loop (cdr cs) (+ k 1) (intercept-step t (make-intercept-frame '() '() (list (list 320 60 w)) w))))))))
+      (assert-equal 'select (intercept-phase t))
+      (assert-equal 280 (intercept-offset t)))))
