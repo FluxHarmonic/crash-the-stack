@@ -588,6 +588,7 @@ let doorMark = 0;
     // the field itself (the review's M4): desktop only (the phone's four pads fill the width).
     // Two captures a second apart; the share of pixels that changed in a strip left of the
     // lanes (virtual x 16..190, y 60..300). With the field it moves; with ?bg=off it holds.
+    if (SHOT && q === "") fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-field.png", Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));   // the wire over the field, for David
     let motion = null;
     if (!PHONE) {
       const a = await client(16, 60), b = await client(190, 300);
