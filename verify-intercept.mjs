@@ -491,6 +491,7 @@ let exitMark = consoleLines.length;
   if (paused) await at(320, 245);   // SONGS on the pause panel
   const songs = paused && await waitLine(/^crash: intercept songs$/, m1, 3000);
   const m2 = consoleLines.length;
+  if (songs) await waitLine(/^crash: intercept preview \S+ at \d+$/, m1, 4000);   // the list's preview opens (so MENU has one to stop)
   if (songs) await at(44, 18);      // MENU on the song screen
   const menu = songs && await waitLine(/^crash: menu (top|free) /, m2, 3000);
   if (!paused) fail("exit", `${PHONE ? "a touch on the pause button" : "Escape"} did not pause the song`);
