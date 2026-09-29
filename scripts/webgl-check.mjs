@@ -5,13 +5,14 @@
 //
 //   node scripts/webgl-check.mjs --url BASE --mode off|webgl1|late|on
 //                                [--query Q] [--ready RE|started] [--wait MS]
-//                                [--line RE] [--shot OUT.png]
+//                                [--line RE] [--no-sw] [--shot OUT.png]
 //
 // BASE is the game's page on a server that is already running (e.g.
 // verify-site's server on a staged tree: http://127.0.0.1:PORT/jack-in/).
 // --ready started waits for SigilWebApp.started instead of a console line.
 // --line RE: a console line matching RE must also appear (waited for, up
-// to --wait more).
+// to --wait more). Console lines read "TYPE: TEXT" (log, warn, error, ...).
+// --no-sw: the page must have no service worker registered at the end.
 // Modes:
 //   off     Chrome started with --disable-webgl: no "webgl2", no "webgl".
 //           Expect: #sub-webgl with data-webgl "none"; the loader's tag
@@ -36,13 +37,15 @@ import fs from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
 
 const args = process.argv.slice(2);
-const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
+// the last occurrence wins, so a caller can append an override
+const opt = (name, dflt) => { const i = args.lastIndexOf(name); return i >= 0 ? args[i + 1] : dflt; };
 const BASE = opt("--url");
 const MODE = opt("--mode");
 const QUERY = opt("--query", "");
 const READY_OPT = opt("--ready", "started");
 const READY = READY_OPT === "started" ? null : new RegExp(READY_OPT);
 const LINE = opt("--line") ? new RegExp(opt("--line")) : null;
+const NO_SW = args.includes("--no-sw");
 const WAIT = parseInt(opt("--wait", "4000"), 10);
 if (!BASE || !["off", "webgl1", "late", "on"].includes(MODE)) {
   console.log("SETUP-FAILED: usage: webgl-check.mjs --url BASE --mode off|webgl1|late|on [--query Q] [--ready RE] [--wait MS] [--shot OUT.png]");
@@ -174,7 +177,7 @@ if (MODE === "off" || MODE === "webgl1") {
 } else if (MODE === "late") {
   check(st.panel === "late", `the message is up with data-webgl "late" (got ${JSON.stringify(st.panel)})`);
   check(st.visible, "the message is visible");
-  check(/couldn.t give the game a WebGL 2 context/.test(st.text), "it gives the late reason (a context the game could not get)");
+  check(/couldn.t give the \w+ a WebGL 2 context/.test(st.text), "it gives the late reason (a context the game could not get)");
   check(wasmReqs.length >= 1, `the wasm was requested (the probe passed: ${wasmReqs.length})`);
   check(lines.some((l) => /no WebGL2 context/.test(l)), "the game said \"no WebGL2 context\"");
   check(!st.failedText, "no \"Failed to start\" left on the page");
@@ -186,6 +189,10 @@ if (MODE === "off" || MODE === "webgl1") {
   check(wasmReqs.length >= 1, `the wasm was requested (${wasmReqs.length})`);
 }
 if (LINE) check(lines.some((l) => LINE.test(l)), `the console said ${LINE}`);
+if (NO_SW) {
+  const regs = await evalJS("navigator.serviceWorker ? navigator.serviceWorker.getRegistrations().then((rs) => rs.map((r) => r.scope)) : []").catch((e) => ["(could not read: " + e.message + ")"]);
+  check(Array.isArray(regs) && regs.length === 0, `no service worker registered (${JSON.stringify(regs)})`);
+}
 if (fails) {
   console.log("page: " + JSON.stringify(st));
   console.log("console: " + JSON.stringify(lines.slice(0, 30)));

@@ -56,6 +56,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -695,13 +696,14 @@ else {
 // app started).
 {
   const cases = [
-    ["jack-in", "off", ["--wait", "100000", "--line", "^crash: sw not registered \\(no WebGL 2\\)$"]],
+    // (the line is logged once crashLive resolves: 90 s with no game)
+    ["jack-in", "off", ["--wait", "100000", "--line", "^log: crash: sw not registered \\(no WebGL 2\\)$", "--no-sw"]],
     ["jack-in", "webgl1", []], ["jack-in", "late", []], ["jack-in", "on", []],
-    ["tracker", "off", []], ["tracker", "late", []], ["tracker", "on", []],
+    ["tracker", "off", []], ["tracker", "webgl1", []], ["tracker", "late", []], ["tracker", "on", []],
   ];
   for (const [page, mode, extra] of cases) {
     const r = await new Promise((resolve) => {
-      const ch = spawn("node", [path.join(path.dirname(new URL(import.meta.url).pathname), "scripts/webgl-check.mjs"),
+      const ch = spawn("node", [path.join(path.dirname(fileURLToPath(import.meta.url)), "scripts/webgl-check.mjs"),
         "--url", `${origin}/${page}/`, "--mode", mode, "--wait", "2500", ...extra]);
       let o = "";
       ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
