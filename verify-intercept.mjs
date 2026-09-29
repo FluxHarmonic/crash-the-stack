@@ -70,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "select", "preview", "open", "hash", "input", "preview-stop", "exit", "clock", "render", ...(FULL ? ["full"] : []), "field", "console"];
+const planned = ["menu", "select", "preview", ...(PHONE ? ["scroll"] : []), "open", "hash", "input", "preview-stop", "exit", "clock", "render", ...(FULL ? ["full"] : []), "field", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -424,6 +424,39 @@ let previewMark = consoleLines.length;
   }
   if (detail) fail("preview", detail);
   previewMark = consoleLines.length;
+}
+
+
+// ---- scroll (phone): David, 2026-09-29: a swipe on the list, and UP / DOWN buttons big enough to tap ----
+if (PHONE) {
+  let detail = "";
+  const LIST_RE = /^crash: intercept list (\d+)$/;
+  const m0 = consoleLines.length;
+  await touch(580, 180);   // DOWN's centre: PAGE-X 528 + 52, y 154..206
+  const down = await waitLine(LIST_RE, m0, 3000);
+  if (!down || down.m[1] !== "4") detail = `a tap on DOWN did not page the list to 4 (${down ? down.m[0] : "no list line"})`;
+  else {
+    // a real swipe up on the list: 60 virtual px, two rows' travel
+    const a = await client(320, 190), b = await client(320, 130);
+    const m1 = consoleLines.length;
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.cx, y: a.cy, id: 1 }] });
+    for (let k = 1; k <= 6; k++) { await sleep(30); await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: a.cx, y: a.cy + (b.cy - a.cy) * k / 6, id: 1 }] }); }
+    await sleep(30);
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const swiped = await waitLine(LIST_RE, m1, 3000);
+    await sleep(800);
+    const chose = linesFrom(/^crash: intercept preview (\S+) at \d+$/, m1).map((m) => m[1]).filter((n) => n !== "black-glass");
+    if (!swiped || +swiped.m[1] <= 4) detail = `a swipe up did not scroll the list past 4 (${swiped ? swiped.m[0] : "no list line"})`;
+    else if (chose.length) detail = `the swipe chose a song (previews: ${chose.join(" ")}): a drag must only scroll`;
+    else {
+      const m2 = consoleLines.length;
+      await touch(580, 122);   // UP's centre: y 96..148
+      const up = await waitLine(LIST_RE, m2, 3000);
+      if (!up || +up.m[1] >= +swiped.m[1]) detail = `a tap on UP did not page back (${up ? up.m[0] : "no list line"})`;
+      else pass("scroll", `DOWN -> ${down.m[0]}; a swipe up -> ${swiped.m[0]} with no song chosen; UP -> ${up.m[0]}`);
+    }
+  }
+  if (detail) fail("scroll", detail);
 }
 
 // ---- open, hash, input (the menu's path, no autoplay) --------------------------------
