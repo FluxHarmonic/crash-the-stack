@@ -1,0 +1,199 @@
+;;; DECRYPT's table ((crash decrypt table)): the controls (swipe, tap then
+;;; tap, mouse click-click and drag, the keyboard cursor with Space then an
+;;; arrow), a refused swap, a whole move to rest, the DAILY's 40 moves and
+;;; its record, the pause, REKEY, and the chains' heat.
+
+(import (sigil test)
+        (sigil list)
+        (crash decrypt rules)
+        (crash decrypt record)
+        (crash decrypt table))
+
+(define (fr now pressed events) (make-decrypt-frame pressed events now))
+
+;; a cell's center in virtual pixels
+(define (cx i) (+ BOARD-X (* CELL (modulo i 8)) (quotient CELL 2)))
+(define (cy i) (+ BOARD-Y (* CELL (quotient i 8)) (quotient CELL 2)))
+
+;; step frames of 16 ms from `now` until the table is idle (or over), at most n
+(define (settle t now n)
+  (let loop ((t t) (now now) (k 0))
+    (if (or (>= k n) (and (> k 0) (memq (decrypt-table-phase t) '(idle over))))
+        (cons t now)
+        (loop (decrypt-step t (fr now '() '())) (+ now 16.0) (+ k 1)))))
+
+(define (open) (decrypt-step (decrypt-open 'endless 7 #f #f) (fr 1000.0 '() '())))
+(define (a-move t) (find-move (dboard-cells (decrypt-table-board t))))
+
+;; the frame after a gesture: did a swap of (i j) start?
+(define (swapping? t i j)
+  (and (eq? (decrypt-table-phase t) 'swap)
+       (let ((s (decrypt-table-swap t)))
+         (or (and (= (car s) i) (= (cadr s) j)) (and (= (car s) j) (= (cadr s) i))))))
+
+(define (direction i j)
+  (cond ((= j (+ i 1)) (cons 20 0)) ((= j (- i 1)) (cons -20 0))
+        ((= j (+ i 8)) (cons 0 20)) (else (cons 0 -20))))
+
+(test-group "decrypt table: the controls"
+  (test "a swipe toward a neighbor swaps (touch)"
+    (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m)) (d (direction i j))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx i) (cy i) 'touch)
+                                                  (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d))))))))
+      (assert-true (swapping? t i j))))
+  (test "a mouse drag swaps the same way"
+    (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m)) (d (direction i j))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx i) (cy i) 'left)))))
+           (t (decrypt-step t (fr 1032.0 '() (list (list 'move (+ (cx i) (quotient (car d) 2)) (+ (cy i) (quotient (cdr d) 2)))))))
+           (_ (assert-equal 'idle (decrypt-table-phase t)))   ; 10 px: not yet a swipe
+           (t (decrypt-step t (fr 1048.0 '() (list (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d))))))))
+      (assert-true (swapping? t i j))))
+  (test "tap then tap on a neighbor swaps (touch, and mouse click-click)"
+    (for-each
+     (lambda (button)
+       (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m))
+              (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx i) (cy i) button) (list 'up (cx i) (cy i) button)))))
+              (_ (assert-equal i (decrypt-table-sel t)))
+              (t (decrypt-step t (fr 1032.0 '() (list (list 'down (cx j) (cy j) button) (list 'up (cx j) (cy j) button))))))
+         (assert-true (swapping? t i j))
+         (assert-false (decrypt-table-sel t))))
+     '(touch left)))
+  (test "a tap on a cell that is not a neighbor moves the selection; a tap on the selected cell clears it"
+    (let* ((t (open))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx 0) (cy 0) 'touch) (list 'up (cx 0) (cy 0) 'touch)))))
+           (t (decrypt-step t (fr 1032.0 '() (list (list 'down (cx 20) (cy 20) 'touch) (list 'up (cx 20) (cy 20) 'touch))))))
+      (assert-equal 'idle (decrypt-table-phase t))
+      (assert-equal 20 (decrypt-table-sel t))
+      (let ((t (decrypt-step t (fr 1048.0 '() (list (list 'down (cx 20) (cy 20) 'touch) (list 'up (cx 20) (cy 20) 'touch))))))
+        (assert-false (decrypt-table-sel t)))))
+  (test "the keyboard: arrows (and h j k l) move the cursor; Space then an arrow swaps"
+    (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m))
+           ;; walk the cursor from 27 to i with arrows
+           (walk (lambda (t from to)
+                   (let* ((dx (- (modulo to 8) (modulo from 8)))
+                          (dy (- (quotient to 8) (quotient from 8)))
+                          (keys (append (make-list (abs dx) (if (> dx 0) 'l 'h))
+                                        (make-list (abs dy) (if (> dy 0) 'down 'up)))))
+                     (decrypt-step t (fr 1016.0 keys '())))))
+           (t (walk t 27 i))
+           (_ (assert-equal i (decrypt-table-cursor t)))
+           (key (cond ((= j (+ i 1)) 'right) ((= j (- i 1)) 'left) ((= j (+ i 8)) 'j) (else 'k)))
+           (t (decrypt-step t (fr 1032.0 (list 'space) '())))
+           (_ (assert-true (decrypt-table-armed t)))
+           (t (decrypt-step t (fr 1048.0 (list key) '()))))
+      (assert-true (swapping? t i j))
+      (assert-equal j (decrypt-table-cursor t))))
+  (test "Space and the arrow in one frame (Space held as the arrow goes down) swap too"
+    (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m))
+           (t (decrypt-table t cursor: i))
+           (key (cond ((= j (+ i 1)) 'right) ((= j (- i 1)) 'left) ((= j (+ i 8)) 'down) (else 'up)))
+           (t (decrypt-step t (fr 1016.0 (list 'space key) '()))))
+      (assert-true (swapping? t i j)))))
+
+(test-group "decrypt table: moves"
+  (test "a refused swap swaps back, costs no move and sounds a mismatch"
+    ;; the diagonal board has no move at all
+    (let* ((t (open))
+           (diag (list->vector (map (lambda (i) (modulo (+ (modulo i 8) (quotient i 8)) 6)) (iota 64))))
+           (t (decrypt-table t board: (dboard-with-cells (decrypt-table-board t) diag)))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx 9) (cy 9) 'touch) (list 'move (+ (cx 9) 20) (cy 9))))))
+           (t (decrypt-step t (fr (+ 1016.0 SWAP-MS 1) '() '()))))
+      (assert-equal 'unswap (decrypt-table-phase t))
+      (assert-true (assoc 'mismatch (decrypt-cues t)))
+      (let ((r (settle t 1200.0 100)))
+        (assert-equal 'idle (decrypt-table-phase (car r)))
+        (assert-equal 0 (decrypt-table-moves (car r)))
+        (assert-equal diag (dboard-cells (decrypt-table-board (car r)))))))
+  (test "a move runs to rest: a move counted, points scored, the board settled with a move, a ping on the beat"
+    (let* ((t (open)) (m (a-move t)) (i (car m)) (j (cdr m)) (d (direction i j))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down (cx i) (cy i) 'touch) (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d)))))))
+           ;; collect every cue on the way
+           (r (let loop ((t t) (now 1032.0) (cues '()) (k 0))
+                (if (or (> k 400) (and (> k 2) (eq? (decrypt-table-phase t) 'idle)))
+                    (list t cues)
+                    (let ((t (decrypt-step t (fr now '() '()))))
+                      (loop t (+ now 16.0) (append cues (decrypt-cues t)) (+ k 1))))))
+           (t (car r)) (cues (cadr r)))
+      (assert-equal 1 (decrypt-table-moves t))
+      (assert-true (> (decrypt-table-score t) 0))
+      (assert-true (has-move? (dboard-cells (decrypt-table-board t))))
+      (assert-false (board-matches? (dboard-cells (decrypt-table-board t))))
+      (assert-equal (cons 'ping-1 #t) (car cues)))))
+
+(test-group "decrypt table: the DAILY, the pause, REKEY, the heat"
+  (test "the DAILY ends after 40 moves: the panel, the record's day, best and streak"
+    (let* ((rec (drecord day: 99 day-best: 10 streak: 3))
+           (t (decrypt-step (decrypt-open 'daily 555 100 rec) (fr 1000.0 '() '()))))
+      (let loop ((t t) (now 1016.0) (k 0) (saved #f))
+        (if (or (= k 60) (eq? (decrypt-table-phase t) 'over))
+            (begin
+              (assert-equal 'over (decrypt-table-phase t))
+              (assert-equal 40 (decrypt-table-moves t))
+              (assert-equal 0 (decrypt-moves-left t))
+              (assert-true saved)
+              (assert-equal 100 (drecord-day (decrypt-table-record t)))
+              (assert-equal 4 (drecord-streak (decrypt-table-record t)))
+              (assert-equal (decrypt-table-score t) (drecord-day-best (decrypt-table-record t)))
+              (assert-equal '("RETRY DAILY" "ENDLESS" "JACK OUT") (map cadr (decrypt-panel-rows t))))
+            (let* ((m (a-move t)) (i (car m)) (j (cdr m)) (d (direction i j))
+                   (t (decrypt-step t (fr now '() (list (list 'down (cx i) (cy i) 'touch) (list 'move (+ (cx i) (car d)) (+ (cy i) (cdr d)))))))
+                   (r (let run ((t t) (now (+ now 16.0)) (n 0) (saved saved))
+                        (if (or (> n 400) (memq (decrypt-table-phase t) '(idle over)))
+                            (list t now saved)
+                            (let ((t (decrypt-step t (fr now '() '()))))
+                              (run t (+ now 16.0) (+ n 1) (or saved (and (memq 'save (decrypt-requests t)) #t))))))))
+              (loop (car r) (cadr r) (+ k 1) (caddr r)))))))
+  (test "Escape pauses: the clock holds, a tap does nothing to the board, RESUME by keys"
+    (let* ((t (open))
+           (t (decrypt-step t (fr 1016.0 (list 'escape) '())))
+           (ms (decrypt-table-ms t)))
+      (assert-true (decrypt-table-paused t))
+      (let* ((t (decrypt-step t (fr 5000.0 '() (list (list 'down (cx 0) (cy 0) 'touch))))))
+        (assert-equal ms (decrypt-table-ms t))
+        (assert-false (decrypt-table-sel t))
+        (let ((t (decrypt-step t (fr 5016.0 (list 'return) '()))))   ; row 0 is RESUME
+          (assert-false (decrypt-table-paused t))))))
+  (test "the PAUSE button pauses on a tap; JACK OUT asks for the menu"
+    (let* ((t (open))
+           (t (decrypt-step t (fr 1016.0 '() (list (list 'down 20 12 'touch)))))
+           (_ (assert-true (decrypt-table-paused t)))
+           (t (decrypt-step t (fr 1032.0 (list 'down 'down 'return) '()))))
+      (assert-true (memq 'quit (decrypt-requests t)))))
+  (test "a settled board with no move REKEYs: the same glyphs, a move, a toast and the shuffle cue"
+    (let* ((t (open))
+           (diag (dboard-with-cells (decrypt-table-board t)
+                                    (list->vector (map (lambda (i) (modulo (+ (modulo i 8) (quotient i 8)) 6)) (iota 64)))))
+           (t (decrypt-table t phase: 'fall phase-ms: (decrypt-table-ms t) level: 1 fall: (dfall board: diag drops: '())))
+           (t (decrypt-step t (fr 1200.0 '() '()))))
+      (assert-equal 'rekey (decrypt-table-phase t))
+      (assert-true (assoc 'shuffle (decrypt-cues t)))
+      (assert-equal "REKEY." (decrypt-table-toast t))
+      (assert-true (has-move? (dboard-cells (decrypt-table-board t))))
+      (assert-equal (list-sort < (vector->list (dboard-cells diag)))
+                    (list-sort < (vector->list (dboard-cells (decrypt-table-board t)))))))
+  (test "the heat: tense from 5, calm again under 1.5, cooling a unit a second"
+    (let* ((t (decrypt-table (open) heat: 5.2))
+           (t (decrypt-step t (fr 1016.0 '() '()))))
+      (assert-true (decrypt-hot? t))
+      (let ((r (let loop ((t t) (now 1032.0)) (if (> now 4200.0) t (loop (decrypt-step t (fr now '() '())) (+ now 16.0))))))
+        (assert-true (decrypt-hot? r))                   ; 3.2 s later: 2.0, still above COOL
+        (let ((r (let loop ((t r) (now 4216.0)) (if (> now 5000.0) t (loop (decrypt-step t (fr now '() '())) (+ now 16.0))))))
+          (assert-false (decrypt-hot? r)))))))
+
+(test-group "decrypt record"
+  (test "the streak: the next day grows it, a gap resets it, the same day keeps the best"
+    (let* ((r (record-daily (empty-record) 10 500)))
+      (assert-equal 1 (drecord-streak r))
+      (assert-equal 2 (drecord-streak (record-daily r 11 100)))
+      (assert-equal 1 (drecord-streak (record-daily r 13 100)))
+      (assert-equal 700 (drecord-day-best (record-daily r 10 700)))
+      (assert-equal 500 (drecord-day-best (record-daily r 10 300)))
+      (assert-equal 1 (record-streak-on r 11))
+      (assert-equal 0 (record-streak-on r 12))))
+  (test "the record round-trips as a datum; junk reads empty"
+    (let ((r (drecord best: 900 day: 12 day-best: 300 streak: 2)))
+      (assert-equal (record->datum r) (record->datum (datum->record (record->datum r))))
+      (assert-equal 0 (drecord-best (datum->record '(junk))))))
+  (test "ENDLESS keeps its best"
+    (assert-equal 900 (drecord-best (record-endless (drecord best: 900) 400)))
+    (assert-equal 950 (drecord-best (record-endless (drecord best: 900) 950)))))

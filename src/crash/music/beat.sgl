@@ -1,0 +1,78 @@
+;;; (crash music beat) - When the next 16th note of the playing tune is heard.
+;;;
+;;; DECRYPT's collision sounds land on the beat (David, 2026-09-29: "tying
+;;; it to the music would be excellent"): a cue is held back until the
+;;; next 16th note of the tune, so a cascade plays as a run on the grid.
+;;;
+;;; The music and the cues run on two sinks ((crash audio)): the tune's
+;;; player renders ahead of the ear by its sink's depth, and a cue starts
+;;; at the tail of the cues' sink, heard after that sink's depth. The
+;;; player's timeline records the render sample where every row it walked
+;;; began, so the grid is known exactly up to the render head; past it,
+;;; the rows are extrapolated at the tune's row length.
+;;;
+;;; All positions are in the PLAYER's frames (its render rate). The caller
+;;; converts: now = rendered - (music sink depth x ratio + resampler's
+;;; unread), and ahead = the cue sink's depth x ratio (ratio = player rate
+;;; / device rate). Then the cue's delay in device frames is
+;;; (slot - now) / ratio - cue depth, never negative because the slot is
+;;; at least `ahead` past now.
+;;;
+;;;   (beat-slot now ahead entries step row-frames last)
+;;;     entries    the timeline: #(pos row sample) newest first
+;;;     step       rows per 16th note (the tune's rows per beat / 4)
+;;;     row-frames one row's length in player frames
+;;;     last       the slot the previous cue took, or #f: a slot is always
+;;;                after it, so two collisions never stack on one 16th, up to
+;;;                RUN-STEPS 16ths past the natural slot: cues arriving faster
+;;;                than the grid share the furthest one rather than drifting
+;;;                ever later
+;;;   -> the slot's sample, or #f with no timeline
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash music beat)
+  (import (sigil math))
+
+  (export beat-slot sixteenth-rows beat-delay-frames RUN-STEPS)
+
+  (begin
+    ;; Rows per 16th: the meter's rows per beat over 4 (the soundtrack's
+    ;; (8 4) is 2 rows; a tune at 4 rows a beat is 1). At least 1.
+    (define (sixteenth-rows rows-per-beat)
+      (max 1 (quotient rows-per-beat 4)))
+
+    (define RUN-STEPS 2)
+
+    (define (beat-slot now ahead entries step row-frames last)
+      (and (pair? entries)
+           (let* ((natural (+ now ahead))
+                  (floor-at (if last
+                                (max natural (min (+ last 1) (+ natural (* RUN-STEPS step row-frames))))
+                                natural))
+                  ;; the earliest walked grid row at or after the floor
+                  (walked (let loop ((es entries) (best #f))
+                            (if (null? es)
+                                best
+                                (let* ((e (car es))
+                                       (row (exact (vector-ref e 1)))
+                                       (s (vector-ref e 2)))
+                                  (loop (cdr es)
+                                        (if (and (>= row 0)
+                                                 (= 0 (modulo row step))
+                                                 (>= s floor-at)
+                                                 (or (not best) (< s best)))
+                                            s
+                                            best)))))))
+             (or walked
+                 ;; past the render head: the grid on from the newest row
+                 (let* ((e (car entries))
+                        (row (exact (vector-ref e 1)))
+                        (s (vector-ref e 2))
+                        (first (+ s (* row-frames (modulo (- step (modulo row step)) step)))))
+                   (let loop ((t first))
+                     (if (>= t floor-at) t (loop (+ t (* step row-frames))))))))))
+
+    ;; The cue's delay in device frames for a slot.
+    (define (beat-delay-frames slot now ratio cue-depth)
+      (max 0 (exact (round (- (/ (- slot now) ratio) cue-depth)))))))

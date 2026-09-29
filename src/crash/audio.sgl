@@ -30,7 +30,7 @@
           (sigil audio sink)
           (crash synth))
 
-  (export audio-open! audio-resume! audio-cue! audio-pump!
+  (export audio-open! audio-resume! audio-cue! audio-cue-in! audio-cue-depth audio-pump!
           audio-render-next! audio-bank-complete?
           audio-open? audio-stream audio-rate audio-muted? audio-set-muted!
           audio-volume audio-set-volume! audio-music? audio-set-music! audio-sfx? audio-set-sfx!
@@ -106,6 +106,8 @@
            (guard (e (#t #f))
              (audio-context-state *ctx*))))
     (define (audio-stream) *stream*)
+    ;; the cues' sink's frames not yet heard (0 without a stream): a cue added now is heard after them
+    (define (audio-cue-depth) (if *stream* (audio-stream-depth *stream*) 0))
     (define (audio-set-source! proc gain)
       (set! *source* proc)
       (set! *source-gain* gain)
@@ -243,13 +245,18 @@
     ;; A cue not yet in the bank (a ?stack boot's first frames, while the
     ;; boot step is still rendering) is rendered on the spot: one stall of
     ;; its own length, once.
-    (define (audio-cue! name)
+    (define (audio-cue! name) (audio-cue-in! name 0))
+
+    ;; A cue that starts `delay` device frames after the next pump's first
+    ;; frame (DECRYPT's beat, (crash music beat)): the voice's position
+    ;; starts at -delay and add-voices! mixes nothing of it until 0.
+    (define (audio-cue-in! name delay)
       (when (and *ctx* (memq name CUES) (not (assq name *bank*)))
         (set! *bank* (cons (cons name (render-cue name *rate*)) *bank*)))
       (let ((entry (assq name *bank*)))
         (when (and entry (not *muted*) *sfx-on*)
           (set! *cue-at* (current-milliseconds))
-          (set! *voices* (cons (cons (cdr entry) 0) *voices*)))))
+          (set! *voices* (cons (cons (cdr entry) (- (max 0 delay))) *voices*)))))
 
     ;; The voices over n frames of out (added, clamped), each advanced by
     ;; n; finished ones leave. Answers the voices left.
@@ -260,8 +267,9 @@
             (let* ((cue (car (car vs)))
                    (at (cdr (car vs)))
                    (len (cue-frames cue))
+                   (skip (min n (max 0 (- at))))           ; a delayed voice's silent lead
                    (take (min n (- len at))))
-              (let add ((i 0))
+              (let add ((i skip))
                 (when (< i take)
                   (let* ((o (* 8 i))
                          (v (max -1.0 (min 1.0 (+ (bytevector-ieee-single-ref out o 'little)

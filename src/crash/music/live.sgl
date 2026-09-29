@@ -42,12 +42,14 @@
           (motif tune player)
           (crash music)
           (crash audio)
-          (crash music resample))
+          (crash music resample)
+          (crash music beat))
 
   (export live-music-frame! live-music-fresh! live-music-off! live-music-stop! live-music-provide!
           live-music-unavailable! live-music-prefetch! live-music-has-text? live-music-text
           live-music-set-loader! live-music-set-gain! live-music-set-say!
           live-music-playing? live-music-title live-music-position live-music-chunk-ms
+          live-music-beat-cue!
           live-music-section live-music-pending? live-music-name live-music-pull! live-music-set-tune-door! fill-window-ms live-music-clock-rate
           live-music-rate live-music-rate-set? live-music-rate-reason live-music-set-rate! live-music-set-budget! live-music-set-remember! MUSIC-BUDGET-MS RATES
           LIVE-GAIN FADE-OUT-MS FADE-IN-MS RETURN-DIP-MS)
@@ -388,6 +390,31 @@
         (*say* "music" "reopen" (car pos) (cdr pos) "skip" skip "head" head "ms" (- (current-milliseconds) t0))))
     (define *player-rate* #f)   ; the rate the player was opened at
     (define (player-rate-of p) (or *player-rate* (audio-rate)))
+
+    ;; --- DECRYPT's beat (2026-09-29): a cue held to the tune's next 16th ------------
+    ;; (live-music-beat-cue! cue-depth) -> the delay in device frames a cue
+    ;; added now must wait so it is heard on the next 16th note of the tune
+    ;; playing, or #f with no tune (the cue plays at once). cue-depth: the
+    ;; cues' sink's depth now ((crash audio) audio-cue-depth). Each answer
+    ;; takes a slot after the last one this player gave, so a cascade's
+    ;; collisions land on successive 16ths ((crash music beat)).
+    (define *beat-last* #f)   ; (player . slot) of the last cue's slot
+    (define (live-music-beat-cue! cue-depth)
+      (and *player* *tune* *timing*
+           (let* ((rate (player-rate-of *player*))
+                  (ratio (/ (* 1.0 rate) (max 1 (audio-rate))))
+                  (depth-p (if (resampling?)
+                               (+ (* (audio-source-depth) ratio) (resampler-unread *rs*))
+                               (audio-source-depth)))
+                  (now (- (player-rendered *player*) depth-p))
+                  (step (sixteenth-rows (car (tune-meter *tune*))))
+                  (row-frames (* 0.001 (timing-row-ms) rate))
+                  (last (and *beat-last* (eq? (car *beat-last*) *player*) (cdr *beat-last*)))
+                  (slot (beat-slot now (* cue-depth ratio) (player-timeline *player*) step row-frames last)))
+             (and slot
+                  (begin
+                    (set! *beat-last* (cons *player* slot))
+                    (beat-delay-frames slot now ratio cue-depth))))))
     (define *scratch* #f)
     (define (discard! p frames)
       (unless *scratch* (set! *scratch* (make-bytevector (* 8 SOURCE-PUSH-MAX) 0)))

@@ -1,0 +1,55 @@
+;;; (crash decrypt record) - DECRYPT's bests and its DAILY streak.
+;;;
+;;; ENDLESS keeps its best score. The DAILY (a seeded board, 40 moves, the
+;;; same for everyone on a UTC day) keeps the day's best and a streak: the
+;;; number of consecutive days whose DAILY was played to its last move,
+;;; SCAN's Daily Board rule ((crash scores) scores-daily-clear). Kept in
+;;; the store under "decrypt" as a datum; an unreadable datum reads as
+;;; empty.
+;;;
+;;; Rules family: no platform.
+
+(define-library (crash decrypt record)
+  (import (sigil struct))
+
+  (export drecord drecord? drecord-best drecord-day drecord-day-best drecord-streak
+          empty-record record-endless record-daily record-streak-on
+          record->datum datum->record)
+
+  (begin
+    (define-struct drecord
+      (best default: 0)          ; ENDLESS's best score
+      (day default: #f)          ; the last DAILY played to its end (a day number)
+      (day-best default: 0)      ; that day's best
+      (streak default: 0))       ; consecutive days up to `day`
+
+    (define (empty-record) (drecord))
+
+    (define (record-endless r score)
+      (drecord r best: (max (drecord-best r) score)))
+
+    ;; A DAILY played to its end on `day` with `score`
+    (define (record-daily r day score)
+      (let ((last (drecord-day r)))
+        (cond ((eqv? last day)
+               (drecord r day-best: (max (drecord-day-best r) score)))
+              ((and last (= last (- day 1)))
+               (drecord r day: day day-best: score streak: (+ 1 (drecord-streak r))))
+              (else
+               (drecord r day: day day-best: score streak: 1)))))
+
+    ;; The streak as it stands on `today`: a streak whose last day is
+    ;; before yesterday has lapsed
+    (define (record-streak-on r today)
+      (let ((last (drecord-day r)))
+        (if (and last today (>= last (- today 1))) (drecord-streak r) 0)))
+
+    (define (record->datum r)
+      (list 'decrypt-record 1 (drecord-best r) (drecord-day r) (drecord-day-best r) (drecord-streak r)))
+
+    (define (datum->record d)
+      (if (and (list? d) (= (length d) 6) (eq? (car d) 'decrypt-record)
+               (integer? (list-ref d 2)) (integer? (list-ref d 4)) (integer? (list-ref d 5))
+               (or (not (list-ref d 3)) (integer? (list-ref d 3))))
+          (drecord best: (list-ref d 2) day: (list-ref d 3) day-best: (list-ref d 4) streak: (list-ref d 5))
+          (empty-record)))))
