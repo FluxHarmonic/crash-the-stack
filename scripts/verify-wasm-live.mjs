@@ -25,6 +25,12 @@
 //     answer from memory
 //   - a wrong hash is a 404, not somebody else's wasm
 //
+// Right after a deploy the wasm route can answer 404 for a few seconds, before
+// the object is visible to the Function (t-975606; Harkfell's production
+// verify hit it on 2026-09-29). A 404 on the published hash is fetched again
+// after 2, 4 and 8 s, each retry said, before it counts; any other status
+// counts at once. The unpublished-hash probe is never retried.
+//
 // Exits 0 when every check passes, 1 otherwise.
 const base = (process.argv[2] || "").replace(/\/$/, "");
 if (!base) { console.log("usage: verify-wasm-live.mjs https://origin"); process.exit(2); }
@@ -32,6 +38,20 @@ if (!base) { console.log("usage: verify-wasm-live.mjs https://origin"); process.
 const results = [];
 const pass = (n, d) => { results.push(true); console.log(`PASS ${n}: ${d}`); };
 const fail = (n, d) => { results.push(false); console.log(`FAIL ${n}: ${d}`); };
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const WASM_BACKOFF = [2000, 4000, 8000];
+async function fetchWasm(url, init) {
+  let r = await fetch(url, init);
+  for (const ms of WASM_BACKOFF) {
+    if (r.status !== 404) break;
+    await r.arrayBuffer();
+    console.log(`retry: ${url} answered 404; again in ${ms / 1000} s`);
+    await sleep(ms);
+    r = await fetch(url, init);
+  }
+  return r;
+}
 
 async function sha16(bytes) {
   const d = await crypto.subtle.digest("SHA-256", bytes);
@@ -52,7 +72,7 @@ for (const [page, name] of [["jack-in", "crash-the-stack"], ["tracker", "crash-t
   if (!/^w\/[0-9a-f]{16}\//.test(named)) { fail(page, `${pageUrl} names ${named}, not a hashed path`); continue; }
   const url = `${base}/${page}/${named}.wasm`;
 
-  const res = await fetch(url, { headers: { "accept-encoding": "br, gzip" } });
+  const res = await fetchWasm(url, { headers: { "accept-encoding": "br, gzip" } });
   if (res.status !== 200) { fail(page, `${url} answered ${res.status}`); continue; }
 
   const detail = [];
