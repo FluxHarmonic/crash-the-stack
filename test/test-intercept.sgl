@@ -17,7 +17,8 @@
         (crash intercept clock)
         (crash intercept table)
         (only (crash store) set-store-root!)
-        (only (crash music live) live-music-set-loader!))
+        (only (crash music live) live-music-set-loader!)
+        (only (crash intercept preview) preview-start-pos))
 
 (define (tune-of name) (read-tune-string (read-file-string (music-tune-path name))))
 
@@ -42,7 +43,8 @@
           (set! *charts* (cons (cons key c) *charts*))
           c))))
 
-(define SONGS '(black-glass blind-spot sector-drift clock-edge glass-current))
+(define SONGS '(black-glass blind-spot sector-drift clock-edge glass-current
+                obsidian-index quiet-array shadow-protocol dead-sector basement-circuit cold-boot relay-ghost breach-vector))
 
 (define (max-in-window chart ms)
   ;; the most notes within any 1000 ms centred on a note
@@ -70,22 +72,22 @@
                 (loop (+ i 1) (max best k))))))))
 
 (test-group "intercept: the song's onsets and sections"
-  (test "every INTERCEPT song has the shared layout: a kick on ch1 and notes on ch6"
+  (test "every INTERCEPT song has the shared layout: a kick on ch1 and a melody on ch6 or ch7 (Shadow Protocol carries it on ch7: 11 notes on ch6, 88 on ch7)"
     (for-each (lambda (name)
                 (let ((os (cdr (source-of name))))
                   (assert-true (> (length (filter (lambda (o) (= 1 (vector-ref o 1))) os)) 50))
-                  (assert-true (> (length (filter (lambda (o) (= 6 (vector-ref o 1))) os)) 20))))
+                  (assert-true (> (length (filter (lambda (o) (memv (vector-ref o 1) (quote (6 7)))) os)) 20))))
               SONGS))
   (test "onsets are in time order, and Black Glass's first kick is on a beat"
     (let* ((os (cdr (source-of 'black-glass)))
            (kick (list-find (lambda (o) (= 1 (vector-ref o 1))) os)))
       (assert-true (let loop ((os os)) (or (null? os) (null? (cdr os)) (and (<= (vector-ref (car os) 0) (vector-ref (cadr os) 0)) (loop (cdr os))))))
       (assert-equal 0 (vector-ref kick 3))))
-  (test "a song runs its whole order list: 150 to 180 s"
+  (test "a song runs its whole order list: 150 to 200 s (Obsidian Index is the longest, 194 s)"
     (for-each (lambda (name)
                 (let ((len (car (source-of name))))
                   (assert-true (> len 150000.0))
-                  (assert-true (< len 180000.0))))
+                  (assert-true (< len 200000.0))))
               SONGS))
   (test "the sections (the progress bar's ticks): in time order inside the song, at least one marked section each"
     (for-each (lambda (name)
@@ -191,11 +193,36 @@
     (glass-current script-kid 236 4458704)
     (glass-current runner 530 148316)
     (glass-current elite 862 4455922)
+    ;; the rest of the soundtrack that passes the playability gate (t-f04480, 2026-09-29)
+    (cold-boot script-kid 212 11878133)
+    (cold-boot runner 385 11989964)
+    (cold-boot elite 668 6722661)
+    (relay-ghost script-kid 201 1434223)
+    (relay-ghost runner 403 2135512)
+    (relay-ghost elite 724 12203247)
+    (shadow-protocol script-kid 213 4707350)
+    (shadow-protocol runner 425 8002321)
+    (shadow-protocol elite 775 12850575)
+    (quiet-array script-kid 229 4953202)
+    (quiet-array runner 402 5514823)
+    (quiet-array elite 547 8190100)
+    (basement-circuit script-kid 213 8956826)
+    (basement-circuit runner 404 6532323)
+    (basement-circuit elite 678 15607030)
+    (dead-sector script-kid 250 16623130)
+    (dead-sector runner 454 3902367)
+    (dead-sector elite 654 13784740)
+    (obsidian-index script-kid 289 14130321)
+    (obsidian-index runner 463 6880504)
+    (obsidian-index elite 586 10714909)
+    (breach-vector script-kid 235 1325647)
+    (breach-vector runner 574 2192244)
+    (breach-vector elite 864 4739673)
     ))
 
 (test-group "intercept: pinned charts (the gate: generated reproducibly)"
-  (test "15 charts, 5 songs x 3 tiers, each its pinned note count and hash"
-    (assert-equal 15 (length PINNED))
+  (test "39 charts, 13 songs x 3 tiers, each its pinned note count and hash"
+    (assert-equal 39 (length PINNED))
     (for-each (lambda (p)
                 (let ((c (chart-of (list-ref p 0) (list-ref p 1))))
                   (assert-equal (list-ref p 2) (vector-length c))
@@ -218,7 +245,7 @@
          (t3 (intercept-step t (frame '(down down) '() 1.0))))
     (test "Tab and down through the settings leave Black Glass chosen (the walk down the list chose Glass Current)"
       (assert-equal 'black-glass (car (intercept-song t1)))
-      (assert-equal 7 (intercept-focus t1)))
+      (assert-equal ROW-CALIBRATE (intercept-focus t1)))
     (test "right on a song row steps DIFFICULTY; down moves the chosen song"
       (assert-equal 'elite (intercept-difficulty t2))
       (assert-equal 'sector-drift (car (intercept-song t3))))))
@@ -433,3 +460,73 @@
         (assert-true (clock-audio? c4))
         (assert-true (>= (clock-ms c4) (clock-ms c3)))
         (assert-true (< (abs (- (clock-ms c6) 800.0)) 10.0))))))   ; 808.55: in step, converging
+
+;; --- the playability gate (t-f04480, David 2026-09-29: "why not just include them all?") ---
+;; Every song on the list: a steady beat (50+ kicks on ch1), a finite length
+;; (60-360 s: INTERCEPT walks the order list once), lanes within 2-70 % (the
+;; lane-balance test above), and a density per tier in its band, in notes a
+;; second over the song. The tunes left off are held to the reasons they fail,
+;; so a change to a tune or to the chart shows here, for David to rule on.
+(define DENSITY-BANDS '((script-kid 0.8 2.0) (runner 1.5 4.0) (elite 2.5 6.0)))
+(define (per-second name d) (/ (vector-length (chart-of name d)) (/ (car (source-of name)) 1000.0)))
+
+(test-group "intercept: the playability gate"
+  (test "every song on the list: 50+ kicks, 60 to 360 s, each tier's density in its band"
+    (assert-equal SONGS (map car (intercept-songs)))
+    (for-each (lambda (name)
+                (let ((kicks (length (filter (lambda (o) (= 1 (vector-ref o 1))) (cdr (source-of name)))))
+                      (len (car (source-of name))))
+                  (assert-true (>= kicks 50))
+                  (assert-true (and (>= len 60000.0) (<= len 360000.0)))
+                  (for-each (lambda (band)
+                              (let ((r (per-second name (car band))))
+                                (display "  ") (display name) (display " ") (display (car band)) (display " ")
+                                (display (/ (round (* 10 r)) 10.0)) (display "/s") (newline)
+                                (assert-true (and (>= r (cadr band)) (<= r (caddr band))))))
+                            DENSITY-BANDS)))
+              SONGS))
+  (test "left off, with their reasons: DIRTY CACHE and CLOSED LOOP leave the J lane under 2 % on SCRIPT KID (0 % and 1 %); FAULT LINE is a 30 s loop"
+    (for-each (lambda (name)
+                (assert-false (memq name SONGS))
+                (assert-true (< (list-ref (lane-shares (chart-of name 'script-kid)) 2) 0.02)))
+              '(dirty-cache closed-loop))
+    (assert-false (memq 'fault-line SONGS))
+    (assert-true (< (car (source-of 'fault-line)) 60000.0))))
+
+(test-group "intercept: the song list scrolls (13 songs, 5 rows)"
+  (test "the window keeps the chosen song in its middle, clamped at both ends"
+    (let ((t (intercept-open #f 'black-glass)))
+      (assert-equal 0 (intercept-list-first t))
+      (assert-equal '(0 1 2 3 4) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t)))))
+    (let ((t (intercept-open #f 'dead-sector)))   ; index 8
+      (assert-equal 6 (intercept-list-first t)))
+    (let ((t (intercept-open #f 'breach-vector)))   ; the last, index 12
+      (assert-equal 8 (intercept-list-first t))
+      (assert-equal '(8 9 10 11 12) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t))))))
+  (test "down walks past the fifth song and wraps from the last to the first"
+    (let* ((t (intercept-open #f 'black-glass))
+           (t (intercept-step t (frame (repeat 6 'down) '() 1.0))))
+      (assert-equal 'quiet-array (car (intercept-song t)))   ; index 6
+      (assert-equal 4 (intercept-list-first t))
+      (let ((t (intercept-step (intercept-open #f 'breach-vector) (frame '(down) '() 1.0))))
+        (assert-equal 'black-glass (car (intercept-song t))))))
+  (test "a tap on the bottom visible row chooses it and scrolls the next songs up"
+    (let* ((t (intercept-open #f 'sector-drift))   ; index 2: rows 0..4
+           (bottom (list-find (lambda (r) (eqv? (car r) 4)) (intercept-select-rows t)))
+           (t (intercept-step t (make-intercept-frame '() '() (list (list (+ (list-ref bottom 1) 20) (+ (list-ref bottom 2) 5) 1.0)) 1.0))))
+      (assert-equal 'glass-current (car (intercept-song t)))
+      (assert-equal 2 (intercept-list-first t))))
+  (test "the settings rows keep their places whatever the list shows"
+    (let ((t (intercept-open #f 'breach-vector)))
+      (assert-true (list-find (lambda (r) (eqv? (car r) ROW-CALIBRATE)) (intercept-select-rows t)))
+      (assert-equal ROW-DIFFICULTY (intercept-focus (intercept-step t (frame '(tab) '() 1.0)))))))
+
+(test-group "intercept: the preview (t-2844c8)"
+  (test "every song's preview starts at its tense section: past the top, inside the song"
+    (for-each (lambda (name)
+                (let* ((t (tune-of name))
+                       (pos (preview-start-pos t)))
+                  (assert-true (> pos 0))
+                  (assert-true (< pos (length (tune-order t))))
+                  (assert-equal pos (cadr (assq 'tense (tune-mark-regions t))))))
+              SONGS)))

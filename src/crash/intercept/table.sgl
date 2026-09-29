@@ -42,6 +42,7 @@
           (motif tune)
           (crash store)
           (only (crash music live) live-music-text)
+          (only (crash intercept preview) preview-want! preview-stop!)
           (crash intercept source)
           (crash intercept chart)
           (crash intercept rules)
@@ -55,6 +56,7 @@
           intercept-length-ms intercept-sections intercept-message intercept-last-note-ms intercept-over-ms intercept-set-say! intercept-autoplay!
           intercept-results-rows intercept-select-rows intercept-leave! intercept-set-audio-reader!
           intercept-taps CALIBRATE-TAPS intercept-pause-rows PAUSE-RECT CALIBRATE-TUNE CALIBRATE-LEAD-MS
+          intercept-list-first VISIBLE ROW-DIFFICULTY ROW-OFFSET ROW-CALIBRATE
           SONGS LEAD-MS OFFSET-STEP)
 
   (begin
@@ -64,7 +66,19 @@
             (list 'blind-spot "BLIND SPOT" 96)
             (list 'sector-drift "SECTOR DRIFT" 100)
             (list 'clock-edge "CLOCK EDGE" 128)
-            (list 'glass-current "GLASS CURRENT" 172)))
+            (list 'glass-current "GLASS CURRENT" 172)
+            ;; the rest of the soundtrack that passes the playability gate (t-f04480,
+            ;; 2026-09-29), by tempo; test-intercept pins their charts. Not here: DIRTY
+            ;; CACHE and CLOSED LOOP (the J lane under 2% on SCRIPT KID), FAULT LINE
+            ;; (a 30 s loop), for David to rule on
+            (list 'obsidian-index "OBSIDIAN INDEX" 84)
+            (list 'quiet-array "QUIET ARRAY" 92)
+            (list 'shadow-protocol "SHADOW PROTOCOL" 96)
+            (list 'dead-sector "DEAD SECTOR" 108)
+            (list 'basement-circuit "BASEMENT CIRCUIT" 124)
+            (list 'cold-boot "COLD BOOT" 132)
+            (list 'relay-ghost "RELAY GHOST" 132)
+            (list 'breach-vector "BREACH VECTOR" 140)))
     (define (intercept-songs) SONGS)
 
     (define LEAD-MS 2500)        ; silence before the song: the first bars fall in from the top
@@ -95,7 +109,7 @@
       (phase default: 'select)     ; select | loading | play | results
       (touch default: #f)
       (song default: 0)            ; index into SONGS
-      (focus default: 0)           ; the select screen's row: 0..4 songs, 5 difficulty, 6 offset
+      (focus default: 0)           ; the select screen's row: a song index, or ROW-DIFFICULTY / ROW-OFFSET / ROW-CALIBRATE
       (difficulty default: 'runner)
       (offset default: 0)          ; ms, OFFSET's value
       (chart default: #f)
@@ -168,8 +182,12 @@
     (define PRESS-LINES 16)
     (define (intercept-open touch? song)
       (let* ((d (stored-ref 'difficulty 'runner))
+             (i (if (and song (assq song SONGS)) (song-index song) (song-index (stored-ref 'song 'black-glass))))
+             ;; the focus starts on the chosen song: it started on row 0, so down from a
+             ;; stored song far down the list jumped to the second song (t-f04480's test)
              (t (itable touch: touch?
-                        song: (if (and song (assq song SONGS)) (song-index song) (song-index (stored-ref 'song 'black-glass)))
+                        song: i
+                        focus: i
                         difficulty: (if (difficulty? d) d 'runner)
                         offset: (let ((o (stored-ref 'offset 0))) (if (and (integer? o) (<= (abs o) OFFSET-MAX)) o 0)))))
         (when (and song (not (assq song SONGS))) (*say* "intercept unknown" song))   ; a door's name not on the set list: the list opens on the stored song
@@ -178,6 +196,7 @@
 
     ;; Leaving the screen (MENU, Escape from the list): the song stops.
     (define (intercept-leave! t)
+      (preview-stop!)
       (intercept-audio-stop!)
       t)
 
@@ -187,14 +206,28 @@
     (define ROW-W 400)
     (define ROW-H 22)
     (define ROWS-Y 96)
-    (define (intercept-select-rows)
-      (append (let loop ((i 0) (acc '()))
-                (if (= i (length SONGS))
-                    (reverse acc)
-                    (loop (+ i 1) (cons (list i ROW-X (+ ROWS-Y (* i ROW-H)) ROW-W (- ROW-H 2)) acc))))
-              (list (list 5 ROW-X 222 ROW-W 20)
-                    (list 6 ROW-X 246 ROW-W 20)
-                    (list 7 ROW-X 268 ROW-W 18)   ; CALIBRATE
+    ;; The song list scrolls (t-f04480: the whole soundtrack, not five): VISIBLE
+    ;; rows at a time, the window keeping the chosen song in its middle, so a
+    ;; tap on the bottom row chooses it and brings the next songs up. The
+    ;; settings rows have their own ids, clear of any song index.
+    (define VISIBLE 5)
+    (define ROW-DIFFICULTY 100)
+    (define ROW-OFFSET 101)
+    (define ROW-CALIBRATE 102)
+    (define (settings-row? id) (and (integer? id) (>= id ROW-DIFFICULTY)))
+    (define (song-row? id) (and (integer? id) (< id ROW-DIFFICULTY)))
+    ;; the first song index the window shows
+    (define (intercept-list-first t)
+      (max 0 (min (- (length SONGS) VISIBLE) (- (itable-song t) (quotient VISIBLE 2)))))
+    (define (intercept-select-rows t)
+      (append (let ((first (intercept-list-first t)))
+                (let loop ((k 0) (acc '()))
+                  (if (or (= k VISIBLE) (>= (+ first k) (length SONGS)))
+                      (reverse acc)
+                      (loop (+ k 1) (cons (list (+ first k) ROW-X (+ ROWS-Y (* k ROW-H)) ROW-W (- ROW-H 2)) acc)))))
+              (list (list ROW-DIFFICULTY ROW-X 222 ROW-W 20)
+                    (list ROW-OFFSET ROW-X 246 ROW-W 20)
+                    (list ROW-CALIBRATE ROW-X 268 ROW-W 18)
                     (list 'play 220 292 200 26)
                     (list 'back 8 8 72 20))))
     ;; The pause button, top left over the song's name (a thumb reaches it and
@@ -223,39 +256,47 @@
              (n (length DIFFICULTIES)))
         (list-ref DIFFICULTIES (modulo (+ i delta) n))))
 
-    ;; Up/down within the focus's group: songs 0..4 (the chosen song follows),
-    ;; or the settings rows 5..7; each group wraps on itself.
+    ;; Up/down within the focus's group: the songs (the chosen song follows),
+    ;; or the settings rows; each group wraps on itself.
     (define (step-focus t delta)
       (let ((i (itable-focus t)))
-        (if (< i 5)
-            (let ((j (modulo (+ i delta) 5)))
+        (if (song-row? i)
+            (let ((j (modulo (+ i delta) (length SONGS))))
               (itable t focus: j song: j))
-            (itable t focus: (+ 5 (modulo (+ (- i 5) delta) 3))))))
+            (itable t focus: (+ ROW-DIFFICULTY (modulo (+ (- i ROW-DIFFICULTY) delta) 3))))))
 
     ;; left/right on a song row step DIFFICULTY (no need to leave the list)
     (define (adjust t delta)
-      (case (if (< (itable-focus t) 5) 5 (itable-focus t))
-        ((5) (let ((d (step-difficulty (itable-difficulty t) delta)))
+      (case (if (song-row? (itable-focus t)) ROW-DIFFICULTY (itable-focus t))
+        ((100) (let ((d (step-difficulty (itable-difficulty t) delta)))
                (store! 'difficulty d)
                (itable t difficulty: d)))
-        ((6) (let ((o (max (- OFFSET-MAX) (min OFFSET-MAX (+ (itable-offset t) (* delta OFFSET-STEP))))))
+        ((101) (let ((o (max (- OFFSET-MAX) (min OFFSET-MAX (+ (itable-offset t) (* delta OFFSET-STEP))))))
                (store! 'offset o)
                (itable t offset: o)))
         (else t)))
 
+    ;; The list, then the preview of the song it leaves chosen (t-2844c8)
     (define (step-select t f)
+      (let ((t (step-select* t f)))
+        (when (eq? (itable-phase t) (quote select))
+          (let ((name (car (intercept-song t))))
+            (preview-want! name (live-music-text name) (intercept-frame-wall f))))
+        t))
+
+    (define (step-select* t f)
       (let loop ((keys (intercept-frame-keys f)) (t t))
         (if (null? keys)
             (let tap-loop ((taps (intercept-frame-taps f)) (t t))
               (if (null? taps)
                   t
                   (let* ((tap (car taps))
-                         (id (hit (intercept-select-rows) (car tap) (cadr tap))))
+                         (id (hit (intercept-select-rows t) (car tap) (cadr tap))))
                     (cond ((not id) (tap-loop (cdr taps) t))
                           ((eq? id 'play) (begin-song t (caddr tap)))
-                          ((eqv? id 7) (begin-calibrate t))
+                          ((eqv? id ROW-CALIBRATE) (begin-calibrate t))
                           ((eq? id 'back) (itable t requests: (list 'menu)))
-                          ((and (integer? id) (< id 5))
+                          ((song-row? id)
                            ;; a tap on the chosen song plays it; on another, chooses it
                            (if (= id (itable-song t))
                                (begin-song t (caddr tap))
@@ -272,10 +313,10 @@
                 ;; song down the list (it did: Black Glass became Glass Current)
                 ((up) (loop (cdr keys) (step-focus t -1)))
                 ((down) (loop (cdr keys) (step-focus t 1)))
-                ((tab) (loop (cdr keys) (itable t focus: (if (< (itable-focus t) 5) 5 (itable-song t)))))
+                ((tab) (loop (cdr keys) (itable t focus: (if (song-row? (itable-focus t)) ROW-DIFFICULTY (itable-song t)))))
                 ((left) (loop (cdr keys) (adjust t -1)))
                 ((right) (loop (cdr keys) (adjust t 1)))
-                ((return space) (if (= 7 (itable-focus t))
+                ((return space) (if (= ROW-CALIBRATE (itable-focus t))
                                     (begin-calibrate t)
                                     (begin-song t (intercept-frame-wall f))))
                 ((escape) (itable t requests: (list 'menu)))
@@ -283,6 +324,7 @@
 
     ;; --- a song -----------------------------------------------------------------------
     (define (begin-song t wall)
+      (preview-stop!)   ; the lead-in restarts the tune cleanly
       (store! 'song (car (intercept-song t)))
       (itable t phase: 'loading requests: '() over: #f run: #f chart: #f clock: #f flashes: '() calibrate: #f
                 loading-since: #f message: #f))
@@ -296,7 +338,7 @@
     (define (step-loading t f)
       (let ((wall (intercept-frame-wall f))
             (back? (or (memq 'escape (intercept-frame-keys f))
-                       (list-find (lambda (tap) (eq? 'back (hit (intercept-select-rows) (car tap) (cadr tap))))
+                       (list-find (lambda (tap) (eq? 'back (hit (intercept-select-rows t) (car tap) (cadr tap))))
                                   (intercept-frame-taps f)))))
         (cond (back? (itable t phase: 'select))
               ((not (itable-loading-since t)) (step-loading (itable t loading-since: wall) f))
@@ -413,7 +455,7 @@
                       (intercept-audio-stop!)
                       (store! 'offset o)
                       (*say* "intercept calibrate done" o "median" (exact (round m)) "kept" n "taps" (- (length taps) 1))
-                      (itable t phase: 'select calibrate: #f offset: o focus: 6
+                      (itable t phase: 'select calibrate: #f offset: o focus: ROW-OFFSET
                               message: (string-append "OFFSET SET TO " (if (> o 0) "+" "") (number->string o)
                                                       " MS FROM " (number->string n) " TAPS")))))
               ((> now CALIBRATE-MS)

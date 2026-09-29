@@ -143,10 +143,11 @@
                 scan-table-ticks scan-table-moves scan-table-daily scan-table-seconds scan-table-trace scan-table-over-ms)
           (only (crash scan draw) draw-scan scan-bar-hit)
           ;; INTERCEPT, the rhythm game: its screen and its draw
-          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame
+          (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame intercept-now intercept-sections intercept-phase
                 intercept-leave! intercept-set-say! intercept-autoplay!)
           (only (crash intercept draw) draw-intercept)
           (only (crash intercept audio) intercept-audio-set-latency!)
+          (only (crash intercept preview) preview-set-say!)
           (crash title card)
           (crash title logo)
           (crash hud)
@@ -1836,7 +1837,32 @@
       (set! *overlay* #f)
       (set! *intercept-presses* '())
       (set! *intercept-taps* '())
+      (field-for-deal! (+ 1 (quotient (exact (floor (now-ms))) 1000)))   ; a live field behind the wire (t-15acbf)
+      (set! *intercept-marks* 0)
       (set! *intercept* (intercept-open *touch* song)))
+
+    ;; The field behind INTERCEPT (t-15acbf): stepped at 60 a second on the
+    ;; wall's time; calm through the list and the lead-in; at each marked
+    ;; section of the song (calm / fill / tense) a burst, and the field turns
+    ;; restless on every other one. Off with BACKGROUND OFF.
+    (define *intercept-bg-last* #f)
+    (define *intercept-bg-acc* 0.0)
+    (define *intercept-marks* 0)
+    (define (intercept-bg) (if (eq? (setting (quote background)) (quote off)) #f (background)))
+    (define (intercept-bg-step! t wall)
+      (let* ((dt (if *intercept-bg-last* (max 0.0 (min 0.25 (/ (- wall *intercept-bg-last*) 1000.0))) 0.0))
+             (now (and (eq? (intercept-phase t) (quote play)) (intercept-now t)))
+             (marks (if now (length (filter (lambda (s) (and (cdr s) (<= (car s) now))) (intercept-sections t))) 0)))
+        (set! *intercept-bg-last* wall)
+        (when *bg*
+          (unless (= marks *intercept-marks*)
+            (set! *bg* (bg-with-phase *bg* (if (odd? marks) (quote counter) (quote trace))))
+            (when (> marks *intercept-marks*) (set! *bg* (bg-with-burst *bg*)))
+            (set! *intercept-marks* marks))
+          (set! *intercept-bg-acc* (+ *intercept-bg-acc* (* 60.0 dt)))
+          (let ((steps (exact (floor *intercept-bg-acc*))))
+            (set! *intercept-bg-acc* (- *intercept-bg-acc* steps))
+            (when (> steps 0) (set! *bg* (bg-tick *bg* (min steps 4))))))))
 
     (define (intercept-tick f)
       (let* ((wall (now-ms))
@@ -1853,7 +1879,8 @@
                    (open-menu!))
             (begin
               (set! *intercept* t)
-              (present! #f (lambda () (draw-intercept t VW VH (background) *copper* wall)))))))
+              (intercept-bg-step! t wall)
+              (present! #f (lambda () (draw-intercept t VW VH (intercept-bg) *copper* wall)))))))
 
     (define (scan-pointer! payload)
       (let ((parts (string-split payload ",")))
@@ -2395,6 +2422,7 @@
       (set! *theme-asked-at* *since-boot*)
       (live-music-set-say! (lambda parts (apply say "music" (cdr parts))))
       (intercept-set-say! (lambda parts (apply say parts)))
+      (preview-set-say! (lambda parts (apply say parts)))   ; the song list's preview (t-2844c8)
       ;; the music's render rate (M1): the ladder's last choice on this device
       ;; from the store, kept for the next boot when the ladder steps
       (let ((r (store-get "music-rate")))

@@ -70,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "select", "open", "hash", "input", "exit", "clock", "render", ...(FULL ? ["full"] : []), "console"];
+const planned = ["menu", "select", "preview", "open", "hash", "input", "preview-stop", "exit", "clock", "render", ...(FULL ? ["full"] : []), "field", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -387,6 +387,40 @@ function linesFrom(re, from) {
 }
 await waitForWorker();
 
+
+// ---- preview (t-2844c8): the highlighted song plays; a fast scroll opens only where it stops ----
+const PREVIEW_RE = /^crash: intercept preview (\S+) at (\d+)$/;
+async function starvedCount() {
+  const s = await evalJS("window.crashPageStats ? window.crashPageStats() : ''");
+  const l = (s.split("\n").find((x) => x.startsWith("page starved-at ")) || "").slice("page starved-at ".length);
+  return l === "(none)" || l === "" ? 0 : l.split(", ").length;
+}
+let previewMark = consoleLines.length;
+{
+  let detail = "";
+  const first = await waitLine(PREVIEW_RE, previewMark, 10000);
+  if (!first) detail = "no \"crash: intercept preview\" on the song list within 10 s";
+  else if (first.m[1] !== "black-glass" || +first.m[2] <= 0) detail = `${first.m[0]}: expected black-glass from its tense section (a position past 0)`;
+  else {
+    await sleep(600);
+    const s0 = await starvedCount();
+    const m1 = consoleLines.length;
+    for (let i = 0; i < 4; i++) await key("ArrowDown");   // 190 ms apart: under the 250 ms debounce
+    const landed = await waitLine(PREVIEW_RE, m1, 5000);
+    await sleep(1500);
+    const s1 = await starvedCount();
+    const opened = linesFrom(PREVIEW_RE, m1).map((m) => m[1]);
+    if (!landed) detail = "no preview after scrolling four songs down";
+    else if (opened.join(" ") !== "glass-current") detail = `the scroll opened ${opened.join(" ")}: only glass-current (where it stopped) should open`;
+    else if (s1 - s0 !== 0) detail = `the audio sink starved ${s1 - s0} times while scrolling`;
+    else pass("preview", `${first.m[0]}; four downs opened only ${landed.m[0]}; sink starvations over the scroll 0`);
+    for (let i = 0; i < 4; i++) await key("ArrowUp");   // back to Black Glass for the legs that follow
+    await waitLine(/^crash: intercept preview black-glass at /, m1 + 1, 5000);
+  }
+  if (detail) fail("preview", detail);
+  previewMark = consoleLines.length;
+}
+
 // ---- open, hash, input (the menu's path, no autoplay) --------------------------------
 {
   const m0 = consoleLines.length;
@@ -436,6 +470,16 @@ await waitForWorker();
     else if (!together) fail("input", `the two-finger touch's presses were ${two.map((m) => m[2]).join(" / ")} ms apart on the song clock (more than 25)`);
     else pass("input", `two-finger touch -> lanes 0 and 3 at ${two.map((m) => m[2]).join(" / ")} ms, then taps -> lanes 1, 2`);
   }
+}
+
+{
+  // preview-stop: Enter stopped the preview before the song opened
+  const stop = linesFrom(/^crash: intercept preview stop$/, previewMark);
+  const openAt = consoleLines.findIndex((l, i) => i >= previewMark && OPEN_RE.test(l));
+  const stopAt = consoleLines.findIndex((l, i) => i >= previewMark && /^crash: intercept preview stop$/.test(l));
+  if (!stop.length) fail("preview-stop", "no \"crash: intercept preview stop\" when the song was entered");
+  else if (openAt >= 0 && stopAt > openAt) fail("preview-stop", "the preview stopped after the song opened");
+  else pass("preview-stop", "the preview stopped before the song opened");
 }
 
 // ---- exit: out of a song and out of INTERCEPT without a keyboard ----------------------
@@ -513,6 +557,38 @@ let doorMark = 0;
     if (!e) fail("full", "no end line within 220 s of the start");
     else if (e.m[1] !== "held" || +e.m[8] !== 0) fail("full", e.m[0]);
     else pass("full", `${e.m[0]} (SYNC CLEAN LOSSY DROP: the web's frame jitter under autoplay)`);
+  }
+}
+
+
+// ---- field (t-15acbf): the living field's frame cost, and that the drawn clock (which the
+// presses are judged on) does not drift with it: on against ?bg=off, the same song on autoplay ----
+{
+  const run = async (q) => {
+    const m0 = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh&intercept=${SONG}&autoplay${q}` });
+    const s = await waitLine(START_RE, m0, 60000);
+    if (!s) return null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 12000 && linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000).length < 6) await sleep(250);
+    const gaps = await evalJS(`new Promise((res) => { const g = []; let last = null; const t0 = performance.now();
+      const f = (t) => { if (last !== null) g.push(t - last); last = t; if (t - t0 < 4000) requestAnimationFrame(f); else res(g); };
+      requestAnimationFrame(f); })`);
+    const errs = linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000 && m[2] !== "-").map((m) => Math.abs(+m[2]));
+    const pct = (xs, p) => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : NaN; };
+    return { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), err: pct(errs, 0.5), n: errs.length };
+  };
+  const on = await run("");
+  const off = await run("&bg=off");
+  if (!on || !off) fail("field", "the door's song did not start");
+  else {
+    const r = (x) => Math.round(x * 10) / 10;
+    const txt = `on p50 ${r(on.p50)} p95 ${r(on.p95)} ms, clock error median ${on.err} ms; off p50 ${r(off.p50)} p95 ${r(off.p95)} ms, error ${off.err} ms`;
+    console.log(`MEASURE field ${PHONE ? "phone" : "desktop"}: ${txt}`);
+    if (off.p50 > 16.7) fail("field", `INCONCLUSIVE: over 16.7 ms with the field off: ${txt}`);
+    else if (on.p50 > 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
+    else if (on.err > off.err + 10) fail("field", `the drawn clock strays with the field on: ${txt}`);
+    else pass("field", txt);
   }
 }
 
