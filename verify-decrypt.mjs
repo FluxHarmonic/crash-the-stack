@@ -1,49 +1,38 @@
-// verify-intercept.mjs - INTERCEPT's browser arm (the rhythm game, CLASSIC).
+// verify-decrypt.mjs - DECRYPT's browser arm (the match-3 table, the 2026-09-29 draft).
 //
-//   node verify-intercept.mjs [build/web] [--port N] [--cdp N] [--phone] [--song NAME]
-//                             [--full] [--shot PATH]
+//   node verify-decrypt.mjs [build/web] [--port N] [--cdp N] [--phone] [--throttle N] [--shot PATH]
 //
-// SCAN's harness (loopback server, headless Chrome on SwiftShader, the
-// DevTools Protocol, --mute-audio and the worker-null sink), with Chrome
-// told to let audio start without a gesture (--autoplay-policy), so the
-// ?intercept door's song plays in a page nobody has touched. Every lane
-// press is a REAL input event from the DevTools Protocol
-// (Input.dispatchKeyEvent, Input.dispatchTouchEvent), so it reaches the
-// page's listeners the way a player's does. --phone is a landscape phone
-// (844x390, touch, coarse pointer): INTERCEPT on touch is four wide pads.
-// Sub-arms:
+// INTERCEPT's harness (loopback server, headless Chrome on SwiftShader, the
+// DevTools Protocol, --mute-audio and the worker-null sink, audio allowed
+// without a gesture). Every swap is made by REAL input events from the
+// DevTools Protocol (Input.dispatchMouseEvent / dispatchTouchEvent /
+// dispatchKeyEvent), found from the page's own board line
+// ("crash: decrypt board TEXT cursor N") with a move finder of the arm's own.
+// --phone is a landscape phone (844x390, touch, coarse pointer). Sub-arms:
 //
-//   menu    a fresh origin's FREE PLAY lists INTERCEPT after SCAN:
-//           stack cards scan intercept decrypt code scores back
-//   select  Enter on INTERCEPT opens the song select on Black Glass, RUNNER,
-//           keys (desktop) or touch (phone): "crash: intercept select"
-//   open    Enter plays it: "crash: intercept open ..." and "start ... audio on"
-//   hash    the chart's note count and hash equal the native pins
-//           (test/test-intercept.sgl's PINNED): the same song makes the same
-//           chart on both targets. Desktop plays RUNNER, the phone ELITE, so a
-//           build's two runs cover two of the three tiers
-//   input   in the lead-in: desktop, real key events D F J K reach lanes 0..3
-//           ("crash: intercept press LANE MS" before the song's 0); phone, a
-//           real TWO-FINGER touch reaches lanes 0 and 3 in one frame, then
-//           single taps lanes 1 and 2
-//   exit    out of the song and INTERCEPT by touch alone on the phone (the
-//           pause button, SONGS, MENU), by Escape and clicks on the desktop
-//   clock   ?intercept=SONG&autoplay: over 8 s of song, every clock line has
-//           an audio reading and a drawn clock following it (error not "-")
-//           within 50 ms, and the audio advances 1000 +- 100 ms a line
-//   render  lane 0's C-COLD rule is drawn under its keycap (desktop) or along
-//           its pad (phone), and a control strip beside it is not that blue
-//   full    (--full) the song plays to its end on autoplay: "intercept end
-//           held" with no DROP; the judgment counts are the web's frame jitter
-//   console zero error-level console entries and zero exceptions
+//   menu     a fresh origin's FREE PLAY lists DECRYPT after INTERCEPT; Enter
+//            opens its screen (NEW BOARD, DAILY BOARD, BACK); NEW BOARD opens
+//            ENDLESS ("crash: decrypt open endless SEED")
+//   swipe    desktop: a real mouse DRAG from a glyph toward its neighbor;
+//            phone: a real touch swipe. A move lands ("crash: decrypt move 1")
+//   tap      tap then tap (phone: two touches; desktop: click, click)
+//   keys     desktop only: arrow keys walk the cursor, Space then an arrow swaps
+//   beat     every collision cue ("crash: decrypt cue NAME delay FRAMES") was
+//            held to the tune (a delay >= 0, not -1) once the music plays
+//   audio    at --throttle (4x) CPU, three moves (their cascades, cues and
+//            falls) starve the cues' sink of no frame: the move lines'
+//            "underruns" do not grow (SCAN's leg 13 for this table)
+//   field    frame time with the living background on against ?bg=off, on
+//            an idle board: p50 and p95 of 4 s of rAF gaps; FAIL if the field
+//            takes the p50 past 16.7 ms when off stays under it
+//   daily    ?decrypt=daily: 40 moves by taps, then "crash: decrypt over N"
+//            and the end panel; JACK OUT by the panel's row reaches the menu
+//   console  zero error-level console entries and zero exceptions
 //
-// Every sub-arm anchors on a "crash: intercept ..." line, which only
-// INTERCEPT prints. A wait that runs out prints TIMED-OUT with everything
-// collected and exits 2; SETUP-FAILED (exit 2) when the build is not there.
-//
-// Not covered here: a real press TIMED against a note (autoplay presses on
-// the song clock itself, so it cannot see a wrong clock-at or OFFSET);
-// test-intercept's table test holds OFFSET's judging, and David's play the rest.
+// --shot PATH writes the play screenshot there, and the end panel and FREE
+// PLAY beside it (PATH with -panel / -menu before .png).
+// A wait that runs out prints TIMED-OUT with everything collected and
+// exits 2; SETUP-FAILED (exit 2) when the build is not there.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -54,14 +43,14 @@ import { spawn } from "node:child_process";
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--shot", "--port", "--cdp", "--song"];
+const VALUED = ["--shot", "--port", "--cdp", "--throttle"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
 const ROOT = path.resolve(positional[0] || "build/web");
 const SHOT = opt("--shot", null);
 const PORT = parseInt(opt("--port", "8099"), 10);
 const CDP = parseInt(opt("--cdp", "9239"), 10);
-const SONG = opt("--song", "black-glass");
-const FULL = flag("--full");   // play the song to its end on ?autoplay (about three minutes)
+const THROTTLE = parseFloat(opt("--throttle", "4"));   // the audio leg's CPU throttle (a phone proxy)
+const FULL = false;
 const PHONE = flag("--phone");
 
 const VW = 640, VH = 400;
@@ -70,7 +59,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "select", "open", "hash", "input", "exit", "clock", "render", ...(FULL ? ["full"] : []), "console"];
+const planned = PHONE ? ["menu", "swipe", "tap", "beat", "audio", "field", "daily", "console"] : ["menu", "swipe", "tap", "keys", "beat", "audio", "field", "daily", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -124,7 +113,7 @@ function leakedVerifyChromes() {
   if (running.length) console.log(`note: another arm's chrome is running beside this one: ${running.map((c) => `pid ${c.pid} (${c.dir})`).join(", ")}`);
 }
 
-const udd = fs.mkdtempSync("/tmp/crash-verify-intercept-chrome-");
+const udd = fs.mkdtempSync("/tmp/crash-verify-decrypt-chrome-");
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
@@ -167,7 +156,7 @@ process.on("SIGTERM", () => shutdown(143));
 process.on("SIGHUP", () => shutdown(129));
 process.on("unhandledRejection", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
 process.on("uncaughtException", (err) => { console.log("EXCEPTION: " + (err && err.stack || err)); dump(); shutdown(2); });
-const WHOLE_RUN_MS = FULL ? 480000 : 240000;   // the full leg plays a whole song (about 175 s with its lead-in)
+const WHOLE_RUN_MS = 420000;
 setTimeout(() => { console.log(`TIMED-OUT whole run after ${WHOLE_RUN_MS} ms; did not run: ${notRun().join(" ")}`); dump(); shutdown(2); }, WHOLE_RUN_MS).unref();
 
 let pageWs = null;
@@ -331,196 +320,280 @@ function decodePng(buf) {
   return { w, h, bpp, px };
 }
 
-// ---- INTERCEPT's helpers -------------------------------------------------------
-// test/test-intercept.sgl's PINNED rows for Black Glass (notes hash), keyed tier/device
-const PINNED = {
-  "black-glass": { "script-kid": [219, 2172806], "runner": [483, 3062157], "elite": [852, 7809115] },   // one chart per tier since the four-lane ruling
-};
-const DEVICE = PHONE ? "touch" : "keys";
-const OPEN_RE = /^crash: intercept open (\S+) (\S+) (keys|touch) notes (\d+) hash (\d+) lanes (\d+)$/;
-const START_RE = /^crash: intercept start (\S+) lead (\d+) audio (on|off)$/;
-const PRESS_RE = /^crash: intercept press (\d+) (-?\d+)$/;
-const CLOCK_RE = /^crash: intercept clock (-?\d+) error (\S+) audio (\S+) wall (\S+)$/;
-const END_RE = /^crash: intercept end (held|severed) score (\d+) acc (\S+) max-combo (\d+) counts (\d+) (\d+) (\d+) (\d+)$/;
-// A real key: keyDown then keyUp from the DevTools Protocol (trusted events).
-const KEYDEF = { s: ["KeyS", 83], d: ["KeyD", 68], f: ["KeyF", 70], j: ["KeyJ", 74], k: ["KeyK", 75], l: ["KeyL", 76],
-                 a: ["KeyA", 65], ";": ["Semicolon", 186], Enter: ["Enter", 13] };
-async function realKey(k) {
-  const [code, vk] = KEYDEF[k];
-  await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: vk, text: k.length === 1 ? k : undefined });
-  await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: vk });
-}
-// The centre of a touch pad (lane of 4, 160 virtual px wide) in client px.
-const padCenter = (lane) => client(lane * 160 + 80, 330);
-function linesFrom(re, from) {
-  const out = [];
-  for (let i = from; i < consoleLines.length; i++) { const m = consoleLines[i].match(re); if (m) out.push(m); }
-  return out;
-}
 
-// ---- menu, select ------------------------------------------------------------------
+// ---- DECRYPT's helpers -------------------------------------------------------------
+const OPEN_RE = /^crash: decrypt open (endless|daily) (\d+)$/;
+const BOARD_RE = /^crash: decrypt board (\S{64}) cursor (\d+)$/;
+const MOVE_RE = /^crash: decrypt move (\d+) score (\d+) level (\d+) underruns (\d+) source (\d+)$/;
+const CUE_RE = /^crash: decrypt cue (\S+) delay (-?\d+)$/;
+const OVER_RE = /^crash: decrypt over (\d+)$/;
+// A real key from the DevTools Protocol (a trusted event: it also counts as the gesture that resumes audio)
+const KEYS = { ArrowUp: ["ArrowUp", 38], ArrowDown: ["ArrowDown", 40], ArrowLeft: ["ArrowLeft", 37], ArrowRight: ["ArrowRight", 39],
+               Enter: ["Enter", 13], " ": ["Space", 32], Escape: ["Escape", 27], h: ["KeyH", 72], j: ["KeyJ", 74], k: ["KeyK", 75], l: ["KeyL", 76] };
+async function realKey(k) {
+  const [code, vk] = KEYS[k];
+  await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code, windowsVirtualKeyCode: vk, text: k.length === 1 ? k : undefined });
+  await sleep(30);
+  await send("Input.dispatchKeyEvent", { type: "keyUp", key: k, code, windowsVirtualKeyCode: vk });
+  await sleep(120);
+}
+// the arm's own move finder over the board line's letters (test-decrypt's)
+function kindOf(c) {
+  if (c >= "0" && c <= "5") return +c;
+  if (c >= "a" && c <= "f") return c.charCodeAt(0) - 97;
+  if (c >= "A" && c <= "F") return c.charCodeAt(0) - 65;
+  return null;
+}
+function runThrough(cells, i) {
+  const k = kindOf(cells[i]); if (k === null) return false;
+  const x = i % 8, y = Math.floor(i / 8);
+  const same = (xx, yy) => xx >= 0 && xx < 8 && yy >= 0 && yy < 8 && kindOf(cells[yy * 8 + xx]) === k;
+  const count = (dx, dy) => { let n = 0, xx = x + dx, yy = y + dy; while (same(xx, yy)) { n++; xx += dx; yy += dy; } return n; };
+  return 1 + count(-1, 0) + count(1, 0) >= 3 || 1 + count(0, -1) + count(0, 1) >= 3;
+}
+function swapOk(cells, i, j) {
+  if (cells[i] === "*" || cells[j] === "*") return true;
+  const c = cells.split(""); [c[i], c[j]] = [c[j], c[i]];
+  return runThrough(c, i) || runThrough(c, j);
+}
+function findMove(cells) {
+  for (let i = 0; i < 64; i++) {
+    if (i % 8 < 7 && swapOk(cells, i, i + 1)) return [i, i + 1];
+    if (i < 56 && swapOk(cells, i, i + 8)) return [i, i + 8];
+  }
+  return null;
+}
+const cellX = (i) => 144 + 44 * (i % 8) + 22;
+const cellY = (i) => 36 + 44 * Math.floor(i / 8) + 22;
+function lastBoard() {
+  for (let i = consoleLines.length - 1; i >= 0; i--) { const m = consoleLines[i].match(BOARD_RE); if (m) return { cells: m[1], cursor: +m[2], index: i }; }
+  return null;
+}
+let moves = 0;   // moves made on the board open now
+// wait for the next move line and the board after it; null on a timeout
+async function moveLanded(from, ms = 15000) {
+  const mv = await waitLine(new RegExp(`^crash: decrypt move ${moves + 1} `), from, ms);
+  if (!mv) return null;
+  moves++;
+  const b = await waitLine(BOARD_RE, mv.index, 3000);
+  return { move: mv.m[0], index: mv.index, board: b && b.m[1] };
+}
+async function tapCell(i) { if (PHONE) await touch(cellX(i), cellY(i)); else await click(cellX(i), cellY(i)); await sleep(60); }
+async function tapTap(i, j) { await tapCell(i); await tapCell(j); }
+async function swipe(i, j) {
+  const dx = (j % 8) - (i % 8), dy = Math.floor(j / 8) - Math.floor(i / 8);
+  const a = await client(cellX(i), cellY(i));
+  const steps = [8, 16, 26].map((d) => client(cellX(i) + dx * d, cellY(i) + dy * d));
+  if (PHONE) {
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.cx, y: a.cy, id: 1 }] });
+    for (const p of steps) { const q = await p; await sleep(30); await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: q.cx, y: q.cy, id: 1 }] }); }
+    await sleep(40);
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  } else {
+    await mouseAt("mouseMoved", a.cx, a.cy, "none", 0);
+    await mouseAt("mousePressed", a.cx, a.cy, "left", 1);
+    for (const p of steps) { const q = await p; await sleep(30); await mouseAt("mouseMoved", q.cx, q.cy, "left", 1); }
+    await sleep(40);
+    const q = await steps[2];
+    await mouseAt("mouseReleased", q.cx, q.cy, "left", 0);
+  }
+}
+async function shot(suffix) {
+  if (!SHOT) return;
+  const r = await send("Page.captureScreenshot", { format: "png" });
+  const p = suffix ? SHOT.replace(/\.png$/, "") + "-" + suffix + ".png" : SHOT;
+  fs.mkdirSync(path.dirname(path.resolve(p)), { recursive: true });
+  fs.writeFileSync(p, Buffer.from(r.data, "base64"));
+  console.log(`note: shot ${p}`);
+}
+async function frameGaps(ms) {
+  return evalJS(`new Promise((res) => { const gaps = []; let last = null; const t0 = performance.now();
+    const f = (t) => { if (last !== null) gaps.push(t - last); last = t; if (t - t0 < ${ms}) requestAnimationFrame(f); else res(gaps); };
+    requestAnimationFrame(f); })`);
+}
+const pct = (xs, p) => { const s = [...xs].sort((a, b) => a - b); return s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : NaN; };
+const r1 = (x) => Math.round(x * 10) / 10;
+
+// ---- menu: FREE PLAY's DECRYPT row, its screen, NEW BOARD --------------------------------
 {
   const mark = consoleLines.length;
   await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh` });
   const menu = await waitLine(/^crash: menu top (.+)$/, mark, 30000);
   if (!menu) { fail("menu", "no top menu line within 30 s"); timedOut("menu"); await new Promise(() => {}); }
   await sleep(800);
-  if (await waitLine(/^crash: title gate /, mark, 20000)) { await key("ArrowUp"); await waitLine(/^crash: title connect$/, mark, 3000); }
-  if (await waitLine(/^crash: title card tick /, mark, 20000)) { await key("ArrowUp"); await waitLine(/^crash: title card done /, mark, 3000); }
-  await key("ArrowUp");
+  if (await waitLine(/^crash: title gate /, mark, 20000)) { await realKey("ArrowUp"); await waitLine(/^crash: title connect$/, mark, 3000); }
+  if (await waitLine(/^crash: title card tick /, mark, 20000)) { await realKey("ArrowUp"); await waitLine(/^crash: title card done /, mark, 3000); }
+  await realKey("ArrowUp");
   const booted = await waitLine(/^crash: boot done /, mark, 30000);
   const settled = await waitLine(/^crash: title settled /, mark, 5000);
   let m0 = consoleLines.length;
-  await key("ArrowDown"); await key("Enter");   // JACK IN is first; FREE PLAY second (no CONTINUE on a fresh origin)
+  await realKey("ArrowDown"); await realKey("Enter");
   const free = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
   const rows = free ? free.m[1].split(" ").filter((_, i) => i % 3 === 0).map((id) => id.split("=")[0]) : [];
-  if (!booted || !settled) fail("menu", "the menu never went live (no boot done / title settled)");
-  else if (!free) fail("menu", "ArrowDown, Enter did not open FREE PLAY");
-  else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") fail("menu", `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt code scores back`);
-  else pass("menu", `FREE PLAY ${rows.join(" ")}`);
-  m0 = consoleLines.length;
-  await key("ArrowDown"); await key("ArrowDown"); await key("ArrowDown"); await key("Enter");
-  const sel = await waitLine(/^crash: intercept select (\S+) (\S+) (keys|touch)$/, m0, 5000);
-  if (!sel) fail("select", "Enter on INTERCEPT opened no song select (no \"crash: intercept select\" line)");
-  else if (sel.m[1] !== "black-glass" || sel.m[2] !== "runner" || sel.m[3] !== DEVICE) fail("select", `${sel.m[0]}: expected black-glass runner ${DEVICE} on a fresh origin`);
-  else pass("select", sel.m[0]);
-}
-await waitForWorker();
-
-// ---- open, hash, input (the menu's path, no autoplay) --------------------------------
-{
-  const m0 = consoleLines.length;
-  // the phone plays ELITE (right on a song row steps DIFFICULTY: RUNNER to ELITE),
-  // so the two runs of the arm cover two tiers' charts against the native pins
-  if (PHONE) await key("ArrowRight");
-  await key("Enter");
-  const o = await waitLine(OPEN_RE, m0, 30000);
-  const s = await waitLine(START_RE, m0, 5000);
-  if (!o || !s) { fail("open", `no ${o ? "start" : "open"} line within 30 s of Enter`); timedOut("open"); await new Promise(() => {}); }
-  if (o.m[1] !== "black-glass" || o.m[3] !== DEVICE || s.m[3] !== "on") fail("open", `${o.m[0]} / ${s.m[0]}`);
-  else pass("open", `${o.m[0]}; ${s.m[0]}`);
-  const want = PINNED["black-glass"][o.m[2]];
-  if (!want) fail("hash", `no pinned value for ${o.m[2]}/${o.m[3]}`);
-  else if (+o.m[4] !== want[0] || +o.m[5] !== want[1]) fail("hash", `web: notes ${o.m[4]} hash ${o.m[5]}; native pinned: notes ${want[0]} hash ${want[1]}`);
-  else pass("hash", `notes ${o.m[4]} hash ${o.m[5]} = the native pin (${o.m[2]}/${o.m[3]})`);
-
-  const pm = consoleLines.length;
-  if (!PHONE) {
-    for (const k of ["d", "f", "j", "k"]) { await realKey(k); await sleep(30); }
-    await sleep(600);
-    const ps = linesFrom(PRESS_RE, pm);
-    const lanes = ps.map((m) => +m[1]);
-    const early = ps.every((m) => +m[2] < 0);
-    if (lanes.join(" ") !== "0 1 2 3") fail("input", `real keys D F J K reached lanes [${lanes.join(" ")}], not [0 1 2 3]`);
-    else if (!early) fail("input", `the presses were not in the lead-in: ${ps.map((m) => m[0]).join("; ")}`);
-    else pass("input", `real keys D F J K -> lanes 0..3 at song ms ${ps.map((m) => m[2]).join(" ")}`);
-  } else {
-    const a = await padCenter(0), b = await padCenter(3);
-    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.cx, y: a.cy, id: 1 }, { x: b.cx, y: b.cy, id: 2 }] });
-    await sleep(60);
-    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-    await sleep(150);
-    for (const lane of [1, 2]) {
-      const c = await padCenter(lane);
-      await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: c.cx, y: c.cy, id: 1 }] });
-      await sleep(50);
-      await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
-      await sleep(120);
+  let detail = "";
+  if (!booted || !settled) detail = "the menu never went live (no boot done / title settled)";
+  else if (!free) detail = "ArrowDown, Enter did not open FREE PLAY";
+  else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}`;
+  if (!detail) {
+    for (let i = 0; i < 4; i++) await realKey("ArrowDown");
+    await sleep(300); await shot("menu");
+    m0 = consoleLines.length;
+    await realKey("Enter");
+    const scr = await waitLine(/^crash: menu free-decrypt (.+)$/, m0, 3000);
+    const srows = scr ? scr.m[1].split(" ").filter((_, i) => i % 3 === 0).map((id) => id.split("=")[0]) : [];
+    if (!scr) detail = "Enter on DECRYPT did not open its screen";
+    else if (srows.join(" ") !== "new-board daily-board back") detail = `DECRYPT's rows are ${srows.join(" ")}`;
+    else {
+      m0 = consoleLines.length;
+      await realKey("Enter");
+      const open = await waitLine(OPEN_RE, m0, 10000);
+      const b = open && await waitLine(BOARD_RE, open.index, 3000);
+      if (!open || open.m[1] !== "endless") detail = "NEW BOARD did not open ENDLESS";
+      else if (!b) detail = "no board line after the open";
+      else pass("menu", `FREE PLAY ${rows.join(" ")}; DECRYPT ${srows.join(" ")}; ${open.m[0]}`);
     }
-    await sleep(600);
-    const ps = linesFrom(PRESS_RE, pm);
-    const lanes = ps.map((m) => +m[1]);
-    const two = ps.slice(0, 2);
-    const together = two.length === 2 && Math.abs(+two[0][2] - +two[1][2]) <= 25;
-    if (lanes.slice(0, 2).sort().join(" ") !== "0 3" || lanes.slice(2).join(" ") !== "1 2") fail("input", `real touches reached lanes [${lanes.join(" ")}], not [0 3] then [1 2]`);
-    else if (!together) fail("input", `the two-finger touch's presses were ${two.map((m) => m[2]).join(" / ")} ms apart on the song clock (more than 25)`);
-    else pass("input", `two-finger touch -> lanes 0 and 3 at ${two.map((m) => m[2]).join(" / ")} ms, then taps -> lanes 1, 2`);
   }
+  if (detail) { fail("menu", detail); timedOut("menu"); await new Promise(() => {}); }
 }
 
-// ---- exit: out of a song and out of INTERCEPT without a keyboard ----------------------
-// David on the phone: "no way to get out of INTERCEPT". The song from the input
-// leg is still playing. Phone: a real touch on the pause button (top left), a
-// real touch on SONGS, a real touch on the song screen's MENU. Desktop: Escape,
-// then clicks on SONGS and MENU. Each step anchors on a line only it prints.
-{
-  const m0 = consoleLines.length;
-  const at = (vx, vy) => (PHONE ? touch(vx, vy, 60) : click(vx, vy));
-  if (PHONE) await at(20, 12); else await key("Escape");
-  const paused = await waitLine(/^crash: intercept pause (-?\d+)$/, m0, 3000);
-  const m1 = consoleLines.length;
-  if (paused) await at(320, 245);   // SONGS on the pause panel
-  const songs = paused && await waitLine(/^crash: intercept songs$/, m1, 3000);
-  const m2 = consoleLines.length;
-  if (songs) await at(44, 18);      // MENU on the song screen
-  const menu = songs && await waitLine(/^crash: menu (top|free) /, m2, 3000);
-  if (!paused) fail("exit", `${PHONE ? "a touch on the pause button" : "Escape"} did not pause the song`);
-  else if (!songs) fail("exit", "SONGS on the pause panel did not leave the song");
-  else if (!menu) fail("exit", "MENU on the song screen did not reach the game's menu");
-  else pass("exit", `${PHONE ? "touch" : "keys and clicks"}: paused at ${paused.m[1]} ms, SONGS, then MENU -> ${menu.m[0].slice(0, 40)}`);
+// ---- swipe, tap, keys: each control makes a move on the live board ------------------------
+async function controlLeg(name, doIt) {
+  const b = lastBoard();
+  const mv = b && findMove(b.cells);
+  if (!mv) { fail(name, "no legal move on the board line (the arm's finder)"); return; }
+  const from = consoleLines.length;
+  await doIt(mv[0], mv[1], b);
+  const landed = await moveLanded(from);
+  if (!landed) fail(name, `no "crash: decrypt move ${moves + 1}" within 15 s after the ${name} on ${mv[0]}<->${mv[1]}`);
+  else pass(name, `${mv[0]}<->${mv[1]}: ${landed.move}`);
 }
-
-// ---- clock, render, full (the door, on autoplay) -------------------------------------
-let doorMark = 0;
-{
-  doorMark = consoleLines.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh&intercept=${SONG}&autoplay` });
-  const s = await waitLine(START_RE, doorMark, 60000);
-  if (!s) { fail("clock", "the door's song never started (no start line within 60 s)"); timedOut("clock"); await new Promise(() => {}); }
-  const t0 = Date.now();
-  while (Date.now() - t0 < 25000 && linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000).length < 9) await sleep(250);
-  const cl = linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000).slice(0, 9);
-  const bad = [];
-  if (cl.length < 9) bad.push(`only ${cl.length} clock lines in 25 s`);
-  cl.forEach((m, i) => {
-    if (m[3] === "-") bad.push(`no audio reading at ${m[1]}`);
-    else if (m[2] === "-") bad.push(`the drawn clock is not following the audio at ${m[1]} (error "-")`);
-    else if (Math.abs(+m[2]) > 50) bad.push(`drawn clock ${m[2]} ms off the audio at ${m[1]}`);
-    if (i > 0 && m[3] !== "-" && cl[i - 1][3] !== "-") { const d = +m[3] - +cl[i - 1][3]; if (d < 900 || d > 1100) bad.push(`audio advanced ${d.toFixed(0)} ms between lines`); }
+await sleep(500);
+await controlLeg("swipe", (i, j) => swipe(i, j));
+await sleep(300);
+await controlLeg("tap", (i, j) => tapTap(i, j));
+if (!PHONE) {
+  await sleep(300);
+  await controlLeg("keys", async (i, j, b) => {
+    // walk the cursor from where the board line says it is to i: h / l across, arrows down / up
+    let c = b.cursor;
+    while (c % 8 !== i % 8) { await realKey(c % 8 < i % 8 ? "l" : "h"); c += c % 8 < i % 8 ? 1 : -1; }
+    while (Math.floor(c / 8) !== Math.floor(i / 8)) { await realKey(c < i ? "ArrowDown" : "ArrowUp"); c += c < i ? 8 : -8; }
+    await realKey(" ");
+    await realKey(j === i + 1 ? "ArrowRight" : j === i - 1 ? "ArrowLeft" : j === i + 8 ? "j" : "k");
   });
-  if (bad.length) fail("clock", bad.join("; "));
-  else pass("clock", `8 s of song: errors ${cl.map((m) => m[2]).join(" ")} ms; audio ${cl[0][3]} .. ${cl[cl.length - 1][3]}`);
+}
 
-  // render: the lane-coloured rule of lane 0 (C-COLD #1A73D9, the left hand's
-  // colour): under the keycap on a keyboard, along the pad's top on a phone.
-  // No layer behind the lanes uses that blue (the review: C-BAR-C, which the
-  // first version read, is also a tone of the living background, so a strip
-  // with no keycaps could pass). The control: a strip of the same size in
-  // the pad or under the keycaps, where the rule is not, must not read blue.
-  const HIT_Y = PHONE ? 262 : 312;
-  const x0 = PHONE ? 0 : (640 - (4 * 48 + 16)) / 2;
-  const blueShare = async (vx, vy, vw, vh) => {
-    const a = await client(vx, vy), b = await client(vx + vw, vy + vh);
-    const shot = await send("Page.captureScreenshot", { format: "png", clip: { x: a.cx, y: a.cy, width: b.cx - a.cx, height: b.cy - a.cy, scale: 1 } });
-    const buf = Buffer.from(shot.data, "base64");
-    if (SHOT) fs.writeFileSync(SHOT, buf);
-    const img = decodePng(buf);
-    let hit = 0;
-    for (let i = 0; i < img.w * img.h; i++) {
-      const r = img.px[i * img.bpp], g = img.px[i * img.bpp + 1], bl = img.px[i * img.bpp + 2];
-      if (bl > 120 && bl > r + 80 && g > r + 20 && bl > g) hit++;   // C-COLD, allowing the scanline pass; not C-WIRE-LIT (a lit pad), whose green beats its blue
+// ---- audio: three moves at a throttled CPU starve the cues' sink of nothing ---------------
+{
+  let detail = "";
+  const music = await waitLine(/^crash: music (open|playing) /, 0, 20000);
+  const resumed = await waitLine(/^crash: audio resumed$/, 0, 1000);
+  const before = [...consoleLines].reverse().map((l) => l.match(MOVE_RE)).find((m) => m);
+  if (!music) detail = "no \"crash: music open\": the music is not playing, so neither the beat nor an underrun could be seen";
+  else if (!before) detail = "no move line to count underruns from";
+  else {
+    await send("Emulation.setCPUThrottlingRate", { rate: THROTTLE });
+    let after = null, why = "";
+    for (let k = 0; k < 3 && !why; k++) {
+      const b = lastBoard(); const mv = b && findMove(b.cells);
+      if (!mv) { why = "no legal move"; break; }
+      const from = consoleLines.length;
+      await tapTap(mv[0], mv[1]);
+      const landed = await moveLanded(from, 30000);
+      if (!landed) why = `move ${moves + 1} did not land within 30 s at ${THROTTLE}x`;
+      else after = consoleLines[landed.index].match(MOVE_RE);
+      await sleep(200);
     }
-    return hit / (img.w * img.h);
-  };
-  const rule = PHONE ? await blueShare(x0 + 8, HIT_Y + 12, 144, 2) : await blueShare(x0 + 6, HIT_Y + 30, 36, 2);
-  const control = PHONE ? await blueShare(x0 + 8, HIT_Y + 40, 144, 2) : await blueShare(x0 + 6, HIT_Y + 40, 36, 2);
-  if (rule < 0.6) fail("render", `only ${(100 * rule).toFixed(1)} % of lane 0's rule reads C-COLD: the ${PHONE ? "pads" : "keycaps"} are not drawn`);
-  else if (control > 0.1) fail("render", `the control strip reads ${(100 * control).toFixed(1)} % C-COLD: the colour test cannot tell the rule from its surroundings`);
-  else pass("render", `lane 0's rule ${(100 * rule).toFixed(1)} % C-COLD; the control strip ${(100 * control).toFixed(1)} %`);
+    await send("Emulation.setCPUThrottlingRate", { rate: 1 });
+    if (why) detail = why;
+    else {
+      const du = +after[4] - +before[4], ds = +after[5] - +before[5];
+      if (du !== 0) detail = `the moves starved the cues' sink: underruns ${before[4]} -> ${after[4]} over 3 moves at ${THROTTLE}x (source ${before[5]} -> ${after[5]})`;
+      else pass("audio", `${THROTTLE}x, 3 moves (${after[0]}): cue sink starved 0 frames; music sink ${ds}; context ${resumed ? "resumed" : "running without a gesture"}`);
+    }
+  }
+  if (detail) fail("audio", detail);
+}
 
-  if (FULL) {
-    const e = await waitLine(END_RE, doorMark, 220000);
-    if (!e) fail("full", "no end line within 220 s of the start");
-    else if (e.m[1] !== "held" || +e.m[8] !== 0) fail("full", e.m[0]);
-    else pass("full", `${e.m[0]} (SYNC CLEAN LOSSY DROP: the web's frame jitter under autoplay)`);
+// ---- beat: every collision cue once the tune plays was held to its 16th -------------------
+{
+  const playing = await waitLine(/^crash: music playing /, 0, 1000);
+  const from = playing ? playing.index : 0;
+  const cues = linesFrom(CUE_RE, from);
+  const unheld = cues.filter((m) => +m[2] < 0);
+  if (!playing) fail("beat", "no \"crash: music playing\" line: no tune reached the ear, so there was no beat to hold to");
+  else if (cues.length < 3) fail("beat", `only ${cues.length} collision cues after the music played`);
+  else if (unheld.length) fail("beat", `${unheld.length} of ${cues.length} cues played with no tune clock (delay -1): ${unheld.slice(0, 3).map((m) => m[0]).join("; ")}`);
+  else pass("beat", `${cues.length} cues held to the tune: delays ${cues.slice(0, 8).map((m) => m[2]).join(" ")} frames`);
+}
+function linesFrom(re, from) {
+  const out = [];
+  for (let i = from; i < consoleLines.length; i++) { const m = consoleLines[i].match(re); if (m) out.push(m); }
+  return out;
+}
+
+// ---- field: the living background's frame cost on an idle board -------------------------------
+{
+  const measure = async (q) => {
+    const m0 = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&decrypt=endless${q}` });
+    const open = await waitLine(OPEN_RE, m0, 30000);
+    if (!open) return null;
+    await sleep(2500);
+    const g = await frameGaps(4000);
+    return { p50: pct(g, 0.5), p95: pct(g, 0.95), n: g.length };
+  };
+  const on = await measure("");
+  const off = await measure("&bg=off");
+  if (!on || !off) fail("field", "?decrypt=endless did not open");
+  else {
+    const txt = `field on p50 ${r1(on.p50)} p95 ${r1(on.p95)} ms (${on.n} frames); off p50 ${r1(off.p50)} p95 ${r1(off.p95)} ms`;
+    console.log(`MEASURE field ${PHONE ? "phone" : "desktop"}: ${txt}`);
+    if (on.p50 > 16.7 && off.p50 <= 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
+    else pass("field", txt);
   }
 }
 
-// ---- console ---------------------------------------------------------------------------
-if (consoleErrors.length) fail("console", `${consoleErrors.length} error(s): ${consoleErrors.slice(0, 5).join(" | ")}`);
-else pass("console", "no errors, no exceptions");
+// ---- daily: 40 moves, the end panel, JACK OUT -------------------------------------------------
+{
+  let detail = "";
+  const m0 = consoleLines.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&decrypt=daily` });
+  const open = await waitLine(OPEN_RE, m0, 30000);
+  if (!open || open.m[1] !== "daily") detail = "?decrypt=daily did not open the DAILY";
+  else {
+    await waitLine(BOARD_RE, open.index, 3000);
+    moves = 0;
+    for (let k = 0; k < 40 && !detail; k++) {
+      const b = lastBoard(); const mv = b && findMove(b.cells);
+      if (!mv) { detail = `no legal move at move ${k + 1}`; break; }
+      const from = consoleLines.length;
+      await tapTap(mv[0], mv[1]);
+      if (k === 20) { await sleep(350); await shot(""); }   // mid-cascade, for David
+      const landed = await moveLanded(from, 20000);
+      if (!landed) detail = `move ${k + 1} did not land within 20 s`;
+    }
+    if (!detail) {
+      const over = await waitLine(OVER_RE, m0, 5000);
+      if (!over) detail = "no \"crash: decrypt over\" after 40 moves";
+      else {
+        await sleep(600); await shot("panel");
+        const mq = consoleLines.length;
+        await realKey("ArrowDown"); await realKey("ArrowDown"); await realKey("Enter");   // RETRY DAILY, ENDLESS, JACK OUT
+        const top = await waitLine(/^crash: menu top /, mq, 5000);
+        if (!top) detail = `${over.m[0]}, but JACK OUT did not reach the menu`;
+        else pass("daily", `40 moves; ${over.m[0]}; JACK OUT -> menu`);
+      }
+    }
+  }
+  if (detail) fail("daily", detail);
+}
 
-const failed = results.filter((r) => r[1] !== "PASS").length;
-console.log(`${failed ? "FAIL" : "PASS"}: ${results.length - failed}/${results.length} legs${failed ? "" : ""}`);
-if (failed) dump();
-shutdown(failed ? 1 : 0);
+// ---- console ---------------------------------------------------------------------------------
+if (consoleErrors.length) fail("console", `${consoleErrors.length} error entries: ${consoleErrors.slice(0, 5).join(" | ")}`);
+else pass("console", "no error-level entries, no exceptions");
+
+const failed = results.filter((r) => r[1] !== "PASS");
+console.log(failed.length ? `verify-decrypt: ${failed.length} FAILED (${failed.map((r) => r[0]).join(" ")})` : `verify-decrypt: ALL PASS (${results.length})`);
+if (failed.length) dump();
+shutdown(failed.length ? 1 : 0);

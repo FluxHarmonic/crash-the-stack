@@ -106,3 +106,25 @@
       (let* ((now (player-rendered p))
              (e (list-find (lambda (e) (<= (vector-ref e 2) now)) (player-timeline p))))
         (assert-equal (cons (vector-ref e 0) (vector-ref e 1)) (player-position p 0))))))
+
+;; (crash audio)'s delayed voice: a voice at position -d mixes nothing for d
+;; frames of the push, then the cue from its first sample.
+(import (only (crash audio) add-voices! CUE-GAIN))
+(test-group "beat: a delayed voice"
+  (test "a voice at -100 is silent for 100 frames, then plays its cue from sample 0; it carries its lead across pushes"
+    (let* ((cue (let ((b (make-bytevector (* 4 50) 0)))
+                  (let loop ((i 0)) (when (< i 50) (bytevector-ieee-single-set! b (* 4 i) 0.25 'little) (loop (+ i 1))))
+                  b))
+           (out (make-bytevector (* 8 256) 0))
+           (left (add-voices! out 256 (list (cons cue -100))))
+           (at (lambda (i) (bytevector-ieee-single-ref out (* 8 i) 'little))))
+      (assert-equal 0.0 (at 99))
+      (assert-true (> (at 100) 0.2))
+      (assert-true (> (at 149) 0.2))
+      (assert-equal 0.0 (at 150))
+      (assert-equal '() left))
+    ;; a lead longer than the push: nothing mixed, the voice kept with its lead shortened
+    (let* ((cue (make-bytevector (* 4 50) 0))
+           (out (make-bytevector (* 8 64) 0))
+           (left (add-voices! out 64 (list (cons cue -100)))))
+      (assert-equal -36 (cdr (car left))))))
