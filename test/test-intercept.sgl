@@ -20,7 +20,7 @@
         (only (crash music live) live-music-set-loader!)
         (only (crash intercept preview) preview-start-pos))
 
-(define (tune-of name) (read-tune-string (read-file-string (music-tune-path name))))
+(define (tune-of name) (read-tune-string (play-once-text (read-file-string (music-tune-path name)))))   ; as INTERCEPT reads it: once through
 
 ;; name -> #(length-ms onsets sections), one walk per song
 (define *walks* '())
@@ -44,7 +44,8 @@
           c))))
 
 (define SONGS '(black-glass blind-spot sector-drift clock-edge glass-current
-                obsidian-index quiet-array shadow-protocol dead-sector basement-circuit cold-boot relay-ghost breach-vector))
+                obsidian-index quiet-array shadow-protocol dead-sector basement-circuit cold-boot relay-ghost breach-vector
+                dirty-cache closed-loop fault-line))
 
 (define (max-in-window chart ms)
   ;; the most notes within any 1000 ms centred on a note
@@ -83,10 +84,10 @@
            (kick (list-find (lambda (o) (= 1 (vector-ref o 1))) os)))
       (assert-true (let loop ((os os)) (or (null? os) (null? (cdr os)) (and (<= (vector-ref (car os) 0) (vector-ref (cadr os) 0)) (loop (cdr os))))))
       (assert-equal 0 (vector-ref kick 3))))
-  (test "a song runs its whole order list: 150 to 200 s (Obsidian Index is the longest, 194 s)"
+  (test "a song runs its whole order list: 140 to 200 s (Fault Line 141, Obsidian Index 194)"
     (for-each (lambda (name)
                 (let ((len (car (source-of name))))
-                  (assert-true (> len 150000.0))
+                  (assert-true (> len 140000.0))
                   (assert-true (< len 200000.0))))
               SONGS))
   (test "the sections (the progress bar's ticks): in time order inside the song, at least one marked section each"
@@ -218,11 +219,20 @@
     (breach-vector script-kid 235 1325647)
     (breach-vector runner 574 2192244)
     (breach-vector elite 864 4739673)
+    (closed-loop script-kid 288 15700819)
+    (closed-loop runner 552 11736034)
+    (closed-loop elite 876 12622254)
+    (dirty-cache script-kid 300 14071144)
+    (dirty-cache runner 603 7962773)
+    (dirty-cache elite 887 1199266)
+    (fault-line script-kid 167 5042194)
+    (fault-line runner 360 2899997)
+    (fault-line elite 601 3397330)
     ))
 
 (test-group "intercept: pinned charts (the gate: generated reproducibly)"
-  (test "39 charts, 13 songs x 3 tiers, each its pinned note count and hash"
-    (assert-equal 39 (length PINNED))
+  (test "48 charts, 16 songs x 3 tiers, each its pinned note count and hash"
+    (assert-equal 48 (length PINNED))
     (for-each (lambda (p)
                 (let ((c (chart-of (list-ref p 0) (list-ref p 1))))
                   (assert-equal (list-ref p 2) (vector-length c))
@@ -485,30 +495,28 @@
                                 (assert-true (and (>= r (cadr band)) (<= r (caddr band))))))
                             DENSITY-BANDS)))
               SONGS))
-  (test "left off, with their reasons: DIRTY CACHE and CLOSED LOOP leave the J lane under 2 % on SCRIPT KID (0 % and 1 %); FAULT LINE is a 30 s loop"
-    (for-each (lambda (name)
-                (assert-false (memq name SONGS))
-                (assert-true (< (list-ref (lane-shares (chart-of name 'script-kid)) 2) 0.02)))
-              '(dirty-cache closed-loop))
-    (assert-false (memq 'fault-line SONGS))
-    (assert-true (< (car (source-of 'fault-line)) 60000.0))))
+  (test "the three that failed at first now pass: FAULT LINE runs its full 141 s once through (its B00 loop cleared; read as it is, 30.5 s), and a starved lane is repaired (DIRTY CACHE's J lane was 0 % on SCRIPT KID)"
+    (assert-true (> (car (source-of 'fault-line)) 140000.0))
+    (assert-true (< (vector-ref (tune-walk (read-tune-string (read-file-string (music-tune-path 'fault-line)))) 0) 31000.0))   ; the control: the file as DEFRAG plays it
+    (assert-true (>= (list-ref (lane-shares (chart-of 'dirty-cache 'script-kid)) 2) 0.02))
+    (assert-true (memq 'fault-line SONGS))))
 
-(test-group "intercept: the song list scrolls (13 songs, 5 rows)"
+(test-group "intercept: the song list scrolls (16 songs, 5 rows)"
   (test "the window opens with the chosen song in its middle, clamped at both ends"
     (let ((t (intercept-open #f 'black-glass)))
       (assert-equal 0 (intercept-list-first t))
       (assert-equal '(0 1 2 3 4) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t)))))
     (let ((t (intercept-open #f 'dead-sector)))   ; index 8
       (assert-equal 6 (intercept-list-first t)))
-    (let ((t (intercept-open #f 'breach-vector)))   ; the last, index 12
-      (assert-equal 8 (intercept-list-first t))
-      (assert-equal '(8 9 10 11 12) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t))))))
+    (let ((t (intercept-open #f 'fault-line)))   ; the last, index 15
+      (assert-equal 11 (intercept-list-first t))
+      (assert-equal '(11 12 13 14 15) (map car (filter (lambda (r) (and (integer? (car r)) (< (car r) ROW-DIFFICULTY))) (intercept-select-rows t))))))
   (test "down walks past the fifth song, the window scrolling only as far as it needs, and wraps from the last to the first"
     (let* ((t (intercept-open #f 'black-glass))
            (t (intercept-step t (frame (repeat 6 'down) '() 1.0))))
       (assert-equal 'quiet-array (car (intercept-song t)))   ; index 6
       (assert-equal 2 (intercept-list-first t))              ; the window's last row
-      (let ((t (intercept-step (intercept-open #f 'breach-vector) (frame '(down) '() 1.0))))
+      (let ((t (intercept-step (intercept-open #f 'fault-line) (frame '(down) '() 1.0))))
         (assert-equal 'black-glass (car (intercept-song t)))
         (assert-equal 0 (intercept-list-first t)))))
   (test "a tap on a row chooses it and leaves the window where it is, so a second tap there plays it (the review's M2)"
@@ -528,8 +536,8 @@
       (assert-equal 'black-glass (car (intercept-song t)))
       (let* ((t (intercept-step t (make-intercept-frame '() '() (strip t 'list-down) 2.0)))
              (t (intercept-step t (make-intercept-frame '() '() (strip t 'list-down) 3.0))))
-        (assert-equal 8 (intercept-list-first t))   ; clamped at 13 - 5
-        (assert-equal 4 (intercept-list-first (intercept-step t (make-intercept-frame '() '() (strip t 'list-up) 4.0)))))))
+        (assert-equal 11 (intercept-list-first t))   ; clamped at 16 - 5
+        (assert-equal 7 (intercept-list-first (intercept-step t (make-intercept-frame '() '() (strip t 'list-up) 4.0)))))))
   (test "the settings rows keep their places whatever the list shows"
     (let ((t (intercept-open #f 'breach-vector)))
       (assert-true (list-find (lambda (r) (eqv? (car r) ROW-CALIBRATE)) (intercept-select-rows t)))
@@ -565,7 +573,7 @@
         (assert-equal 3 (intercept-list-first t))
         (assert-equal 'black-glass (car (intercept-song t)))
         (let ((t (intercept-step t (frame (repeat 20 'scroll-down) '() 2.0))))
-          (assert-equal 8 (intercept-list-first t)))
+          (assert-equal 11 (intercept-list-first t)))
         (assert-equal 0 (intercept-list-first (intercept-step t (frame (repeat 9 'scroll-up) '() 3.0))))))
     (test "the list's area (where the web shell holds a press for a swipe) covers the rows and the chevrons, not the buttons"
       (let ((a (intercept-list-area)))
