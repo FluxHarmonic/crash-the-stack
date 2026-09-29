@@ -115,7 +115,19 @@
     (define (draw-strips strips x y)
       (for-each (lambda (s) (draw-filled-rect (+ x (car s)) (+ y (cadr s)) (caddr s) (cadddr s))) strips))
     ;; shape k in color c at alpha a, shadowed and bevelled
-    (define (draw-glyph k x y c a)
+    ;; shape k (color index ci) at alpha a: through the baked sheet, one texture
+    ;; region a glyph; ?atlas=off draws the rects (the oracle and the fallback)
+    (define (draw-glyph k ci x y a)
+      (if (atlas-on?)
+          (let ((tex (glyph-sheet)))
+            (color-alpha! C-TEX-PLAIN a)
+            (draw-texture-region tex x y GP GP
+                                 (* GP (if (= k 6) ci k))
+                                 (- (* 2 GP) (* GP (if (= k 6) 1 0)))
+                                 GP (- GP)))
+          (draw-glyph-rects k x y (list-ref KIND-COLORS ci) a)))
+
+    (define (draw-glyph-rects k x y c a)
       (color-alpha! C-BG (* 0.75 a))
       (draw-shape k (+ x 2) (+ y 2) PX)
       (color-alpha! c a)
@@ -126,13 +138,51 @@
         (color-alpha! C-BG (* 0.5 a))
         (draw-strips (cdr b) x y)))
 
+    ;; --- the baked sheet (the bevel tripled the rects a frame: the phone arm's
+    ;; audio leg starved 128 frames at 4x and its frame p95 went 16.7 -> 33.3 ms) --
+    ;; One 'nearest target, baked on first use, as (crash atlas) bakes the font:
+    ;; row 0 the six kinds in their colors, row 1 the WILDCARD's star in each
+    ;; color, GP x GP a cell. Baked with blending off, so every texel is opaque
+    ;; where the glyph is and clear elsewhere: the shadow is C-BG, the strips the
+    ;; kind's color mixed toward C-FACE-EDGE (lit) and C-BG (shaded), the looks
+    ;; the rect path gets by blending. Drawn tinted C-TEX-PLAIN (white) at the
+    ;; cell's alpha. Rows are read bottom-up, as the atlas reads them.
+    (define GP 32)
+    (define *glyph-rt* #f)
+    (define *glyph-tex* #f)
+    (define (mix a b k) (map (lambda (x y) (+ x (* k (- y x)))) a b))
+    (define (opaque! c) (set-color (car c) (cadr c) (caddr c) 1.0))
+    (define (bake-glyph! k c x y)
+      (opaque! C-BG)
+      (draw-shape k (+ x 2) (+ y 2) PX)
+      (opaque! c)
+      (draw-shape k x y PX)
+      (let ((b (bevel k)))
+        (opaque! (mix c C-FACE-EDGE 0.55))
+        (draw-strips (car b) x y)
+        (opaque! (mix c C-BG 0.5))
+        (draw-strips (cdr b) x y)))
+    (define (glyph-sheet)
+      (unless *glyph-rt*
+        (set! *glyph-rt* (make-render-target (* 6 GP) (* 2 GP) 'nearest))
+        (with-render-target *glyph-rt*
+          (set-blend-mode 'none)
+          (let loop ((i 0))
+            (when (< i 6)
+              (bake-glyph! i (list-ref KIND-COLORS i) (* i GP) 0)
+              (bake-glyph! 6 (list-ref KIND-COLORS i) (* i GP) GP)
+              (loop (+ i 1)))))
+        (set-blend-mode 'normal)
+        (set! *glyph-tex* (render-target->texture *glyph-rt*)))
+      *glyph-tex*)
+
     ;; a cell's glyph at (x, y) = the cell's top left, alpha a
     (define (draw-cell v x y a ms)
       (let* ((sp (cell-special v))
              (gx (+ x 8)) (gy (+ y 8)))
         (cond ((not sp) #f)
               ((= sp 3)
-               (draw-glyph 6 gx gy (list-ref KIND-COLORS (modulo (quotient (exact (floor ms)) 120) 6)) a))
+               (draw-glyph 6 (modulo (quotient (exact (floor ms)) 120) 6) gx gy a))
               (else
                (let ((c (list-ref KIND-COLORS (cell-kind v))))
                  (when (= sp 2)
@@ -150,7 +200,7 @@
                                (list (+ x 2) (+ x 40) (+ x 2) (+ x 40))
                                (list (+ y 2) (+ y 2) (+ y 40) (+ y 40))
                                '(1 -1 1 -1) '(1 1 -1 -1))))
-                 (draw-glyph (cell-kind v) gx gy c a))))))
+                 (draw-glyph (cell-kind v) (cell-kind v) gx gy a))))))
 
     ;; draw-filled-rect with a negative size (the BURST's mirrored corners)
     ;; is normalised here so the graphics layer only sees positive sizes
