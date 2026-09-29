@@ -43,6 +43,12 @@ git diff --quiet "$VERSION" -- $GAME || die "the game files here differ from $VE
 # shellcheck disable=SC2086
 untracked=$(git status --porcelain --untracked-files=all -- $GAME | grep '^??' || true)
 [ -z "$untracked" ] || die "untracked files among the game's: $(printf '%s' "$untracked" | head -3 | tr '\n' ' ')"
+pkgver=$(sed -n 's/^ *version: *"\([0-9][0-9.]*\)".*/\1/p' package.sgl | head -1)
+[ "v$pkgver" = "$VERSION" ] || die "package.sgl says version \"$pkgver\", not ${VERSION#v}"
+# A build made against redirected (unreleased, local) dependencies passes every check above but
+# contains code sigil.lock does not name: refuse while a redirects file or variable is in play.
+[ -z "${SIGIL_REDIRECTS:-}" ] || die "SIGIL_REDIRECTS is set; build and pack without dependency redirects"
+[ ! -e dev-redirects.sgl ] || die "dev-redirects.sgl exists; a build may have used unreleased dependencies (move it aside, rebuild, pack)"
 [ -x build/release/bin/crash-the-stack ] || die "build/release/bin/crash-the-stack missing; build --config release first"
 [ -f build/windows-amd64/bin/crash-the-stack.exe ] || die "build/windows-amd64/bin/crash-the-stack.exe missing; build --config windows-amd64 first"
 for exe in build/release/bin/crash-the-stack build/windows-amd64/bin/crash-the-stack.exe; do
@@ -93,7 +99,7 @@ guix shell patchelf -- patchelf --set-interpreter /lib64/ld-linux-x86-64.so.2 "$
 check=$(scripts/check-linux-binary "$L/bin/crash-the-stack") || { printf '%s\n' "$check" >&2; rm -rf "$DIST/$NAME-linux-amd64"; die "the packed Linux executable is not portable"; }
 cmp -s build/release/bin/crash-the-stack "$L/bin/crash-the-stack" && die "patchelf left the executable unchanged"
 floor=$(printf '%s\n' "$check" | sed -n 's/^glibc-floor //p')
-sed -i "s|^PLATFORM\$|Linux x86-64 with glibc $floor or newer (Ubuntu 22.04, Debian 12, Fedora 35\nand later), a GL driver, and PulseAudio or PipeWire.|" "$L/README-run.txt"
+sed -i "s|^PLATFORM\$|Linux x86-64 with glibc $floor or newer (Ubuntu 22.04, Debian 12, Fedora 36\nand later), a GL driver, and PulseAudio or PipeWire.|" "$L/README-run.txt"
 grep -q "glibc $floor or newer" "$L/README-run.txt" || die "the Linux README's platform line did not land"
 fill "$DIST/$NAME-windows-amd64/$NAME" build/windows-amd64 crash-the-stack.exe "Windows 10 or later, 64-bit."
 

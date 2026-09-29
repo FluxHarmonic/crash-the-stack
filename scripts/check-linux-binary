@@ -20,12 +20,19 @@ set -eu
 f=${1:-}
 [ -n "$f" ] && [ -f "$f" ] || { echo "check-linux-binary: give an existing file" >&2; exit 125; }
 readelf() { guix shell binutils -- readelf "$@"; }
+elfh=$(readelf -hW "$f" 2>/dev/null) || { echo "check-linux-binary: SETUP-FAILED, readelf could not read $f" >&2; exit 125; }
 hdr=$(readelf -lW "$f" 2>/dev/null) || { echo "check-linux-binary: SETUP-FAILED, readelf could not read $f" >&2; exit 125; }
 dyn=$(readelf -dW "$f" 2>/dev/null) || { echo "check-linux-binary: SETUP-FAILED, readelf -d failed on $f" >&2; exit 125; }
 ver=$(readelf -VW "$f" 2>/dev/null) || ver=""
 interp=$(printf '%s\n' "$hdr" | sed -n 's/.*Requesting program interpreter: \(.*\)\]$/\1/p')
 [ -n "$interp" ] || { echo "check-linux-binary: SETUP-FAILED, no interpreter found in $f (not a dynamic ELF executable?)" >&2; exit 125; }
 bad=0
+# the loader path below is x86-64's; a binary for another machine must not pass with it
+machine=$(printf '%s\n' "$elfh" | sed -n 's/^ *Machine: *//p')
+class=$(printf '%s\n' "$elfh" | sed -n 's/^ *Class: *//p')
+echo "machine ${machine:-unknown} ${class:-unknown}"
+case "$machine" in *X86-64*) ;; *) echo "FAIL not an x86-64 executable"; bad=1 ;; esac
+[ "$class" = ELF64 ] || { echo "FAIL not a 64-bit ELF"; bad=1; }
 echo "interpreter $interp"
 if [ "$interp" != "/lib64/ld-linux-x86-64.so.2" ]; then
   echo "FAIL interpreter is not /lib64/ld-linux-x86-64.so.2"; bad=1
@@ -37,11 +44,23 @@ needed=$(printf '%s\n' "$dyn" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
 [ -n "$needed" ] || { echo "check-linux-binary: SETUP-FAILED, no NEEDED entries read" >&2; exit 125; }
 for n in $needed; do
   case "$n" in
-    libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|ld-linux-x86-64.so.2) echo "needed $n" ;;
+    libc.so.6|libm.so.6|libdl.so.2|libpthread.so.0|librt.so.1|libutil.so.1|libresolv.so.2|libanl.so.1|ld-linux-x86-64.so.2) echo "needed $n" ;;
     *) echo "FAIL needs $n, which is not part of glibc"; bad=1 ;;
   esac
 done
 floor=$(printf '%s\n' "$ver" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/GLIBC_//' | sort -t. -k1,1n -k2,2n -k3,3n -u | tail -1)
+# a binary linked with packed relocations needs GLIBC_ABI_DT_RELR, which glibc 2.36 introduced
+if printf '%s\n' "$ver" | grep -q 'GLIBC_ABI_DT_RELR'; then
+  floor=$(printf '%s\n%s\n' "${floor:-0}" 2.36 | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+fi
 echo "glibc-floor ${floor:-unknown}"
+# The downloads promise Ubuntu 22.04 and Debian 12 (glibc 2.35 and 2.36): a newer floor would
+# break that promise, so it fails here instead of shipping (override with GLIBC_MAX=X.Y).
+max=${GLIBC_MAX:-2.35}
+if [ -z "$floor" ]; then
+  echo "FAIL no GLIBC_ symbol versions read, so the floor is unknown"; bad=1
+elif [ "$(printf '%s\n%s\n' "$floor" "$max" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)" != "$max" ]; then
+  echo "FAIL needs glibc $floor, newer than the $max the downloads promise (Ubuntu 22.04)"; bad=1
+fi
 [ "$bad" = 0 ] && echo "PASS portable" && exit 0
 exit 1

@@ -55,7 +55,12 @@ fi
 
 # --- make ----------------------------------------------------------------------
 if ! DIST="$T/dist" scripts/release-archives "$VERSION" > "$T/make.log" 2>&1; then
-  cat "$T/make.log"; echo "SETUP-FAILED release-archives $VERSION did not complete; no other leg ran"; exit 125
+  cat "$T/make.log"
+  # the script refusing a non-portable executable is the defect this gate exists for: a FAIL, not a skip
+  if grep -q "REFUSED: the packed Linux executable is not portable" "$T/make.log"; then
+    echo "FAIL portable: release-archives refused the packed executable (above); no other leg ran"; exit 1
+  fi
+  echo "SETUP-FAILED release-archives $VERSION did not complete; no other leg ran"; exit 125
 fi
 
 # --- sums --------------------------------------------------------------------
@@ -148,7 +153,9 @@ else
   else
     u=0
     [ "$prc" = 0 ] && [ "$us" = "$hs" ] || { fail "ubuntu: --bench-probe 3 rc=$prc gave '$us' against '$hs' here: $(tail -1 "$R/tmp/probe.err" 2>/dev/null)"; u=1; }
-    [ "$nrc" != 0 ] || { fail "ubuntu: the unpatched Guix build STARTED in Ubuntu, so this leg cannot tell"; u=1; }
+    # the unpatched build must fail to START (no loader: rc 127, "No such file"), not start and fail later
+    if [ "$nrc" != 127 ] || ! grep -q "No such file" "$R/tmp/neg.err"; then
+      fail "ubuntu: the unpatched Guix build did not fail to start as expected (rc $nrc: $(head -1 "$R/tmp/neg.err"))"; u=1; fi
     [ "$u" = 0 ] && pass "ubuntu: --bench-probe 3 gives '$us' as on this box; the unpatched build does not start (rc $nrc: $(head -1 "$R/tmp/neg.err"))"
   fi
 fi
