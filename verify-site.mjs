@@ -46,6 +46,11 @@
 //   crosslink      every page's footer links Harkfell beside Flux Harmonic
 //   version-missing the game's version fetch takes its missing branch for a 404
 //                  AND for 200 with HTML (t-5bb869)
+//   webgl          scripts/webgl-check.mjs on /jack-in/ and /tracker/: with WebGL
+//                  off or only WebGL 1, the page says it needs WebGL 2 and never
+//                  fetches the wasm (the game registers no service worker);
+//                  with no context for the stage, the message replaces the raw
+//                  error; with WebGL 2, no message and the app starts
 //   console        no error and no sokol refusal over the run
 import http from "node:http";
 import fs from "node:fs";
@@ -678,6 +683,36 @@ else {
   hidden = new Set();
   if (detail.length) fail("version-missing", detail.join("; "));
   else pass("version-missing", seen.join("; "));
+}
+
+// ---- webgl (2026-09-29) ------------------------------------------------------------
+// A browser with no WebGL 2 got "Failed to start: sigil_wasm_start failed
+// (rc -1)" on both pages. scripts/webgl-check.mjs, one Chrome per case,
+// against this server: WebGL off (the message, the loader switched off, no
+// wasm; on the game, no service worker either, past the 90 s live timeout
+// that registers it), WebGL 1 only, a context refused to the stage alone
+// (the message in place of the raw error), and WebGL on (no message, the
+// app started).
+{
+  const cases = [
+    ["jack-in", "off", ["--wait", "100000", "--line", "^crash: sw not registered \\(no WebGL 2\\)$"]],
+    ["jack-in", "webgl1", []], ["jack-in", "late", []], ["jack-in", "on", []],
+    ["tracker", "off", []], ["tracker", "late", []], ["tracker", "on", []],
+  ];
+  for (const [page, mode, extra] of cases) {
+    const r = await new Promise((resolve) => {
+      const ch = spawn("node", [path.join(path.dirname(new URL(import.meta.url).pathname), "scripts/webgl-check.mjs"),
+        "--url", `${origin}/${page}/`, "--mode", mode, "--wait", "2500", ...extra]);
+      let o = "";
+      ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
+      const kill = setTimeout(() => ch.kill("SIGKILL"), 240000);
+      ch.on("close", (code) => { clearTimeout(kill); resolve({ status: code, out: o }); });
+    });
+    const verdict = r.out.trim().split("\n").pop();
+    if (r.status === 0 && verdict === `PASS ${mode}`) pass("webgl", `/${page}/ ${mode}: ${{ off: "WebGL off: the message, no wasm" + (page === "jack-in" ? ", no service worker after 100 s" : ""),
+      webgl1: "WebGL 1 only: the message, no wasm", late: "no context for the stage: the message, not the raw error", on: "WebGL 2: no message, the app started" }[mode]}`);
+    else fail("webgl", `/${page}/ ${mode}: rc ${r.status}: ${r.out.split("\n").filter((l) => /FAIL|SETUP|TIMED/.test(l)).join(" | ").slice(0, 400)}`);
+  }
 }
 
 // ---- console ----------------------------------------------------------------

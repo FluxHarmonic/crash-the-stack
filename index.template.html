@@ -33,6 +33,156 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <script>
+  // The WebGL 2 check, before anything boots (a visitor on phantomburn.net
+  // hit the raw "Failed to start: sigil_wasm_start failed (rc -1)",
+  // 2026-09-29; this page had the same failure). Substratic's, from
+  // substratic.js's "webgl" section (substratic 0.2.3), copied as is: this
+  // page doesn't load substratic.js. It must come before the loader's tag
+  // (the build's app marker), which it switches off without WebGL 2.
+  (function () {
+    "use strict";
+  // ---- webgl -------------------------------------------------------------------
+  // (substratic.js's WebGL check; copied as is into pages that don't load it)
+  //
+  // Every Substratic game draws with WebGL 2. Without it (graphics
+  // acceleration off, a blocklisted GPU, a browser started without GPU
+  // access) the wasm starts, fails to get a context, and the loader shows
+  // "Failed to start: sigil_wasm_start failed (rc -1)", which tells a player
+  // nothing. So, before the wasm boots:
+  //   - a throwaway canvas is asked for "webgl2" (with the attributes the
+  //     gles3 bridge asks for), then "webgl", so the message can say whether
+  //     WebGL is off entirely or only WebGL 2 is missing;
+  //   - with no WebGL 2, the loader's script tag (the build's app marker,
+  //     which must come after this script) is switched to text/plain as the
+  //     parser inserts it, before it runs, so the wasm is never fetched
+  //     (a MutationObserver: the parser delivers mutation records before it
+  //     runs a script; "beforescriptexecute" for Firefox before 109);
+  //   - a message in the page says what to do (#sub-webgl, data-webgl "none"
+  //     or "webgl1"; body.sub-nowebgl).
+  // And late: a start that fails for want of a WebGL 2 context (the game's
+  // "no WebGL2 context" line) shows the message (data-webgl "late") in
+  // place of the loader's "Failed to start: ...". If the loader ran anyway
+  // without WebGL 2, its "Failed to start" is cleared the same way.
+  //
+  // cfg.webglCheck (default true) turns it on; cfg.webglText overrides any
+  // of the strings below (title, none, webgl1, late, advice, test). The
+  // panel's style goes first in <head>, so a page's own CSS for #sub-webgl
+  // wins. Returns "webgl2", "webgl1", "none", or "off" (the check turned off).
+  function webglGuard(cfg) {
+    if (cfg.webglCheck === false) return "off";
+    var LOADER = /(^|\/)sigil-web-app\.js(\?|#|$)/;
+    var text = Object.assign({
+      title: "This game needs WebGL 2, and your browser isn't providing it.",
+      none: "WebGL is turned off in this browser, or it can't reach your graphics card. Usually that means graphics acceleration is off.",
+      webgl1: "Your browser has WebGL, but not WebGL 2. Usually that means graphics acceleration is off, or the browser is too old for it " +
+              "(on an iPhone, iPad or Mac, updating the system updates Safari; in Firefox, check that webgl.enable-webgl2 is true in about:config).",
+      late: "Your browser has WebGL 2, but it couldn't give the game a WebGL 2 context. Closing other tabs that use graphics, or restarting the browser, usually fixes it.",
+      advice: "Turn on \"Use graphics acceleration when available\" (Chrome, Edge) or check that WebGL is enabled (Firefox: about:config, webgl.disabled set to false), then restart the browser. " +
+              "If you launched the browser in a special way (a remote desktop, a sandbox, a VM), try opening it normally. Or try another browser.",
+      test: "Check what your browser supports at get.webgl.org/webgl2."
+    }, cfg.webglText || {});
+    var TEST_URL = "https://get.webgl.org/webgl2/";
+
+    function probe(kind) {
+      try {
+        var gl = document.createElement("canvas").getContext(kind, { alpha: false, antialias: false, depth: false, stencil: false });
+        if (!gl) return false;
+        var lose = gl.getExtension("WEBGL_lose_context");   // give the context back now
+        if (lose) lose.loseContext();
+        return true;
+      } catch (err) { return false; }
+    }
+    function loaderMount() {                                // the loader shows its errors here
+      var all = document.querySelectorAll("script[src]"), s = null;
+      for (var i = 0; i < all.length; i++) if (LOADER.test(all[i].getAttribute("src"))) s = all[i];
+      return document.getElementById((s && s.getAttribute("data-mount")) || "app");
+    }
+    function clearFailed() {
+      var m = loaderMount();
+      if (m && /^Failed to start/.test(m.textContent)) m.textContent = "";
+    }
+    function show(level) {
+      if (level === "late") clearFailed();
+      if (document.getElementById("sub-webgl")) return;
+      if (!document.body) { document.addEventListener("DOMContentLoaded", function () { show(level); }); return; }
+      var css = document.createElement("style");
+      css.textContent =
+        "#sub-webgl{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);-webkit-transform:translate(-50%,-50%);z-index:20;" +
+        "box-sizing:border-box;width:92%;max-width:40em;max-height:92%;overflow:auto;padding:20px 22px;background:#000;" +
+        "border:1px solid rgba(170,170,187,.4);border-radius:6px;color:#aab;font:14px/1.5 ui-monospace,monospace;text-align:left}" +
+        "#sub-webgl h1{margin:0 0 12px;font:bold 16px/1.4 ui-monospace,monospace;color:#dde}" +
+        "#sub-webgl p{margin:0 0 10px}" +
+        "#sub-webgl a{color:#9cf}";
+      document.head.insertBefore(css, document.head.firstChild);
+      var box = document.createElement("div");
+      box.id = "sub-webgl";
+      box.setAttribute("role", "alert");
+      box.setAttribute("data-webgl", level);
+      var h = document.createElement("h1"); h.textContent = text.title; box.appendChild(h);
+      [text[level] || text.none, text.advice].forEach(function (t) {
+        var p = document.createElement("p"); p.textContent = t; box.appendChild(p);
+      });
+      var p = document.createElement("p"), host = "get.webgl.org/webgl2", at = text.test.indexOf(host);
+      var a = document.createElement("a"); a.href = TEST_URL; a.target = "_blank"; a.rel = "noopener";
+      if (at >= 0) {                                         // the link on the address, where the text names it
+        p.appendChild(document.createTextNode(text.test.slice(0, at)));
+        a.textContent = host; p.appendChild(a);
+        p.appendChild(document.createTextNode(text.test.slice(at + host.length)));
+      } else { p.appendChild(document.createTextNode(text.test + " ")); a.textContent = TEST_URL; p.appendChild(a); }
+      box.appendChild(p);
+      document.body.className += " sub-nowebgl";
+      document.body.appendChild(box);
+      console.log("substratic: webgl " + level + ": the message is up");
+    }
+
+    var level = probe("webgl2") ? "webgl2" : probe("webgl") ? "webgl1" : "none";
+    // both paths: a boot error after a "no WebGL2 context" line (or with no
+    // WebGL 2 at all) is the message's, not the loader's
+    var seen = false, watching = true;
+    ["log", "warn", "error"].forEach(function (k) {
+      var was = console[k];
+      console[k] = function () {
+        if (watching && !seen) {
+          try {
+            var line = "";
+            for (var i = 0; i < arguments.length; i++) line += " " + String(arguments[i]);
+            if (/no WebGL2 context/.test(line)) { seen = true; Promise.resolve().then(function () { show(level === "webgl2" ? "late" : level); }); }
+          } catch (err) { /* an argument with no string form */ }
+        }
+        return was.apply(console, arguments);
+      };
+    });
+    document.addEventListener("sigil-web-app-ready", function () { watching = false; });
+    document.addEventListener("sigil-web-app-error", function () {
+      // (still watching: a line flushed after the error still clears it)
+      if (seen || level !== "webgl2") { clearFailed(); show(level === "webgl2" ? "late" : level); }
+    });
+    if (level === "webgl2") return level;
+
+    // no WebGL 2: the loader must not run
+    var off = function (node) {
+      if (node.nodeName === "SCRIPT" && LOADER.test(node.getAttribute("src") || "")) {
+        node.type = "text/plain";
+        node.setAttribute("data-substratic-off", "no-webgl2");
+        return true;
+      }
+      return false;
+    };
+    var mo = new MutationObserver(function (records) {
+      records.forEach(function (r) { Array.prototype.forEach.call(r.addedNodes, off); });
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener("beforescriptexecute", function (e) { if (off(e.target)) e.preventDefault(); });
+    document.addEventListener("DOMContentLoaded", function () { mo.disconnect(); });
+    console.log("substratic: webgl " + level + ": " + (window.SigilWebApp
+      ? "the loader already ran (this script must come before it)" : "the game is not started"));
+    show(level);
+    return level;
+  }
+    window.CrashWebGL = webglGuard({ webglCheck: true });
+  })();
+  </script>
   <main>
     <!-- The board and, in its top-right corner over the margin the game
          leaves free, the one button the page owns: fullscreen (David,
@@ -1236,7 +1386,11 @@
     // version, which the boot's own fetches on a phone cannot share the link
     // with); the promise is the first script's, resolved by the game's word
     // or at 90 s
+    // Without WebGL 2 (the check at the top of <body>) the game never starts,
+    // and no worker is registered: its install would download the whole
+    // version, the wasm included, for a browser that cannot play it
     (window.crashLive || Promise.resolve()).then(function () {
+    if (window.CrashWebGL === "webgl1" || window.CrashWebGL === "none") { console.log("crash: sw not registered (no WebGL 2)"); return new Promise(function () {}); }
     return navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }); }).then(function (reg) {
       if (status.state === "none") status.state = "registered";
       launchUntil = Date.now() + 8000;
