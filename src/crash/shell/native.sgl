@@ -101,7 +101,7 @@
           (only (crash scan draw) draw-scan scan-bar-hit)
           ;; INTERCEPT, the rhythm game: its screen and its draw
           (only (crash intercept table) intercept-open intercept-step intercept-requests make-intercept-frame
-                intercept-leave! intercept-set-say! intercept-autoplay! intercept-phase)
+                intercept-leave! intercept-set-say! intercept-autoplay! intercept-phase intercept-now intercept-sections)
           (only (crash intercept draw) draw-intercept)
           ;; DECRYPT, the match-3 table (the draft)
           (only (crash decrypt table) decrypt-open decrypt-step make-decrypt-frame decrypt-cues decrypt-requests decrypt-hot?
@@ -109,6 +109,7 @@
           (only (crash decrypt draw) draw-decrypt)
           (only (crash decrypt record) record->datum datum->record)
           (only (crash daily) daily-decrypt-seed)
+          (only (crash intercept preview) preview-set-say!)
           (only (sigil time) current-jiffy jiffies-per-second)
           (only (sigil gc) gc-allocated-bytes gc-young-occupancy gc-minor-collect!)   ; the --scanbench door's GC probes
           (crash hud)
@@ -1020,7 +1021,38 @@
 
     (define (open-intercept a song)
       (live-music-stop!)
-      (stage a screen: 'intercept overlay: #f intercept: (intercept-open #f song)))
+      (set! *intercept-marks* 0)
+      (stage (field-for-deal a (+ 1 (exact (floor (current-second))))) screen: 'intercept overlay: #f intercept: (intercept-open #f song)))   ; a live field behind the wire (t-15acbf)
+
+    ;; The field behind INTERCEPT (t-15acbf), as on the web: stepped at 60 a
+    ;; second, calm through the list and lead-in, a burst and a phase flip at
+    ;; each marked section of the song; off with BACKGROUND OFF.
+    (define *intercept-bg-last* #f)
+    (define *intercept-bg-acc* 0.0)
+    (define *intercept-marks* 0)
+    (define (intercept-bg a) (if (eq? (setting 'background) 'off) #f (stage-background a)))
+    (define (intercept-bg-step a t wall)
+      (let* ((dt (if *intercept-bg-last* (max 0.0 (min 0.25 (/ (- wall *intercept-bg-last*) 1000.0))) 0.0))
+             (ph (intercept-phase t))
+             (now (and (eq? ph 'play) (intercept-now t)))
+             ;; as on the web: marks move only in play, reset quietly on the list
+             ;; and loading, held through a pause, the results and CALIBRATE
+             (marks (cond (now (length (filter (lambda (s) (and (cdr s) (<= (car s) now))) (intercept-sections t))))
+                          ((memq ph '(select loading)) 0)
+                          (else *intercept-marks*)))
+             (b (stage-bg a)))
+        (set! *intercept-bg-last* wall)
+        (if (not b)
+            a
+            (let* ((b (if (= marks *intercept-marks*)
+                          b
+                          (let ((b (bg-with-phase b (if (odd? marks) 'counter 'trace))))
+                            (if (and now (> marks *intercept-marks*)) (bg-with-burst b) b))))
+                   (_ (set! *intercept-marks* marks))
+                   (_ (unless (eq? ph 'calibrate) (set! *intercept-bg-acc* (+ *intercept-bg-acc* (* 60.0 dt)))))
+                   (steps (exact (floor *intercept-bg-acc*))))
+              (set! *intercept-bg-acc* (- *intercept-bg-acc* steps))
+              (stage a bg: (if (> steps 0) (bg-tick b (min steps 4)) b))))))
 
     (define (step-intercept a f)
       (let* ((wall (intercept-wall-ms))
@@ -1035,7 +1067,7 @@
              (t (intercept-step (stage-intercept a) frame)))
         (if (memq 'menu (intercept-requests t))
             (begin (intercept-leave! t) (open-menu (stage a intercept: #f)))
-            (stage a intercept: t))))
+            (intercept-bg-step (stage a intercept: t) t wall))))
 
     ;; --- DECRYPT, the match-3 table (the 2026-09-29 draft) ---------------------------
     ;; The web shell's twin: its own screen beside the table records, the
@@ -1137,6 +1169,7 @@
                                   (and (file-exists? path) (read-file-string path)))))
       (live-music-set-say! (lambda parts (display "crash:") (for-each (lambda (p) (display " ") (display p)) parts) (newline)))
       (intercept-set-say! (lambda parts (display "crash:") (for-each (lambda (p) (display " ") (display p)) parts) (newline)))
+      (preview-set-say! (lambda parts (display "crash:") (for-each (lambda (p) (display " ") (display p)) parts) (newline)))
       ;; the music's render rate (M1): the ladder's last choice on this device
       ;; from the store, kept for the next boot when the ladder steps
       (let ((r (store-get "music-rate")))
@@ -1258,8 +1291,8 @@
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
-                            ((intercept) (draw-intercept (stage-intercept a) VW VH (stage-background a) *copper* (intercept-wall-ms)))
                             ((decrypt) (draw-decrypt (stage-decrypt a) VW VH (decrypt-bg a) *copper* (live-music-beat-phase)))
+                            ((intercept) (draw-intercept (stage-intercept a) VW VH (intercept-bg a) *copper* (intercept-wall-ms)))
                             ;; a table: its record's draw, the overlay's panel over it
                             (else
                              (let ((k (table-up a)))

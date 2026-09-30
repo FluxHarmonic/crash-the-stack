@@ -1,0 +1,146 @@
+;;; (crash intercept preview) - The highlighted song, playing on the song list.
+;;;
+;;; David, 2026-09-29 (t-2844c8): the song select plays a preview of each
+;;; song as it is highlighted. The tunes are live tracker data, so a preview
+;;; is the tune's player started at a preview row: the start of its tense
+;;; section (every soundtrack tune marks calm / fill / tense), looping that
+;;; section, as (crash audio)'s source. No files, no downloads.
+;;;
+;;; The list calls (preview-want! name text now) every frame with the
+;;; highlighted song and its text (#f until it has landed). A name that
+;;; holds for DEBOUNCE-MS starts; a change first fades what plays out over
+;;; FADE-MS and the next fades in over FADE-MS: one source has one volume, so
+;;; the "crossfade" is a dip, about 300 ms end to end. Fast scrolling opens
+;;; nothing until it stops. A cue within DUCK-MS ducks the preview to
+;;; DUCK-GAIN. (preview-stop!) silences it at once: entering a song (its
+;;; lead-in restarts the tune cleanly), CALIBRATE, leaving the screen.
+;;;
+;;; Lines (the arm's):
+;;;   crash: intercept preview NAME at POS      a preview opened (POS: the order position)
+;;;   crash: intercept preview stop
+
+(define-library (crash intercept preview)
+  (import (sigil math)
+          (sigil time)
+          (motif tune)
+          (motif tune player)
+          (crash audio)
+          (crash music resample)
+          (only (crash music live) live-music-rate LIVE-GAIN)
+          (only (crash intercept source) play-once-text))
+
+  (export preview-want! preview-stop! preview-name preview-gain preview-set-say! preview-start-pos
+          DEBOUNCE-MS FADE-MS)
+
+  (begin
+    (define DEBOUNCE-MS 250)
+    (define FADE-MS 150)
+    (define DUCK-MS 250)
+    (define DUCK-GAIN 0.5)
+    (define PREVIEW-GAIN 0.8)    ; of the soundtrack's level: a preview sits a little under the game's music
+
+    (define *player* #f)
+    (define *name* #f)           ; the song playing (or fading out)
+    (define *want* #f)           ; (name . since-ms): the highlighted song and when it was first asked
+    (define *fade* #f)           ; (from to start-ms) the gain's ramp
+    (define *gain* 0.0)
+    (define *rate* 44100)
+    (define *device* 44100)
+    (define *rs* (make-resampler))
+    (define *say* (lambda parts #f))
+    (define *refused* (quote ()))   ; songs whose text would not read
+    (define *said-at* #f)           ; the last underruns line (once a second, for the arm); #f: none yet
+                                    ; (the web's wall ms reads NEGATIVE here, so a start at 0 never printed)
+    (define (preview-set-say! proc) (set! *say* proc))
+    (define (preview-name) *name*)
+    (define (preview-gain) *gain*)
+
+    ;; Where a preview starts: the tense section's first order position, else
+    ;; the top (a tune with no marks)
+    (define (preview-start-pos tune)
+      (let ((r (assq 'tense (tune-mark-regions tune))))
+        (if r (cadr r) 0)))
+
+    (define (pull! out byte-offset n)
+      (and *player*
+           (if (< *rate* *device*)
+               (resampler-pull! *rs* (lambda (buf off frames) (player-pull! *player* buf off frames))
+                                out byte-offset n (/ (* 1.0 *rate*) *device*))
+               (player-pull! *player* out byte-offset n))))
+
+    (define (close!)
+      (when *player*
+        (audio-set-source! #f 0.0)
+        (player-close! *player*)
+        (set! *player* #f))
+      (set! *name* #f))
+
+    (define (preview-stop!)
+      (when *player* (*say* "intercept" "preview" "stop"))
+      (close!)
+      (set! *want* #f)
+      (set! *fade* #f)
+      (set! *gain* 0.0))
+
+    (define (open! name text now)
+      (let ((tune (and (not (memq name *refused*)) (guard (e (#t #f)) (read-tune-string (play-once-text text))))))
+        (unless tune (set! *refused* (cons name *refused*)))   ; a text that will not read is not parsed again every frame
+        (when tune
+          (set! *device* (audio-rate))
+          (set! *rate* (min (live-music-rate) *device*))
+          (resampler-reset! *rs*)
+          (let* ((pos (preview-start-pos tune))
+                 (r (assq 'tense (tune-mark-regions tune)))
+                 (p (open-tune-player tune *rate* start: (cons pos 0) loop: #t)))
+            (when r (player-set-region! p (cadr r) (cddr r)))
+            (set! *player* p)
+            (set! *name* name)
+            (set! *gain* 0.0)
+            (set! *fade* (list 0.0 1.0 now))
+            (audio-set-source! pull! 0.0)
+            (*say* "intercept" "preview" name "at" pos)))))
+
+    (define (ramp now)
+      (if (not *fade*)
+          *gain*
+          (let* ((from (car *fade*)) (to (cadr *fade*))
+                 (k (min 1.0 (/ (- now (caddr *fade*)) FADE-MS))))
+            (+ from (* k (- to from))))))
+
+    (define (duck now)
+      (let ((c (audio-cue-at)))
+        (if (and c (< (- (current-milliseconds) c) DUCK-MS)) DUCK-GAIN 1.0)))
+
+    ;; Once a second on the list: the sinks' starved frames so far (the source's
+    ;; count carries over closed sinks), for the arm's scroll check (the review's M3:
+    ;; the page's own stats read only the first two sinks)
+    ;;   crash: intercept preview underruns SOURCE CUES
+    (define (say-underruns! now)
+      (when (or (not *said-at*) (>= (- now *said-at*) 1000))
+        (set! *said-at* now)
+        (*say* "intercept" "preview" "underruns" (audio-source-underruns) (audio-underruns))))
+
+    (define (preview-want! name text now)
+      (say-underruns! now)
+      (unless (and *want* (eq? (car *want*) name))
+        (set! *want* (cons name now)))
+      (cond
+        ;; the wanted song plays: if it was fading out (the list moved away and back
+        ;; inside the fade), fade it back in from where it stands (the review's M1)
+        ((eq? *name* name)
+         (when (and *fade* (= (cadr *fade*) 0.0))
+           (set! *fade* (list (ramp now) 1.0 now))))
+        ;; another plays: fade it out, then close it
+        (*player*
+         (unless (and *fade* (= (cadr *fade*) 0.0))
+           (set! *fade* (list (ramp now) 0.0 now)))
+         (when (>= (- now (caddr *fade*)) FADE-MS)
+           (close!)
+           (set! *fade* #f)
+           (set! *gain* 0.0)))
+        ;; nothing plays: open the wanted one once it has held still
+        ((and text (>= (- now (cdr *want*)) DEBOUNCE-MS) (audio-open?) (not (audio-muted?)) (audio-music?))   ; MUSIC off: no preview
+         (open! name text now)))
+      (when *player*
+        (set! *gain* (ramp now))
+        (audio-set-source! pull! (* LIVE-GAIN PREVIEW-GAIN (audio-volume) *gain* (duck now)))))))

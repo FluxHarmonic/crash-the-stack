@@ -70,7 +70,7 @@ const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;char
   ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const results = [];
-const planned = ["menu", "select", "open", "hash", "input", "exit", "clock", "render", ...(FULL ? ["full"] : []), "console"];
+const planned = ["menu", "select", "preview", ...(PHONE ? ["scroll"] : []), "open", "hash", "input", "preview-stop", "exit", "clock", "render", ...(FULL ? ["full"] : []), "field", "console"];
 function pass(name, detail) { results.push([name, "PASS"]); console.log(`PASS ${name}${detail ? ": " + detail : ""}`); }
 function fail(name, detail) { results.push([name, "FAIL"]); console.log(`FAIL ${name}: ${detail}`); }
 function notRun() { const done = new Set(results.map((r) => r[0])); return planned.filter((p) => !done.has(p)); }
@@ -387,6 +387,78 @@ function linesFrom(re, from) {
 }
 await waitForWorker();
 
+
+// ---- preview (t-2844c8): the highlighted song plays; a fast scroll opens only where it stops ----
+const PREVIEW_RE = /^crash: intercept preview (\S+) at (\d+)$/;
+async function starvedCount() {
+  const s = await evalJS("window.crashPageStats ? window.crashPageStats() : ''");
+  const l = (s.split("\n").find((x) => x.startsWith("page starved-at ")) || "").slice("page starved-at ".length);
+  return l === "(none)" || l === "" ? 0 : l.split(", ").length;
+}
+let previewMark = consoleLines.length;
+{
+  let detail = "";
+  const first = await waitLine(PREVIEW_RE, previewMark, 10000);
+  if (!first) detail = "no \"crash: intercept preview\" on the song list within 10 s";
+  else if (first.m[1] !== "black-glass" || +first.m[2] <= 0) detail = `${first.m[0]}: expected black-glass from its tense section (a position past 0)`;
+  else {
+    await sleep(600);
+    // the page says the sinks' starved frames once a second on the list (the source's count
+    // carries over the preview's closed sinks): the last line before the scroll and after
+    const under = () => { const m = [...consoleLines].reverse().map((l) => l.match(/^crash: intercept preview underruns (\d+) (\d+)$/)).find((x) => x); return m ? [+m[1], +m[2]] : null; };
+    const u0 = under();
+    const m1 = consoleLines.length;
+    for (let i = 0; i < 4; i++) await key("ArrowDown");   // 190 ms apart: under the 250 ms debounce
+    const landed = await waitLine(PREVIEW_RE, m1, 5000);
+    if (SHOT && landed) { await sleep(400); fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-list.png", Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64")); }   // the scrolled list, for David
+    await sleep(1500);
+    const u1 = under();
+    const opened = linesFrom(PREVIEW_RE, m1).map((m) => m[1]);
+    if (!landed) detail = "no preview after scrolling four songs down";
+    else if (opened.join(" ") !== "glass-current") detail = `the scroll opened ${opened.join(" ")}: only glass-current (where it stopped) should open`;
+    else if (!u0 || !u1) detail = "no \"crash: intercept preview underruns\" line on the list";
+    else if (u1[0] - u0[0] !== 0 || u1[1] - u0[1] !== 0) detail = `frames starved while scrolling: source ${u1[0] - u0[0]}, cues ${u1[1] - u0[1]}`;
+    else pass("preview", `${first.m[0]}; four downs opened only ${landed.m[0]}; frames starved over the scroll: source 0, cues 0`);
+    for (let i = 0; i < 4; i++) await key("ArrowUp");   // back to Black Glass for the legs that follow
+    await waitLine(/^crash: intercept preview black-glass at /, m1 + 1, 5000);
+  }
+  if (detail) fail("preview", detail);
+  previewMark = consoleLines.length;
+}
+
+
+// ---- scroll (phone): David, 2026-09-29: a swipe on the list, and UP / DOWN buttons big enough to tap ----
+if (PHONE) {
+  let detail = "";
+  const LIST_RE = /^crash: intercept list (\d+)$/;
+  const m0 = consoleLines.length;
+  await touch(580, 180);   // DOWN's centre: PAGE-X 528 + 52, y 154..206
+  const down = await waitLine(LIST_RE, m0, 3000);
+  if (!down || down.m[1] !== "4") detail = `a tap on DOWN did not page the list to 4 (${down ? down.m[0] : "no list line"})`;
+  else {
+    // a real swipe up on the list: 60 virtual px, two rows' travel
+    const a = await client(320, 190), b = await client(320, 130);
+    const m1 = consoleLines.length;
+    await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: a.cx, y: a.cy, id: 1 }] });
+    for (let k = 1; k <= 6; k++) { await sleep(30); await send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: a.cx, y: a.cy + (b.cy - a.cy) * k / 6, id: 1 }] }); }
+    await sleep(30);
+    await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const swiped = await waitLine(LIST_RE, m1, 3000);
+    await sleep(800);
+    const chose = linesFrom(/^crash: intercept preview (\S+) at \d+$/, m1).map((m) => m[1]).filter((n) => n !== "black-glass");
+    if (!swiped || +swiped.m[1] <= 4) detail = `a swipe up did not scroll the list past 4 (${swiped ? swiped.m[0] : "no list line"})`;
+    else if (chose.length) detail = `the swipe chose a song (previews: ${chose.join(" ")}): a drag must only scroll`;
+    else {
+      const m2 = consoleLines.length;
+      await touch(580, 122);   // UP's centre: y 96..148
+      const up = await waitLine(LIST_RE, m2, 3000);
+      if (!up || +up.m[1] >= +swiped.m[1]) detail = `a tap on UP did not page back (${up ? up.m[0] : "no list line"})`;
+      else pass("scroll", `DOWN -> ${down.m[0]}; a swipe up -> ${swiped.m[0]} with no song chosen; UP -> ${up.m[0]}`);
+    }
+  }
+  if (detail) fail("scroll", detail);
+}
+
 // ---- open, hash, input (the menu's path, no autoplay) --------------------------------
 {
   const m0 = consoleLines.length;
@@ -438,6 +510,7 @@ await waitForWorker();
   }
 }
 
+let exitMark = consoleLines.length;
 // ---- exit: out of a song and out of INTERCEPT without a keyboard ----------------------
 // David on the phone: "no way to get out of INTERCEPT". The song from the input
 // leg is still playing. Phone: a real touch on the pause button (top left), a
@@ -452,12 +525,25 @@ await waitForWorker();
   if (paused) await at(320, 245);   // SONGS on the pause panel
   const songs = paused && await waitLine(/^crash: intercept songs$/, m1, 3000);
   const m2 = consoleLines.length;
+  if (songs) await waitLine(/^crash: intercept preview \S+ at \d+$/, m1, 4000);   // the list's preview opens (so MENU has one to stop)
   if (songs) await at(44, 18);      // MENU on the song screen
   const menu = songs && await waitLine(/^crash: menu (top|free) /, m2, 3000);
   if (!paused) fail("exit", `${PHONE ? "a touch on the pause button" : "Escape"} did not pause the song`);
   else if (!songs) fail("exit", "SONGS on the pause panel did not leave the song");
   else if (!menu) fail("exit", "MENU on the song screen did not reach the game's menu");
   else pass("exit", `${PHONE ? "touch" : "keys and clicks"}: paused at ${paused.m[1]} ms, SONGS, then MENU -> ${menu.m[0].slice(0, 40)}`);
+}
+
+{
+  // preview-stop: the preview stops on entering a song (before it opens) and on leaving by MENU
+  // (the exit leg above left by the pause's SONGS, then MENU)
+  const openAt = consoleLines.findIndex((l, i) => i >= previewMark && OPEN_RE.test(l));
+  const stopAt = consoleLines.findIndex((l, i) => i >= previewMark && /^crash: intercept preview stop$/.test(l));
+  const menuStop = linesFrom(/^crash: intercept preview stop$/, exitMark).length;
+  if (stopAt < 0) fail("preview-stop", "no \"crash: intercept preview stop\" when the song was entered");
+  else if (openAt >= 0 && stopAt > openAt) fail("preview-stop", "the preview stopped after the song opened");
+  else if (menuStop < 1) fail("preview-stop", "no preview stop after leaving the list by MENU");
+  else pass("preview-stop", "stopped on entering the song, and on MENU");
 }
 
 // ---- clock, render, full (the door, on autoplay) -------------------------------------
@@ -513,6 +599,59 @@ let doorMark = 0;
     if (!e) fail("full", "no end line within 220 s of the start");
     else if (e.m[1] !== "held" || +e.m[8] !== 0) fail("full", e.m[0]);
     else pass("full", `${e.m[0]} (SYNC CLEAN LOSSY DROP: the web's frame jitter under autoplay)`);
+  }
+}
+
+
+// ---- field (t-15acbf): the living field's frame cost, and that the drawn clock (which the
+// presses are judged on) does not drift with it: on against ?bg=off, the same song on autoplay ----
+{
+  const run = async (q) => {
+    const m0 = consoleLines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&fresh&intercept=${SONG}&autoplay${q}` });
+    const s = await waitLine(START_RE, m0, 60000);
+    if (!s) return null;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 12000 && linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000).length < 6) await sleep(250);
+    const gaps = await evalJS(`new Promise((res) => { const g = []; let last = null; const t0 = performance.now();
+      const f = (t) => { if (last !== null) g.push(t - last); last = t; if (t - t0 < 4000) requestAnimationFrame(f); else res(g); };
+      requestAnimationFrame(f); })`);
+    const errs = linesFrom(CLOCK_RE, s.index).filter((m) => +m[1] >= 1000 && m[2] !== "-").map((m) => Math.abs(+m[2]));
+    const pct = (xs, p) => { const v = [...xs].sort((a, b) => a - b); return v.length ? v[Math.min(v.length - 1, Math.floor(p * v.length))] : NaN; };
+    // the field itself (the review's M4): desktop only (the phone's four pads fill the width).
+    // Two captures a second apart; the share of pixels that changed in a strip left of the
+    // lanes (virtual x 16..190, y 60..300). With the field it moves; with ?bg=off it holds.
+    if (SHOT && q === "") fs.writeFileSync(SHOT.replace(/\.png$/, "") + "-field.png", Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));   // the wire over the field, for David
+    let motion = null;
+    if (!PHONE) {
+      const a = await client(16, 60), b = await client(190, 300);
+      const dpr = 2;
+      const box = { x0: Math.round(a.cx * dpr), y0: Math.round(a.cy * dpr), x1: Math.round(b.cx * dpr), y1: Math.round(b.cy * dpr) };
+      const grab = async () => decodePng(Buffer.from((await send("Page.captureScreenshot", { format: "png" })).data, "base64"));
+      const p1 = await grab(); await sleep(1000); const p2 = await grab();
+      let changed = 0, total = 0;
+      for (let y = box.y0; y < box.y1; y += 2) for (let x = box.x0; x < box.x1; x += 2) {
+        const i = (y * p1.w + x) * p1.bpp;
+        const d = Math.abs(p1.px[i] - p2.px[i]) + Math.abs(p1.px[i + 1] - p2.px[i + 1]) + Math.abs(p1.px[i + 2] - p2.px[i + 2]);
+        total++; if (d > 6) changed++;
+      }
+      motion = total ? changed / total : 0;
+    }
+    return { p50: pct(gaps, 0.5), p95: pct(gaps, 0.95), err: pct(errs, 0.5), n: errs.length, motion };
+  };
+  const on = await run("");
+  const off = await run("&bg=off");
+  if (!on || !off) fail("field", "the door's song did not start");
+  else {
+    const r = (x) => Math.round(x * 10) / 10;
+    const pc = (m) => (m === null ? "-" : `${(m * 100).toFixed(1)} %`);
+    const txt = `on p50 ${r(on.p50)} p95 ${r(on.p95)} ms, clock error median ${on.err} ms, field motion ${pc(on.motion)}; off p50 ${r(off.p50)} p95 ${r(off.p95)} ms, error ${off.err} ms, motion ${pc(off.motion)}`;
+    console.log(`MEASURE field ${PHONE ? "phone" : "desktop"}: ${txt}`);
+    if (off.p50 > 16.7) fail("field", `INCONCLUSIVE: over 16.7 ms with the field off: ${txt}`);
+    else if (on.p50 > 16.7) fail("field", `the field takes the frame past 16.7 ms: ${txt}`);
+    else if (on.err > off.err + 10) fail("field", `the drawn clock strays with the field on: ${txt}`);
+    else if (!PHONE && !(on.motion > 0.01 && on.motion > 3 * off.motion)) fail("field", `the field is not moving behind the wire: ${txt}`);
+    else pass("field", txt);
   }
 }
 
