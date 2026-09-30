@@ -1,0 +1,458 @@
+;;; (crash decrypt draw) - Drawing DECRYPT
+;;;
+;;; The ciphertext grid: six glyph kinds, each a distinct 7x7 shape AND a
+;;; color (STACK's color-blind rule: the shape carries the kind, the color
+;;; reinforces it). A BURST wears a corner frame that pulses, a SWEEP a
+;;; bar through its row and column, a WILDCARD a star cycling every kind's
+;;; color. A collision decrypts: the glyphs flash and break into bits that
+;;; fall away; the column then falls and new ciphertext drops in from the
+;;; top. The board sits on the living background; the bar on the left
+;;; holds the score, the chain and (DAILY) the moves left.
+;;;
+;;; Nothing here reads input, a platform or a clock: the table's clock
+;;; comes in with the table.
+
+(define-library (crash decrypt draw)
+  (import (sigil math)
+          (sigil list)
+          (sigil string)
+          (sigil graphics)
+          (crash palette)
+          (crash font)
+          (crash atlas)
+          (only (crash render) draw-board-background draw-end-panel)
+          (crash decrypt rules)
+          (crash decrypt record)
+          (crash decrypt table))
+
+  (export draw-decrypt GLYPHS KIND-COLORS)
+
+  (begin
+    (define (text! text x y scale)
+      (if (atlas-on?) (atlas-text text x y scale) (draw-text text x y scale)))
+    (define (text-center! text cx y scale)
+      (text! text (- cx (quotient (text-width text scale) 2)) y scale))
+
+    ;; --- the glyphs ----------------------------------------------------------------
+    ;; 7x7, a "#" lit: square, diamond, triangle, ring, plus, cross.
+    (define GLYPHS
+      (list (list "#######" "#.....#" "#.###.#" "#.#.#.#" "#.###.#" "#.....#" "#######")
+            (list "...#..." "..###.." ".#####." "#######" ".#####." "..###.." "...#...")
+            (list "...#..." "..###.." "..###.." ".#####." ".#####." "#######" "#######")
+            (list "..###.." ".#...#." "#.....#" "#.....#" "#.....#" ".#...#." "..###..")
+            (list "..###.." "..###.." "#######" "#######" "#######" "..###.." "..###..")
+            (list "##...##" "###.###" ".#####." "..###.." ".#####." "###.###" "##...##")))
+    (define STAR (list "#..#..#" ".#.#.#." "..###.." "#######" "..###.." ".#.#.#." "#..#..#"))
+    (define KIND-COLORS (list C-SCAN-1 C-LABEL-LIT C-SCAN-2 C-TRACE-HOT C-GIBSON C-HOT))
+
+    ;; each row's lit runs as (x0 . len), made once
+    (define (runs-of rows)
+      (map (lambda (r)
+             (let loop ((x 0) (start #f) (acc '()))
+               (cond ((= x 7) (reverse (if start (cons (cons start (- x start)) acc) acc)))
+                     ((char=? (string-ref r x) #\#) (loop (+ x 1) (or start x) acc))
+                     (else (loop (+ x 1) #f (if start (cons (cons start (- x start)) acc) acc))))))
+           rows))
+    (define *runs* #f)
+    (define (glyph-runs k)
+      (unless *runs* (set! *runs* (list->vector (map runs-of (append GLYPHS (list STAR))))))
+      (vector-ref *runs* k))
+
+    (define PX 4)   ; a glyph pixel: 7 x 4 = 28 of the 44 cell
+    (define (draw-shape k x y px)
+      (let loop ((rows (glyph-runs k)) (r 0))
+        (when (pair? rows)
+          (for-each (lambda (run)
+                      (draw-filled-rect (+ x (* px (car run))) (+ y (* px r)) (* px (cdr run)) px))
+                    (car rows))
+          (loop (cdr rows) (+ r 1)))))
+
+    ;; --- the bevel (David, 2026-09-29: the glyphs "look a little plain") ----------
+    ;; Each glyph is drawn as a solid piece lit from the top left: a drop shadow
+    ;; two pixels down and right, the shape, a lit one-pixel strip along every
+    ;; top and left edge and a shaded one along every bottom and right edge.
+    ;; The strips are found once per shape from its 7x7 grid (a cell is an edge
+    ;; where its neighbor on that side is not lit) and merged into runs.
+    (define (lit? rows c r)
+      (and (>= c 0) (< c 7) (>= r 0) (< r 7) (char=? (string-ref (list-ref rows r) c) #\#)))
+    ;; runs along rows (horizontal edges) or columns (vertical ones) of the cells
+    ;; that are lit with their (dc, dr) neighbor unlit, as rects in glyph pixels
+    ;; offset inside the cell: (x y w h), the strip ONE screen pixel thick
+    (define (edge-strips rows dc dr)
+      (let* ((along-row? (= dc 0))
+             (edge? (lambda (c r) (and (lit? rows c r) (not (lit? rows (+ c dc) (+ r dr))))))
+             (strip (lambda (c r len)
+                      (let ((x (* PX c)) (y (* PX r)))
+                        (cond ((= dr -1) (list x y (* PX len) 1))
+                              ((= dr 1) (list x (+ y (- PX 1)) (* PX len) 1))
+                              ((= dc -1) (list x y 1 (* PX len)))
+                              (else (list (+ x (- PX 1)) y 1 (* PX len))))))))
+        (let outer ((line 0) (acc '()))
+          (if (= line 7)
+              acc
+              (let inner ((k 0) (start #f) (acc acc))
+                (let* ((c (if along-row? k line))
+                       (r (if along-row? line k))
+                       (on (and (< k 7) (edge? c r)))
+                       (flush (lambda (acc)
+                                (if start
+                                    (cons (if along-row? (strip start line (- k start)) (strip line start (- k start))) acc)
+                                    acc))))
+                  (cond ((= k 7) (outer (+ line 1) (flush acc)))
+                        (on (inner (+ k 1) (or start k) acc))
+                        (else (inner (+ k 1) #f (flush acc))))))))))
+    (define *bevels* #f)
+    ;; (lights . shades) of shape k
+    (define (bevel k)
+      (unless *bevels*
+        (set! *bevels*
+              (list->vector
+               (map (lambda (rows)
+                      (cons (append (edge-strips rows 0 -1) (edge-strips rows -1 0))
+                            (append (edge-strips rows 0 1) (edge-strips rows 1 0))))
+                    (append GLYPHS (list STAR))))))
+      (vector-ref *bevels* k))
+    (define (draw-strips strips x y)
+      (for-each (lambda (s) (draw-filled-rect (+ x (car s)) (+ y (cadr s)) (caddr s) (cadddr s))) strips))
+    ;; shape k in color c at alpha a, shadowed and bevelled
+    ;; shape k (color index ci) at alpha a: through the baked sheet, one texture
+    ;; region a glyph; ?atlas=off draws the rects (the oracle and the fallback)
+    (define (draw-glyph k ci x y a)
+      (if (atlas-on?)
+          (let ((tex (glyph-sheet)))
+            (color-alpha! C-TEX-PLAIN a)
+            (draw-texture-region tex x y GP GP
+                                 (* GP (if (= k 6) ci k))
+                                 (- (* 2 GP) (* GP (if (= k 6) 1 0)))
+                                 GP (- GP)))
+          (draw-glyph-rects k x y (list-ref KIND-COLORS ci) a)))
+
+    (define (draw-glyph-rects k x y c a)
+      (color-alpha! C-BG (* 0.75 a))
+      (draw-shape k (+ x 2) (+ y 2) PX)
+      (color-alpha! c a)
+      (draw-shape k x y PX)
+      (let ((b (bevel k)))
+        (color-alpha! C-FACE-EDGE (* 0.55 a))
+        (draw-strips (car b) x y)
+        (color-alpha! C-BG (* 0.5 a))
+        (draw-strips (cdr b) x y)))
+
+    ;; --- the baked sheet (the bevel tripled the rects a frame: the phone arm's
+    ;; audio leg starved 128 frames at 4x and its frame p95 went 16.7 -> 33.3 ms) --
+    ;; One 'nearest target, baked on first use, as (crash atlas) bakes the font:
+    ;; row 0 the six kinds in their colors, row 1 the WILDCARD's star in each
+    ;; color, GP x GP a cell. Baked with blending off, so every texel is opaque
+    ;; where the glyph is and clear elsewhere: the shadow is C-BG, the strips the
+    ;; kind's color mixed toward C-FACE-EDGE (lit) and C-BG (shaded), the looks
+    ;; the rect path gets by blending. Drawn tinted C-TEX-PLAIN (white) at the
+    ;; cell's alpha. Rows are read bottom-up, as the atlas reads them.
+    (define GP 32)
+    (define *glyph-rt* #f)
+    (define *glyph-tex* #f)
+    (define (mix a b k) (map (lambda (x y) (+ x (* k (- y x)))) a b))
+    (define (opaque! c) (set-color (car c) (cadr c) (caddr c) 1.0))
+    (define (bake-glyph! k c x y)
+      (opaque! C-BG)
+      (draw-shape k (+ x 2) (+ y 2) PX)
+      (opaque! c)
+      (draw-shape k x y PX)
+      (let ((b (bevel k)))
+        (opaque! (mix c C-FACE-EDGE 0.55))
+        (draw-strips (car b) x y)
+        (opaque! (mix c C-BG 0.5))
+        (draw-strips (cdr b) x y)))
+    (define (glyph-sheet)
+      (unless *glyph-rt*
+        (set! *glyph-rt* (make-render-target (* 6 GP) (* 2 GP) 'nearest))
+        (with-render-target *glyph-rt*
+          (set-blend-mode 'none)
+          (let loop ((i 0))
+            (when (< i 6)
+              (bake-glyph! i (list-ref KIND-COLORS i) (* i GP) 0)
+              (bake-glyph! 6 (list-ref KIND-COLORS i) (* i GP) GP)
+              (loop (+ i 1)))))
+        (set-blend-mode 'normal)
+        (set! *glyph-tex* (render-target->texture *glyph-rt*)))
+      *glyph-tex*)
+
+    ;; a cell's glyph at (x, y) = the cell's top left, alpha a
+    (define (draw-cell v x y a ms)
+      (let* ((sp (cell-special v))
+             (gx (+ x 8)) (gy (+ y 8)))
+        (cond ((not sp) #f)
+              ((= sp 3)
+               (draw-glyph 6 (modulo (quotient (exact (floor ms)) 120) 6) gx gy a))
+              (else
+               (let ((c (list-ref KIND-COLORS (cell-kind v))))
+                 (when (= sp 2)
+                   ;; SWEEP: a bar across and down through the cell
+                   (color-alpha! c (* 0.45 a))
+                   (draw-filled-rect (+ x 2) (+ y 20) 40 4)
+                   (draw-filled-rect (+ x 20) (+ y 2) 4 40))
+                 (when (= sp 1)
+                   ;; BURST: corner brackets that pulse
+                   (let ((p (+ 0.55 (* 0.45 (sin (* ms 0.012))))))
+                     (color-alpha! c (* p a))
+                     (for-each (lambda (cx cy dx dy)
+                                 (rect cx cy (* 8 dx) 2)
+                                 (rect cx cy 2 (* 8 dy)))
+                               (list (+ x 2) (+ x 40) (+ x 2) (+ x 40))
+                               (list (+ y 2) (+ y 2) (+ y 40) (+ y 40))
+                               '(1 -1 1 -1) '(1 1 -1 -1))))
+                 (draw-glyph (cell-kind v) (cell-kind v) gx gy a))))))
+
+    ;; draw-filled-rect with a negative size (the BURST's mirrored corners)
+    ;; is normalised here so the graphics layer only sees positive sizes
+    (define (rect x y w h)
+      (draw-filled-rect (if (< w 0) (+ x w) x) (if (< h 0) (+ y h) y) (abs w) (abs h)))
+
+    ;; --- the board -------------------------------------------------------------------
+    (define (cell-xy i) (cons (+ BOARD-X (* CELL (modulo i 8))) (+ BOARD-Y (* CELL (quotient i 8)))))
+
+    (define (draw-grid)
+      (color-alpha! C-BG 0.82)
+      (draw-filled-rect (- BOARD-X 4) (- BOARD-Y 4) (+ 8 (* 8 CELL)) (+ 8 (* 8 CELL)))
+      (let loop ((i 0))
+        (when (< i 64)
+          (let ((p (cell-xy i)))
+            (color-alpha! (if (even? (+ (modulo i 8) (quotient i 8))) C-BAR-A C-BAR-B) 0.9)
+            (draw-filled-rect (car p) (cdr p) CELL CELL))
+          (loop (+ i 1))))
+      (color! C-WIRE-DARK)
+      (draw-filled-rect (- BOARD-X 4) (- BOARD-Y 4) (+ 8 (* 8 CELL)) 1)
+      (draw-filled-rect (- BOARD-X 4) (+ BOARD-Y (* 8 CELL) 3) (+ 8 (* 8 CELL)) 1))
+
+    (define (clamp01 x) (max 0.0 (min 1.0 x)))
+
+    (define (draw-cells t)
+      (let* ((ph (decrypt-table-phase t))
+             (ms (decrypt-table-ms t))
+             (age (- ms (decrypt-table-phase-ms t)))
+             (board (decrypt-table-board t))
+             (cells (dboard-cells board)))
+        (case ph
+          ((swap unswap)
+           (let* ((s (decrypt-table-swap t))
+                  (i (car s)) (j (cadr s))
+                  (k (clamp01 (/ age SWAP-MS)))
+                  (k (if (eq? ph 'unswap) (- 1.0 k) k))
+                  (pa (cell-xy i)) (pb (cell-xy j)))
+             (let loop ((n 0))
+               (when (< n 64)
+                 (unless (or (= n i) (= n j))
+                   (let ((p (cell-xy n))) (draw-cell (vector-ref cells n) (car p) (cdr p) 1.0 ms)))
+                 (loop (+ n 1))))
+             (let ((lerp (lambda (a b) (exact (round (+ a (* k (- b a))))))))
+               (draw-cell (vector-ref cells i) (lerp (car pa) (car pb)) (lerp (cdr pa) (cdr pb)) 1.0 ms)
+               (draw-cell (vector-ref cells j) (lerp (car pb) (car pa)) (lerp (cdr pb) (cdr pa)) 1.0 ms))))
+          ((clear)
+           (let* ((st (decrypt-table-step t))
+                  (cleared (dstep-cleared st))
+                  (after (dboard-cells (dstep-board st)))
+                  (k (clamp01 (/ age CLEAR-MS))))
+             (let loop ((n 0))
+               (when (< n 64)
+                 (let ((p (cell-xy n)))
+                   (if (memv n cleared)
+                       (draw-decrypting (vector-ref cells n) (car p) (cdr p) k n)
+                       (draw-cell (vector-ref after n) (car p) (cdr p) 1.0 ms))
+                   ;; a special made here appears as the clear ends
+                   (when (and (memv n cleared) (>= (vector-ref after n) 0))
+                     (draw-cell (vector-ref after n) (car p) (cdr p) k ms)))
+                 (loop (+ n 1))))))
+          ((fall)
+           (let* ((fl (decrypt-table-fall t))
+                  (fc (dboard-cells (dfall-board fl)))
+                  (drops (dfall-drops fl)))
+             (let loop ((n 0))
+               (when (< n 64)
+                 (let* ((p (cell-xy n))
+                        (d (assv n drops))
+                        (rows (if d (cadr d) 0))
+                        (dur (+ FALL-BASE-MS (* FALL-ROW-MS rows)))
+                        (k (clamp01 (/ age dur)))
+                        (off (exact (round (* rows CELL (- 1.0 (* k k)))))))
+                   (when (>= (- (+ (cdr p) CELL) off) BOARD-Y)   ; above the board: not yet in
+                     (draw-cell (vector-ref fc n) (car p) (- (cdr p) off) 1.0 ms)))
+                 (loop (+ n 1))))
+             ;; the board's top edge hides what is still above it
+             (color! C-BG)
+             (draw-filled-rect (- BOARD-X 4) 0 (+ 8 (* 8 CELL)) (- BOARD-Y 4))))
+          ((rekey)
+           (let ((k (clamp01 (/ age REKEY-MS))))
+             (let loop ((n 0))
+               (when (< n 64)
+                 (let* ((p (cell-xy n))
+                        ;; the glyphs scramble in, row by row
+                        (show (> (* k 10.0) (+ 1.5 (* 0.1 (quotient n 8)) (* 0.05 (modulo (* n 7) 8))))))
+                   (if show
+                       (draw-cell (vector-ref cells n) (car p) (cdr p) 1.0 ms)
+                       (begin (color-alpha! C-STATIC-A 0.5)
+                              (draw-filled-rect (+ (car p) 10 (* 3 (modulo (* n 13) 7))) (+ (cdr p) 18) 8 4))))
+                 (loop (+ n 1))))))
+          (else
+           (let loop ((n 0))
+             (when (< n 64)
+               (let ((p (cell-xy n))) (draw-cell (vector-ref cells n) (car p) (cdr p) 1.0 ms))
+               (loop (+ n 1))))))))
+
+    ;; a glyph decrypting: a white flash, then bits falling away
+    (define (draw-decrypting v x y k n)
+      (if (< k 0.35)
+          (begin
+            (color-alpha! C-FACE-EDGE (- 1.0 (* 2.0 k)))
+            (draw-filled-rect (+ x 4) (+ y 4) 36 36)
+            (when (>= v 0) (draw-cell v x y (- 1.0 k) 0)))
+          (let ((f (/ (- k 0.35) 0.65)))
+            (color-alpha! (if (and (>= v 0) (cell-kind v)) (list-ref KIND-COLORS (cell-kind v)) C-TEXT) (- 1.0 f))
+            (let loop ((b 0))
+              (when (< b 6)
+                (let ((bx (+ x 6 (* 6 b)))
+                      (by (+ y 14 (exact (round (* f (+ 10 (* 4 (modulo (+ n b) 3)))))))))
+                  (text! (if (odd? (+ n b)) "1" "0") bx by 1))
+                (loop (+ b 1)))))))
+
+    ;; the selection, the keyboard cursor
+    (define (draw-marks t)
+      (let ((sel (decrypt-table-sel t))
+            (ms (decrypt-table-ms t)))
+        (when (and sel (eq? (decrypt-table-phase t) 'idle))
+          (let ((p (cell-xy sel)))
+            (color-alpha! C-SELECTED (+ 0.6 (* 0.4 (sin (* ms 0.01)))))
+            (frame (car p) (cdr p) CELL CELL 2)))
+        (when (decrypt-table-cursor-shown t)
+          (let ((p (cell-xy (decrypt-table-cursor t))))
+            (color! (if (decrypt-table-armed t) C-SELECTED C-HIGHLIGHT))
+            (frame (+ (car p) 1) (+ (cdr p) 1) (- CELL 2) (- CELL 2) (if (decrypt-table-armed t) 3 1))))))
+
+    (define (frame x y w h th)
+      (draw-filled-rect x y w th)
+      (draw-filled-rect x (- (+ y h) th) w th)
+      (draw-filled-rect x y th h)
+      (draw-filled-rect (- (+ x w) th) y th h))
+
+    ;; --- the bar and the words --------------------------------------------------------
+    (define (draw-bar t)
+      (let ((daily? (eq? (decrypt-table-mode t) 'daily))
+            (r (decrypt-table-record t))
+            (x 12))
+        ;; PAUSE (top left, the touch way out)
+        (let ((pr PAUSE-RECT))
+          (color! C-BAR-C)
+          (draw-filled-rect (car pr) (cadr pr) (caddr pr) (cadddr pr))
+          (color! C-TEXT)
+          (text-center! "PAUSE" (+ (car pr) (quotient (caddr pr) 2)) (+ (cadr pr) 10) 1))
+        (color! C-TEXT-DIM)
+        (text! (case (decrypt-table-mode t) ((daily) "DAILY") ((timed) "TIMED") (else "ENDLESS")) x 50 1)
+        (color! C-TEXT-DIM)
+        (text! "SCORE" x 74 1)
+        (color! C-TEXT)
+        (text! (number->string (decrypt-table-score t)) x 86 2)
+        (when daily?
+          (color! C-TEXT-DIM)
+          (text! "MOVES" x 120 1)
+          (let ((left (decrypt-moves-left t)))
+            (color! (if (<= left 5) C-TRACE-HOT C-TEXT))
+            (text! (number->string left) x 132 2)))
+        ;; TIMED: the seconds left, hot in the last ten
+        (let ((tl (decrypt-table-time-left t)))
+          (when tl
+            (color! C-TEXT-DIM)
+            (text! "TIME" x 120 1)
+            (let ((s (exact (ceiling (/ tl 1000.0)))))
+              (color! (if (<= tl TENSE-MS) C-TRACE-HOT C-TEXT))
+              (text! (number->string s) x 132 2))))
+        (color! C-TEXT-DIM)
+        (text! "BEST" x 166 1)
+        (color! C-TEXT)
+        (text! (number->string (case (decrypt-table-mode t)
+                                 ((daily) (if (eqv? (drecord-day r) (decrypt-table-day t)) (drecord-day-best r) 0))
+                                 ((timed) (drecord-timed-best r))
+                                 (else (drecord-best r))))
+               x 178 1)
+        (when daily?
+          (color! C-TEXT-DIM)
+          (text! "STREAK" x 200 1)
+          (color! C-TEXT)
+          (text! (number->string (record-streak-on r (decrypt-table-day t))) x 212 1))
+        ;; the chain, while a cascade runs
+        (let ((lv (decrypt-table-level t)))
+          (when (and (> lv 1) (memq (decrypt-table-phase t) '(clear fall)))
+            (color! (if (decrypt-table-hot t) C-ICE C-SELECTED))
+            (text! "CHAIN" x 250 1)
+            (text! (string-append "X" (number->string lv)) x 262 3)))
+        ;; the heat: the music's tension, as a thin bar
+        (let* ((h (min 1.0 (/ (decrypt-table-heat t) 8.0)))
+               (w (exact (round (* 110 h)))))
+          (color! C-BAR-B)
+          (draw-filled-rect x 380 110 4)
+          (color! (if (decrypt-table-hot t) C-ICE C-TRACE))
+          (draw-filled-rect x 380 w 4))
+        ;; the keys, on the right
+        (color! C-TEXT-DIM)
+        (for-each (lambda (line y) (text! line 510 y 1))
+                  ;; h j k l named on screen (David, 2026-09-29: "it took me a moment to realize that hjkl works")
+                  (list "SWIPE OR TAP" "TWO GLYPHS" "" "ARROWS OR H J K L" "MOVE THE CURSOR" "SPACE THEN" "AN ARROW SWAPS" "" "ESC PAUSES")
+                  (list 60 72 84 96 108 120 132 144 156))))
+
+    (define (draw-popups t)
+      (let ((ms (decrypt-table-ms t)))
+        (for-each (lambda (p)
+                    (let* ((age (- ms (list-ref p 3)))
+                           (k (clamp01 (/ age 700.0))))
+                      (color-alpha! C-LABEL-LIT (- 1.0 (* k k)))
+                      (text-center! (list-ref p 2) (car p) (- (cadr p) (exact (round (* 24 k)))) 2)))
+                  (decrypt-table-popups t))))
+
+    (define (draw-toast t)
+      (let* ((msg (decrypt-table-toast t))
+             (age (- (decrypt-table-ms t) (decrypt-table-toast-ms t))))
+        (when (and msg (< age 1400))
+          (color-alpha! C-ICE (- 1.0 (clamp01 (/ (- age 1000) 400.0))))
+          (text-center! msg 320 (+ BOARD-Y (* 8 CELL) 6) 1))))
+
+    (define (draw-panel t)
+      (let* ((rows (decrypt-panel-rows t))
+             (over? (eq? (decrypt-table-phase t) 'over))
+             (r (decrypt-table-record t))
+             (a (clamp01 (/ (- (decrypt-table-ms t) (decrypt-table-panel-at t)) 200.0)))
+             (a (if (decrypt-table-paused t) 1.0 (max a 0.0))))
+        (draw-end-panel (decrypt-panel-title t)
+                        (if over? C-SELECTED C-TEXT)
+                        (cond ((not over?)
+                               (string-append "SCORE " (number->string (decrypt-table-score t))))
+                              ((eq? (decrypt-table-mode t) 'timed)
+                               (string-append "SCORE " (number->string (decrypt-table-score t))
+                                              "   BEST " (number->string (drecord-timed-best r))))
+                              (else
+                               (string-append "SCORE " (number->string (decrypt-table-score t))
+                                              "   BEST " (number->string (drecord-day-best r))
+                                              "   STREAK " (number->string (drecord-streak r)))))
+                        (map cadr rows)
+                        (decrypt-table-panel t)
+                        (if over? (max a 0.05) 1.0))))
+
+    ;; The field behind the board (David, 2026-09-29): dimmed and grayed so the
+    ;; glyphs stay the brightest thing on screen, lifting on each beat of the
+    ;; tune (beat: where the ear is in the beat, 0..1, or #f), bursting on a
+    ;; cascade (the shell bursts the field itself). #f bg: BACKGROUND OFF.
+    (define (draw-veil vw vh beat)
+      (let* ((p (if beat (- 1.0 beat) 0.0))
+             (pulse (* p p p)))
+        (color-alpha! C-STATIC-B 0.22)
+        (draw-filled-rect 0 0 vw vh)
+        (color-alpha! C-BG (- 0.62 (* 0.16 pulse)))
+        (draw-filled-rect 0 0 vw vh)))
+
+    (define (draw-decrypt t vw vh bg copper beat)
+      (draw-board-background vw vh vh 0.0 bg copper)
+      (when bg (draw-veil vw vh beat))
+      (draw-grid)
+      (draw-cells t)
+      (draw-marks t)
+      (draw-popups t)
+      (draw-bar t)
+      (draw-toast t)
+      (when (or (decrypt-table-paused t) (eq? (decrypt-table-phase t) 'over))
+        (draw-panel t)))))

@@ -14,7 +14,7 @@
 // Sub-arms:
 //
 //   menu    a fresh origin's FREE PLAY lists INTERCEPT after SCAN:
-//           stack cards scan intercept code scores back
+//           stack cards scan intercept decrypt code scores back
 //   select  Enter on INTERCEPT opens the song select on Black Glass, RUNNER,
 //           keys (desktop) or touch (phone): "crash: intercept select"
 //   open    Enter plays it: "crash: intercept open ..." and "start ... audio on"
@@ -376,7 +376,7 @@ function linesFrom(re, from) {
   const rows = free ? free.m[1].split(" ").filter((_, i) => i % 3 === 0).map((id) => id.split("=")[0]) : [];
   if (!booted || !settled) fail("menu", "the menu never went live (no boot done / title settled)");
   else if (!free) fail("menu", "ArrowDown, Enter did not open FREE PLAY");
-  else if (rows.join(" ") !== "stack cards scan intercept code scores back") fail("menu", `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept code scores back`);
+  else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") fail("menu", `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt code scores back`);
   else pass("menu", `FREE PLAY ${rows.join(" ")}`);
   m0 = consoleLines.length;
   await key("ArrowDown"); await key("ArrowDown"); await key("ArrowDown"); await key("Enter");

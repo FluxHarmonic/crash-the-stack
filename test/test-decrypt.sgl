@@ -1,0 +1,249 @@
+;;; DECRYPT's board rules ((crash decrypt rules)): the deal, swaps, the
+;;; collisions and their specials, gravity and refill, cascades, REKEY and
+;;; the seeded determinism the DAILY stands on.
+;;;
+;;; Fixtures are 8 strings of 8 characters:
+;;;   0..5  a plain glyph of that kind
+;;;   a..f  a BURST of kind 0..5      A..F  a SWEEP of kind 0..5
+;;;   *     a WILDCARD                .     a hole (EMPTY)
+;;; The expected cells of every clear were worked out by hand from the
+;;; picture, not read back from the module.
+
+(import (sigil test)
+        (sigil list)
+        (crash decrypt rules))
+
+(define (char->cell c)
+  (cond ((char=? c #\.) EMPTY)
+        ((char=? c #\*) WILD)
+        ((char-numeric? c) (- (char->integer c) (char->integer #\0)))
+        ((and (char>=? c #\a) (char<=? c #\f)) (make-cell (- (char->integer c) (char->integer #\a)) BURST))
+        (else (make-cell (- (char->integer c) (char->integer #\A)) SWEEP))))
+
+(define (fixture rows)
+  (dboard cells: (list->vector (apply append (map (lambda (r) (map char->cell (string->list r))) rows)))
+          rng: 12345))
+
+(define (at x y) (+ (* y 8) x))
+
+(define (sorted xs) (list-sort < xs))
+
+;; A board with no runs and no move: every row the one before it shifted
+;; by one ((x + y) mod 6). Each kind's cells lie on diagonals, and no swap
+;; can line three up.
+(define (diagonal-rows off)
+  (map (lambda (y)
+         (list->string (map (lambda (x) (integer->char (+ (char->integer #\0) (modulo (+ x y off) 6))))
+                            (iota 8))))
+       (iota 8)))
+
+;; A 4 / 5 checkerboard: no runs, and planted kinds 0..3 never line up with it
+(define CHECKER
+  (list "45454545" "54545454" "45454545" "54545454" "45454545" "54545454" "45454545" "54545454"))
+
+;; CHECKER with rows replaced; a "-" in a row keeps the checkerboard's cell
+(define (fill-row y text)
+  (list->string (map (lambda (c b) (if (char=? c #\-) b c))
+                    (string->list text)
+                    (string->list (list-ref CHECKER y)))))
+
+(define (checker-with row text) (checker-with* (list (cons row text))))
+(define (checker-with* edits)
+  (map (lambda (y r)
+         (let ((e (assv y edits))) (if e (fill-row y (cdr e)) r)))
+       (iota 8) CHECKER))
+
+(test-group "decrypt: the deal"
+  (test "3000 seeded deals: no collision on the board, a move always, six kinds only"
+    (let loop ((seed 1) (bad '()))
+      (if (> seed 3000)
+          (assert-equal '() bad)
+          (let* ((b (decrypt-deal seed))
+                 (cells (dboard-cells b))
+                 (ok (and (not (board-matches? cells))
+                          (has-move? cells)
+                          (every (lambda (v) (and (>= v 0) (< v KINDS))) (vector->list cells)))))
+            (loop (+ seed 1) (if ok bad (cons seed bad)))))))
+  (test "a seed deals the same board every time; neighboring seeds deal apart"
+    (assert-equal (dboard-cells (decrypt-deal 41)) (dboard-cells (decrypt-deal 41)))
+    (assert-false (equal? (dboard-cells (decrypt-deal 41)) (dboard-cells (decrypt-deal 42))))))
+
+(test-group "decrypt: swaps"
+  (test "the diagonal board has no run and no move (the REKEY fixture's control)"
+    (let ((cells (dboard-cells (fixture (diagonal-rows 0)))))
+      (assert-false (board-matches? cells))
+      (assert-false (has-move? cells))))
+  (test "a swap that lines nothing up is refused and changes nothing"
+    (let* ((b (fixture (diagonal-rows 0)))
+           (p (play-swap b (at 3 3) (at 4 3))))
+      (assert-true (dplay-refused p))
+      (assert-equal (dboard-cells b) (dboard-cells (dplay-board p)))))
+  (test "only neighbors swap: diagonal and distant pairs are refused"
+    (let ((cells (dboard-cells (fixture (checker-with 3 "00------")))))
+      (assert-false (swap-ok? cells (at 3 2) (at 2 3)))
+      (assert-false (swap-ok? cells (at 7 3) (at 0 4)))   ; consecutive indices, different rows
+      (assert-false (neighbors? (at 7 3) (at 0 4)))))
+  (test "a swap that completes a line of three stands"
+    ;; row 3: 0 0 4 0 ...: moving the third 0 left completes 0 0 0
+    (let ((cells (dboard-cells (fixture (checker-with 3 "00-0----")))))
+      (assert-true (swap-ok? cells (at 2 3) (at 3 3)))))
+  (test "a WILDCARD swaps with any neighbor"
+    (let ((cells (dboard-cells (fixture (checker-with 0 "*-------")))))
+      (assert-true (swap-ok? cells (at 0 0) (at 1 0)))
+      (assert-true (swap-ok? cells (at 0 0) (at 0 1))))))
+
+(test-group "decrypt: collisions make specials"
+  (test "3 in a line clears 3 and makes nothing: 30 points at chain 1"
+    (let ((st (resolve-step (fixture (checker-with 3 "000-----")) 1 '() #f)))
+      (assert-equal (list (at 0 3) (at 1 3) (at 2 3)) (sorted (dstep-cleared st)))
+      (assert-equal '() (dstep-made st))
+      (assert-equal 30 (dstep-points st))))
+  (test "4 in a line makes a BURST of its kind on the moved cell"
+    (let ((st (resolve-step (fixture (checker-with 3 "1111----")) 1 (list (at 2 3) (at 2 2)) #f)))
+      (assert-equal 4 (length (dstep-cleared st)))
+      (assert-equal (list (cons (at 2 3) (make-cell 1 BURST))) (dstep-made st))
+      (assert-equal (make-cell 1 BURST) (dboard-at (dstep-board st) (at 2 3)))
+      (assert-equal (* 1 (+ 40 50)) (dstep-points st))))
+  (test "5 in a line makes a WILDCARD"
+    (let ((st (resolve-step (fixture (checker-with 5 "22222---")) 1 (list (at 1 5)) #f)))
+      (assert-equal (list (cons (at 1 5) WILD)) (dstep-made st))
+      (assert-equal (+ 50 200) (dstep-points st))))
+  (test "an L of 5 makes a SWEEP at its corner"
+    ;; 3 across at row 3 from x=0, 3 down at x=0 from row 3
+    (let ((st (resolve-step (fixture (checker-with* (list (cons 3 "333-----") (cons 4 "3-------") (cons 5 "3-------"))))
+                            2 '() #f)))
+      (assert-equal (sorted (list (at 0 3) (at 1 3) (at 2 3) (at 0 4) (at 0 5))) (sorted (dstep-cleared st)))
+      (assert-equal (list (cons (at 0 3) (make-cell 3 SWEEP))) (dstep-made st))
+      (assert-equal (* 2 (+ 50 100)) (dstep-points st))))
+  (test "a T of 5 makes a SWEEP at the crossing"
+    (let ((st (resolve-step (fixture (checker-with* (list (cons 3 "000-----") (cons 4 "-0------") (cons 5 "-0------"))))
+                            1 '() #f)))
+      (assert-equal (list (cons (at 1 3) (make-cell 0 SWEEP))) (dstep-made st))))
+  (test "a cascade's step multiplies: 3 cleared at chain 4 is 120"
+    (let ((st (resolve-step (fixture (checker-with 3 "000-----")) 4 '() #f)))
+      (assert-equal 120 (dstep-points st))
+      (assert-equal 4 (dstep-level st)))))
+
+(test-group "decrypt: the specials' clears"
+  (test "a BURST caught in a collision clears the 3x3 around it"
+    ;; row 3: 1 at x=2, BURST of 1 at x=3, 1 at x=4
+    (let ((st (resolve-step (fixture (checker-with 3 "--1b1---")) 1 '() #f)))
+      (assert-equal (sorted (list (at 2 2) (at 3 2) (at 4 2) (at 2 3) (at 3 3) (at 4 3) (at 2 4) (at 3 4) (at 4 4)))
+                    (sorted (dstep-cleared st)))
+      (assert-equal (list (cons (at 3 3) BURST)) (dstep-fired st))))
+  (test "a BURST at the edge clears only the board's part of its 3x3"
+    (let ((st (resolve-step (fixture (checker-with 0 "a00-----")) 1 '() #f)))
+      (assert-equal (sorted (list (at 0 0) (at 1 0) (at 2 0) (at 0 1) (at 1 1))) (sorted (dstep-cleared st)))))
+  (test "a SWEEP caught in a collision clears its row and its column"
+    (let ((st (resolve-step (fixture (checker-with 3 "--2C2---")) 1 '() #f)))
+      (assert-equal (sorted (append (map (lambda (x) (at x 3)) (iota 8))
+                                    (map (lambda (y) (at 3 y)) '(0 1 2 4 5 6 7))))
+                    (sorted (dstep-cleared st)))))
+  (test "a special caught in another's clear fires too: a SWEEP's column sets off a BURST"
+    ;; the SWEEP at (3,3) clears column 3, which holds a BURST at (3,6)
+    (let ((st (resolve-step (fixture (checker-with* (list (cons 3 "--2C2---") (cons 6 "---a----")))) 1 '() #f)))
+      (assert-equal 2 (length (dstep-fired st)))
+      (assert-true (memv (at 2 7) (dstep-cleared st)))    ; the BURST's 3x3 reaches off the column
+      (assert-true (memv (at 4 5) (dstep-cleared st)))
+      (assert-equal (+ 15 6) (length (dstep-cleared st)))))   ; 15 of the SWEEP, 6 more of the 3x3 (3 are in column 3)
+  (test "a WILDCARD swapped with each kind clears exactly every glyph of that kind"
+    ;; the diagonal board with (0,0) a WILDCARD; swapping it right puts the
+    ;; glyph at (1,0) into (0,0), whose kind is (1 + off) mod 6
+    (for-each
+     (lambda (off)
+       (let* ((rows (diagonal-rows off))
+              (rows (cons (string-append "*" (substring (car rows) 1 8)) (cdr rows)))
+              (b (fixture rows))
+              (k (modulo (+ 1 off) 6))
+              (p (play-swap b (at 0 0) (at 1 0)))
+              (st (car (dplay-steps p)))
+              ;; by hand: every cell whose diagonal is k after the swap, i.e.
+              ;; (x + y + off) mod 6 = k, less (1,0) (now the WILDCARD) plus (0,0)
+              (expect (sorted (cons (at 1 0)
+                                    (filter (lambda (i)
+                                              (and (not (= i (at 1 0)))
+                                                   (or (= i (at 0 0))
+                                                       (= k (modulo (+ (modulo i 8) (quotient i 8) off) 6)))))
+                                            (iota 64))))))
+         (assert-false (dplay-refused p))
+         (assert-equal k (dstep-wild st))
+         (assert-equal expect (sorted (dstep-cleared st)))))
+     (iota 6)))
+  (test "two WILDCARDs swapped together clear the whole board"
+    (let* ((rows (diagonal-rows 0))
+           (rows (cons (string-append "**" (substring (car rows) 2 8)) (cdr rows)))
+           (p (play-swap (fixture rows) (at 0 0) (at 1 0))))
+      (assert-equal 'all (dstep-wild (car (dplay-steps p))))
+      (assert-equal 64 (length (dstep-cleared (car (dplay-steps p))))))))
+
+(test-group "decrypt: gravity and refill"
+  (test "glyphs fall to the bottom in order, the holes refill from the top, nothing is left EMPTY"
+    ;; column 0: 0 at row 1, holes at rows 2..4, 1 at row 5
+    (let* ((rows (checker-with* (list (cons 1 "0-------") (cons 2 ".-------") (cons 3 ".-------")
+                                      (cons 4 ".-------") (cons 5 "1-------"))))
+           (f (fall-and-refill (fixture rows)))
+           (cells (dboard-cells (dfall-board f))))
+      (assert-true (every (lambda (v) (>= v 0)) (vector->list cells)))
+      (assert-equal 1 (vector-ref cells (at 0 5)))         ; below the holes: unmoved
+      (assert-equal 0 (vector-ref cells (at 0 4)))         ; fell 3 rows
+      (assert-equal 4 (vector-ref cells (at 0 3)))         ; row 0's glyph fell 3 rows too
+      (assert-equal (list (at 0 4) 3) (assoc (at 0 4) (dfall-drops f)))
+      ;; three new glyphs, each falling the column's 3 holes
+      (assert-equal 3 (length (filter (lambda (d) (and (= (modulo (car d) 8) 0) (< (car d) (at 0 3)) (= (cadr d) 3)))
+                                      (dfall-drops f))))
+      ;; the rest of the board did not move
+      (assert-equal (vector-ref (dboard-cells (fixture rows)) (at 5 5)) (vector-ref cells (at 5 5)))))
+  (test "a refill is a function of the board's stream"
+    (let ((b (fixture (checker-with 3 "...-----"))))
+      (assert-equal (dboard-cells (dfall-board (fall-and-refill b)))
+                    (dboard-cells (dfall-board (fall-and-refill b)))))))
+
+(test-group "decrypt: REKEY"
+  (test "a board with no move REKEYs to the same glyphs, with a move and no collision"
+    (let* ((b (fixture (diagonal-rows 2)))
+           (r (rekey b))
+           (count (lambda (cells) (sorted (vector->list cells)))))
+      (assert-true (needs-rekey? (dboard-cells b)))
+      (assert-equal (count (dboard-cells b)) (count (dboard-cells r)))
+      (assert-false (board-matches? (dboard-cells r)))
+      (assert-true (has-move? (dboard-cells r)))))
+  (test "REKEY keeps the specials"
+    (let* ((rows (diagonal-rows 0))
+           (rows (cons (string-append "a" (substring (car rows) 1 8)) (cdr rows)))
+           (r (rekey (fixture rows))))
+      (assert-equal 1 (length (filter (lambda (v) (= v (make-cell 0 BURST))) (vector->list (dboard-cells r))))))))
+
+(test-group "decrypt: whole games (cascades settle, the DAILY is deterministic)"
+  (test "300 seeds x 25 moves: every move stands, every cascade ends, every board settles playable"
+    (let loop ((seed 1) (worst 0) (rekeys 0) (bad '()))
+      (if (> seed 300)
+          (begin
+            (display (list 'decrypt-games 'worst-chain worst 'rekeys rekeys)) (newline)
+            (assert-equal '() bad)
+            (assert-true (< worst CHAIN-CAP)))
+          (let game ((b (decrypt-deal seed)) (k 0) (worst worst) (rekeys rekeys))
+            (if (= k 25)
+                (loop (+ seed 1) worst rekeys bad)
+                (let* ((m (find-move (dboard-cells b)))
+                       (p (and m (play-swap b (car m) (cdr m))))
+                       (cells (and p (dboard-cells (dplay-board p))))
+                       (ok (and p (not (dplay-refused p))
+                                (>= (dplay-chains p) 1)
+                                (not (board-matches? cells))
+                                (has-move? cells)
+                                (every (lambda (v) (>= v 0)) (vector->list cells)))))
+                  (if (not ok)
+                      (loop (+ seed 1) worst rekeys (cons (list seed k) bad))
+                      (game (dplay-board p) (+ k 1)
+                            (max worst (dplay-chains p))
+                            (+ rekeys (if (dplay-rekeyed p) 1 0))))))))))
+  (test "the same seed and moves give the same board and score (the DAILY)"
+    (let ((run (lambda (seed)
+                 (let game ((b (decrypt-deal seed)) (k 0) (score 0))
+                   (if (= k 40)
+                       (list (dboard-cells b) score)
+                       (let* ((m (find-move (dboard-cells b)))
+                              (p (play-swap b (car m) (cdr m))))
+                         (game (dplay-board p) (+ k 1) (+ score (dplay-points p)))))))))
+      (assert-equal (run 20260929) (run 20260929))
+      (assert-false (equal? (run 20260929) (run 20260930))))))

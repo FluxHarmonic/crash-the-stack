@@ -1,0 +1,417 @@
+;;; (crash decrypt table) - A DECRYPT board in play.
+;;;
+;;; The board ((crash decrypt rules)) with everything around it both shells
+;;; share: the input (a swipe toward a neighbor, tap-then-tap, mouse
+;;; click-click or drag, the keyboard's cursor with Space then an arrow),
+;;; the animation of a move (the swap, each chain step's collision, the
+;;; fall and refill, a REKEY), the score, the DAILY's move budget, the
+;;; pause and end panels (the shared end panel's rows), the cues and the
+;;; music's tension.
+;;;
+;;; The shell calls (decrypt-step t frame) once a frame and reads:
+;;;   decrypt-cues      the frame's cues: (name . beat?); a beat? cue is held
+;;;                     to the tune's next 16th note ((crash music beat))
+;;;   decrypt-requests  quit (to the menu), new (a new ENDLESS board),
+;;;                     daily (the DAILY again), save (the record changed:
+;;;                     write decrypt-record)
+;;;   decrypt-hot?      the chains have pushed the music to its tense section
+;;;
+;;; The table keeps its own clock (ms), advanced by the frame's wall time
+;;; while not paused, so a pause holds every animation where it stands.
+;;;
+;;; Rules family: no platform, no clock of its own.
+
+(define-library (crash decrypt table)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash decrypt rules)
+          (crash decrypt record)
+          (only (crash geometry) panel-row-hit panel-keys))
+
+  (export decrypt-table decrypt-table? make-decrypt-frame
+          decrypt-open decrypt-step
+          decrypt-table-board decrypt-table-mode decrypt-table-score decrypt-table-moves
+          decrypt-table-phase decrypt-table-phase-ms decrypt-table-step decrypt-table-fall
+          decrypt-table-swap decrypt-table-sel decrypt-table-cursor decrypt-table-cursor-shown
+          decrypt-table-armed decrypt-table-ms decrypt-table-panel decrypt-table-panel-at decrypt-table-paused decrypt-table-hot
+          decrypt-table-popups decrypt-table-level decrypt-table-heat decrypt-table-record
+          decrypt-table-day decrypt-table-seed decrypt-table-toast decrypt-table-toast-ms
+          decrypt-cues decrypt-requests decrypt-hot? decrypt-moves-left decrypt-panel-rows decrypt-panel-title
+          decrypt-table-time-left TIMED-MS LINK-BONUS-MS SPECIAL-BONUS-MS TENSE-MS
+          decrypt-cell-at decrypt-cell-rect decrypt-with-record
+          BOARD-X BOARD-Y CELL PAUSE-RECT DAILY-MOVES
+          SWAP-MS CLEAR-MS REKEY-MS FALL-ROW-MS FALL-BASE-MS)
+
+  (begin
+    ;; --- the layout (640 x 400 virtual) ------------------------------------------
+    (define CELL 44)
+    (define BOARD-X (quotient (- 640 (* 8 CELL)) 2))   ; 144
+    (define BOARD-Y 36)
+    (define PAUSE-RECT '(8 6 72 28))
+    (define SWIPE-PX 14)          ; a drag this far picks the neighbor it points at
+
+    (define (decrypt-cell-rect i)
+      (list (+ BOARD-X (* CELL (modulo i 8))) (+ BOARD-Y (* CELL (quotient i 8))) CELL CELL))
+
+    ;; The cell under a virtual point, or #f
+    (define (decrypt-cell-at x y)
+      (let ((cx (- x BOARD-X)) (cy (- y BOARD-Y)))
+        (and (>= cx 0) (>= cy 0) (< cx (* 8 CELL)) (< cy (* 8 CELL))
+             (+ (* 8 (quotient cy CELL)) (quotient cx CELL)))))
+
+    (define (in-rect? r x y)
+      (and (>= x (car r)) (>= y (cadr r)) (< x (+ (car r) (caddr r))) (< y (+ (cadr r) (cadddr r)))))
+
+    ;; --- timing -----------------------------------------------------------------
+    (define SWAP-MS 130)
+    (define CLEAR-MS 260)
+    (define FALL-BASE-MS 90)
+    (define FALL-ROW-MS 45)
+    (define REKEY-MS 700)
+    (define TOAST-MS 1400)
+    (define POPUP-MS 700)
+    (define DAILY-MOVES 40)
+    ;; TIMED (the design's third mode; David, 2026-09-29: ENDLESS "felt endless"):
+    ;; 90 seconds; each chain link past the first buys a second per level past
+    ;; the first, each special made two; the last TENSE-MS push the music tense
+    (define TIMED-MS 90000)
+    (define LINK-BONUS-MS 1000)
+    (define SPECIAL-BONUS-MS 2000)
+    (define TENSE-MS 10000)
+    ;; the chains' heat (the music's tension): each chain step past the first
+    ;; adds its level; it cools a unit a second; tense from HOT, calm below COOL
+    (define HOT 5.0)
+    (define COOL 1.5)
+
+    ;; --- the frame ---------------------------------------------------------------
+    ;; pressed: key symbols this frame; events: pointer events in order,
+    ;; (down x y button) (up x y button) (move x y); now: wall ms
+    (define-struct decrypt-frame
+      (pressed default: '())
+      (events default: '())
+      (now default: 0.0))
+    (define (make-decrypt-frame pressed events now)
+      (decrypt-frame pressed: pressed events: events now: now))
+
+    ;; --- the table -----------------------------------------------------------------
+    (define-struct decrypt-table
+      (mode default: 'endless)      ; endless | daily | timed
+      (seed default: 1)
+      (day default: #f)             ; the DAILY's day number
+      (board default: #f)           ; the settled board (under an animation: the board it started from)
+      (score default: 0)
+      (moves default: 0)            ; swaps that stood
+      (time-left default: #f)       ; TIMED: ms left on the table clock, else #f
+      (phase default: 'idle)        ; idle swap unswap clear fall rekey over
+      (phase-ms default: 0)         ; the table clock when the phase began
+      (swap default: #f)            ; (i j wild) of the swap in play
+      (step default: #f)            ; the chain step on show (a dstep)
+      (fall default: #f)            ; the fall on show (a dfall)
+      (level default: 0)            ; the chain step reached in this move
+      (sel default: #f)             ; the selected cell (tap-then-tap, a click)
+      (drag default: #f)            ; (cell x y fresh?) while a pointer is down
+      (cursor default: 27)
+      (cursor-shown default: #f)
+      (armed default: #f)           ; Space pressed: the next arrow swaps
+      (ms default: 0.0)             ; the table clock
+      (last-now default: #f)
+      (paused default: #f)
+      (panel default: #f)           ; #f, or the highlighted row of the pause / end panel
+      (panel-at default: 0)         ; the table clock when the panel opened
+      (popups default: '())         ; (x y text born-ms)
+      (heat default: 0.0)
+      (hot default: #f)
+      (toast default: #f)
+      (toast-ms default: 0)
+      (record default: #f)          ; (crash decrypt record)
+      (cues default: '())
+      (requests default: '()))
+
+    (define (decrypt-open mode seed day record)
+      (decrypt-table mode: mode
+                     seed: seed
+                     day: day
+                     board: (decrypt-deal seed)
+                     time-left: (and (eq? mode 'timed) TIMED-MS)
+                     record: (or record (empty-record))))
+
+    (define (decrypt-with-record t r) (decrypt-table t record: r))
+    (define (decrypt-cues t) (decrypt-table-cues t))
+    (define (decrypt-requests t) (decrypt-table-requests t))
+    ;; the chains' heat, or TIMED's last seconds
+    (define (decrypt-hot? t)
+      (or (decrypt-table-hot t)
+          (let ((tl (decrypt-table-time-left t)))
+            (and tl (> tl 0) (<= tl TENSE-MS) (not (eq? (decrypt-table-phase t) 'over))))))
+    (define (decrypt-moves-left t)
+      (and (eq? (decrypt-table-mode t) 'daily) (max 0 (- DAILY-MOVES (decrypt-table-moves t)))))
+
+    (define (cue t name beat?) (decrypt-table t cues: (append (decrypt-table-cues t) (list (cons name beat?)))))
+    (define (request t r) (decrypt-table t requests: (append (decrypt-table-requests t) (list r))))
+    (define (phase t p) (decrypt-table t phase: p phase-ms: (decrypt-table-ms t)))
+    (define (elapsed t) (- (decrypt-table-ms t) (decrypt-table-phase-ms t)))
+    (define (toast t text) (decrypt-table t toast: text toast-ms: (decrypt-table-ms t)))
+
+    ;; --- the panels ----------------------------------------------------------------
+    ;; paused: RESUME and a way on; over (the DAILY's last move settled, or
+    ;; TIMED's clock out): the same again, the other scored mode, JACK OUT.
+    ;; Requests: daily, timed, new (ENDLESS), quit.
+    (define (decrypt-panel-rows t)
+      (let ((mode (decrypt-table-mode t)))
+        (cond ((and (eq? (decrypt-table-phase t) 'over) (eq? mode 'timed))
+               (list (list 'timed "PLAY AGAIN") (list 'daily "DAILY BOARD") (list 'quit "JACK OUT")))
+              ((eq? (decrypt-table-phase t) 'over)
+               (list (list 'daily "RETRY DAILY") (list 'timed "TIMED") (list 'quit "JACK OUT")))
+              ((eq? mode 'daily)
+               (list (list 'resume "RESUME") (list 'daily "RESTART DAILY") (list 'quit "JACK OUT")))
+              ((eq? mode 'timed)
+               (list (list 'resume "RESUME") (list 'timed "NEW BOARD") (list 'quit "JACK OUT")))
+              (else
+               (list (list 'resume "RESUME") (list 'new "NEW BOARD") (list 'quit "JACK OUT"))))))
+
+    ;; The end panel's title
+    (define (decrypt-panel-title t)
+      (cond ((not (eq? (decrypt-table-phase t) 'over)) "PAUSED")
+            ((eq? (decrypt-table-mode t) 'timed) "TIME'S UP")
+            (else "DECRYPTED")))
+
+    (define (pick-row t key)
+      (case key
+        ((resume) (decrypt-table t paused: #f panel: #f drag: #f sel: #f))
+        ;; leaving: an ENDLESS score counts toward the best
+        ((quit new daily timed) (request (save-endless t) key))
+        (else t)))
+
+    (define (save-endless t)
+      (if (and (eq? (decrypt-table-mode t) 'endless) (> (decrypt-table-score t) 0))
+          (let ((r (record-endless (decrypt-table-record t) (decrypt-table-score t))))
+            (request (decrypt-table t record: r) 'save))
+          t))
+
+    (define (panel-input t f)
+      (let* ((rows (decrypt-panel-rows t))
+             (n (length rows))
+             (k (panel-keys (or (decrypt-table-panel t) 0) n (decrypt-frame-pressed f)))
+             (t (decrypt-table t panel: (car k)))
+             (tap (let loop ((es (decrypt-frame-events f)))
+                    (cond ((null? es) #f)
+                          ((eq? (car (car es)) 'down)
+                           (or (panel-row-hit n (cadr (car es)) (caddr (car es))) (loop (cdr es))))
+                          (else (loop (cdr es)))))))
+        (cond ((and (memq 'escape (decrypt-frame-pressed f)) (decrypt-table-paused t))
+               (decrypt-table t paused: #f panel: #f drag: #f sel: #f))
+              ((cdr k) (pick-row t (car (list-ref rows (cdr k)))))
+              (tap (pick-row (decrypt-table t panel: tap) (car (list-ref rows tap))))
+              (else t))))
+
+    ;; --- a frame -------------------------------------------------------------------
+    (define (decrypt-step t0 f)
+      (let* ((now (decrypt-frame-now f))
+             (dt (if (decrypt-table-last-now t0) (max 0.0 (min 250.0 (- now (decrypt-table-last-now t0)))) 0.0))
+             (t (decrypt-table t0 cues: '() requests: '() last-now: now))
+             ;; the clock stops only for the pause: the end panel fades in on it (the first
+             ;; hosted build froze it at 'over and the panel stayed at alpha 0.05)
+             (t (if (decrypt-table-paused t)
+                    t
+                    (cool (decrypt-table t ms: (+ (decrypt-table-ms t) dt)) dt)))
+             ;; TIMED's clock runs on the table clock: a pause holds it, the end stops it
+             (tl (decrypt-table-time-left t))
+             (t (if (and tl (not (decrypt-table-paused t)) (not (eq? (decrypt-table-phase t) 'over)))
+                    (decrypt-table t time-left: (max 0 (- tl dt)))
+                    t)))
+        (cond ((or (decrypt-table-paused t) (eq? (decrypt-table-phase t) 'over))
+               (panel-input t f))
+              ;; out of time: no new swap; the move in play settles, then the end
+              ((and tl (<= (decrypt-table-time-left t) 0))
+               (let ((t (animate t)))
+                 (if (eq? (decrypt-table-phase t) 'idle) (time-up t) t)))
+              ((or (memq 'escape (decrypt-frame-pressed f))
+                   (any (lambda (e) (and (eq? (car e) 'down) (in-rect? PAUSE-RECT (cadr e) (caddr e))))
+                        (decrypt-frame-events f)))
+               ;; a press held through the pause must not swipe after it (the review, MED 2)
+               (decrypt-table t paused: #t panel: 0 panel-at: (decrypt-table-ms t) drag: #f sel: #f armed: #f))
+              (else (animate (input t f))))))
+
+    (define (cool t dt)
+      (let* ((h (max 0.0 (- (decrypt-table-heat t) (/ dt 1000.0))))
+             (hot (cond ((>= h HOT) #t) ((< h COOL) #f) (else (decrypt-table-hot t)))))
+        (decrypt-table t heat: h hot: hot
+                       popups: (filter (lambda (p) (< (- (decrypt-table-ms t) (list-ref p 3)) POPUP-MS))
+                                       (decrypt-table-popups t)))))
+
+    ;; --- input -----------------------------------------------------------------------
+    (define ARROWS '((left . (-1 . 0)) (h . (-1 . 0)) (right . (1 . 0)) (l . (1 . 0))
+                     (up . (0 . -1)) (k . (0 . -1)) (down . (0 . 1)) (j . (0 . 1))))
+
+    (define (neighbor i d)
+      (let ((x (+ (modulo i 8) (car d))) (y (+ (quotient i 8) (cdr d))))
+        (and (>= x 0) (< x 8) (>= y 0) (< y 8) (+ (* 8 y) x))))
+
+    (define (input t f)
+      (let* ((t (let loop ((ks (decrypt-frame-pressed f)) (t t))
+                  (if (null? ks) t (loop (cdr ks) (key t (car ks))))))
+             (t (let loop ((es (decrypt-frame-events f)) (t t))
+                  (if (null? es) t (loop (cdr es) (pointer t (car es)))))))
+        t))
+
+    (define (idle? t) (eq? (decrypt-table-phase t) 'idle))
+
+    (define (key t k)
+      (let ((d (assq k ARROWS))
+            (c (decrypt-table-cursor t)))
+        (cond ((and d (decrypt-table-armed t))
+               (let ((n (neighbor c (cdr d))))
+                 (if (and n (idle? t))
+                     (try-swap (decrypt-table t armed: #f cursor: n cursor-shown: #t) c n)
+                     (decrypt-table t armed: #f cursor-shown: #t))))
+              (d (decrypt-table t cursor: (or (neighbor c (cdr d)) c) cursor-shown: #t sel: #f))
+              ((memq k '(space return))
+               (decrypt-table t armed: (not (decrypt-table-armed t)) cursor-shown: #t sel: #f))
+              (else t))))
+
+    (define (pointer t e)
+      (case (car e)
+        ((down)
+         (let ((c (decrypt-cell-at (cadr e) (caddr e)))
+               (s (decrypt-table-sel t)))
+           (cond ((not c) (decrypt-table t sel: #f drag: #f))
+                 ((and s (idle? t) (neighbors? s c))
+                  (try-swap (decrypt-table t sel: #f drag: #f cursor: c cursor-shown: #f armed: #f) s c))
+                 ;; a press on the selected cell: released without a swipe, it deselects
+                 (else (decrypt-table t sel: c drag: (list c (cadr e) (caddr e) (not (eqv? s c)))
+                                      cursor: c cursor-shown: #f armed: #f)))))
+        ((move)
+         (let ((d (decrypt-table-drag t)))
+           (if (not d)
+               t
+               (let* ((dx (- (cadr e) (cadr d)))
+                      (dy (- (caddr e) (caddr d))))
+                 (if (< (max (abs dx) (abs dy)) SWIPE-PX)
+                     t
+                     (let ((n (neighbor (car d) (if (> (abs dx) (abs dy))
+                                                    (cons (if (> dx 0) 1 -1) 0)
+                                                    (cons 0 (if (> dy 0) 1 -1))))))
+                       (if (and n (idle? t))
+                           (try-swap (decrypt-table t sel: #f drag: #f) (car d) n)
+                           (decrypt-table t drag: #f))))))))
+        ((up)
+         (let ((d (decrypt-table-drag t)))
+           ;; a swipe's release lands here too: drag is gone by then
+           (if (and d (not (cadddr d)))
+               (decrypt-table t drag: #f sel: #f)
+               (decrypt-table t drag: #f))))
+        (else t)))
+
+    ;; A swap asked for: it animates either way; a refused one swaps back
+    (define (try-swap t i j)
+      (let* ((cells (dboard-cells (decrypt-table-board t)))
+             (ok (swap-ok? cells i j))
+             (a (vector-ref cells i))
+             (b (vector-ref cells j))
+             (wild (and ok (cond ((= a WILD) (cons j i)) ((= b WILD) (cons i j)) (else #f)))))
+        (phase (decrypt-table t swap: (list i j ok wild) level: 0) 'swap)))
+
+    ;; --- the move's animation -----------------------------------------------------------
+    (define (fall-ms fl)
+      (+ FALL-BASE-MS
+         (* FALL-ROW-MS (list-fold (lambda (d m) (max m (cadr d))) 0 (dfall-drops fl)))))
+
+    (define (animate t)
+      (case (decrypt-table-phase t)
+        ((swap)
+         (if (< (elapsed t) SWAP-MS)
+             t
+             (let* ((s (decrypt-table-swap t))
+                    (i (car s)) (j (cadr s)))
+               (if (caddr s)
+                   (let* ((b (decrypt-table-board t))
+                          (swapped (dboard-with-cells b (swap-cells (dboard-cells b) i j))))
+                     (begin-step (decrypt-table t board: swapped moves: (+ 1 (decrypt-table-moves t)))
+                                 (resolve-step swapped 1 (list i j) (cadddr s))))
+                   (cue (phase t 'unswap) 'mismatch #f)))))
+        ((unswap)
+         (if (< (elapsed t) SWAP-MS) t (phase (decrypt-table t swap: #f) 'idle)))
+        ((clear)
+         (if (< (elapsed t) CLEAR-MS)
+             t
+             (let ((fl (fall-and-refill (dstep-board (decrypt-table-step t)))))
+               (phase (decrypt-table t fall: fl) 'fall))))
+        ((fall)
+         (if (< (elapsed t) (fall-ms (decrypt-table-fall t)))
+             t
+             (let* ((b (dfall-board (decrypt-table-fall t)))
+                    (t (decrypt-table t board: b fall: #f step: #f))
+                    (st (and (< (decrypt-table-level t) CHAIN-CAP)
+                             (resolve-step b (+ 1 (decrypt-table-level t)) '() #f))))
+               (if st (begin-step t st) (settle t)))))
+        ((rekey)
+         (if (< (elapsed t) REKEY-MS) t (after-move (phase t 'idle))))
+        (else t)))
+
+    ;; A chain step begins: its points, its cue on the beat, the heat
+    (define (begin-step t st)
+      (let* ((lv (dstep-level st))
+             (b (dstep-board st))
+             (cleared (dstep-cleared st))
+             (cx (quotient (list-fold (lambda (i s) (+ s (modulo i 8))) 0 cleared) (max 1 (length cleared))))
+             (cy (quotient (list-fold (lambda (i s) (+ s (quotient i 8))) 0 cleared) (max 1 (length cleared))))
+             (label (if (> lv 1)
+                        (string-append (number->string (dstep-points st)) " X" (number->string lv))
+                        (number->string (dstep-points st))))
+             (t (decrypt-table t
+                               step: st
+                               swap: #f
+                               level: lv
+                               score: (+ (decrypt-table-score t) (dstep-points st))
+                               heat: (+ (decrypt-table-heat t) (if (> lv 1) lv 0))
+                               popups: (cons (list (+ BOARD-X (* CELL cx) (quotient CELL 2))
+                                                   (+ BOARD-Y (* CELL cy))
+                                                   label
+                                                   (decrypt-table-ms t))
+                                             (decrypt-table-popups t))))
+             (t (if (>= (decrypt-table-heat t) HOT) (decrypt-table t hot: #t) t))
+             ;; the cascade climbs SCAN's pentatonic pings, one step a link
+             (t (cue t (list-ref '(ping-1 ping-2 ping-3 ping-4 ping-5 ping-6 ping-7 ping-8) (min 7 (- lv 1))) #t))
+             (t (if (pair? (dstep-fired st)) (cue t 'sweep #t) t))
+             (t (cond ((dstep-wild st) (toast t "WILDCARD: A KIND DECRYPTED."))
+                      ((any (lambda (m) (= (cdr m) WILD)) (dstep-made st)) (toast t "WILDCARD COMPILED."))
+                      ((>= lv 4) (toast t (string-append "EXPLOIT CHAIN X" (number->string lv))))
+                      (else t)))
+             ;; TIMED: a link past the first buys a second per level past the first,
+             ;; a special made two; the gain rises as a popup beside the score
+             (bonus (if (decrypt-table-time-left t)
+                        (+ (* LINK-BONUS-MS (max 0 (- lv 1))) (* SPECIAL-BONUS-MS (length (dstep-made st))))
+                        0))
+             (t (if (> bonus 0)
+                    (decrypt-table t
+                                   time-left: (+ (decrypt-table-time-left t) bonus)
+                                   popups: (cons (list 68 146 (string-append "+" (number->string (quotient bonus 1000)) "S") (decrypt-table-ms t))
+                                                 (decrypt-table-popups t)))
+                    t)))
+        (phase t (quote clear))))
+
+    ;; The move settled: REKEY when no move is left, then the DAILY's budget
+    (define (settle t)
+      (let ((b (decrypt-table-board t)))
+        (if (needs-rekey? (dboard-cells b))
+            (cue (toast (phase (decrypt-table t board: (rekey b)) 'rekey) "REKEY.") 'shuffle #f)
+            (after-move (phase t 'idle)))))
+
+    ;; TIMED's clock is out and the board has settled: the end, its best recorded
+    (define (time-up t)
+      (let ((r (record-timed (decrypt-table-record t) (decrypt-table-score t))))
+        (request (cue (decrypt-table (phase t 'over) record: r panel: 0 panel-at: (decrypt-table-ms t)) 'cleared #f)
+                 'save)))
+
+    (define (after-move t)
+      (if (and (eq? (decrypt-table-mode t) 'daily) (>= (decrypt-table-moves t) DAILY-MOVES))
+          (let ((r (record-daily (decrypt-table-record t) (decrypt-table-day t) (decrypt-table-score t))))
+            (request (cue (decrypt-table (phase t 'over) record: r panel: 0 panel-at: (decrypt-table-ms t)) 'cleared #f)
+                     'save))
+          ;; ENDLESS: a new best is saved as the move comes to rest, so a closed
+          ;; tab or window keeps it (the review, MED 6)
+          (if (and (eq? (decrypt-table-mode t) 'endless)
+                   (> (decrypt-table-score t) (drecord-best (decrypt-table-record t))))
+              (request (decrypt-table t record: (record-endless (decrypt-table-record t) (decrypt-table-score t))) 'save)
+              t)))))
