@@ -51,12 +51,50 @@
 //                  fetches the wasm (the game registers no service worker);
 //                  with no context for the stage, the message replaces the raw
 //                  error; with WebGL 2, no message and the app starts
+//   analytics      (scripts/plausible-check.mjs) every HTML page in the tree
+//                  carries David's Plausible snippet with crashthestack.com's
+//                  script ID exactly once, in <head>; the game's and the
+//                  tracker's pages carry the gated one (the script only on
+//                  crashthestack.com: the itch.io build is the same page).
+//                  Then in Chrome at https://crashthestack.com itself (every
+//                  request for it answered by a second server over this tree
+//                  that applies the staged _headers, as Pages does; every
+//                  https://plausible.io request sent to a stub: no internet),
+//                  the landing, /about/, /news/, a post, /soundtrack/, a
+//                  missing page, /jack-in/ and /tracker/ each load the script
+//                  and send a pageview for crashthestack.com that comes back
+//                  202, and /jack-in/ and /tracker/ stay cross-origin isolated
+//                  while they do. (The game's worker is not registered there:
+//                  its own fetches would leave the harness for the live site.
+//                  The sw leg covers the worker.)
+//   itch           /jack-in/ and /tracker/ played on another host (this
+//                  server's loopback origin, as on itch.io) ask plausible.io
+//                  for nothing
+//   sw             the staged jack-in/sw.js, run in a sandbox: its install
+//                  precaches nothing from plausible.io, and no fetch listener
+//                  answers plausible.io's script GET or its event POST (as
+//                  fetch or as a no-cors beacon), so none is cached or queued;
+//                  a same-origin GET is answered (the control)
+//   coep           /jack-in/ at crashthestack.com with a plausible.io that
+//                  sends no CORP: the script is requested and blocked, the
+//                  page stays isolated (so COEP really judges it, and the
+//                  analytics leg's pass means plausible.io's CORP is enough)
+//   privacy        the landing's footer says "Privacy-friendly analytics by
+//                  Plausible: no cookies, no personal data."
+//   analytics-down plausible.io unreachable (every request refused): the
+//                  landing and the game at crashthestack.com still work, with
+//                  no error or exception
 //   console        no error and no sokol refusal over the run
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
+import { auditTree, plausibleStub, PRIVACY } from "./scripts/plausible-check.mjs";
+
+const PLAUSIBLE_ID = "pa-5iTMFNFjYxMn3THin-cwJ";
+const PLAUSIBLE_HOST = "crashthestack.com";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -111,7 +149,7 @@ function notFound(urlPath) {
   indexed.push(`${root === STAGED ? "staged" : "old"}:${urlPath}`);
   return [200, path.join(root, "index.html")];
 }
-const server = http.createServer((req, res) => {
+function handler(req, res) {
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   requests.push(urlPath);
   const rel = urlPath === "/" ? "/index.html" : (urlPath.endsWith("/") ? urlPath + "index.html" : urlPath);
@@ -123,8 +161,28 @@ const server = http.createServer((req, res) => {
     res.writeHead(status, { "Content-Type": TYPES[path.extname(fp)] || "application/octet-stream", "Cache-Control": "no-store" });
     res.end(buf);
   });
-});
+}
+const server = http.createServer(handler);
 await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
+// the analytics legs' server: the same tree with the staged _headers applied
+// (Pages' format: a path pattern, then indented "Name: value" lines), so
+// /jack-in/ and /tracker/ are cross-origin isolated from the first load as
+// they are on crashthestack.com
+const headerRules = [];
+for (const line of fs.readFileSync(path.join(STAGED, "_headers"), "utf8").split("\n")) {
+  if (/^\s*(#|$)/.test(line)) continue;
+  if (!/^\s/.test(line)) headerRules.push({ re: new RegExp("^" + line.trim().replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$"), set: [] });
+  else if (headerRules.length && line.includes(":")) { const i = line.indexOf(":"); headerRules[headerRules.length - 1].set.push([line.slice(0, i).trim(), line.slice(i + 1).trim()]); }
+}
+const pagesServer = http.createServer((req, res) => {
+  const p = (req.url || "/").split("?")[0];
+  // every matching rule applies; a header two rules set is joined, as Pages joins it
+  const got = new Map();
+  for (const r of headerRules) if (r.re.test(p)) for (const [k, v] of r.set) got.set(k.toLowerCase(), got.has(k.toLowerCase()) ? `${got.get(k.toLowerCase())}, ${v}` : v);
+  for (const [k, v] of got) res.setHeader(k, v);
+  handler(req, res);
+});
+await new Promise((r) => pagesServer.listen(0, "127.0.0.1", r));
 
 const udd = fs.mkdtempSync("/tmp/crash-verify-site-chrome-");
 const chrome = spawn("google-chrome", [
@@ -136,12 +194,14 @@ const chrome = spawn("google-chrome", [
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { /* gone */ } }
 let exiting = false;
+let stub = null;   // plausible.io's stand-in (scripts/plausible-check.mjs)
 function shutdown(code) {
   if (exiting) return; exiting = true;
   // the verdict first: the exit below sits in an unref'd timer, so a run whose
   // loop empties before it fires exits naturally, and without this it exits 0
   process.exitCode = code;
-  try { server.close(); } catch { /* not listening */ }
+  try { server.close(); pagesServer.close(); } catch { /* not listening */ }
+  if (stub) stub.close();
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 1500).unref();
 }
@@ -166,6 +226,7 @@ function send(method, params = {}) {
 ws.addEventListener("message", (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
+  if (stub) stub.onMessage(msg);
   if (msg.method === "Runtime.consoleAPICalled") {
     const text = (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
     consoleLines.push(text);
@@ -175,6 +236,9 @@ ws.addEventListener("message", (ev) => {
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable");
+// no leg reaches the internet: https://plausible.io goes to a stub, and
+// https://crashthestack.com (the analytics legs) to pagesServer
+stub = await plausibleStub(send, { sites: { [`https://${PLAUSIBLE_HOST}`]: `http://127.0.0.1:${pagesServer.address().port}` } });
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
   if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
@@ -716,6 +780,175 @@ else {
     else fail("webgl", `/${page}/ ${mode}: rc ${r.status}: ${r.out.split("\n").filter((l) => /FAIL|SETUP|TIMED/.test(l)).join(" | ").slice(0, 400)}`);
   }
 }
+
+// ---- analytics (no browser): the tag on every HTML page -------------------------------
+{
+  const { pages, problems } = auditTree(STAGED, PLAUSIBLE_ID, { gated: ["jack-in/index.html", "tracker/index.html"], host: PLAUSIBLE_HOST });
+  // a floor, so an empty walk is no pass
+  for (const p of ["index.html", "404.html", "about/index.html", "news/index.html", "docs/tracker/index.html", "soundtrack/index.html", "jack-in/index.html", "tracker/index.html"]) if (!pages.includes(p)) problems.push(`${p} is not in the tree`);
+  if (!pages.some((p) => /^news\/[^/]+\/index\.html$/.test(p))) problems.push("no news post page in the tree");
+  if (problems.length) fail("analytics", problems.slice(0, 6).join("; "));
+  else pass("analytics", `${pages.length} HTML pages carry the snippet with ${PLAUSIBLE_ID} once, in <head>; jack-in/ and tracker/ the gated one (${PLAUSIBLE_HOST} only)`);
+}
+
+// ---- sw: the game's worker leaves plausible.io alone -----------------------------------
+// The staged worker's own bytes in a sandbox. Its install is dispatched and
+// what it precaches recorded; then every fetch listener, in order, as a
+// worker runs them, is handed each of plausible.io's requests and must not
+// call respondWith (a worker that answers one could cache it or hold it).
+// A same-origin GET must be answered, or the sandbox proves nothing. (The
+// review, 2026-09-30: the first version kept only the last listener and
+// never ran install.)
+{
+  const detail = [];
+  const listeners = {};
+  const scope = "https://crashthestack.com/jack-in/";
+  const precached = [];
+  const urlOf = (r) => new URL(typeof r === "string" ? r : r.url, scope).href;
+  class ScopedRequest extends Request { constructor(u, o) { super(typeof u === "string" ? new URL(u, scope).href : u, o); } }
+  const cache = { match: async () => undefined, put: async (r) => { precached.push(urlOf(r)); }, add: async (r) => { precached.push(urlOf(r)); },
+                  addAll: async (rs) => { for (const r of rs) precached.push(urlOf(r)); }, keys: async () => [] };
+  const sandbox = {
+    self: { location: new URL(scope + "sw.js"), addEventListener: (t, fn) => { (listeners[t] = listeners[t] || []).push(fn); }, skipWaiting() {}, clients: { claim: async () => {} } },
+    caches: { open: async () => cache, match: async () => undefined, keys: async () => [], delete: async () => true },
+    fetch: async () => new Response("", { status: 200 }), Request: ScopedRequest, Response, Headers, URL, Promise, console,
+  };
+  try { vm.runInNewContext(text("jack-in/sw.js"), sandbox, { filename: "jack-in/sw.js" }); } catch (e) { detail.push(`jack-in/sw.js did not run: ${e.message}`); }
+  // install: whatever it precaches, none of it from plausible.io
+  const waits = [];
+  for (const fn of listeners.install || []) {
+    try { fn({ waitUntil: (p) => waits.push(Promise.resolve(p)) }); } catch (e) { detail.push(`install threw: ${e.message}`); }
+  }
+  const settled = await Promise.allSettled(waits);
+  for (const r of settled) if (r.status === "rejected") detail.push(`install failed: ${String(r.reason).slice(0, 120)}`);
+  const bad = precached.filter((u) => new URL(u).hostname === "plausible.io");
+  if (bad.length) detail.push(`install precaches ${bad.join(", ")}`);
+  if (!precached.length) detail.push("install precached nothing (the sandbox is not running it)");
+  const answered = (url, method, mode) => {
+    let called = false;
+    const event = { request: { url, method, mode, headers: new Headers() }, respondWith: (p) => { called = true; Promise.resolve(p).catch(() => {}); } };
+    for (const fn of listeners.fetch || []) {
+      try { fn(event); } catch (e) { detail.push(`a fetch listener threw on ${method} ${url}: ${e.message}`); }
+      if (called) break;
+    }
+    return called;
+  };
+  if (!(listeners.fetch || []).length) detail.push("jack-in/sw.js registered no fetch handler");
+  else {
+    for (const [url, method, mode] of [[`https://plausible.io/js/${PLAUSIBLE_ID}.js`, "GET", "no-cors"], ["https://plausible.io/api/event", "POST", "cors"],
+                                       ["https://plausible.io/api/event", "POST", "no-cors"], ["https://plausible.io/api/event", "GET", "cors"]]) {
+      if (answered(url, method, mode)) detail.push(`the worker answers ${method} ${url} (${mode})`);
+    }
+    if (!answered(scope + "styles.css", "GET", "no-cors")) detail.push("the control: the worker did not answer GET /jack-in/styles.css (the sandbox is not running its handler)");
+  }
+  if (detail.length) fail("sw", detail.join("; "));
+  else pass("sw", `jack-in/sw.js precaches ${precached.length} files, none from plausible.io; ${listeners.fetch.length} fetch listener(s) answer a same-origin GET and leave plausible.io's script GET and event POST (fetch and beacon) to the network`);
+}
+
+// ---- itch: the game on a host that is not crashthestack.com ----------------------------
+{
+  const detail = [];
+  for (const p of ["/jack-in/", "/tracker/"]) {
+    const s0 = stub.scripts.length, e0 = stub.events.length;
+    await navigate(`${origin}${p}`);
+    if (p === "/jack-in/") { if (!(await gameUp(60000))) detail.push(`${p}: the game never came up`); }
+    else await sleep(3000);
+    await sleep(1500);
+    const loaded = await evalJS("!!(window.plausible && window.plausible.l)").catch(() => null);
+    if (stub.scripts.length !== s0 || stub.events.length !== e0 || loaded !== false) detail.push(`${p} at ${origin}: ${stub.scripts.length - s0} script and ${stub.events.length - e0} event requests to plausible.io; the script ${loaded ? "ran" : "did not run"}`);
+  }
+  if (detail.length) fail("itch", detail.join("; "));
+  else pass("itch", `/jack-in/ and /tracker/ at ${origin}, not ${PLAUSIBLE_HOST} (as on itch.io): no request to plausible.io, no script`);
+}
+
+// ---- analytics, in Chrome, at https://crashthestack.com ----------------------------------
+// (the game's worker is kept from registering on this origin: its install
+// fetches its files from the worker, outside this page's interception, so
+// they would reach the live site)
+const NO_SW = `if (location.hostname === ${JSON.stringify(PLAUSIBLE_HOST)} && navigator.serviceWorker) navigator.serviceWorker.register = function () { return new Promise(function () {}); };`;
+const noSw = await send("Page.addScriptToEvaluateOnNewDocument", { source: NO_SW });
+{
+  const detail = []; const got = [];
+  const H = `https://${PLAUSIBLE_HOST}`;
+  const missing = `/no-such-page-${Date.now()}`;
+  const post = fs.readdirSync(path.join(STAGED, "news")).filter((d) => fs.existsSync(path.join(STAGED, "news", d, "index.html"))).sort().pop();
+  if (!post) detail.push("no news post to visit");
+  for (const p of ["/", "/about/", "/news/", post && `/news/${post}/`, "/soundtrack/", missing, "/jack-in/", "/tracker/"].filter(Boolean)) {
+    await navigate(H + p);
+    if (p === "/jack-in/" && !(await gameUp(60000))) detail.push(`${p}: the game never came up at ${H}`);
+    const st = await (async () => { const t0 = Date.now(); while (Date.now() - t0 < 10000) { const v = await evalJS("window.__plausibleStub && window.__plausibleStub.length ? JSON.stringify({ st: window.__plausibleStub, coi: self.crossOriginIsolated, href: location.href }) : null").catch(() => null); if (v) return JSON.parse(v); await sleep(150); } return null; })();
+    const evs = stub.events.filter((e) => e.body && e.body.u === H + p && e.body.n === "pageview");
+    if (!st) detail.push(`${p}: no event status came back to the page (the script did not run, or its POST failed)`);
+    else if (!st.st.includes(202)) detail.push(`${p}: the page got ${JSON.stringify(st.st)}, not 202`);
+    else if (st.href !== H + p) detail.push(`${p}: the status came from ${st.href}, not ${H + p}`);
+    if (!evs.length) detail.push(`${p}: the stub received no pageview for ${H + p}`);
+    if ((p === "/jack-in/" || p === "/tracker/") && (!st || st.coi !== true)) detail.push(`${p} is not cross-origin isolated with the analytics loaded (${st && st.coi})`);
+    if (st) got.push(p === missing ? "(404)" : p);
+  }
+  const wrongScript = stub.scripts.filter((sc) => sc.id !== PLAUSIBLE_ID);
+  if (wrongScript.length) detail.push(`scripts requested for other IDs: ${[...new Set(wrongScript.map((sc) => sc.id))].join(", ")}`);
+  const wrongDomain = stub.events.filter((e) => !e.body || e.body.d !== PLAUSIBLE_HOST);
+  if (wrongDomain.length) detail.push(`${wrongDomain.length} event(s) not for ${PLAUSIBLE_HOST}: ${JSON.stringify(wrongDomain[0].body).slice(0, 120)}`);
+  if (detail.length) fail("analytics", detail.slice(0, 6).join("; "));
+  else pass("analytics", `at ${H}: ${got.join(", ")} each loaded the script and sent a pageview for ${PLAUSIBLE_HOST} that came back 202; /jack-in/ and /tracker/ cross-origin isolated with it (${stub.scripts.length} script requests, ${stub.events.length} events over the run)`);
+}
+
+// ---- coep: the isolated page really judges plausible.io's CORP --------------------------
+// (the review, 2026-09-30: without this, "isolated with the script loaded"
+// could not tell "COEP passed the script" from "COEP never looked")
+{
+  const detail = [];
+  const H = `https://${PLAUSIBLE_HOST}`;
+  stub.setMode("nocorp");
+  const s0 = stub.scripts.length, e0 = stub.events.length;
+  await navigate(`${H}/jack-in/`);
+  if (!(await gameUp(60000))) detail.push("/jack-in/: the game never came up");
+  await sleep(4000);
+  const st = await evalJS("JSON.stringify({ st: window.__plausibleStub || null, coi: self.crossOriginIsolated, l: !!(window.plausible && window.plausible.l) })").then(JSON.parse).catch(() => null);
+  if (stub.scripts.length === s0) detail.push("the script was never requested (the leg judged nothing)");
+  if (!st || st.coi !== true) detail.push(`/jack-in/ is not cross-origin isolated (${st && st.coi})`);
+  else if (st.l || st.st || stub.events.length !== e0) detail.push(`a plausible.io script without CORP ran on the isolated page (events ${stub.events.length - e0}, status ${JSON.stringify(st.st)})`);
+  stub.setMode("stub");
+  if (detail.length) fail("coep", detail.join("; "));
+  else pass("coep", "/jack-in/ at crashthestack.com asked for a plausible.io script sent without CORP and COEP blocked it; the page stayed isolated");
+}
+
+// ---- privacy ---------------------------------------------------------------------------
+{
+  await navigate(`${origin}/`);
+  await sleep(1000);
+  const foot = await evalJS("(() => { const f = document.querySelector('footer'); if (!f) return null; const a = [...f.querySelectorAll('a')].find((a) => a.textContent.trim() === 'Plausible'); return { text: f.innerText, link: a ? a.href : null }; })()").catch(() => null);
+  if (!foot) fail("privacy", "the landing has no <footer>");
+  else if (!foot.text.includes(PRIVACY)) fail("privacy", `the landing's footer does not say "${PRIVACY}"`);
+  else if (foot.link !== "https://plausible.io/data-policy") fail("privacy", `the footer's "Plausible" links ${foot.link || "nowhere"}, not https://plausible.io/data-policy`);
+  else pass("privacy", `the landing's footer says "${PRIVACY}", Plausible linking its data policy`);
+}
+
+// ---- analytics-down: plausible.io unreachable --------------------------------------------
+{
+  stub.setMode("down");
+  const detail = []; const H = `https://${PLAUSIBLE_HOST}`;
+  const f0 = stub.failed.length, e0 = consoleErrors.length;
+  await navigate(`${H}/`);
+  await sleep(2000);
+  const title = await evalJS("document.title").catch(() => null);
+  if (title !== "Crash The Stack") detail.push(`/: the landing did not render (title ${JSON.stringify(title)})`);
+  const f1 = stub.failed.length;
+  await navigate(`${H}/jack-in/`);
+  if (!(await gameUp(60000))) detail.push("/jack-in/: the game never came up with plausible.io unreachable");
+  await sleep(1500);
+  const isolated = await evalJS("self.crossOriginIsolated").catch(() => null);
+  if (isolated !== true) detail.push(`/jack-in/ is not cross-origin isolated (${isolated})`);
+  const errs = consoleErrors.slice(e0);
+  if (errs.length) detail.push(`errors: ${errs.slice(0, 3).join(" | ")}`);
+  // the positive control: plausible.io really was refused on both pages
+  if (f1 - f0 < 1 || stub.failed.length - f1 < 1) detail.push(`plausible.io was not refused on both pages (${f1 - f0} and ${stub.failed.length - f1})`);
+  stub.setMode("stub");
+  if (detail.length) fail("analytics-down", detail.join("; "));
+  else pass("analytics-down", `with plausible.io refused (${stub.failed.length - f0} requests), the landing renders and /jack-in/ comes up, isolated, with no error or exception`);
+}
+await send("Page.removeScriptToEvaluateOnNewDocument", { identifier: noSw.identifier });
+await send("Storage.clearDataForOrigin", { origin: `https://${PLAUSIBLE_HOST}`, storageTypes: "all" }).catch(() => {});
 
 // ---- console ----------------------------------------------------------------
 {
