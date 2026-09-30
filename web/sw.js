@@ -17,9 +17,11 @@
 // Fetch: same-origin GET requests are served from this version's cache
 // first and the network second (the response is cached for next time);
 // navigations (any query string) are the cached game page. Anything else
-// goes to the network untouched. The worker's scope is the game's own
-// directory (/jack-in/ on crashthestack.com since P4b; the site and the
-// tracker sit outside it).
+// goes to the network untouched, and Plausible Analytics (plausible.io's
+// script and its event POSTs) always does: never cached, never queued,
+// never answered from here, whatever the rules below become. The
+// worker's scope is the game's own directory (/jack-in/ on
+// crashthestack.com since P4b; the site and the tracker sit outside it).
 
 var VERSION = "__VERSION__";
 // P4b: the game's caches are "crash-jack-in-<version>"; the old root-scoped
@@ -114,7 +116,10 @@ self.addEventListener("message", function (event) {
 // is why the first load is not reloaded here (a reload mid-boot would
 // cost more than one visit's fallback). The public site adds the same
 // headers at the edge (_headers) and is isolated from the first load.
-// Every resource the page loads is same-origin, so require-corp blocks nothing.
+// Every resource the page loads is same-origin except plausible.io's
+// script (on crashthestack.com only), which is sent with
+// Cross-Origin-Resource-Policy: cross-origin, so require-corp blocks
+// nothing the page needs.
 function isolated(res) {
   if (!res || res.status === 0) return res;
   var headers = new Headers(res.headers);
@@ -126,8 +131,11 @@ function isolated(res) {
 
 self.addEventListener("fetch", function (event) {
   var req = event.request;
-  if (req.method !== "GET") return;
   var url = new URL(req.url);
+  // Plausible Analytics: straight to the network (verify-site's sw leg runs
+  // this handler on plausible.io's requests and fails if it answers one)
+  if (url.hostname === "plausible.io") return;
+  if (req.method !== "GET") return;
   if (url.origin !== self.location.origin) return;
   // Stream the standalone album without the game cache or navigation fallback.
   if (/^\/soundtrack(?:\/|$)/.test(url.pathname)) return;
