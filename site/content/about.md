@@ -6,7 +6,7 @@ summary: What Crash The Stack is, how it was made, and what you can do with it.
 
 Crash The Stack is a collection of cyberpunk takes on classic casual games, built in the open and growing with every release. You play a hacker named Crash; the games are the hacks. Each one keeps the rules of a game you already know, and the theme adds what sits around them: a trace running against you, counter-hacks, a song to play along with. JACK IN links them into one run through Gibson's network, and FREE PLAY gives you any of them on its own.
 
-It is free to play in the browser at [/jack-in/](/jack-in/), and it installs as an app on a phone from the browser's own menu. Desktop builds for Linux and Windows are ready but they are not available for sale yet. The [News](/news/) posts cover each release. What the game is right now, and what to expect while it grows, is below.
+It is free to play in the browser at [/jack-in/](/jack-in/), and it installs as an app on a phone from the browser's own menu. You can also download Crash The Stack for Linux and Windows on [itch.io](https://fluxharmonic.itch.io/crash-the-stack). The [News](/news/) posts cover each release. What the game is right now, and what to expect while it grows, is below.
 
 ## The classics are sacred
 
