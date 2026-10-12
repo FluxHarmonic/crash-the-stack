@@ -121,7 +121,7 @@
                   (assert-true (string-contains? html "Privacy-friendly analytics by <a href=\"https://plausible.io/data-policy\">Plausible</a>: no cookies, no personal data.")))
                 pages))))
 
-;; The landing's screenshots (2026-10-12): eight shots, each a file in
+;; The landing's screenshots (2026-10-12): one shot per game, six, each a file in
 ;; assets/shots/ with real alt text and a caption, the first shown and the
 ;; rest hidden from assistive tech until the rotation shows them; a dot
 ;; for each; the rotation's script after the footer.
@@ -129,8 +129,8 @@
   (let* ((html (sxml->html (landing-page #f)))
          (frames (car (string-split (cadr (string-split html "<div class=\"frames\">")) "</div>")))
          (imgs (cdr (string-split frames "<img "))))
-    (test "eight shots, each a file in assets/shots/"
-      (assert-equal 8 (length imgs))
+    (test "six shots, one per game, each a file in assets/shots/"
+      (assert-equal 6 (length imgs))
       (for-each (lambda (img)
                   (let ((src (car (string-split (cadr (string-split img "src=\"/shots/")) "\""))))
                     (assert-true (file-exists? (string-append "assets/shots/" src)))))
@@ -142,15 +142,23 @@
                   (let ((alt (car (string-split (cadr (string-split img "alt=\"")) "\""))))
                     (assert-true (> (string-length alt) 80))))
                 imgs))
-    (test "the first is shown, the other seven are hidden until shown"
+    (test "the first is shown, the other five are hidden until shown"
       (assert-true (string-starts-with? (car imgs) "class=\"shot shown\""))
       (assert-false (string-contains? (car imgs) "aria-hidden"))
       (for-each (lambda (img)
                   (assert-true (string-starts-with? img "class=\"shot\""))
                   (assert-true (string-contains? img "aria-hidden=\"true\"")))
                 (cdr imgs)))
+    ;; David, 2026-10-12: the logo, the short description, the screenshots,
+    ;; then the button, as harkfell.com has them
+    (test "the shots sit between the description and the JACK IN button"
+      (let ((before-shots (car (string-split html "<section class=\"shots\"")))
+            (after-shots (cadr (string-split html "<section class=\"shots\""))))
+        (assert-true (string-contains? before-shots "<p class=\"tag\">"))
+        (assert-false (string-contains? before-shots "class=\"cta\""))
+        (assert-true (string-contains? after-shots "class=\"cta\">JACK IN</a>"))))
     (test "a dot per shot, the first current, and the script after the footer"
-      (assert-equal 9 (length (string-split html "<button type=\"button\"")))
+      (assert-equal 7 (length (string-split html "<button type=\"button\"")))
       (assert-equal 2 (length (string-split html "aria-current=\"true\"")))
       (assert-true (string-contains? (cadr (string-split html "</footer>")) "querySelector('.shots')")))))
 
@@ -170,5 +178,34 @@
       (for-each (lambda (html)
                   (let ((foot (cadr (string-split html "<footer class=\"foot\">"))))
                     (assert-true (string-contains? foot "<a class=\"mark\" href=\"https://fluxharmonic.com/\"><img src=\"/mark.png\" width=\"380\" height=\"188\" loading=\"lazy\" alt=\"Flux Harmonic\"></a>"))
-                    (assert-true (string-contains? foot "the Flux Harmonic mark are reserved."))))
+                    (assert-true (string-contains? foot "the Flux Harmonic mark are reserved."))
+                    (assert-true (string-contains? foot "<p>Also from Flux Harmonic: <a href=\"https://harkfell.com/\">Harkfell</a> and <a href=\"https://phantomburn.net/\">Phantom Burn</a></p>"))))
                 pages))))
+
+;; The site's copy (David, 2026-10-12): his tagline, one string, in the
+;; landing's hero and at the start of every description; and no game names
+;; and no count of games anywhere outside the screenshots' own labels, since
+;; both change over time.
+(test-group "copy"
+  (let* ((tag "Cyberpunk takes on classic casual games, linked by a network you can hack.")
+         (landing (sxml->html (landing-page #f)))
+         (item #{source-path: "content/x.md" output-path: "/x/index.html" title: "X"
+                 metadata: #{} format: 'markdown
+                 body-loader: (lambda () (document metadata: #{} children: '((p "body"))))})
+         (page (sxml->html (crash-theme #{title: "Crash The Stack"} (initial-state) item '((p "body")))))
+         (outside-shots (string-append (car (string-split landing "<section class=\"shots\""))
+                                       (apply string-append (cdr (string-split landing "</section>"))))))
+    (test "the tagline is the hero's line and starts the landing's and a page's descriptions"
+      (assert-true (string-contains? landing (string-append "<p class=\"tag\">" tag "</p>")))
+      (for-each (lambda (html)
+                  (for-each (lambda (meta)
+                              (assert-true (string-contains? html (string-append meta " content=\"" tag))))
+                            '("<meta name=\"description\"" "<meta property=\"og:description\"" "<meta name=\"twitter:description\"")))
+                (list landing page)))
+    (test "no game names or counts in the landing's copy or a page's default description"
+      (for-each (lambda (html)
+                  (for-each (lambda (word) (assert-false (string-contains? html word)))
+                            '("STACK" "DEFRAG" "SCAN" "INTERCEPT" "DECRYPT" "Mahjongg" "Klondike" "Minesweeper"
+                              "two games" "three games" "four games" "five games" "six games")))
+                ;; "Crash The Stack" is the name: its "Stack" is not STACK
+                (list outside-shots page)))))

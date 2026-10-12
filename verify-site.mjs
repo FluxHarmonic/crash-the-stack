@@ -43,7 +43,7 @@
 //                  soundtrack page links /news/, not /devlog/
 //   devlog         the staged _redirects sends /devlog/, its old post paths and
 //                  its feeds to /news/ (301); /news/ is headed News
-//   crosslink      every page's footer links Harkfell beside Flux Harmonic
+//   crosslink      every page's footer links Harkfell and Phantom Burn beside Flux Harmonic
 //   version-missing the game's version fetch takes its missing branch for a 404
 //                  AND for 200 with HTML (t-5bb869)
 //   webgl          scripts/webgl-check.mjs on /jack-in/ and /tracker/: with WebGL
@@ -718,11 +718,11 @@ else {
   for (const p of pages) {
     const foot = (/<footer class="foot">([\s\S]*?)<\/footer>/.exec(text(p)) || [])[1];
     if (!foot) { detail.push(`${p}: no footer`); continue; }
-    if (!/<p>Also from Flux Harmonic: <a href="https:\/\/harkfell\.com\/">Harkfell<\/a><\/p>/.test(foot)) detail.push(`${p}: the footer does not link Harkfell`);
+    if (!/<p>Also from Flux Harmonic: <a href="https:\/\/harkfell\.com\/">Harkfell<\/a> and <a href="https:\/\/phantomburn\.net\/">Phantom Burn<\/a><\/p>/.test(foot)) detail.push(`${p}: the footer does not link Harkfell and Phantom Burn`);
     if (!/href="https:\/\/fluxharmonic\.com"/.test(foot)) detail.push(`${p}: the footer lost the Flux Harmonic link`);
   }
   if (detail.length) fail("crosslink", detail.join("; "));
-  else pass("crosslink", `${pages.length} pages' footers link Harkfell beside Flux Harmonic (${pages.join(" ")})`);
+  else pass("crosslink", `${pages.length} pages' footers link Harkfell and Phantom Burn beside Flux Harmonic (${pages.join(" ")})`);
 }
 
 // ---- version-missing (0.1.3, t-5bb869) -------------------------------------------

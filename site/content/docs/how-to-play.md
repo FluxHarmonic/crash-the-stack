@@ -1,6 +1,6 @@
 ---
 title: How to play
-summary: The rules of STACK, DEFRAG and SCAN, the trace, and the controls on a keyboard and a phone.
+summary: The rules of the games, the trace, and the controls on a keyboard and a phone.
 ---
 # How to play
 
