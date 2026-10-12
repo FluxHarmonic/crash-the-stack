@@ -1,0 +1,93 @@
+;;; CHECKSUM uses the shared trace machine and existing LOCK/SCRAMBLE ICE.
+;;; Arithmetic replaces STACK's identity matching for safe lock choices.
+;;; SCRAMBLE uses the actual shared member, unchanged. STACK's identity
+;;; REMAP cannot preserve a Pyramid deck, so it is not applicable here.
+
+(define-library (crash checksum trace)
+  (import (sigil struct)
+          (sigil list)
+          (crash stack rules)
+          (crash stack prng)
+          (crash trace)
+          (substratic time clock)
+          (crash checksum rules))
+
+  (export CHECKSUM-ICE-SET checksum-lock-pairs checksum-lock-weak?
+          fire-checksum-ice checksum-break-lock)
+
+  (begin
+    (define (disjoint? a b)
+      (not (or (eqv? (car a) (car b))
+               (eqv? (car a) (cdr b))
+               (and (cdr a)
+                    (or (eqv? (cdr a) (car b))
+                        (eqv? (cdr a) (cdr b)))))))
+
+    (define (checksum-lock-pairs b)
+      (let ((moves (checksum-moves b)))
+        (filter (lambda (move)
+                  (and (integer? (car move))
+                       (integer? (cdr move))
+                       (any (lambda (other) (disjoint? move other)) moves)))
+                moves)))
+
+    (define (checksum-lock-weak? b id now)
+      (let ((pyramid (cboard-pyramid b)))
+        (and (tile-locked? pyramid id)
+             (or (>= (- now (tile-lock-tick pyramid id))
+                     (* LOCK-DECAY TICKS-PER-SECOND))
+                 (null? (checksum-moves b))))))
+
+    (define (checksum-break-lock b id now)
+      (if (checksum-lock-weak? b id now)
+          (cboard b
+                  selected: #f
+                  pyramid: (board (board-unlock-pair
+                                   (cboard-pyramid b) id
+                                   (tile-lock-partner (cboard-pyramid b) id))
+                                  history: '()))
+          b))
+
+    (define (lock-apply b now)
+      (let* ((pairs (checksum-lock-pairs b))
+             (pyramid (cboard-pyramid b))
+             (rng (prng-next (board-rng pyramid)))
+             (pair (list-ref pairs (prng-index rng (length pairs)))))
+        (cboard b
+                pyramid: (board (board-lock-pair pyramid (car pair) (cdr pair) now)
+                                rng: rng
+                                history: '()))))
+
+    (define SCRAMBLE-MEMBER
+      (list-find (lambda (member) (eq? (ice-member-name member) 'scramble))
+                 ICE-SET))
+
+    (define CHECKSUM-ICE-SET
+      (list (ice-member name: 'lock
+                        applicable?: (lambda (b) (pair? (checksum-lock-pairs b)))
+                        apply: lock-apply)
+            (ice-member name: (ice-member-name SCRAMBLE-MEMBER)
+                        applicable?: (lambda (b)
+                                       ((ice-member-applicable? SCRAMBLE-MEMBER)
+                                        (cboard-pyramid b)))
+                        apply: (lambda (b now)
+                                 (cboard b
+                                         pyramid: ((ice-member-apply SCRAMBLE-MEMBER)
+                                                   (cboard-pyramid b) now))))))
+
+    (define (fire-checksum-ice before now)
+      (let* ((b (cboard before
+                        pyramid: (board-unscramble-all (cboard-pyramid before))))
+             (members (filter (lambda (member) ((ice-member-applicable? member) b))
+                              CHECKSUM-ICE-SET)))
+        (if (null? members)
+            (cons b #f)
+            (let* ((rng (prng-next (board-rng (cboard-pyramid b))))
+                   (member (list-ref members (prng-index rng (length members))))
+                   (ready (cboard b pyramid: (board (cboard-pyramid b) rng: rng)))
+                   (after ((ice-member-apply member) ready now)))
+              (cons (cboard after
+                            selected: #f
+                            history: '()
+                            pyramid: (board (cboard-pyramid after) history: '()))
+                    (ice-member-name member))))))))

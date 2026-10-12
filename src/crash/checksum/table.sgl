@@ -1,0 +1,276 @@
+;;; The shared CHECKSUM table: pure input, clock, trace, pause and end rows.
+;;; Both shells supply ordered virtual pointer events and wall milliseconds.
+
+(define-library (crash checksum table)
+  (import (sigil struct)
+          (sigil math)
+          (crash stack rules)
+          (crash stack layout)
+          (crash checksum layout)
+          (crash checksum rules)
+          (crash checksum generate)
+          (crash checksum trace)
+          (crash trace)
+          (only (crash cards trace) trace-pass trace-undo)
+          (only (crash geometry) rect-contains? panel-keys panel-row-hit)
+          (substratic time clock))
+
+  (export checksum-table checksum-table? checksum-open checksum-step
+          checksum-table-board checksum-table-trace checksum-table-mode
+          checksum-table-seed checksum-table-ms checksum-table-clock
+          checksum-table-cursor checksum-table-cursor-shown
+          checksum-table-paused checksum-table-outcome checksum-table-panel
+          checksum-table-panel-at checksum-table-toast checksum-table-toast-at
+          checksum-table-cues checksum-table-requests
+          checksum-frame make-checksum-frame checksum-panel-rows checksum-panel-title
+          checksum-place-rect checksum-hit checksum-cursor-places
+          CHECKSUM-PAUSE-RECT CHECKSUM-UNDO-RECT)
+
+  (begin
+    (define CHECKSUM-PAUSE-RECT '(544 4 88 26))
+    (define CHECKSUM-UNDO-RECT '(536 346 96 28))
+
+    (define-struct checksum-frame
+      (pressed default: '())
+      (events default: '())
+      (now default: 0.0))
+
+    (define (make-checksum-frame pressed events now)
+      (checksum-frame pressed: pressed events: events now: now))
+
+    (define-struct checksum-table
+      (board default: #f)
+      (trace default: #f)
+      (mode default: 'clean)
+      (seed default: 1)
+      (clock default: #f)
+      (ms default: 0.0)
+      (last-now default: #f)
+      (cursor default: 21)
+      (cursor-shown default: #f)
+      (paused default: #f)
+      (outcome default: #f)
+      (panel default: 0)
+      (panel-at default: 0.0)
+      (toast default: #f)
+      (toast-at default: 0.0)
+      (cues default: '())
+      (requests default: '()))
+
+    (define (checksum-open seed mode)
+      (let ((b (checksum-deal seed)))
+        (unless b (error "CHECKSUM: archive deal failed" seed))
+        (checksum-table
+         board: (cboard b pyramid: (board (cboard-pyramid b) rng: (cboard-seed b)))
+         trace: (trace-new mode)
+         mode: mode
+         seed: (cboard-seed b)
+         clock: (clock-new))))
+
+    (define (checksum-place-rect place)
+      (cond ((eq? place 'pull) '(20 32 56 76))
+            ((eq? place 'waste) '(20 174 56 76))
+            (else
+             (let* ((slot (layout-slot (pyramid-layout) place))
+                    (row (slot-layer slot)))
+               (list (+ 100 (* 32 (slot-hx slot)))
+                     (+ 32 (* 32 row))
+                     56 76)))))
+
+    ;; Reverse draw order: the visible child wins a tap in any overlap.
+    (define (checksum-hit b x y)
+      (cond ((rect-contains? (checksum-place-rect 'pull) x y) 'pull)
+            ((rect-contains? (checksum-place-rect 'waste) x y) 'waste)
+            (else
+             (let loop ((id 27))
+               (cond ((< id 0) #f)
+                     ((and (tile-present? (cboard-pyramid b) id)
+                           (rect-contains? (checksum-place-rect id) x y))
+                      id)
+                     (else (loop (- id 1))))))))
+
+    (define (checksum-cursor-places b)
+      (append (filter (lambda (id) (checksum-free? b id)) (iota 28))
+              (if (pair? (cboard-waste b)) '(waste) '())
+              (if (or (pair? (cboard-stock b)) (checksum-rollback? b)) '(pull) '())))
+
+    (define (center place)
+      (let ((r (checksum-place-rect place)))
+        (cons (+ (car r) 28) (+ (cadr r) 38))))
+
+    (define (move-cursor t key)
+      (let* ((places (checksum-cursor-places (checksum-table-board t)))
+             (current (checksum-table-cursor t))
+             (origin (center current))
+             (horizontal? (memq key '(left h right l)))
+             (sign (if (memq key '(left h up k)) -1 1)))
+        (define (distance place)
+          (let* ((target (center place))
+                 (dx (- (car target) (car origin)))
+                 (dy (- (cdr target) (cdr origin)))
+                 (along (if horizontal? dx dy))
+                 (across (if horizontal? dy dx)))
+            (and (> (* sign along) 0)
+                 (+ (abs along) (* 3 (abs across))))))
+        (let loop ((rest places) (best current) (score #f))
+          (if (null? rest)
+              (checksum-table t cursor: best cursor-shown: #t)
+              (let ((d (distance (car rest))))
+                (if (and d (or (not score) (< d score)))
+                    (loop (cdr rest) (car rest) d)
+                    (loop (cdr rest) best score)))))))
+
+    (define (checksum-panel-rows t)
+      (append (if (checksum-table-paused t) '((resume "RESUME")) '())
+              '((retry "RETRY ARCHIVE") (new "NEW ARCHIVE") (quit "JACK OUT"))))
+
+    (define (checksum-panel-title t)
+      (cond ((checksum-table-paused t) "PAUSED")
+            ((eq? (checksum-table-outcome t) 'cleared) "SEAL BROKEN")
+            ((eq? (checksum-table-outcome t) 'severed) "LINK SEVERED")
+            (else "SEAL HOLDS")))
+
+    (define (say t text)
+      (checksum-table t toast: text toast-at: (checksum-table-ms t)))
+
+    (define (act t place)
+      (let* ((b (checksum-table-board t))
+             (pyramid (cboard-pyramid b))
+             (locked? (and (integer? place) (tile-locked? pyramid place)))
+             (after (if locked?
+                        (checksum-break-lock b place (trace-ticks (checksum-table-trace t)))
+                        (checksum-select b place)))
+             (tr (checksum-table-trace t))
+             (tr (if (and (eq? (checksum-table-mode t) 'twist)
+                          (> (cboard-passes after) (cboard-passes b)))
+                     (trace-pass tr)
+                     tr)))
+        (cond ((eq? b after) (say t (if locked? MSG-LOCKED "PAIR OFFSETS TO 13.")))
+              (else
+               (let* ((places (checksum-cursor-places after))
+                      (cursor (checksum-table-cursor t)))
+                 (checksum-table t
+                                 board: after
+                                 trace: tr
+                                 cursor: (if (or (memv cursor places) (null? places))
+                                             cursor
+                                             (car places))
+                                 cues: (cons (if (> (checksum-count after) (checksum-count b))
+                                                 'match
+                                                 'select)
+                                             (checksum-table-cues t))))))))
+
+    (define (undo t)
+      (let* ((before (checksum-table-board t))
+             (after (checksum-undo before)))
+        (if (eq? before after)
+            t
+            (checksum-table t
+                      board: after
+                      trace: (if (eq? (checksum-table-mode t) 'twist)
+                                 (trace-undo (checksum-table-trace t))
+                                 (checksum-table-trace t))))))
+
+    (define (pause t)
+      (checksum-table t
+                      paused: #t
+                      panel: 0
+                      panel-at: (checksum-table-ms t)
+                      board: (cboard (checksum-table-board t) selected: #f)))
+
+    (define (pointer t event)
+      (if (or (not (eq? (car event) 'down))
+              (checksum-table-paused t)
+              (checksum-table-outcome t))
+          t
+          (let ((x (cadr event)) (y (caddr event)))
+            (cond ((rect-contains? CHECKSUM-PAUSE-RECT x y) (pause t))
+                  ((rect-contains? CHECKSUM-UNDO-RECT x y) (undo t))
+                  (else
+                   (let ((place (checksum-hit (checksum-table-board t) x y)))
+                     (if place
+                         (act (checksum-table t cursor-shown: #f) place)
+                         t)))))))
+
+    (define (keyboard t key)
+      (cond ((or (checksum-table-paused t) (checksum-table-outcome t)) t)
+            ((eq? key 'escape) (pause t))
+            ((memq key '(left right up down h j k l)) (move-cursor t key))
+            ((memq key '(space return))
+             (act (checksum-table t cursor-shown: #t) (checksum-table-cursor t)))
+            ((eq? key 'p) (act t 'pull))
+            ((eq? key 'u) (undo t))
+            (else t)))
+
+    (define (panel t f)
+      (let* ((rows (checksum-panel-rows t))
+             (keys (panel-keys (checksum-table-panel t) (length rows)
+                               (checksum-frame-pressed f)))
+             (tap (let loop ((events (checksum-frame-events f)))
+                    (cond ((null? events) #f)
+                          ((eq? (caar events) 'down)
+                           (or (panel-row-hit (length rows) (cadar events) (caddar events))
+                               (loop (cdr events))))
+                          (else (loop (cdr events))))))
+             (pick (or tap (cdr keys)))
+             (t (checksum-table t panel: (car keys))))
+        (cond ((and (checksum-table-paused t)
+                    (memq 'escape (checksum-frame-pressed f)))
+               (checksum-table t paused: #f))
+              ((not pick) t)
+              ((eq? (car (list-ref rows pick)) 'resume)
+               (checksum-table t paused: #f))
+              (else
+               (checksum-table t requests: (list (car (list-ref rows pick))))))))
+
+    (define (finish t)
+      (let* ((b (checksum-table-board t))
+             (tr (checksum-table-trace t))
+             (outcome (cond ((checksum-won? b) 'cleared)
+                            ((trace-severed? tr) 'severed)
+                            ((checksum-lost? b) 'stalled)
+                            (else #f))))
+        (if outcome
+            (checksum-table t
+                            outcome: outcome
+                            panel: 0
+                            panel-at: (checksum-table-ms t)
+                            trace: (if (eq? outcome 'cleared) (trace-finish tr) tr))
+            t)))
+
+    (define (checksum-step before f)
+      (let* ((now (checksum-frame-now f))
+             (dt (if (checksum-table-last-now before)
+                     (max 0.0 (min 250.0 (- now (checksum-table-last-now before))))
+                     0.0))
+             (t (checksum-table before
+                                last-now: now
+                                cues: '()
+                                requests: '()
+                                ms: (+ (checksum-table-ms before)
+                                       (if (checksum-table-paused before) 0.0 dt)))))
+        (if (or (checksum-table-paused t) (checksum-table-outcome t))
+            (panel t f)
+            (let* ((clock (clock-advance (checksum-table-clock t) (/ dt 1000.0)))
+                   (advanced (trace-advance* (checksum-table-trace t)
+                                             (checksum-table-board t)
+                                             (clock-steps clock)
+                                             fire-checksum-ice))
+                   (t (checksum-table t clock: clock trace: (car advanced)
+                                      board: (cadr advanced)))
+                   (t (fold (lambda (t event)
+                              (say t
+                                   (case event
+                                     ((traced) MSG-TRACED)
+                                     ((lock) MSG-LOCKED-PAIR)
+                                     ((scramble) MSG-SCRAMBLED)
+                                     ((severed) MSG-SEVERED)
+                                     (else MSG-NOTHING))))
+                            t (caddr advanced)))
+                   (t (finish t)))
+              (if (checksum-table-outcome t)
+                  t
+                  (finish
+                   (fold keyboard
+                         (fold pointer t (checksum-frame-events f))
+                         (checksum-frame-pressed f))))))))))

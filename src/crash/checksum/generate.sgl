@@ -1,0 +1,155 @@
+;;; A reverse-solve deal using every DEFRAG packet exactly once.
+;;; Split a seeded shuffled deck into complementary pairs and ROOTs.
+;;; Remove currently free pyramid slots, assigning a group to two slots,
+;;; or one slot and the next feed packet. A ROOT fills one slot. Search
+;;; backtracks over group and slot choices if the feed budget runs out.
+;;; Unused groups fill the rest of the 24-packet feed. Assign faces on
+;;; successful unwind, as STACK does; no arbitrary deal is ever accepted.
+
+(define-library (crash checksum generate)
+  (import (sigil struct)
+          (sigil list)
+          (crash stack rules)
+          (crash stack prng)
+          (crash cards deck)
+          (crash checksum layout)
+          (crash checksum rules))
+
+  (export checksum-deal checksum-deal/stats replay-checksum-solution)
+
+  (begin
+    (define STOCK-SIZE 24)
+
+    ;; Complement counts in a 52-packet deck are balanced. Pair the first
+    ;; packet with the first complementary one in seeded deck order.
+    (define (packet-groups packets)
+      (cond ((null? packets) '())
+            ((= (card-rank (car packets)) 13)
+             (cons (list (car packets)) (packet-groups (cdr packets))))
+            (else
+             (let* ((a (car packets))
+                    (partner (list-find
+                              (lambda (c)
+                                (= (+ (card-rank a) (card-rank c)) 13))
+                              (cdr packets))))
+               (unless partner (error "CHECKSUM: unbalanced packet deck"))
+               (cons (list a partner)
+                     (packet-groups
+                      (filter (lambda (c) (not (= c partner)))
+                              (cdr packets))))))))
+
+    (define (choices slots root? stock-first? stock-room?)
+      (if root?
+          (map (lambda (a) (cons a #f)) slots)
+          (let ((pairs
+                 (let loop ((rest slots) (acc '()))
+                   (if (null? rest)
+                       (reverse acc)
+                       (loop (cdr rest)
+                             (append (map (lambda (c) (cons (car rest) c))
+                                          (cdr rest))
+                                     acc)))))
+                (stock (if stock-room?
+                           (map (lambda (a) (cons a 'waste)) slots)
+                           '())))
+            (if stock-first? (append stock pairs) (append pairs stock)))))
+
+    (define (checksum-deal/stats seed)
+      (let* ((deck (shuffled-deck seed))
+             (groups (packet-groups (car deck)))
+             (packets (make-vector PYRAMID-SIZE #f))
+             (blank (board-new (pyramid-layout) packets))
+             (rng (cdr deck))
+             (backtracks 0))
+        (define (search live groups feed-reversed feed-count)
+          (if (board-cleared? live)
+              (list (append (reverse feed-reversed) (apply append groups)) '())
+              (let ((slots (playable-slots live)))
+                (set! rng (prng-next rng))
+                (let* ((n (length groups))
+                       (start (prng-index rng n))
+                       (stock-first? (= (modulo rng 3) 0)))
+                  (let group-loop ((index 0))
+                    (if (= index n)
+                        #f
+                        (let* ((group (list-ref groups (modulo (+ start index) n)))
+                               (root? (null? (cdr group)))
+                               (moves (choices slots root? stock-first?
+                                               (< feed-count STOCK-SIZE)))
+                               (left (filter (lambda (g) (not (eq? g group))) groups)))
+                          (set! rng (prng-next rng))
+                          (let* ((count (length moves))
+                                 ;; Randomize free-slot choices within the
+                                 ;; preferred move kind, preserving stock's
+                                 ;; deliberate one-in-three preference.
+                                 (preferred (if root?
+                                                count
+                                                (if stock-first?
+                                                    (if (< feed-count STOCK-SIZE)
+                                                        (length slots)
+                                                        count)
+                                                    (- count (if (< feed-count STOCK-SIZE)
+                                                                 (length slots)
+                                                                 0)))))
+                                 (offset (if (> preferred 0)
+                                             (prng-index rng preferred)
+                                             0)))
+                            (let move-loop ((attempt 0))
+                              (if (= attempt count)
+                                  (group-loop (+ index 1))
+                                  (let* ((move (list-ref moves
+                                                        (modulo (+ offset attempt) count)))
+                                         (a (car move))
+                                         (c (cdr move))
+                                         (stock? (eq? c 'waste))
+                                         (next (board (board-remove-pair
+                                                       live a
+                                                       (if (integer? c) c a))
+                                                      history: '()))
+                                         (result
+                                          (search next left
+                                                  (if stock?
+                                                      (cons (cadr group) feed-reversed)
+                                                      feed-reversed)
+                                                  (if stock? (+ feed-count 1) feed-count))))
+                                    (if result
+                                        (begin
+                                          (vector-set! packets a (car group))
+                                          (when (integer? c)
+                                            (vector-set! packets c (cadr group)))
+                                          (list (car result)
+                                                (append (if stock?
+                                                            (list 'pull move)
+                                                            (list move))
+                                                        (cadr result))))
+                                        (begin
+                                          (set! backtracks (+ backtracks 1))
+                                          (move-loop (+ attempt 1)))))))))))))))
+        (let ((result (search blank groups '() 0)))
+          (cons (and result
+                     (cboard (checksum-board packets (car result))
+                             seed: (prng-seed seed)
+                             solution: (cadr result)))
+                backtracks))))
+
+    (define (checksum-deal seed)
+      (car (checksum-deal/stats seed)))
+
+    ;; Replay through the player's selection/PULL doors, not unchecked
+    ;; removals. A witness is useful for regression, but independent solve
+    ;; gates consume only the dealt pyramid and feed, never this sequence.
+    (define (replay-checksum-solution b)
+      (let loop ((b b) (moves (cboard-solution b)))
+        (cond ((null? moves) (checksum-won? b))
+              ((eq? (car moves) 'pull)
+               (let ((after (checksum-select b 'pull)))
+                 (and (not (eq? b after))
+                      (loop after (cdr moves)))))
+              (else
+               (let* ((move (car moves))
+                      (a (car move))
+                      (c (cdr move))
+                      (selected (checksum-select b a))
+                      (after (if c (checksum-select selected c) selected)))
+                 (and (> (checksum-count after) (checksum-count b))
+                      (loop after (cdr moves))))))))))

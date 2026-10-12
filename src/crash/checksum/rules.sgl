@@ -1,0 +1,175 @@
+;;; CHECKSUM: Pyramid with DEFRAG's 52 distinct packets.
+;;; Places are pyramid ids, 'waste, and 'pull (the next feed packet).
+;;; A selected buffer packet can pair with the next PULL; otherwise PULL
+;;; moves one packet to the buffer. Three passes include the initial deal.
+
+(define-library (crash checksum rules)
+  (import (sigil struct)
+          (crash stack rules)
+          (crash cards deck)
+          (crash checksum layout))
+
+  (export cboard cboard? cboard-pyramid cboard-stock cboard-waste
+          cboard-passes cboard-selected cboard-history cboard-moves
+          cboard-seed cboard-solution
+          PASS-LIMIT checksum-board checksum-free? checksum-card
+          checksum-pair? checksum-root? checksum-remove checksum-select
+          checksum-pull checksum-rollback? checksum-undo checksum-moves
+          checksum-won? checksum-lost? checksum-count)
+
+  (begin
+    (define PASS-LIMIT 3)
+
+    (define-struct cboard
+      (pyramid default: #f)
+      (stock default: '())
+      (waste default: '())
+      (passes default: 1)
+      (selected default: #f)
+      (history default: '())
+      (moves default: 0)
+      (seed default: 1)
+      (solution default: '()))
+
+    (define (checksum-board packets stock)
+      (cboard pyramid: (board-new (pyramid-layout) packets)
+              stock: stock))
+
+    (define (pyramid-place? place)
+      (and (integer? place) (>= place 0) (< place PYRAMID-SIZE)))
+
+    (define (checksum-free? b place)
+      (cond ((pyramid-place? place)
+             (and (playable? (cboard-pyramid b) place)
+                  (not (tile-locked? (cboard-pyramid b) place))))
+            ((eq? place 'waste) (pair? (cboard-waste b)))
+            ((eq? place 'pull) (pair? (cboard-stock b)))
+            (else #f)))
+
+    (define (checksum-card b place)
+      (and (checksum-free? b place)
+           (cond ((eq? place 'waste) (car (cboard-waste b)))
+                 ((eq? place 'pull) (car (cboard-stock b)))
+                 (else (tile-face (cboard-pyramid b) place)))))
+
+    (define (checksum-root? b place)
+      (let ((packet (checksum-card b place)))
+        (and packet (= (card-rank packet) 13))))
+
+    (define (checksum-pair? b a c)
+      (and (not (eqv? a c))
+           (checksum-free? b a)
+           (checksum-free? b c)
+           ;; The feed is paired through PULL only with the buffer.
+           (or (and (not (eq? a 'pull)) (not (eq? c 'pull)))
+               (eq? a 'waste)
+               (eq? c 'waste))
+           (= (+ (card-rank (checksum-card b a))
+                 (card-rank (checksum-card b c)))
+              13)))
+
+    (define (without-place b place)
+      (cond ((eq? place 'waste)
+             (cboard b waste: (cdr (cboard-waste b))))
+            ((eq? place 'pull)
+             (cboard b stock: (cdr (cboard-stock b))))
+            (else
+             (cboard b
+                     pyramid: (board (board-remove-pair
+                                      (cboard-pyramid b) place place)
+                                     history: '())))))
+
+    (define (remember before after)
+      (cboard after
+              selected: #f
+              moves: (+ 1 (cboard-moves before))
+              history: (cons (cboard before history: '())
+                             (cboard-history before))))
+
+    ;; c = #f means ROOT alone. Refused moves preserve the whole value.
+    (define (checksum-remove b a c)
+      (cond ((and (not c) (checksum-root? b a))
+             (remember b (without-place b a)))
+            ((and c (checksum-pair? b a c))
+             (remember b (without-place (without-place b a) c)))
+            (else b)))
+
+    (define (checksum-rollback? b)
+      (and (null? (cboard-stock b))
+           (pair? (cboard-waste b))
+           (< (cboard-passes b) PASS-LIMIT)))
+
+    (define (checksum-pull b)
+      (cond ((pair? (cboard-stock b))
+             (if (and (eq? (cboard-selected b) 'waste)
+                      (checksum-pair? b 'waste 'pull))
+                 (checksum-remove b 'waste 'pull)
+                 (remember b
+                           (cboard b
+                                   stock: (cdr (cboard-stock b))
+                                   waste: (cons (car (cboard-stock b))
+                                                (cboard-waste b))))))
+            ((checksum-rollback? b)
+             (remember b
+                       (cboard b
+                               stock: (reverse (cboard-waste b))
+                               waste: '()
+                               passes: (+ 1 (cboard-passes b)))))
+            (else b)))
+
+    (define (checksum-select b place)
+      (let ((b (if (and (pyramid-place? place)
+                        (checksum-free? b place)
+                        (tile-scrambled? (cboard-pyramid b) place))
+                   (cboard b
+                           pyramid: (board-unscramble (cboard-pyramid b) place))
+                   b)))
+        (cond ((eq? place 'pull) (checksum-pull b))
+              ((not (checksum-free? b place)) b)
+              ((checksum-root? b place) (checksum-remove b place #f))
+              ((eqv? (cboard-selected b) place) (cboard b selected: #f))
+              ((and (cboard-selected b)
+                    (checksum-pair? b (cboard-selected b) place))
+               (checksum-remove b (cboard-selected b) place))
+              (else (cboard b selected: place)))))
+
+    (define (checksum-undo b)
+      (if (null? (cboard-history b))
+          b
+          (cboard (car (cboard-history b))
+                  selected: #f
+                  history: (cdr (cboard-history b)))))
+
+    ;; Legal removals available now; the feed and recycling are separate.
+    (define (checksum-moves b)
+      (let ((places (append (filter (lambda (id) (checksum-free? b id))
+                                   (iota PYRAMID-SIZE))
+                            (if (pair? (cboard-waste b)) '(waste) '())
+                            (if (pair? (cboard-stock b)) '(pull) '()))))
+        (let loop ((rest places) (moves '()))
+          (if (null? rest)
+              (reverse moves)
+              (let ((a (car rest)))
+                (loop (cdr rest)
+                      (append
+                       (map (lambda (c) (cons a c))
+                            (filter (lambda (c) (checksum-pair? b a c))
+                                    (cdr rest)))
+                       (if (checksum-root? b a)
+                           (cons (cons a #f) moves)
+                           moves))))))))
+
+    (define (checksum-count b)
+      (- PYRAMID-SIZE (board-tile-count (cboard-pyramid b))))
+
+    (define (checksum-won? b)
+      (board-cleared? (cboard-pyramid b)))
+
+    ;; A remaining feed or pass can expose another match. At the final
+    ;; exhausted feed, only current free packets and the buffer top matter.
+    (define (checksum-lost? b)
+      (and (not (checksum-won? b))
+           (null? (board-locked-slots (cboard-pyramid b)))
+           (null? (cboard-stock b))
+           (not (checksum-rollback? b))
+           (null? (checksum-moves b))))))
