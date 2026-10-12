@@ -1,5 +1,5 @@
 // Light source-evaluation tests, with a behavioral plant for every test.
-// Usage: node scripts/checksum-rule-sabotage.mjs SIGIL SIGIL_TEST_SOURCE
+// Usage: node scripts/checksum-rule-sabotage.mjs SIGIL SIGIL_TEST_SOURCE SUBSTRATIC_SOURCE
 import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync,
          rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,30 +7,38 @@ import { resolve, join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-const [sigil, testSource] = process.argv.slice(2);
-if (!sigil || !testSource) throw new Error('Need SIGIL and SIGIL_TEST_SOURCE');
+const [sigil, testSource, substraticSource] = process.argv.slice(2);
+if (!sigil || !testSource || !substraticSource)
+  throw new Error('Need SIGIL, SIGIL_TEST_SOURCE and SUBSTRATIC_SOURCE');
 const repo = resolve('.');
 const scratch = mkdtempSync(join(tmpdir(), 'checksum-rule-sabotage-'));
 const source = join(scratch, 'src');
 mkdirSync(join(source, 'crash'), { recursive: true });
-for (const family of ['stack', 'cards', 'checksum'])
-  cpSync(join(repo, 'src/crash', family), join(source, 'crash', family), { recursive: true });
+cpSync(join(repo, 'src/crash'), join(source, 'crash'), { recursive: true });
+cpSync(join(resolve(substraticSource), 'substratic'), join(source, 'substratic'), { recursive: true });
 const rulePath = join(source, 'crash/checksum/rules.sgl');
 const layoutPath = join(source, 'crash/checksum/layout.sgl');
 const generatePath = join(source, 'crash/checksum/generate.sgl');
+const tablePath = join(source, 'crash/checksum/table.sgl');
+const tracePath = join(source, 'crash/checksum/trace.sgl');
+const menuPath = join(source, 'crash/menu.sgl');
 const rules = readFileSync(rulePath, 'utf8');
 const layout = readFileSync(layoutPath, 'utf8');
 const generate = readFileSync(generatePath, 'utf8');
 const originals = new Map([[rulePath, rules], [layoutPath, layout], [generatePath, generate]]);
+for (const file of [tablePath, tracePath, menuPath]) originals.set(file, readFileSync(file, 'utf8'));
 const tests = readFileSync(join(repo, 'test/test-checksum.sgl'), 'utf8')
-  + '\n' + readFileSync(join(repo, 'test/test-checksum-generate.sgl'), 'utf8');
+  + '\n' + readFileSync(join(repo, 'test/test-checksum-generate.sgl'), 'utf8')
+  + '\n' + readFileSync(join(repo, 'test/test-checksum-table.sgl'), 'utf8')
+  + '\n' + readFileSync(join(repo, 'test/test-menu.sgl'), 'utf8');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const runFile = join(scratch, 'run.sgl');
 
 function run(target) {
   const predicate = target
     ? `(lambda (td) (string=? (test-descriptor-name td) ${JSON.stringify(target)}))`
-    : '(lambda (td) #t)';
+    : `(lambda (td) (member (test-descriptor-name td)
+         (list ${cases.map(c => JSON.stringify(c[3])).join(' ')})))`;
   writeFileSync(runFile, `${tests}\n
 (let ((summary (run-tests-filtered ${predicate})))
   (for-each (lambda (r)
@@ -97,6 +105,37 @@ const cases = [
     'a seed repeats exactly, a neighboring seed differs'],
   [generatePath, "(list 'pull move)", "(list move 'pull)",
     'ten recorded solutions clear via player controls with the feed in play'],
+  [rulePath, sumAnchor, sumPlant, 'tap-click pairs and ROOTs go through the same table selection'],
+  [tablePath, '(let loop ((id 27))', '(let loop ((id 0))',
+    'a tap in overlap hits the visible child, and covered packets cannot be selected'],
+  [tablePath, "((memq key '(space return))", "((memq key '(unused))",
+    'arrows plus Space and Enter perform a packet pair'],
+  [rulePath, "(eq? (cboard-selected b) 'waste)", "(eq? (cboard-selected b) 'invalid)",
+    'PULL by key or tap permits a selected buffer-to-next-pull pair'],
+  [tablePath, "((eq? key 'u) (undo t))", "((eq? key 'u) t)",
+    'U undoes a move; a no-op undo never charges the trace'],
+  [tablePath, '(if (checksum-table-paused before) 0.0 dt)', 'dt',
+    'pause clears selection, holds both clocks, and Escape resumes'],
+  [tablePath, '(if (checksum-table-paused before) 0.0 dt)',
+    '(if (or (checksum-table-paused before) (checksum-table-outcome before)) 0.0 dt)',
+    'clear freezes trace, keeps the panel fade clock running and offers retry/new/quit'],
+  [tablePath, "((checksum-lost? b) 'stalled)", "((checksum-lost? b) #f)",
+    'no legal removals at the final feed shows SEAL HOLDS'],
+  [tablePath, '(clock-steps clock)\n                                             fire-checksum-ice',
+    '0\n                                             fire-checksum-ice',
+    'HACKER runs the shared trace phases and severs; CLASSIC never severs'],
+  [tablePath, '(trace-pass tr)', 'tr', 'HACKER rollback uses the shared pass charge'],
+  [tracePath, '(* LOCK-DECAY TICKS-PER-SECOND)', '(* 2 LOCK-DECAY TICKS-PER-SECOND)',
+    'existing LOCK and SCRAMBLE members only; arithmetic lock leaves a disjoint move'],
+  [rulePath, '(board-unscramble (cboard-pyramid b) place)', '(cboard-pyramid b)',
+    'shared SCRAMBLE preserves packets; selecting a marked face clears its glitch'],
+  [tracePath, "history: '()\n                            pyramid:", 'history: (cboard-history before)\n                            pyramid:',
+    'ICE cuts undo history; temporary locks cannot cause an immediate loss'],
+  [menuPath, "'free-checksum \"CHECKSUM\" 'new-board 'version 'back",
+    "'free-checksum \"CHECKSUM\" 'version 'new-board 'back",
+    'CHECKSUM (Pyramid) tile opens its own screen and NEW BOARD selects CHECKSUM'],
+  [menuPath, "((free-checksum) 'checksum)", "((free-checksum) 'stack)",
+    "CHECKSUM's version stays independent and Back returns to its kept tile"],
 ];
 
 try {
@@ -117,7 +156,8 @@ try {
     // Require the targeted assertion to fail after successful evaluation.
     // Syntax/import/runtime errors are not evidence of sabotage detection.
     if (red.status !== 1 || !red.stdout.includes(`TEST-FAIL: ${target}`)
-        || !red.stdout.includes('TEST-COUNT: 1') || red.stderr.includes('Error ('))
+        || !red.stdout.includes('TEST-COUNT: 1') || red.stderr.includes('Error (')
+        || red.stdout.includes('| error:'))
       throw new Error(`Sabotage did not produce the intended assertion: ${target}\n${red.stdout}${red.stderr}`);
     console.log(`RED: ${target}`);
   }

@@ -1863,7 +1863,7 @@ async function dealFrom(free, table, row = "new-board") {
   const r = await pauseMenu();
   if (r.error) detail = r.error;
   else {
-    const want = { free: "stack cards scan intercept decrypt code scores back",   // D66: the games first (INTERCEPT after SCAN); TRACKER sits on the top screen now (David, 2026-09-22)
+    const want = { free: "stack cards scan intercept decrypt checksum code scores back",   // D66: the games first (INTERCEPT after SCAN); TRACKER sits on the top screen now (David, 2026-09-22)
                    "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
                    "free-cards": "new-board daily-board version draw scoring back",   // 0.3: DEFRAG's own settings on its screen
                    "free-scan": "new-board daily-board version size back",   // SCAN: VERSION (P6c) and SIZE, both value rows

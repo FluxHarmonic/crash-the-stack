@@ -502,7 +502,7 @@ if (flag("--meds")) {
   let detail = "";
   if (!booted || !settled) detail = "the menu never went live (no boot done / title settled)";
   else if (!free) detail = "ArrowDown, Enter did not open FREE PLAY";
-  else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt code scores back`;
+  else if (rows.join(" ") !== "stack cards scan intercept decrypt checksum code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt checksum code scores back`;
   else {
     m0 = consoleLines.length;
     await key("ArrowRight"); await key("ArrowRight"); await key("Enter");   // 0.3: the carousel, SCAN the third tile

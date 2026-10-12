@@ -130,8 +130,15 @@ function main() {
   const minimum = mode === '--smoke' ? 1 : 200;
   if (deals.length < minimum) throw new Error(`Need at least ${minimum} distinct seeds`);
   let worst = 0;
+  let firstPass = 0;
   for (const deal of deals) {
-    const result = solve(deal.pyramid, deal.stock);
+    // A stricter first-pass search avoids exploring two unnecessary feed
+    // retries inside each bad branch. Success is still a legal Pyramid
+    // proof; no generator witness is consulted. General deals may need
+    // the full three-pass search, which remains available as a fallback.
+    let result = solve(deal.pyramid, deal.stock, { passLimit: 1 });
+    if (result.solvable) firstPass++;
+    else result = solve(deal.pyramid, deal.stock);
     if (!result.solvable)
       throw new Error(`Seed ${deal.seed}: ${result.budgetExceeded ? 'budget exceeded (inconclusive)' : 'unsolvable'}`);
     worst = Math.max(worst, result.nodes);
@@ -145,7 +152,7 @@ function main() {
   const red = solve(broken, brokenStock, { maxNodes: 2_000_000 });
   if (red.solvable || red.budgetExceeded)
     throw new Error(`Independent sabotage failed or inconclusive: nodes=${red.nodes}`);
-  console.log(`SOLVED: ${deals.length}/${deals.length}; worst ${worst} nodes; independent coverage, ranks and feed`);
+  console.log(`SOLVED: ${deals.length}/${deals.length}; ${firstPass} on first pass; worst ${worst} nodes; independent coverage, ranks and feed`);
   console.log(`SABOTAGE: unsolvable after ${red.nodes} nodes; BOOT apex with no SYSOP`);
 }
 

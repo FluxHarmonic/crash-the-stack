@@ -433,7 +433,7 @@ const r1 = (x) => Math.round(x * 10) / 10;
   let detail = "";
   if (!booted || !settled) detail = "the menu never went live (no boot done / title settled)";
   else if (!free) detail = "ArrowDown, Enter did not open FREE PLAY";
-  else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}`;
+  else if (rows.join(" ") !== "stack cards scan intercept decrypt checksum code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}`;
   if (!detail) {
     for (let i = 0; i < 4; i++) await realKey("ArrowRight");   // 0.3: the carousel, DECRYPT the fifth tile
     await sleep(300); await shot("menu");
