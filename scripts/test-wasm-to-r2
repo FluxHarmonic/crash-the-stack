@@ -27,17 +27,17 @@ stage() {   # a fresh staged tree in $DIR
   echo 'const PRECACHE = ["crash-the-stack.wasm"];' > "$DIR/jack-in/sw.js"
   echo '<main data-wasm="crash-tracker"></main>' > "$DIR/tracker/index.html"
 }
-TOKEN=tok-test-wasm-to-r2
+dummy_token=tok-test-wasm-to-r2
 start_mock() {   # scope-bucket [mode]
   [ -n "$M" ] && kill $M 2>/dev/null; wait 2>/dev/null
-  node scripts/r2-s3-mock.cjs 0 "$TOKEN" "$1" ${2:-honest} > "$T/mock.log" 2>&1 & M=$!
+  node scripts/r2-s3-mock.cjs 0 "$dummy_token" "$1" ${2:-honest} > "$T/mock.log" 2>&1 & M=$!
   i=0; until grep -q listening "$T/mock.log" 2>/dev/null; do i=$((i+1)); [ $i -le 100 ] || { echo "SETUP-FAILED: the mock did not start"; cat "$T/mock.log"; exit 1; }; sleep 0.1; done
   PORT=$(sed -n 's/^mock-r2 listening \([0-9]*\).*/\1/p' "$T/mock.log")
 }
 run() {   # creds|nocreds args...
   c=$1; shift
   if [ "$c" = creds ]; then
-    env CRASH_WEB_DIR="$WEB" CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct \
+    env CRASH_WEB_DIR="$WEB" CLOUDFLARE_API_TOKEN="$dummy_token" CLOUDFLARE_ACCOUNT_ID=acct \
       R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" sh "$W2R" "$@" > "$T/out" 2>&1
   else
     env -u CLOUDFLARE_API_TOKEN -u CLOUDFLARE_ACCOUNT_ID CRASH_WEB_DIR="$WEB" \
@@ -76,7 +76,7 @@ ok "  and says 403, not absent" 'grep -q "HTTP 403" "$T/out"'
 
 start_mock "$BUCKET"
 head -c 1000 /dev/urandom > "$T/other.bin"
-env CLOUDFLARE_API_TOKEN="$TOKEN" CLOUDFLARE_ACCOUNT_ID=acct R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
+env CLOUDFLARE_API_TOKEN="$dummy_token" CLOUDFLARE_ACCOUNT_ID=acct R2_API_BASE="http://127.0.0.1:$PORT" R2_S3_ENDPOINT="http://127.0.0.1:$PORT" \
   scripts/r2-s3 put "$BUCKET" "$GKEY" "$T/other.bin" application/wasm 2>/dev/null || { echo "SETUP-FAILED: could not plant other bytes at the key"; exit 1; }
 stage i; run creds "$DIR" --upload
 ok "upload, key holds OTHER bytes: REFUSED, not overwritten" '[ $RC = 1 ] && grep -q "holds other bytes" "$T/out" && [ "$(puts "$GKEY")" = 1 ]'

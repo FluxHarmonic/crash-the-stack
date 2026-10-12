@@ -7,13 +7,13 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 HELPER=${1:-$HERE/r2-s3}
 MOCK=$HERE/r2-s3-mock.cjs
 T=$(mktemp -d); trap 'kill $M 2>/dev/null; rm -rf "$T"' EXIT
-node "$MOCK" 0 tok-secret-value-xyz wasm-bucket,missing-bucket > "$T/mock.log" 2>&1 & M=$!
+node "$MOCK" 0 dummy-secret-value-xyz wasm-bucket,missing-bucket > "$T/mock.log" 2>&1 & M=$!
 i=0; until grep -q listening "$T/mock.log" 2>/dev/null; do i=$((i+1)); [ $i -le 100 ] || { echo "SETUP-FAILED: the mock did not start:"; cat "$T/mock.log"; exit 1; }; sleep 0.1; done
 PORT=$(sed -n "s/^mock-r2 listening \([0-9]*\).*/\1/p" "$T/mock.log")
 # a curl shim that records every argv, to prove no credential rides on a command line
 mkdir "$T/bin"; REAL=$(command -v curl)
 printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s/argv.log\nexec %s "$@"\n' "$T" "$REAL" > "$T/bin/curl"; chmod +x "$T/bin/curl"
-export PATH="$T/bin:$PATH" CLOUDFLARE_API_TOKEN=tok-secret-value-xyz CLOUDFLARE_ACCOUNT_ID=acct \
+export PATH="$T/bin:$PATH" CLOUDFLARE_API_TOKEN=dummy-secret-value-xyz CLOUDFLARE_ACCOUNT_ID=acct \
   R2_API_BASE=http://127.0.0.1:$PORT R2_S3_ENDPOINT=http://127.0.0.1:$PORT
 N=0; F=0
 ck() { N=$((N+1)); if [ "$2" = "$3" ]; then echo "PASS $1 (rc $3)"; else echo "FAIL $1: rc $3, want $2"; F=$((F+1)); fi; }
@@ -34,7 +34,7 @@ ok "  ...and says HTTP 403" 'grep -q "HTTP 403" "$T/e"'
 ok "  ...writes no file" '[ ! -e "$T/nope" ]'
 "$HELPER" put other-bucket $K "$T/w.wasm" application/wasm 2>"$T/e"; ck "put out-of-scope -> 1" 1 $?
 ok "  ...says AccessDenied" 'grep -q "AccessDenied" "$T/e"'
-CLOUDFLARE_API_TOKEN=wrong-token "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "unverifiable token -> 1" 1 $?
+CLOUDFLARE_API_TOKEN=dummy-wrong-token "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "unverifiable token -> 1" 1 $?
 ok "  ...says so" 'grep -q "did not verify" "$T/e"'
 "$HELPER" head wasm-bucket 'a b/../x' 2>"$T/e"; ck "odd key refused -> 2" 2 $?
 "$HELPER" put wasm-bucket $K "$T/missing" application/wasm 2>"$T/e"; ck "put of a missing file -> 1" 1 $?
@@ -59,10 +59,10 @@ NL='
 "$HELPER" put wasm-bucket $K2 "$T/w.wasm" "audio/mpeg${NL}X-Injected: 1" 2>"$T/e"; ck "TYPE with a newline refused" 2 $?
 "$HELPER" put wasm-bucket $K2 "$T/w.wasm" audio/mpeg "public$(printf '\r')X: 1" 2>"$T/e"; ck "CACHE-CONTROL with a CR refused" 2 $?
 ok "  ...and no injected header reached the server" '! grep -q "X-Injected" "$T/mock.log"'
-CLOUDFLARE_API_TOKEN='tok"quote' "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "token with a quote refused" 2 $?
-CLOUDFLARE_API_TOKEN="tok${NL}line" "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "token with a newline refused" 2 $?
-SECRET=$(printf '%s' tok-secret-value-xyz | sha256sum | cut -d' ' -f1)
+CLOUDFLARE_API_TOKEN='dummy"quote' "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "token with a quote refused" 2 $?
+CLOUDFLARE_API_TOKEN="dummy${NL}line" "$HELPER" head wasm-bucket $K 2>"$T/e"; ck "token with a newline refused" 2 $?
+SECRET=$(printf '%s' dummy-secret-value-xyz | sha256sum | cut -d' ' -f1)
 ok "curl ran (argv log has lines)" '[ "$(wc -l < "$T/argv.log")" -ge 10 ]'
-ok "no token on any curl argv" '! grep -q tok-secret-value-xyz "$T/argv.log"'
+ok "no token on any curl argv" '! grep -q dummy-secret-value-xyz "$T/argv.log"'
 ok "no S3 secret on any curl argv" '! grep -q "$SECRET" "$T/argv.log"'
 echo "VERDICT: $((N-F))/$N passed"; [ "$F" = 0 ]
