@@ -153,6 +153,9 @@
                 decrypt-table-board decrypt-table-cursor)
           (only (crash decrypt rules) dboard-cells board->text)
           (only (crash decrypt draw) draw-decrypt)
+          (crash checksum table)
+          (crash checksum rules)
+          (only (crash checksum draw) draw-checksum)
           (only (crash decrypt record) record->datum datum->record)
           (only (crash intercept preview) preview-set-say!)
           (crash title card)
@@ -1375,6 +1378,10 @@
           ;; CLASSIC SCAN), once a board is in memory
           ((intercept) #f)   ; the song is the screen's own source
           ((decrypt) (when *decrypt* (music-frame! (quote decrypt) (if (decrypt-hot? *decrypt*) (quote counter) (quote trace)) (decrypt-table-seed *decrypt*))))
+          ((checksum)
+           (when *checksum*
+             (music-frame! 'cards (checksum-table-trace *checksum*)
+                           (checksum-table-seed *checksum*))))
           (else
            (let ((k (table-up)))
              (when (and k ((table-kind-board? k)))
@@ -1435,6 +1442,7 @@
         ((hub) (if *overlay* (overlay-tick f dt) (hub-tick f dt)))   ; P5: the pause panel holds the beat
         ((intercept) (intercept-tick f))
         ((decrypt) (decrypt-tick f dt))
+        ((checksum) (checksum-tick f dt))
         (else
          (if *overlay*
              (overlay-tick f dt)                                     ; the pause panel stops the table's clock
@@ -1948,6 +1956,84 @@
               (set! *intercept* t)
               (intercept-bg-step! t wall)
               (present! #f (lambda () (draw-intercept t VW VH (intercept-bg) *copper* wall)))))))
+
+    ;; --- CHECKSUM: standalone FREE PLAY draft ----------------------------------
+    (define *checksum* #f)
+    (define *checksum-events* '())
+    (define *checksum-door* #f)
+    (define *checksum-deals* 0)
+
+    (define (open-checksum! seed . modes)
+      (let* ((version (cdr (assq 'checksum (versions-in-force))))
+             (mode (if (pair? modes)
+                       (car modes)
+                       (if (eq? version 'hacker) 'twist 'clean)))
+             (seed (or seed
+                       (+ 1 (modulo (+ (* 7919 (now-second))
+                                       (* 104729 *checksum-deals*))
+                                    4194303)))))
+        (set! *checksum-deals* (+ 1 *checksum-deals*))
+        (set-run! #f)
+        (music-fresh!)
+        (field-for-deal! seed)
+        (set! *screen* 'checksum)
+        (set! *overlay* #f)
+        (set! *checksum-events* '())
+        (set! *checksum* (checksum-open seed mode))
+        (say "checksum" "open" mode seed)
+        (let ((b (checksum-table-board *checksum*)))
+          (say "checksum" "deal" seed
+               (vector->list (board-faces (cboard-pyramid b)))
+               (cboard-stock b)))))
+
+    (define (checksum-pointer! payload)
+      (let ((parts (string-split payload ",")))
+        (when (and (eq? *screen* 'checksum) (= (length parts) 4))
+          (let ((kind (string->symbol (car parts)))
+                (x (string->number (caddr parts)))
+                (y (string->number (cadddr parts))))
+            (when (and x y (memq kind '(down up move)))
+              (let ((p (or (frame->virtual (gles3-canvas-width) (gles3-canvas-height)
+                                           VW VH x y)
+                           (cons -1 -1))))
+                (set! *checksum-events*
+                      (cons (list kind (exact (floor (car p)))
+                                  (exact (floor (cdr p)))
+                                  (string->symbol (cadr parts)))
+                            *checksum-events*))))))))
+
+    (define (checksum-tick f dt)
+      (let* ((before *checksum*)
+             (t (checksum-step before
+                               (make-checksum-frame (input-frame-pressed f)
+                                                    (reverse *checksum-events*)
+                                                    (now-ms))))
+             (requests (checksum-table-requests t))
+             (b (checksum-table-board t)))
+        (set! *checksum-events* '())
+        (set! *checksum* t)
+        (play-cues! (checksum-table-cues t))
+        (when *bg*
+          (set! *bg* (bg-advance *bg* (clock-steps (checksum-table-clock t))
+                                 (checksum-table-trace before)
+                                 (checksum-table-trace t))))
+        (unless (eq? b (checksum-table-board before))
+          (say "checksum" "state" (checksum-count b)
+               "selected" (or (cboard-selected b) '-)
+               "cursor" (checksum-table-cursor t)
+               "stock" (length (cboard-stock b)) "pass" (cboard-passes b)))
+        (when (and (checksum-table-outcome t) (not (checksum-table-outcome before)))
+          (say "checksum" "over" (checksum-table-outcome t) (checksum-count b)))
+        (cond ((memq 'quit requests) (set! *checksum* #f) (open-menu!))
+              ((memq 'new requests) (open-checksum! #f (checksum-table-mode t)))
+              ((memq 'retry requests)
+               (open-checksum! (checksum-table-seed t) (checksum-table-mode t)))
+              (else
+               (present! #f
+                         (lambda ()
+                           (draw-checksum t (texture-for-path PORTRAITS-PATH)
+                                          (if (eq? (setting 'background) 'off) #f (background))
+                                          *copper*)))))))
 
     ;; --- DECRYPT, the match-3 table (the 2026-09-29 draft) ----------------------------
     ;; Its own screen beside the table records, like INTERCEPT's: the board,
@@ -2530,6 +2616,7 @@
                ((decrypt-timed) (open-decrypt! (quote timed)))   ; DECRYPT's TIMED (David, 2026-09-29)
                ((decrypt-endless decrypt) (open-decrypt! (quote endless)))
                ((daily-decrypt) (say-daily!) (open-decrypt! (quote daily)))
+               ((checksum) (open-checksum! #f))
                ((update) (update-chosen!))
                ;; NEWS (P4b): the screen opened, its posts seen: the store remembers
                ((news-seen) (news-seen! (menu-news-newest-date *menu*)))
@@ -2709,6 +2796,9 @@
             ((memq *decrypt-door* (list (quote endless) (quote daily) (quote timed)))   ; ?decrypt=MODE: DECRYPT at boot (the arms)
              (say "boot" "step" "decrypt")
              (open-decrypt! *decrypt-door*))
+            (*checksum-door*
+             (say "boot" "step" "checksum")
+             (open-checksum! *seed* *checksum-door*))
             (*intercept-door*   ; ?intercept=SONG: the song starts at boot (its select screen, Enter pressed)
              (say "boot" "step" "intercept")
              (open-intercept! *intercept-door*)
@@ -2764,7 +2854,11 @@
             ((string=? type "keyup") (key-up! payload) 0)
             ((string=? type "pointerdown") (pointer-down! payload) 0)
             ((string=? type "pointerup") (set! *pointer-up* #t) 0)   ; P5: the hub's hold-to-walk ends on the release
-            ((string=? type "scan-pointer") (menu-pointer! payload) (intercept-pointer! payload) (decrypt-pointer! payload) (scan-pointer! payload))   ; 0.1.3: SCAN's pointer events, with the button; INTERCEPT's taps
+            ((string=? type "scan-pointer") (menu-pointer! payload) (intercept-pointer! payload) (decrypt-pointer! payload) (checksum-pointer! payload) (scan-pointer! payload))   ; the shared pointer stream
+            ((string=? type "checksum")
+             (param! (lambda ()
+                       (set! *checksum-door*
+                             (if (member payload '("hacker" "twist")) 'twist 'clean)))))
             ((string=? type "decrypt") (param! (lambda () (set! *decrypt-door* (string->symbol payload)))))   ; ?decrypt=endless|daily
             ((string=? type "intercept") (param! (lambda () (set! *intercept-door* (string->symbol payload)))))   ; ?intercept=SONG
             ((string=? type "autoplay") (param! (lambda () (intercept-autoplay! (string=? payload "on")))))   ; ?autoplay: every note pressed on the song clock

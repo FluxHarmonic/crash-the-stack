@@ -107,6 +107,9 @@
           (only (crash decrypt table) decrypt-open decrypt-step make-decrypt-frame decrypt-cues decrypt-requests decrypt-hot?
                 decrypt-table-record decrypt-table-seed decrypt-table-level)
           (only (crash decrypt draw) draw-decrypt)
+          (crash checksum table)
+          (crash checksum rules)
+          (only (crash checksum draw) draw-checksum)
           (only (crash decrypt record) record->datum datum->record)
           (only (crash daily) daily-decrypt-seed)
           (only (crash intercept preview) preview-set-say!)
@@ -348,6 +351,7 @@
       (scan default: #f)          ; SCAN's table, (crash scan table), once opened (0.1.3)
       (intercept default: #f)     ; INTERCEPT's screen, (crash intercept table), while it is up
       (decrypt default: #f)       ; DECRYPT's table, (crash decrypt table), while it is up
+      (checksum default: #f)      ; standalone Pyramid draft
       (bg default: #f))           ; the living background, (crash bg), stepped by whichever table is up
 
     ;; The stack. CONTINUE (resume?) returns to the table in memory, or
@@ -846,6 +850,10 @@
                ((decrypt-timed) (open-decrypt a 'timed))   ; DECRYPT's TIMED (David, 2026-09-29)
                ((decrypt-endless decrypt) (open-decrypt a 'endless))
                ((daily-decrypt) (open-decrypt a 'daily))
+               ((checksum)
+                (open-checksum a #f
+                               (if (eq? (cdr (assq 'checksum (versions-in-force))) 'hacker)
+                                   'twist 'clean)))
                ((copy)
                 (let ((code (live-code a)))
                   (when code (display "crash: copy ") (display (code-display code)) (newline)))
@@ -1095,6 +1103,45 @@
     ;; --- DECRYPT, the match-3 table (the 2026-09-29 draft) ---------------------------
     ;; The web shell's twin: its own screen beside the table records, the
     ;; soundtrack's DECRYPT pool with the chains' heat as its phase, the
+    ;; CHECKSUM is a standalone screen beside DECRYPT and INTERCEPT.
+    (define *checksum-door* #f)
+    (define *checksum-deals* 0)
+
+    (define (open-checksum a seed mode)
+      (let ((seed (or seed
+                      (+ 1 (modulo (+ (* 7919 (now-second))
+                                      (* 104729 *checksum-deals*))
+                                   4194303)))))
+        (set! *checksum-deals* (+ 1 *checksum-deals*))
+        (set-run! #f)
+        (music-fresh!)
+        (display "crash: checksum open ")
+        (display mode)
+        (display " ")
+        (display seed)
+        (newline)
+        (stage (field-for-deal a seed)
+               screen: 'checksum
+               overlay: #f
+               checksum: (checksum-open seed mode))))
+
+    (define (step-checksum a f dt)
+      (let* ((before (stage-checksum a))
+             (t (checksum-step before
+                               (make-checksum-frame (input-frame-pressed f)
+                                                    (scan-events)
+                                                    (* 1.0 (current-milliseconds)))))
+             (requests (checksum-table-requests t))
+             (b (bg-advance (stage-bg a) (clock-steps (checksum-table-clock t))
+                            (checksum-table-trace before) (checksum-table-trace t)))
+             (a (stage a checksum: t bg: b)))
+        (play-cues! (checksum-table-cues t))
+        (cond ((memq 'quit requests) (open-menu (stage a checksum: #f)))
+              ((memq 'new requests) (open-checksum a #f (checksum-table-mode t)))
+              ((memq 'retry requests)
+               (open-checksum a (checksum-table-seed t) (checksum-table-mode t)))
+              (else a))))
+
     ;; collisions' cues held to the tune's next 16th, the record in the
     ;; store's "decrypt".
     (define *decrypt-bg-acc* 0.0)
@@ -1238,6 +1285,8 @@
                                 (*hub-seed* (jack-in (open-menu fresh) *hub-seed* *pace* lay model))   ; --hub SEED: JACK IN at boot (P5; the arms)
                                 (*scan-door*   ; --scan PRESET (0.1.3): a SCAN board of --seed, else the next free seed
                                  (open-scan-table (open-menu fresh) (scan-open-table *scan-door* (or seed (scan-seed-next!)) #f #f)))
+                                (*checksum-door*
+                                 (open-checksum (open-menu fresh) seed *checksum-door*))
                                 (*intercept-door*   ; --intercept SONG: the song starts at boot (its select screen, Enter pressed)
                                  (let ((a (open-intercept (open-menu fresh) *intercept-door*)))
                                    (stage a intercept: (intercept-step (stage-intercept a) (make-intercept-frame (list (quote return)) (quote ()) (quote ()) (intercept-wall-ms))))))
@@ -1264,6 +1313,9 @@
                           ;; a table: its pool by its board's seed, its trace's phase (#f on CLASSIC SCAN)
                           ((intercept) #f)   ; the song is the screen's own source
                           ((decrypt) (music-frame! (quote decrypt) (if (decrypt-hot? (stage-decrypt a)) (quote counter) (quote trace)) (decrypt-table-seed (stage-decrypt a))))
+                          ((checksum)
+                           (music-frame! 'cards (checksum-table-trace (stage-checksum a))
+                                         (checksum-table-seed (stage-checksum a))))
                           (else (let ((k (table-up a)))
                                   (music-frame! (table-kind-name k) ((table-kind-trace k) a) ((table-kind-seed k) a)))))))
                    (click (input-frame-click f))
@@ -1303,6 +1355,7 @@
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
                         ((intercept) (step-intercept a f))
                         ((decrypt) (step-decrypt a f dt))
+                        ((checksum) (step-checksum a f dt))
                         ;; a table: the pause overlay first, else its record's tick (t-90ec6b)
                         (else
                          (if (stage-overlay a)
@@ -1329,6 +1382,11 @@
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))
                             ((decrypt) (draw-decrypt (stage-decrypt a) VW VH (decrypt-bg a) *copper* (live-music-beat-phase)))
+                            ((checksum)
+                             (draw-checksum (stage-checksum a) (texture-path PORTRAITS-PATH)
+                                            (if (eq? (setting 'background) 'off)
+                                                #f (stage-background a))
+                                            *copper*))
                             ((intercept) (draw-intercept (stage-intercept a) VW VH (intercept-bg a) *copper* (intercept-wall-ms)))
                             ;; a table: its record's draw, the overlay's panel over it
                             (else
@@ -1603,6 +1661,9 @@
         (set! *code* code-arg)   ; --code XXXXX-XXXXX: the board of a share code (P4)
         (set! *scan-door* (let ((p (arg-value args "--scan" #f))) (and p (memq (string->symbol p) (list (quote lan) (quote wan) (quote backbone))) (string->symbol p))))   ; --scan PRESET (0.1.3)
         (set! *intercept-door* (let ((s (arg-value args "--intercept" #f))) (and s (string->symbol s))))   ; --intercept SONG: the song at boot
+        (set! *checksum-door*
+              (let ((mode (arg-value args "--checksum" #f)))
+                (and mode (if (member mode '("hacker" "twist")) 'twist 'clean))))
         (set! *autoplay* (and (member "--autoplay" args) #t))
         (intercept-autoplay! *autoplay*)
         (set! *pace* (let ((p (arg-value args "--pace" #f))) (if (and p (difficulty? (string->symbol p))) (string->symbol p) 'normal)))

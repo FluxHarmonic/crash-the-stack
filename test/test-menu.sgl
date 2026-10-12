@@ -51,12 +51,20 @@
     (assert-equal "PULL" (menu-label 'draw))
     (assert-equal "?" (menu-label 'look))
     (for-each (lambda (e)
-                (for-each (lambda (c) (assert-true (or (char-upper-case? c) (char-numeric? c) (char=? c #\space))))
+                (for-each (lambda (c)
+                            (assert-true
+                             (or (char-upper-case? c)
+                                 (char-numeric? c)
+                                 (char=? c #\space)
+                                 (and (eq? (car e) 'checksum)
+                                      (or (char-lower-case? c)
+                                          (char=? c #\()
+                                          (char=? c #\)))))))
                           (string->list (cadr e))))
               MENU-ENTRIES))
   (test "the removed prototype entries are not entries any more (rulings D32, D34, D48)"
     (assert-equal '(jack-in) (menu-entries (menu-new '(look hud depth jack-in))))
-    (assert-equal 31 (length MENU-ENTRIES)))   ; P4c's 21 + D65's three difficulties + P4b's NEWS (TRACKER left the menu) + 0.1.3's SCAN and SIZE + INTERCEPT + DECRYPT and its TIMED and ENDLESS
+    (assert-equal 32 (length MENU-ENTRIES)))   ; the existing entries plus CHECKSUM
   (test "EXIT is the top screen's last row when the shell asks for it (the native build), absent otherwise"
     (assert-equal '(jack-in credits exit) (menu-entries (menu-new '(exit jack-in credits))))
     (assert-equal 'exit (cdr (step (step* (menu-new '(jack-in exit)) 'down) '(return))))
@@ -129,8 +137,8 @@
     (test "opens on the kept tile (STACK by default), the tiles then the bar as its entries, the carousel already there"
       (assert-equal 'free (menu-screen f))
       (assert-equal "FREE PLAY" (menu-heading f))
-      (assert-equal '(stack cards scan intercept decrypt code scores back) (menu-entries f))
-      (assert-equal FREE-TILES (list (quote stack) (quote cards) (quote scan) (quote intercept) (quote decrypt)))
+      (assert-equal '(stack cards scan intercept decrypt checksum code scores back) (menu-entries f))
+      (assert-equal FREE-TILES (list (quote stack) (quote cards) (quote scan) (quote intercept) (quote decrypt) (quote checksum)))
       (assert-equal 0 (menu-highlight f))
       (assert-equal 0.0 (menu-free-pos f))
       (assert-equal 'tiles (menu-free-focus f)))
@@ -147,7 +155,7 @@
       (assert-equal 'scan (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'h))))
       (assert-equal 'scan (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'k))))
       (assert-equal 'stack (list-ref (menu-entries f) (menu-highlight (step* f 'left))))
-      (assert-equal 'decrypt (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'right 'right 'right)))))
+      (assert-equal 'checksum (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'right 'right 'right)))))
     (test "a move keeps the tile (the shell stores it) and is the select cue"
       (assert-equal 'scan (menu-free-tile (step* f 'right 'right)))
       (assert-equal (list 'select) (menu-cues f (step* f 'right))))
@@ -179,9 +187,9 @@
         (assert-true (> (+ (car far) (caddr far)) VW))                ; ...cut by it: the hint that more exist
         (assert-true (>= (car gone) VW))))                            ; and the next ones are off the screen
     (test "the bar's three items sit side by side under the tiles"
-      (let ((c (menu-entry-rect f 5 VW VH))
-            (s (menu-entry-rect f 6 VW VH))
-            (b (menu-entry-rect f 7 VW VH)))
+      (let ((c (menu-entry-rect f 6 VW VH))
+            (s (menu-entry-rect f 7 VW VH))
+            (b (menu-entry-rect f 8 VW VH)))
         (assert-equal FREE-BAR-Y (cadr c))
         (assert-equal (cadr c) (cadr s))
         (assert-true (< (+ (car c) (caddr c)) (car s)))
@@ -279,8 +287,8 @@
         (assert-equal 'free (menu-screen (car t)))
         (assert-equal 'cards (list-ref (menu-entries (car t)) (menu-highlight (car t))))))
     (test "a tap on the bar picks its item"
-      (assert-equal 'code (menu-screen (car (menu-step f (click-frame (center f 5)) VW VH))))
-      (assert-equal 'top (menu-screen (car (menu-step f (click-frame (center f 7)) VW VH)))))
+      (assert-equal 'code (menu-screen (car (menu-step f (click-frame (center f 6)) VW VH))))
+      (assert-equal 'top (menu-screen (car (menu-step f (click-frame (center f 8)) VW VH)))))
     (test "with the shell's pointer stream a press in the band is not a tap; the stroke is"
       (let* ((s (menu-with-free-stream f #t))
              (pressed (menu-step s (click-frame (center s 0)) VW VH)))
@@ -349,6 +357,28 @@
       (assert-equal "KLONDIKE SOLITAIRE" (free-classic 'cards))
       (assert-equal "MINESWEEPER" (free-classic 'scan))
       (assert-equal (quote ()) (filter (lambda (t) (= 0 (string-length (free-classic t)))) FREE-TILES)))))
+
+(test-group "FREE PLAY: CHECKSUM"
+  (let* ((m (menu-with-versions (menu-new TOP 'free-play)
+                               '((stack . hacker) (checksum . original))))
+         (free (car (step (menu-with-free-tile m 'checksum) '(return))))
+         (table (car (step free '(return)))))
+    (test "CHECKSUM (Pyramid) tile opens its own screen and NEW BOARD selects CHECKSUM"
+      (assert-equal "CHECKSUM (Pyramid)" (menu-label 'checksum))
+      (assert-equal "PYRAMID" (free-classic 'checksum))
+      (assert-equal 'free-checksum (menu-screen table))
+      (assert-equal '(new-board version back) (menu-entries table))
+      (assert-equal 'checksum (cdr (step table '(return)))))
+    (test "CHECKSUM's version stays independent and Back returns to its kept tile"
+      (let* ((row (car (step table '(down))))
+             (changed (step row '(return)))
+             (back (car (step (car changed) '(escape)))))
+        (assert-equal '(version checksum . hacker) (cdr changed))
+        (assert-equal 'hacker (menu-version (car changed) 'checksum))
+        (assert-equal 'hacker (menu-version (car changed) 'stack))
+        (assert-equal 'free (menu-screen back))
+        (assert-equal 'checksum (menu-free-tile back))
+        (assert-equal 5 (menu-highlight back))))))
 
 (test-group "FREE PLAY: SCAN's screen (VERSION since P6c, and SIZE)"
   (let* ((m (menu-new TOP 'free-play))
