@@ -120,3 +120,55 @@
                   (assert-true (string-contains? (car (string-split html "</head>")) "plausible.init()"))
                   (assert-true (string-contains? html "Privacy-friendly analytics by <a href=\"https://plausible.io/data-policy\">Plausible</a>: no cookies, no personal data.")))
                 pages))))
+
+;; The landing's screenshots (2026-10-12): eight shots, each a file in
+;; assets/shots/ with real alt text and a caption, the first shown and the
+;; rest hidden from assistive tech until the rotation shows them; a dot
+;; for each; the rotation's script after the footer.
+(test-group "landing screenshots"
+  (let* ((html (sxml->html (landing-page #f)))
+         (frames (car (string-split (cadr (string-split html "<div class=\"frames\">")) "</div>")))
+         (imgs (cdr (string-split frames "<img "))))
+    (test "eight shots, each a file in assets/shots/"
+      (assert-equal 8 (length imgs))
+      (for-each (lambda (img)
+                  (let ((src (car (string-split (cadr (string-split img "src=\"/shots/")) "\""))))
+                    (assert-true (file-exists? (string-append "assets/shots/" src)))))
+                imgs))
+    (test "every shot has 640x400, a caption and alt text of a sentence or more"
+      (for-each (lambda (img)
+                  (assert-true (string-contains? img "width=\"640\" height=\"400\""))
+                  (assert-true (string-contains? img "data-caption=\""))
+                  (let ((alt (car (string-split (cadr (string-split img "alt=\"")) "\""))))
+                    (assert-true (> (string-length alt) 80))))
+                imgs))
+    (test "the first is shown, the other seven are hidden until shown"
+      (assert-true (string-starts-with? (car imgs) "class=\"shot shown\""))
+      (assert-false (string-contains? (car imgs) "aria-hidden"))
+      (for-each (lambda (img)
+                  (assert-true (string-starts-with? img "class=\"shot\""))
+                  (assert-true (string-contains? img "aria-hidden=\"true\"")))
+                (cdr imgs)))
+    (test "a dot per shot, the first current, and the script after the footer"
+      (assert-equal 9 (length (string-split html "<button type=\"button\"")))
+      (assert-equal 2 (length (string-split html "aria-current=\"true\"")))
+      (assert-true (string-contains? (cadr (string-split html "</footer>")) "querySelector('.shots')")))))
+
+;; The Flux Harmonic mark (2026-10-12): every kind of page's footer opens
+;; with it, linking the studio, as harkfell.com's and phantomburn.net's do;
+;; the album's hand-written page carries the same footer.
+(test-group "footer mark"
+  (test "the mark is in assets/ and every kind of page's footer links it to the studio"
+    (assert-true (file-exists? "assets/mark.png"))
+    (let* ((item #{source-path: "content/about.md" output-path: "/about/index.html" title: "About"
+                   metadata: #{} format: 'markdown
+                   body-loader: (lambda () (document metadata: #{} children: '((p "body"))))})
+           (pages (list (sxml->html (crash-theme #{title: "Crash The Stack"} (initial-state) item '((p "body"))))
+                        (sxml->html (landing-page #f))
+                        (sxml->html (not-found-page))
+                        (read-file-string "../docs/music/album/listen/index.html"))))
+      (for-each (lambda (html)
+                  (let ((foot (cadr (string-split html "<footer class=\"foot\">"))))
+                    (assert-true (string-contains? foot "<a class=\"mark\" href=\"https://fluxharmonic.com/\"><img src=\"/mark.png\" width=\"380\" height=\"188\" alt=\"Flux Harmonic\"></a>"))
+                    (assert-true (string-contains? foot "the Flux Harmonic mark are reserved."))))
+                pages))))
