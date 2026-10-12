@@ -160,7 +160,7 @@ async function key(k) {
 }
 
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${QUERY}` });
-const boot = await waitLine(/^crash: (seed|cards seed|menu|hub open|scan open|intercept (select|open)|decrypt )/, 0, 30000);   // P5: a ?hub= boot opens on the hub; 0.3: the SCAN, INTERCEPT and DECRYPT doors
+const boot = await waitLine(/^crash: (seed|cards seed|menu|hub open|scan open|intercept (select|open)|decrypt |checksum )/, 0, 30000);   // Table doors may bypass the title/menu boot.
 if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(0, 14))); shutdown(2); }
 await sleep(600);
 
