@@ -57,7 +57,9 @@
           (only (crash scan save) scan-save scan-load)
           (only (crash scan table) scan-table-new scan-table-session scan-table-over scan-table-daily
                 scan-table-ticks scan-table-moves scan-table->datum datum->scan-table scan-table-retry-seed
-                scan-table-with-launch scan-table-trace scan-table-consumed))
+                scan-table-with-launch scan-table-trace scan-table-consumed)
+          (only (crash decrypt record) datum->record drecord-best drecord-timed-best record-streak-on)
+          (only (crash intercept table) intercept-songs intercept-songs-played intercept-top-score))
 
   (export VW VH MODIFIERS bg-advance bg-choose FIELD-POOL field-pick! field-rule-for-deal! field-rule-at-boot copper-choice phosphor-choice demo-won-deal
           literal-check LITERAL-NAMES
@@ -76,7 +78,7 @@
           boot-session save-after-frame! run-after-frame! deal-run-after-frame!
           boot-deal save-deal-after-frame!
           active-game set-active-game! saved-game?
-          launch-menu menu-frame? jack-out?
+          launch-menu menu-frame? jack-out? free-tile! free-tile-in-force free-records FREE-TILE-KEY
           SCAN-KEY scan-size-in-force scan-size! scan-open-table scan-new-table scan-daily-table
           scan-boot scan-save! scan-save-after-frame! scan-record! scan-seed-next! scan-retry-table
           scan-node-table scan-run-clear-line! scan-in-run?)
@@ -814,6 +816,52 @@
     ;; each boot's glitches differ (P3d). The reveal plays once per
     ;; process and only when the process opens on the menu (a ?stack boot
     ;; forfeits it): later menus open settled.
+    ;; --- FREE PLAY's carousel (0.3) ---------------------------------------------
+    ;; The tile the carousel keeps, in the store, so the next FREE PLAY
+    ;; opens where the player left it (a pick writes it: free-tile!).
+    (define FREE-TILE-KEY "free-tile")
+    (define (free-tile-in-force)
+      (let ((d (guard (e (#t #f)) (store-read-datum FREE-TILE-KEY))))
+        (if (free-tile? d) d 'stack)))
+    (define (free-tile! id)
+      (when (and (free-tile? id) (not (eq? id (free-tile-in-force))))
+        (store-write-datum! FREE-TILE-KEY id)))
+
+    ;; Each tile's record lines, from what the store holds: a table's best
+    ;; time in the version in force (SCAN's on the size in force) and its
+    ;; daily streak; DECRYPT's best score and streak; INTERCEPT's songs
+    ;; played and best score. A table with nothing gives '().
+    (define (m-ss ticks)
+      (let* ((s (quotient ticks 60))
+             (r (modulo s 60)))
+        (string-append (number->string (quotient s 60)) ":" (if (< r 10) "0" "") (number->string r))))
+    (define (best-lines s key version streak-table)
+      (let ((best (scores-best s key version))
+            (streak (scores-streak s streak-table)))
+        (append (if best
+                    (list (string-append "BEST " (m-ss (car best)) (if (eq? version 'original) " CLASSIC" " HACKER")))
+                    '())
+                (if (> streak 0) (list (string-append "STREAK " (number->string streak))) '()))))
+    (define (free-records)
+      (let* ((s (scores-in-force))
+             (v (versions-in-force))
+             (version (lambda (t) (let ((e (assq t v))) (if e (cdr e) 'hacker))))
+             (scan-key (case (scan-size-in-force) ((wan) 'scan-wan) ((backbone) 'scan-backbone) (else 'scan-lan)))
+             (d (datum->record (guard (e (#t #f)) (store-read-datum "decrypt"))))
+             (d-best (max (drecord-best d) (drecord-timed-best d)))
+             (d-streak (record-streak-on d (today)))
+             (played (guard (e (#t 0)) (intercept-songs-played)))
+             (top (guard (e (#t 0)) (intercept-top-score))))
+        (list (cons 'stack (best-lines s 'stack (version 'stack) 'stack))
+              (cons 'cards (best-lines s 'cards (version 'cards) 'cards))
+              (cons 'scan (best-lines s scan-key (version 'scan) 'scan))
+              (cons 'intercept (if (> played 0)
+                                   (list (string-append (number->string played) "/" (number->string (length (intercept-songs))) " SONGS")
+                                         (string-append "BEST " (number->string top)))
+                                   '()))
+              (cons 'decrypt (append (if (> d-best 0) (list (string-append "BEST " (number->string d-best))) '())
+                                     (if (> d-streak 0) (list (string-append "STREAK " (number->string d-streak))) '()))))))
+
     (define (launch-menu update-waiting? held? . rest)   ; rest: seed, code-line, copy?, fresh? (a fresh boot ignores the saved board: no CONTINUE unless held), exit? (the native build's EXIT row)
       (let ((continue? (or held?
                            (and (not (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (pair? (cdddr rest)) (cadddr rest)))
@@ -825,6 +873,8 @@
             (copy? (and (pair? rest) (pair? (cdr rest)) (pair? (cddr rest)) (caddr rest)))
             (exit? (and (>= (length rest) 5) (list-ref rest 4))))
         (set! *title-shown* #t)
+        (menu-with-free-records
+        (menu-with-free-tile
         (menu-with-scan-size
         (menu-with-versions
         (menu-with-news
@@ -847,7 +897,9 @@
          *credits*)
          *news* (news-seen))
         (versions-in-force))
-        (scan-size-in-force))))
+        (scan-size-in-force))
+        (free-tile-in-force))
+        (free-records))))
 
     ;; --- the version per game (D66) ----------------------------------------------
     ;; A game's VERSION row (HACKER | CLASSIC) is remembered in the store,

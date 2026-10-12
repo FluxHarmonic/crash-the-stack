@@ -32,6 +32,7 @@
           (only (crash code) code-display CODE-LENGTH))   ; (crash code) has an ALPHABET too, the string; the title's is the glyph vector
 
   (export title-draw draw-title draw-menu-item draw-menu-items draw-overlay draw-bottom-band title-stamp! menu-prepare!
+          free-previews! FREE-PREVIEWS-PATH FREE-PREVIEW-W FREE-PREVIEW-H
           title-covers? title-bake! title-diag! title-diag-dial!
           TITLE-CELL TITLE-X TITLE-Y TITLE-H
           BACKDROP-W BACKDROP-H)
@@ -581,8 +582,108 @@
                                     (else '())))
                             ids)))))
 
+    ;; --- FREE PLAY's carousel (0.3, t-beb409) ------------------------------------
+    ;; The previews: one strip of the tables' boards, FREE-PREVIEW-W x
+    ;; FREE-PREVIEW-H a frame in FREE-TILES' order, which the shells load
+    ;; like the backdrop and hand over (#f until it is in: a tile is then
+    ;; its frame on the panel's ground).
+    (define FREE-PREVIEWS-PATH "assets/free/previews.png")
+    (define FREE-PREVIEW-W 320)
+    (define FREE-PREVIEW-H 200)
+    (define *free-previews* #f)
+    (define (free-previews! tex) (set! *free-previews* tex))
+
+    (define (draw-free-screen m vw vh)
+      (let* ((n (length FREE-TILES))
+             (pos (menu-free-pos m))
+             (tiles? (eq? (menu-free-focus m) 'tiles))
+             (target (let ((i (menu-highlight m))) (if (< i n) i (or (free-tile-index (menu-free-tile m)) 0))))
+             (id (list-ref FREE-TILES target)))
+        ;; a panel under the carousel and its lines: the backdrop is busy
+        (draw-panel 8 (- FREE-CY (quotient FREE-TILE-H 2) 10) (- vw 16)
+                    (- (+ FREE-BAR-Y FREE-BAR-H 10) (- FREE-CY (quotient FREE-TILE-H 2) 10)))
+        ;; the heading, as any sub-screen's
+        (let* ((heading (or (menu-heading m) ""))
+               (tw (* ITEM-CELL (block-text-width heading)))
+               (tx (quotient (- vw tw) 2)))
+          (if (and *bake* *items-tex* (label-index heading))
+              (draw-item-row (label-index heading) 'ramp tx HEADING-Y tw)
+              (draw-block-text heading tx HEADING-Y ITEM-CELL 'ramp)))
+        ;; the tiles, the farthest first so the nearer cover them
+        (for-each (lambda (i) (draw-free-tile m i pos (and tiles? (= i target)) vw))
+                  (list-sort (lambda (a b) (> (abs (- a pos)) (abs (- b pos))))
+                             (filter (lambda (i) (<= (abs (- i pos)) 2.5)) (iota n))))
+        ;; the edge marks: more tiles that way
+        (color! C-TEXT-DIM)
+        (when (> target 0) (text! "<" 12 (- FREE-CY 7) 2))
+        (when (< target (- n 1)) (text! ">" (- vw 12 (text-width ">" 2)) (- FREE-CY 7) 2))
+        ;; the selected table: its name, the classic, its record
+        (let* ((name (menu-label id))
+               (tw (* ITEM-CELL (block-text-width name)))
+               (tx (quotient (- vw tw) 2))
+               (style (if tiles? 'ramp 'flat)))
+          (if (and *bake* *items-tex* (label-index name))
+              (draw-item-row (label-index name) style tx FREE-NAME-Y tw)
+              (draw-block-text name tx FREE-NAME-Y ITEM-CELL style)))
+        (let ((classic (free-classic id)))
+          (color! C-TEXT-DIM)
+          (text! classic (quotient (- vw (text-width classic 2)) 2) FREE-CLASSIC-Y 2))
+        (let* ((lines (menu-free-record m id))
+               (line (if (null? lines) "NO RECORD YET" (join-lines lines))))
+          (color! (if (null? lines) C-TEXT-DIM C-LABEL-LIT))
+          (text! line (quotient (- vw (text-width line 2)) 2) FREE-RECORD-Y 2))
+        ;; a dot per tile, the selected one lit
+        (let ((x0 (- (quotient vw 2) (quotient (- (* n 14) 8) 2))))
+          (let loop ((i 0))
+            (when (< i n)
+              (color! (if (= i target) C-SELECTED C-BAR-C))
+              (draw-filled-rect (+ x0 (* i 14)) FREE-DOTS-Y 6 6)
+              (loop (+ i 1)))))
+        ;; the bar: ENTER CODE, HIGH SCORES, BACK in the 5x7 at 2x
+        (let loop ((i 0))
+          (when (< i (length FREE-BAR))
+            (let* ((bid (list-ref FREE-BAR i))
+                   (rect (free-bar-rect i vw))
+                   (lit? (= (menu-highlight m) (+ n i))))
+              (draw-small-row (menu-label bid) #f rect lit? (menu-cursor-on? m) #f vw))
+            (loop (+ i 1))))))
+
+    (define (join-lines lines)
+      (let loop ((ls (cdr lines)) (acc (car lines)))
+        (if (null? ls) acc (loop (cdr ls) (string-append acc "   " (car ls))))))
+
+    ;; One tile: its board's preview (dimmed off the middle), a frame (the
+    ;; selected tile's in the highlight, two px), and beside the middle its
+    ;; name under it in the 5x7.
+    (define (draw-free-tile m i pos lit? vw)
+      (let* ((r (free-tile-rect i pos vw))
+             (x (car r)) (y (cadr r)) (w (caddr r)) (h (cadddr r))
+             (middle? (< (abs (- i pos)) 0.5)))
+        (color! C-STATIC-B)
+        (draw-filled-rect x y w h)
+        (when *free-previews*
+          (color! (if middle? C-TEX-PLAIN C-TEX-DIM))
+          (draw-texture-region *free-previews* x y w h
+                               (* i FREE-PREVIEW-W) 0 FREE-PREVIEW-W FREE-PREVIEW-H))
+        (color! (if lit? C-SELECTED C-BAR-C))
+        (let ((t (if lit? 2 1)))
+          (draw-filled-rect (- x t) (- y t) (+ w t t) t)
+          (draw-filled-rect (- x t) (+ y h) (+ w t t) t)
+          (draw-filled-rect (- x t) y t h)
+          (draw-filled-rect (+ x w) y t h))
+        (unless middle?
+          (when (< (abs (- i pos)) 1.5)
+            (let ((name (menu-label (list-ref FREE-TILES i))))
+              (color! C-TEXT-DIM)
+              (text! name (+ x (quotient (- w (text-width name 1)) 2)) (+ y h 5) 1))))))
+
     (define (draw-sub-screen m vw vh)
       (when (and *bake* (not *prepared*)) (items-bake! (screen-labels m)))
+      (if (eq? (menu-screen m) 'free)
+          (draw-free-screen m vw vh)
+          (draw-rows-screen m vw vh)))
+
+    (define (draw-rows-screen m vw vh)
       ;; the heading, in the ramp, where the logo was
       (let* ((heading (or (menu-heading m) ""))
              (tw (* ITEM-CELL (block-text-width heading)))

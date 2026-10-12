@@ -52,7 +52,11 @@
           code-line-rect now-playing-rect menu-now-playing keypad-cells keypad-rect keypad-hit
           MENU-ENTRIES MENU-TITLE SCREENS
           ENTRY-W ENTRY-H ENTRY-GAP ENTRIES-Y SUB-ENTRIES-Y HEADING-Y CODE-LINE-Y VALUE-ROW-W TEXT-ROWS-Y TEXT-SCREENS
-          menu-credits menu-with-credits menu-scroll menu-crawl-rows menu-crawl-height)
+          menu-credits menu-with-credits menu-scroll menu-crawl-rows menu-crawl-height
+          FREE-TILES FREE-BAR free-tile? free-classic
+          menu-free-tile menu-with-free-tile menu-free-pos menu-free-records menu-with-free-records menu-free-record
+          menu-free-drag menu-free-focus menu-free-pointer menu-with-free-stream free-tile-rect free-tile-index free-bar-rect
+          FREE-CY FREE-TILE-W FREE-TILE-H FREE-NAME-Y FREE-CLASSIC-Y FREE-RECORD-Y FREE-DOTS-Y FREE-BAR-Y FREE-BAR-H)
 
   (begin
     (define MENU-TITLE "CRASH THE STACK")
@@ -203,7 +207,13 @@
       (news default: '())        ; P4b: the news posts, newest first, each (title date url); '() until the page hands them over
       (news-seen default: "")    ; the newest post's date the player has seen (the store's news-seen key); "" for none
       (frames default: 0)        ; menu frames so far
-      (ms default: 0.0))         ; milliseconds so far: the cursor's blink (the same at 60 and 120 Hz)
+      (ms default: 0.0)          ; milliseconds so far: the cursor's blink (the same at 60 and 120 Hz)
+      ;; FREE PLAY's carousel (0.3, t-beb409)
+      (free-tile default: 'stack)  ; the table the carousel keeps (the shell remembers it across menus)
+      (free-pos default: 0.0)      ; the carousel's drawn position, in tiles: eases to the selected tile
+      (free-records default: '())  ; ((table line ...) ...): a tile's record lines, from the shell
+      (free-drag default: #f)      ; (x0 pos0 moved) while a pointer drags the carousel, else #f
+      (free-stream default: #f))   ; the shell sends the pointer's whole stroke (menu-free-pointer): a press in the band is not a tap
 
     (define (menu-with-title m t) (menu m title: t))
     (define (menu-with-settings m s) (menu m settings: s))
@@ -238,13 +248,198 @@
                   (cond ((null? ps) 0) ((eq? (car ps) p) i) (else (loop (cdr ps) (+ i 1)))))))
         (list-ref SCAN-SIZES (modulo (+ i delta) n))))
     ;; The game a screen belongs to: the game screens' table, else #f.
-    (define (screen-table m)
-      (case (menu-screen m)
+    (define (screen-table m) (game-screen-table (menu-screen m)))
+    (define (game-screen-table screen)
+      (case screen
         ((free-stack) 'stack)
         ((free-cards) 'cards)
         ((free-scan) 'scan)
         ((free-decrypt) 'decrypt)
         (else #f)))
+
+    ;; --- FREE PLAY's carousel (0.3, t-beb409) --------------------------------------
+    ;; The tables as tiles in a row that scrolls sideways, so it holds any
+    ;; number of them (David, 2026-09-29: "there could always be more"):
+    ;; the selected tile in the middle at full size, a neighbor on each side
+    ;; smaller and dimmed, the next ones out as slivers at the screen's
+    ;; edges (the hint that more tiles exist). Under the tiles: the
+    ;; selected table's name, the classic it keeps, its record, a dot per
+    ;; tile; under those the bar (ENTER CODE, HIGH SCORES, BACK). The
+    ;; screen's entries are the tiles then the bar, so the highlight, a
+    ;; pick and the shells' menu line work as on any screen.
+    (define FREE-TILES (list 'stack 'cards 'scan 'intercept 'decrypt))
+    (define FREE-BAR (list 'code 'scores 'back))
+    (define (free-tile? id) (and (memq id FREE-TILES) #t))
+    (define (free-tile-index id)
+      (let loop ((ts FREE-TILES) (i 0))
+        (cond ((null? ts) #f) ((eq? (car ts) id) i) (else (loop (cdr ts) (+ i 1))))))
+    ;; the game a tile's table keeps, under its name
+    (define (free-classic id)
+      (case id
+        ((stack) "MAHJONGG SOLITAIRE")
+        ((cards) "KLONDIKE SOLITAIRE")
+        ((scan) "MINESWEEPER")
+        ((intercept) "FOUR-LANE RHYTHM")
+        ((decrypt) "MATCH-3")
+        (else "")))
+    (define (menu-with-free-tile m id)
+      (if (free-tile? id) (menu m free-tile: id free-pos: (inexact (free-tile-index id))) m))
+    (define (menu-with-free-records m records) (menu m free-records: records))
+    (define (menu-with-free-stream m on?) (menu m free-stream: on?))
+    ;; a tile's record lines (strings), '() when the shell has none
+    (define (menu-free-record m id)
+      (let ((e (assq id (menu-free-records m)))) (if e (cdr e) '())))
+    ;; tiles | bar: where the highlight is on FREE PLAY
+    (define (menu-free-focus m)
+      (let ((id (highlighted m))) (if (free-tile? id) 'tiles 'bar)))
+
+    ;; The geometry, in the 640x400 viewport. A tile is a preview of its
+    ;; board (16:10, the board's own shape); its center x moves 200 px a
+    ;; tile out to the neighbors, then 110 px a tile to the edge slivers;
+    ;; its scale falls from 1 to 0.7 at a neighbor and 0.6 at a sliver.
+    (define FREE-CY 124)        ; the tiles' center line
+    (define FREE-TILE-W 224)    ; the selected tile's preview
+    (define FREE-TILE-H 140)
+    (define FREE-NAME-Y 206)    ; the selected table's name, in the block alphabet
+    (define FREE-CLASSIC-Y 238) ; the classic's name, 5x7 at 2x
+    (define FREE-RECORD-Y 258)  ; the record, 5x7 at 2x
+    (define FREE-DOTS-Y 282)    ; a dot per tile
+    (define FREE-BAR-Y 306)     ; the bar's items
+    (define FREE-BAR-H 24)
+    (define FREE-BAR-W 176)
+    (define FREE-PITCH 200.0)   ; px a tile, near the middle (the drag's scale)
+
+    ;; d: the tile's offset from the carousel's position, in tiles
+    (define (tile-dx d)
+      (let ((a (abs d))
+            (sign (if (< d 0) -1.0 1.0)))
+        (cond ((<= a 1.0) (* FREE-PITCH d))
+              ((<= a 2.0) (* sign (+ FREE-PITCH (* 110.0 (- a 1.0)))))
+              (else (* sign (+ 310.0 (* FREE-PITCH (- a 2.0))))))))
+    (define (tile-scale d)
+      (let ((a (abs d)))
+        (cond ((<= a 1.0) (- 1.0 (* 0.3 a)))
+              ((<= a 2.0) (- 0.7 (* 0.1 (- a 1.0))))
+              (else 0.6))))
+
+    ;; (x y w h) of the tile at index i, the carousel at pos
+    (define (free-tile-rect i pos vw)
+      (let* ((d (- i pos))
+             (s (tile-scale d))
+             (w (exact (round (* FREE-TILE-W s))))
+             (h (exact (round (* FREE-TILE-H s))))
+             (cx (+ (quotient vw 2) (exact (round (tile-dx d))))))
+        (list (- cx (quotient w 2)) (- FREE-CY (quotient h 2)) w h)))
+
+    ;; (x y w h) of the bar's i-th item: three across, 200 px apart
+    (define (free-bar-rect i vw)
+      (let ((cx (+ (quotient vw 2) (* 200 (- i 1)))))
+        (list (- cx (quotient FREE-BAR-W 2)) FREE-BAR-Y FREE-BAR-W FREE-BAR-H)))
+
+    ;; The carousel's band: a press here is the carousel's (a tap or a drag)
+    (define (in-carousel? y)
+      (and (>= y (- FREE-CY (quotient FREE-TILE-H 2))) (< y (+ FREE-CY (quotient FREE-TILE-H 2)))))
+
+    ;; the highlighted tile's index, or the kept tile's when the bar has it
+    (define (free-target m)
+      (let ((id (highlighted m)))
+        (or (free-tile-index id) (free-tile-index (menu-free-tile m)) 0)))
+
+    ;; The carousel's position eased toward its target: 1/e in about 70 ms,
+    ;; snapped once within a hundredth of a tile (a drag holds it).
+    (define (free-ease m dt-ms)
+      (if (or (not (eq? (menu-screen m) 'free)) (menu-free-drag m))
+          m
+          (let* ((target (inexact (free-target m)))
+                 (pos (menu-free-pos m))
+                 (k (min 1.0 (/ dt-ms 70.0)))
+                 (next (+ pos (* k (- target pos)))))
+            (menu m free-pos: (if (< (abs (- target next)) 0.01) target next)))))
+
+    ;; The highlight on tile i (clamped: the carousel does not wrap, so its
+    ;; ends stay findable), remembered as the kept tile.
+    (define (free-select m i)
+      (let* ((n (length FREE-TILES))
+             (i (max 0 (min (- n 1) i)))
+             (id (list-ref FREE-TILES i)))
+        (menu m highlight: (index-of id (menu-entries m)) free-tile: id)))
+
+    ;; FREE PLAY's keys: on the tiles left/right (and h/l, j/k: David asked
+    ;; for j/k) move the carousel, Down goes to the bar; on the bar
+    ;; left/right move along it, Up (or k) returns to the kept tile.
+    ;; Answers (cons menu choice), or #f for the keys the screen shares
+    ;; with every other (Enter, Space, Escape, Backspace).
+    (define (free-key m f)
+      (let* ((tiles? (eq? (menu-free-focus m) 'tiles))
+             (i (free-target m))
+             (bar-i (- (menu-highlight m) (length FREE-TILES))))
+        (cond (tiles?
+               (cond ((or (pressed? f 'left) (pressed? f 'h) (pressed? f 'k)) (cons (free-select m (- i 1)) #f))
+                     ((or (pressed? f 'right) (pressed? f 'l) (pressed? f 'j)) (cons (free-select m (+ i 1)) #f))
+                     ((pressed? f 'down) (cons (menu m highlight: (length FREE-TILES)) #f))
+                     ((pressed? f 'up) (cons m #f))
+                     (else #f)))
+              ((or (pressed? f 'up) (pressed? f 'k)) (cons (free-select m i) #f))
+              ((or (pressed? f 'left) (pressed? f 'h))
+               (cons (menu m highlight: (+ (length FREE-TILES) (max 0 (- bar-i 1)))) #f))
+              ((or (pressed? f 'right) (pressed? f 'l))
+               (cons (menu m highlight: (+ (length FREE-TILES) (min (- (length FREE-BAR) 1) (+ bar-i 1)))) #f))
+              ((or (pressed? f 'down) (pressed? f 'j)) (cons m #f))
+              (else #f))))
+
+    ;; A tap on FREE PLAY: on a side tile it brings that tile to the middle;
+    ;; on the middle tile it opens its table; on the bar, its item.
+    (define (free-tap m vw x y)
+      (let loop ((i 0))
+        (cond ((= i (length FREE-TILES))
+               ;; the bar
+               (let bar ((j 0))
+                 (cond ((= j (length FREE-BAR)) (cons m #f))
+                       ((rect-contains? (free-bar-rect j vw) x y)
+                        (pick (menu m highlight: (+ (length FREE-TILES) j))))
+                       (else (bar (+ j 1))))))
+              ((and (in-carousel? y) (rect-contains? (free-tile-rect i (menu-free-pos m) vw) x y)
+                    ;; the middle one wins where a neighbor overlaps it
+                    (or (= i (free-target m))
+                        (not (rect-contains? (free-tile-rect (free-target m) (menu-free-pos m) vw) x y))))
+               (if (and (= i (free-target m)) (eq? (menu-free-focus m) 'tiles))
+                   (pick m)
+                   (cons (free-select m i) #f)))
+              (else (loop (+ i 1))))))
+
+    ;; The pointer on the carousel, from a shell that has the pointer's
+    ;; whole stroke (a press, its moves, its release): kind down | move | up.
+    ;; A press in the band starts a drag; a move scrolls the tiles with the
+    ;; finger; the release settles on the nearest tile, or the next one in
+    ;; the stroke's direction past a quarter tile; a release that barely
+    ;; moved is a tap. Answers (cons menu choice).
+    (define DRAG-SLOP 8)
+    (define (menu-free-pointer m kind x y vw)
+      (let ((d (menu-free-drag m)))
+        (cond ((not (and (eq? (menu-screen m) 'free) (menu-live? m))) (cons m #f))
+              ((eq? kind 'down)
+               (if (in-carousel? y)
+                   (cons (menu m free-drag: (list x (menu-free-pos m) #f)) #f)
+                   (cons m #f)))
+              ((not d) (cons m #f))
+              ((eq? kind 'move)
+               (let ((moved (or (caddr d) (> (abs (- x (car d))) DRAG-SLOP))))
+                 (cons (menu m free-drag: (list (car d) (cadr d) moved)
+                             free-pos: (if moved
+                                           (max -0.4 (min (+ (- (length FREE-TILES) 1) 0.4)
+                                                          (- (cadr d) (/ (- x (car d)) FREE-PITCH))))
+                                           (menu-free-pos m)))
+                       #f)))
+              ((eq? kind 'up)
+               (let ((m (menu m free-drag: #f)))
+                 (if (not (or (caddr d) (> (abs (- x (car d))) DRAG-SLOP)))
+                     (free-tap m vw x y)
+                     (let* ((delta (- (menu-free-pos m) (cadr d)))
+                            (i (cond ((> delta 0.25) (exact (ceiling (- (menu-free-pos m) 0.25))))
+                                     ((< delta -0.25) (exact (floor (+ (menu-free-pos m) 0.25))))
+                                     (else (exact (round (menu-free-pos m)))))))
+                       (cons (free-select m i) #f)))))
+              (else (cons m #f)))))
 
     ;; --- NEWS (P4b, ruling D20) -------------------------------------------------
     ;; The posts the page read from the site's JSON Feed (newest first) and
@@ -408,7 +603,7 @@
     ;; The overlay's sub-screens and the text screens keep their rows in
     ;; their own places; the rest sit at rows-y.
     (define (own-rows? m)
-      (or (memq (menu-screen m) TEXT-SCREENS) (eq? (menu-home m) 'pause)))
+      (or (memq (menu-screen m) TEXT-SCREENS) (eq? (menu-home m) 'pause) (eq? (menu-screen m) 'free)))
 
     ;; A sub-screen's heading: HEADING-Y over the rows' base, sliding with
     ;; them (the overlay and the text screens keep HEADING-Y).
@@ -419,6 +614,19 @@
 
     ;; (x y w h) of the index-th row of the menu's screen.
     (define (menu-entry-rect m index vw vh)
+      (if (eq? (menu-screen m) 'free)
+          (free-entry-rect m index vw)
+          (row-rect m index vw vh)))
+
+    ;; FREE PLAY's entries: a tile where the carousel has it (it may be off
+    ;; the screen), a bar item in the bar
+    (define (free-entry-rect m index vw)
+      (let ((n (length FREE-TILES)))
+        (if (< index n)
+            (free-tile-rect index (menu-free-pos m) vw)
+            (free-bar-rect (- index n) vw))))
+
+    (define (row-rect m index vw vh)
       (let* ((ids (menu-entries m))
              (id (and (< index (length ids)) (list-ref ids index)))
              (value? (and id (menu-row-value m id) #t))
@@ -563,8 +771,17 @@
                              ;; NEWS (P4b): a row per post, newest first, then BACK
                              ((eq? screen 'news)
                               (append (post-ids (menu-news m)) (list 'back)))
+                             ;; a game's screen: its own rows, then its table's
+                             ;; settings (DEFRAG's DRAW and SCORING), then BACK
+                             ((game-screen-table screen)
+                              (append (filter (lambda (id) (not (eq? id 'back))) (screen-entries screen))
+                                      (settings-group (game-screen-table screen))
+                                      (list 'back)))
                              (else (screen-entries screen)))
-              highlight: 0
+              ;; FREE PLAY opens on the kept tile, the carousel already there
+              highlight: (if (eq? screen 'free) (index-of (menu-free-tile m) (screen-entries 'free)) 0)
+              free-pos: (if (eq? screen 'free) (inexact (or (free-tile-index (menu-free-tile m)) 0)) (menu-free-pos m))
+              free-drag: #f
               code: ""
               page: 0
               scroll: 0.0
@@ -583,8 +800,7 @@
                       ((pause-game) 'game-settings)
                       (else #f))))
         (if (screen-table m)
-            (let ((f (open-screen m 'free)))   ; the game's row highlighted
-              (menu f highlight: (index-of (screen-table m) (menu-entries f))))
+            (open-screen (menu m free-tile: (screen-table m)) 'free)   ; the game's tile in the middle, highlighted
             (let ((c (menu m screen: (menu-home m)
                              entries: (menu-top-entries m)
                              highlight: (index-of opener (menu-top-entries m))
@@ -718,7 +934,7 @@
              (running? (and t (title-running? t)))
              (t (and t (title-step t)))
              (dt-ms (if (pair? rest) (car rest) 16.7))
-             (m (menu m title: t frames: (+ 1 (menu-frames m)) ms: (+ (menu-ms m) dt-ms)))
+             (m (free-ease (menu m title: t frames: (+ 1 (menu-frames m)) ms: (+ (menu-ms m) dt-ms)) dt-ms))
              (click (input-frame-click f))
              (top? (eq? (menu-screen m) (menu-home m))))   ; the home screen: top, or the overlay's pause
         (cond ((and t (title-gated? t) (or click (pair? (input-frame-pressed f))))
@@ -735,7 +951,15 @@
               ((eq? (menu-screen m) 'code)
                (if click (code-tap m vw vh (car click) (cdr click)) (code-key m f)))
               ((eq? (menu-screen m) 'credits) (credits-step m f dt-ms))
+              ;; FREE PLAY: a press in the carousel's band is the carousel's;
+              ;; a shell with the pointer's stroke sends it through
+              ;; menu-free-pointer instead (a swipe must not open a tile)
+              ((and click (eq? (menu-screen m) 'free))
+               (if (and (menu-free-stream m) (in-carousel? (cdr click)))
+                   (cons m #f)
+                   (free-tap m vw (car click) (cdr click))))
               (click (tap-rows m vw vh (car click) (cdr click)))
+              ((and (eq? (menu-screen m) 'free) (free-key m f)) (free-key m f))
               ((or (pressed? f 'up) (pressed? f 'k)) (cons (move m -1) #f))
               ((or (pressed? f 'down) (pressed? f 'j)) (cons (move m 1) #f))
               ((or (pressed? f 'left) (pressed? f 'h)) (step-highlighted m -1))

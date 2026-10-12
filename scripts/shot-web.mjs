@@ -2,6 +2,7 @@
 //
 //   node scripts/shot-web.mjs build/web OUT.png [--query "stack&seed=3"]
 //                             [--do ACTION ...] [--port N] [--cdp N]
+//                             [--viewport W,H,DPR] [--page PAGE.png]
 //
 // Serves the build dir on loopback, opens headless Chrome (SwiftShader,
 // a phone viewport with touch and ?trace on), boots the page with the
@@ -15,7 +16,16 @@
 //   menu:ID            tap a menu row on the screen shown ("crash: menu SCREEN ID X Y ...")
 //   tool:NAME          fire a tool through the stack (the corner button, then the entry)
 //   at:VX,VY           tap a virtual point
+//   press:VX,VY        a whole tap at a virtual point: the press, then the release
+//                      80 ms later (a table that acts on release, 0.3's carousel)
+//   swipe:X1,Y1,X2,Y2[,hold]  a press at one point, moves to the other over
+//                      ~200 ms, the release there (hold: leave the finger down,
+//                      no release, for a shot of the drag itself)
 //   key:K              a keydown/keyup pair (DOM key name)
+// --viewport sets the emulated screen (default 844,390,3: a landscape phone;
+// a width of 1000 or more is a desktop: no touch, a fine pointer); --page
+// also writes the whole page as the screen shows it (mocks at phone and
+// desktop sizes, 0.3's carousel).
 // The standing instruction (leader, 2026-09-18): every hosted slice with
 // new visuals ships one such PNG per candidate under docs/p3/.
 
@@ -30,7 +40,7 @@ const positional = [];
 const actions = [];
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--do") { actions.push(args[++i]); continue; }
-  if (["--query", "--port", "--cdp"].includes(args[i])) { i++; continue; }
+  if (["--query", "--port", "--cdp", "--viewport", "--page"].includes(args[i])) { i++; continue; }
   if (!args[i].startsWith("--")) positional.push(args[i]);
 }
 const ROOT = path.resolve(positional[0] || "build/web");
@@ -39,6 +49,9 @@ const QUERY = opt("--query", "stack");
 const PORT = parseInt(opt("--port", "8098"), 10);
 const CDP = parseInt(opt("--cdp", "9238"), 10);
 const VW = 640, VH = 400;
+const [VPW, VPH, VPDPR] = opt("--viewport", "844,390,3").split(",").map(Number);
+const DESKTOP = VPW >= 1000;
+const PAGE = opt("--page", null);
 const TYPES = { ".html": "text/html;charset=utf-8", ".js": "text/javascript;charset=utf-8", ".wasm": "application/wasm", ".json": "application/json", ".css": "text/css;charset=utf-8", ".png": "image/png", ".webmanifest": "application/manifest+json" };
 
 const server = http.createServer((req, res) => {
@@ -58,7 +71,7 @@ const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   "--enable-webgl", "--ignore-gpu-blocklist",
-  `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`, "--window-size=844,390", "about:blank",
+  `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`, `--window-size=${VPW},${VPH}`, "about:blank",
 ], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { /* gone */ } }
@@ -94,9 +107,11 @@ ws.addEventListener("message", (ev) => {
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Log.enable");   // P5: browser log entries too
 // a landscape phone: the canvas fills the height, dpr 3, touch
-await send("Emulation.setDeviceMetricsOverride", { width: 844, height: 390, deviceScaleFactor: 3, mobile: true });
+await send("Emulation.setDeviceMetricsOverride", { width: VPW, height: VPH, deviceScaleFactor: VPDPR, mobile: !DESKTOP });
+if (!DESKTOP) {
 await send("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 5 });
 await send("Emulation.setEmulatedMedia", { features: [{ name: "pointer", value: "coarse" }, { name: "hover", value: "none" }] });
+}
 
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
@@ -122,6 +137,19 @@ async function tap(vx, vy) {
     return [cx, cy];
   })()`);
 }
+// a pointer event at a virtual point, on the canvas (down) or the window (move, up),
+// where the page's own listeners take them
+async function pointer(type, vx, vy) {
+  return evalJS(`(() => {
+    const c = document.getElementById("stage"); const r = c.getBoundingClientRect();
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const cx = r.left + (ox + ${vx} * scale) * r.width / c.width, cy = r.top + (oy + ${vy} * scale) * r.height / c.height;
+    const e = new PointerEvent("${type}", { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true, pointerId: 7 });
+    ("${type}" === "pointerdown" ? c : window).dispatchEvent(e);
+    return [cx, cy];
+  })()`);
+}
 async function key(k) {
   await send("Input.dispatchKeyEvent", { type: "keyDown", key: k, code: k.length === 1 ? "Key" + k.toUpperCase() : k });
   await sleep(40);
@@ -130,7 +158,7 @@ async function key(k) {
 }
 
 await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${QUERY}` });
-const boot = await waitLine(/^crash: (seed|cards seed|menu|hub open)/, 0, 30000);   // P5: a ?hub= boot opens on the hub
+const boot = await waitLine(/^crash: (seed|cards seed|menu|hub open|scan open|intercept (select|open)|decrypt )/, 0, 30000);   // P5: a ?hub= boot opens on the hub; 0.3: the SCAN, INTERCEPT and DECRYPT doors
 if (!boot) { console.log("SETUP-FAILED: no boot line in 30 s; console: " + JSON.stringify(lines.slice(0, 14))); shutdown(2); }
 await sleep(600);
 
@@ -186,6 +214,13 @@ for (const action of actions) {
     if (!found) { console.log(`SETUP-FAILED: no menu row ${rest} on screen ${menu.m[1]}: ${menu.m[2]}`); shutdown(2); await new Promise(() => {}); }
     await tap(found[0], found[1]); await sleep(600);
   } else if (kind === "at") { const [x, y] = rest.split(",").map(Number); await tap(x, y); await sleep(400); }
+  else if (kind === "press") { const [x, y] = rest.split(",").map(Number); await pointer("pointerdown", x, y); await sleep(80); await pointer("pointerup", x, y); await sleep(400); }
+  else if (kind === "swipe") {
+    const p = rest.split(","); const [x1, y1, x2, y2] = p.slice(0, 4).map(Number);
+    await pointer("pointerdown", x1, y1);
+    for (let i = 1; i <= 8; i++) { await sleep(25); await pointer("pointermove", x1 + (x2 - x1) * i / 8, y1 + (y2 - y1) * i / 8); }
+    if (p[4] !== "hold") { await sleep(30); await pointer("pointerup", x2, y2); await sleep(400); } else await sleep(150);
+  }
   else if (kind === "key") { await key(rest); }
   else { console.log(`SETUP-FAILED: unknown action ${action}`); shutdown(2); }
 }
@@ -194,6 +229,11 @@ await sleep(300);
 const data = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
   const c = document.getElementById("stage"); resolve(c.toDataURL("image/png"));
 })))`);
+if (PAGE) {
+  const shot = await send("Page.captureScreenshot", { format: "png" });
+  fs.writeFileSync(PAGE, Buffer.from(shot.data, "base64"));
+  console.log(`page -> ${PAGE} (${VPW}x${VPH} at dpr ${VPDPR})`);
+}
 const raw = OUT + ".raw.png";
 fs.writeFileSync(raw, Buffer.from(data.split(",")[1], "base64"));
 // the buffer is the phone's, letterboxed; crop the 640x400 viewport out of it

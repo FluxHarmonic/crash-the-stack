@@ -653,10 +653,12 @@
                      ;; a menu rebuilt mid-reveal keeps the reveal (P3d); a fresh one
                      ;; starts on the publisher card (D43), whose strip loads here at
                      ;; once (no gate on native: the card opens the process)
+                     (menu-with-free-stream   ; the carousel takes the mouse's strokes (free-pointer)
                      (cond ((stage-menu a) (menu-with-title m (menu-title (stage-menu a))))
                            ((not (menu-title m)) m)
                            ((texture-path CARD-PATH) (menu-with-title m (title-card-ready! (menu-title m))))
-                           (else (menu-with-title m (title-skip-card (menu-title m))))))))
+                           (else (menu-with-title m (title-skip-card (menu-title m)))))
+                     #t))))
 
     ;; FREE PLAY's next board on a table: the seed after the one in memory
     ;; or in the store (David, 2026-09-18), else the flags', else the
@@ -805,6 +807,7 @@
     ;; version; the dailies and a code deal their boards; a setting is
     ;; applied; COPY prints the code (no clipboard natively).
     (define (choose a choice lay seed fresh? model)
+      (when (stage-menu a) (free-tile! (menu-free-tile (stage-menu a))))   ; FREE PLAY's kept tile, for the next menu (0.3)
       (cond ((pair? choice)
              (case (car choice)
                ((set) (apply-setting a (cadr choice) (cddr choice)))
@@ -946,6 +949,19 @@
         (append (if held? (list (list 'move x y)) '())
                 (filter-map (lambda (b) (and (mouse-pressed? b) (list 'down x y b))) SCAN-BUTTONS)
                 (filter-map (lambda (b) (and (mouse-released? b) (list 'up x y b))) SCAN-BUTTONS))))
+
+    ;; FREE PLAY's carousel (0.3): the frame's left-button stroke through
+    ;; menu-free-pointer (a drag scrolls the tiles, a release that barely
+    ;; moved is the tap). (cons menu choice), the first choice a release made.
+    (define (free-pointer m)
+      (if (not (eq? (menu-screen m) 'free))
+          (cons m #f)
+          (let loop ((es (scan-events)) (m m) (choice #f))
+            (cond ((null? es) (cons m choice))
+                  ((or choice (and (pair? (cdddr (car es))) (not (eq? (cadddr (car es)) 'left))))
+                   (loop (cdr es) m choice))
+                  (else (let ((r (menu-free-pointer m (car (car es)) (cadr (car es)) (caddr (car es)) VW)))
+                          (loop (cdr es) (car r) (cdr r))))))))
 
     (define (filter-map f xs)
       (let loop ((xs xs) (acc '()))
@@ -1156,7 +1172,7 @@
                   (boot-add-step! (string->symbol path)
                                   (lambda () (and (or (equal? path CARD-PATH) (equal? path BACKDROP-PATH) *reveal-over*)
                                                   (begin (texture-path path) #t)))))
-                (list CARD-PATH BACKDROP-PATH PORTRAITS-PATH))
+                (list CARD-PATH BACKDROP-PATH PORTRAITS-PATH FREE-PREVIEWS-PATH))
       ;; P3c's glyph atlas: baked by the frame that presents (atlas-ensure! inside
       ;; a frame; called from boot-run! outside one, the bake left the frame's
       ;; later rectangles undrawn: measured, the items vanished with the atlas
@@ -1256,6 +1272,12 @@
                                (not (memq 'continue (menu-entries (stage-menu a))))))
                    (a (case (stage-screen a)
                         ((menu)
+                         (let* ((p (free-pointer (stage-menu a)))   ; FREE PLAY's carousel: the mouse's stroke first (0.3)
+                                (_ (play-cues! (menu-cues (stage-menu a) (car p) (cdr p))))
+                                (a (stage a menu: (car p)))
+                                (a (if (cdr p) (open a (cdr p)) a)))
+                          (if (not (eq? (stage-screen a) 'menu))
+                           a
                          (let ((r (if (and (eq? (menu-screen (stage-menu a)) 'run-done)
                                            (> (- (current-milliseconds) *run-done-at*) LAYER-HOLD-MS))
                                       (menu-step (stage-menu a) (make-input-frame (list 'escape) '() #f) VW VH (* 1000.0 dt))
@@ -1263,7 +1285,7 @@
                            (play-cues! (menu-cues (stage-menu a) (car r) (cdr r)))   ; the title reveal's cues (P3d) and the menu's own
                            (if (cdr r)
                                (open (stage a menu: (car r)) (cdr r))
-                               (stage a menu: (car r)))))
+                               (stage a menu: (car r)))))))
                         ((entry) (entry-step! a lay model))   ; P5: the hub's entry screen (D65)
                         ((hub) (if (stage-overlay a) (overlay-step a f dt card-geom lay model) (hub-step! a f dt lay model)))   ; P5: the pause panel holds the beat
                         ((intercept) (step-intercept a f))
@@ -1287,7 +1309,8 @@
                         log-keys?   ; the menu's frames too (the credits crawl's cost, 2026-09-21)
                         (lambda ()
                           (case (stage-screen a)
-                            ((menu) (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
+                            ((menu) (free-previews! (texture-path FREE-PREVIEWS-PATH))   ; FREE PLAY's tiles (0.3)
+                                    (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5
                                    (when (stage-overlay a) (draw-overlay (stage-overlay a) VW VH BOARD-H)))

@@ -121,23 +121,74 @@
         (assert-false (code-line-rect m VW VH))
         (assert-false (cdr (menu-step p (click-frame (cons 320 CODE-LINE-Y)) VW VH)))))))
 
-(test-group "FREE PLAY (D66: the games first, each with its own screen)"
+(test-group "FREE PLAY: the carousel (0.3, t-beb409; D66's games, each with its own screen)"
   (let* ((m (menu-new TOP 'free-play))
          (f (car (step m '(return))))
-         (g (car (step f '(return))))                 ; STACK's screen
-         (d (car (step (step* f 'down) '(return)))))  ; DEFRAG's screen
-    (test "opens with its rows, its heading, the first row highlighted; the rows sit under the heading"
+         (g (car (step f '(return))))                  ; STACK's screen
+         (d (car (step (step* f 'right) '(return)))))  ; DEFRAG's screen
+    (test "opens on the kept tile (STACK by default), the tiles then the bar as its entries, the carousel already there"
       (assert-equal 'free (menu-screen f))
       (assert-equal "FREE PLAY" (menu-heading f))
       (assert-equal '(stack cards scan intercept decrypt code scores back) (menu-entries f))
+      (assert-equal FREE-TILES (list (quote stack) (quote cards) (quote scan) (quote intercept) (quote decrypt)))
       (assert-equal 0 (menu-highlight f))
-      ;; eight rows since DECRYPT: pulled up from ENTRIES-Y (where the main menu's first row is, David 2026-09-22) as far as they need to end above the band (rows-y)
-      (assert-equal (- (+ 376 ENTRY-GAP) (* 8 (+ ENTRY-H ENTRY-GAP))) (cadr (menu-entry-rect f 0 VW VH)))
-      (assert-equal (+ HEADING-Y (- (cadr (menu-entry-rect f 0 VW VH)) SUB-ENTRIES-Y)) (menu-heading-y f))   ; the heading slid with the rows
-      (assert-true (<= (+ (cadr (menu-entry-rect f 7 VW VH)) ENTRY-H) 376))
-      (assert-true (>= (menu-heading-y f) 0)))   ; the heading still on screen with eight rows
-    (test "DECRYPT opens its screen: TIMED first (David, 2026-09-29), DAILY BOARD, ENDLESS; BACK returns with DECRYPT highlighted"
-      (let* ((d (car (step (step* f 'down 'down 'down 'down) '(return)))))
+      (assert-equal 0.0 (menu-free-pos f))
+      (assert-equal 'tiles (menu-free-focus f)))
+    (test "the kept tile from the shell: FREE PLAY opens on it, centered; an unknown id is ignored"
+      (let ((k (car (step (menu-with-free-tile (menu-new TOP 'free-play) 'scan) '(return)))))
+        (assert-equal 'scan (list-ref (menu-entries k) (menu-highlight k)))
+        (assert-equal 2.0 (menu-free-pos k)))
+      (assert-equal 'stack (menu-free-tile (menu-with-free-tile m 'tracker))))
+    (test "right, l and j move to the next tile; left, h and k back; the ends hold (no wrap, so the ends stay findable)"
+      (assert-equal 'cards (list-ref (menu-entries f) (menu-highlight (step* f 'right))))
+      (assert-equal 'cards (list-ref (menu-entries f) (menu-highlight (step* f 'l))))
+      (assert-equal 'cards (list-ref (menu-entries f) (menu-highlight (step* f 'j))))
+      (assert-equal 'scan (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'left))))
+      (assert-equal 'scan (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'h))))
+      (assert-equal 'scan (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'k))))
+      (assert-equal 'stack (list-ref (menu-entries f) (menu-highlight (step* f 'left))))
+      (assert-equal 'decrypt (list-ref (menu-entries f) (menu-highlight (step* f 'right 'right 'right 'right 'right 'right)))))
+    (test "a move keeps the tile (the shell stores it) and is the select cue"
+      (assert-equal 'scan (menu-free-tile (step* f 'right 'right)))
+      (assert-equal (list 'select) (menu-cues f (step* f 'right))))
+    (test "the carousel eases to the selected tile on the menu's clock, and lands there"
+      (let* ((r (step* f 'right))
+             (a (car (menu-step r (frame '()) VW VH 16.7)))
+             (b (let loop ((m a) (i 0)) (if (= i 60) m (loop (car (menu-step m (frame '()) VW VH 16.7)) (+ i 1))))))
+        (assert-true (> (menu-free-pos a) 0.0))
+        (assert-true (< (menu-free-pos a) 1.0))
+        (assert-equal 1.0 (menu-free-pos b))))
+    (test "Down goes to the bar (ENTER CODE), right and left along it, Up back to the kept tile"
+      (let ((b (step* f 'right 'right 'down)))
+        (assert-equal 'code (list-ref (menu-entries b) (menu-highlight b)))
+        (assert-equal 'bar (menu-free-focus b))
+        (assert-equal 'scores (list-ref (menu-entries b) (menu-highlight (step* b 'right))))
+        (assert-equal 'back (list-ref (menu-entries b) (menu-highlight (step* b 'right 'right 'right))))
+        (assert-equal 'code (list-ref (menu-entries b) (menu-highlight (step* b 'left))))
+        (assert-equal 'scan (list-ref (menu-entries b) (menu-highlight (step* b 'up))))
+        (assert-equal 'scan (list-ref (menu-entries b) (menu-highlight (step* b 'right 'k))))))
+    (test "the tiles: the selected one in the middle at full size, its neighbors smaller and off to the sides, the far ones at the edges"
+      (let ((mid (menu-entry-rect f 0 VW VH))
+            (next (menu-entry-rect f 1 VW VH))
+            (far (menu-entry-rect f 2 VW VH))
+            (gone (menu-entry-rect f 3 VW VH)))
+        (assert-equal (list (- 320 (quotient FREE-TILE-W 2)) (- FREE-CY (quotient FREE-TILE-H 2)) FREE-TILE-W FREE-TILE-H) mid)
+        (assert-true (< (caddr next) FREE-TILE-W))
+        (assert-true (> (car next) (+ (car mid) (caddr mid))))       ; clear of the middle one
+        (assert-true (< (car far) VW))                                ; the far one shows at the edge...
+        (assert-true (> (+ (car far) (caddr far)) VW))                ; ...cut by it: the hint that more exist
+        (assert-true (>= (car gone) VW))))                            ; and the next ones are off the screen
+    (test "the bar's three items sit side by side under the tiles"
+      (let ((c (menu-entry-rect f 5 VW VH))
+            (s (menu-entry-rect f 6 VW VH))
+            (b (menu-entry-rect f 7 VW VH)))
+        (assert-equal FREE-BAR-Y (cadr c))
+        (assert-equal (cadr c) (cadr s))
+        (assert-true (< (+ (car c) (caddr c)) (car s)))
+        (assert-true (< (+ (car s) (caddr s)) (car b)))
+        (assert-true (<= (+ (car b) (caddr b)) VW))))
+    (test "DECRYPT opens its screen: TIMED first (David, 2026-09-29), DAILY BOARD, ENDLESS; BACK returns with DECRYPT in the middle"
+      (let* ((d (car (step (step* f 'right 'right 'right 'right) '(return)))))
         (assert-equal 'free-decrypt (menu-screen d))
         (assert-equal "DECRYPT" (menu-heading d))
         (assert-equal '(decrypt-timed daily-board decrypt-endless back) (menu-entries d))
@@ -146,21 +197,30 @@
         (assert-equal 'daily-decrypt (cdr (step (step* d 'down) '(return))))
         (let ((b (car (step d '(escape)))))
           (assert-equal 'free (menu-screen b))
-          (assert-equal 4 (menu-highlight b)))))
+          (assert-equal 4 (menu-highlight b))
+          (assert-equal 4.0 (menu-free-pos b)))))
     (test "INTERCEPT is a choice, not a screen: the shell opens its song select"
-      (let ((r (step (step* f 'down 'down 'down) '(return))))
+      (let ((r (step (step* f 'right 'right 'right) '(return))))
         (assert-equal 'intercept (cdr r))
-        (assert-equal 'free (menu-screen (car r)))))
-    (test "STACK and DEFRAG open the game's screen (no choice): NEW BOARD, DAILY BOARD, VERSION, BACK under the game's name"
+        (assert-equal 'free (menu-screen (car r)))
+        (assert-equal 'intercept (menu-free-tile (car r)))))
+    (test "STACK and DEFRAG open the game's screen (no choice): NEW BOARD, DAILY BOARD, VERSION, then the table's own settings, BACK"
       (assert-false (cdr (step f '(return))))
       (assert-equal 'free-stack (menu-screen g))
       (assert-equal "STACK" (menu-heading g))
-      (assert-equal '(new-board daily-board version back) (menu-entries g))
+      (assert-equal '(new-board daily-board version back) (menu-entries g))   ; the stack has no settings of its own
       (assert-equal ENTRIES-Y (cadr (menu-entry-rect g 0 VW VH)))
       (assert-equal 0 (menu-highlight g))
       (assert-equal 'free-cards (menu-screen d))
       (assert-equal "DEFRAG" (menu-heading d))
-      (assert-equal '(new-board daily-board version back) (menu-entries d)))
+      (assert-equal (append '(new-board daily-board version) (settings-group 'cards) '(back)) (menu-entries d)))
+    (test "DEFRAG's settings on its screen step as on GAME SETTINGS, and the choice names the setting"
+      (let* ((v (step* d 'down 'down 'down))
+             (r (step v '(return))))
+        (assert-equal 'draw (list-ref (menu-entries v) (menu-highlight v)))
+        (assert-equal 'value (menu-row-kind v 'draw))
+        (assert-equal 'set (car (cdr r)))
+        (assert-equal 'draw (cadr (cdr r)))))
     (test "NEW BOARD and DAILY BOARD are the game's choices"
       (assert-equal 'stack (cdr (step g '(return))))
       (assert-equal 'daily-stack (cdr (step (step* g 'down) '(return))))
@@ -185,11 +245,12 @@
         (assert-equal (cons 'version (cons 'cards 'original)) (cdr r))
         (assert-equal 'original (menu-version (car r) 'cards))
         (assert-equal 'hacker (menu-version (car r) 'stack))))
-    (test "BACK on a game's screen closes to FREE PLAY with the game highlighted; Escape and Backspace too"
+    (test "BACK on a game's screen closes to FREE PLAY with the game's tile in the middle; Escape and Backspace too"
       (let ((b (step (step* d 'up) '(return))))
         (assert-false (cdr b))
         (assert-equal 'free (menu-screen (car b)))
-        (assert-equal 'cards (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
+        (assert-equal 'cards (list-ref (menu-entries (car b)) (menu-highlight (car b))))
+        (assert-equal 1.0 (menu-free-pos (car b))))
       (assert-equal 'free (menu-screen (car (step g '(escape)))))
       (assert-equal 'stack (list-ref (menu-entries (car (step g '(escape)))) (menu-highlight (car (step g '(escape))))))
       (assert-equal 'free (menu-screen (car (step g '(backspace))))))
@@ -198,24 +259,71 @@
       (assert-equal (list 'mismatch) (menu-cues g (car (step g '(escape)))))
       (assert-equal (list 'mismatch) (menu-cues f (car (step f '(escape))))))
     (test "BACK closes FREE PLAY to the top screen with FREE PLAY highlighted; Escape and Backspace too"
-      (let ((b (step (step* f 'up) '(return))))
+      (let ((b (step (step* f 'down 'right 'right) '(return))))
         (assert-false (cdr b))
         (assert-equal 'top (menu-screen (car b)))
         (assert-equal 'free-play (list-ref (menu-entries (car b)) (menu-highlight (car b)))))
       (assert-equal 'top (menu-screen (car (step f '(escape)))))
       (assert-equal 'top (menu-screen (car (step f '(backspace))))))
-    (test "a tap on a game's row opens its screen; on the version row it steps it"
+    (test "the kept tile survives closing FREE PLAY and opening it again"
+      (let* ((s (step* f 'right 'right))
+             (top (car (step s '(escape))))
+             (again (car (step top '(return)))))
+        (assert-equal 'scan (list-ref (menu-entries again) (menu-highlight again)))))
+    (test "a tap on the middle tile opens its table; on a side tile it brings that tile to the middle"
+      (let ((t (menu-step f (click-frame (center f 0)) VW VH)))
+        (assert-false (cdr t))
+        (assert-equal 'free-stack (menu-screen (car t))))
       (let ((t (menu-step f (click-frame (center f 1)) VW VH)))
         (assert-false (cdr t))
-        (assert-equal 'free-cards (menu-screen (car t))))
-      (let ((r (menu-step g (click-frame (center g 2)) VW VH)))
-        (assert-equal (cons 'version (cons 'stack 'original)) (cdr r))
-        (assert-equal 'original (menu-version (car r) 'stack))))))
+        (assert-equal 'free (menu-screen (car t)))
+        (assert-equal 'cards (list-ref (menu-entries (car t)) (menu-highlight (car t))))))
+    (test "a tap on the bar picks its item"
+      (assert-equal 'code (menu-screen (car (menu-step f (click-frame (center f 5)) VW VH))))
+      (assert-equal 'top (menu-screen (car (menu-step f (click-frame (center f 7)) VW VH)))))
+    (test "with the shell's pointer stream a press in the band is not a tap; the stroke is"
+      (let* ((s (menu-with-free-stream f #t))
+             (pressed (menu-step s (click-frame (center s 0)) VW VH)))
+        (assert-equal 'free (menu-screen (car pressed)))
+        (assert-false (cdr pressed))
+        (let* ((x (car (center s 0)))
+               (y (cdr (center s 0)))
+               (down (car (menu-free-pointer s 'down x y VW)))
+               (up (menu-free-pointer down 'up (+ x 2) y VW)))
+          (assert-equal 'free-stack (menu-screen (car up))))))
+    (test "a swipe left past a quarter tile settles on the next tile; a short one settles back; the drag follows the finger"
+      (let* ((s (menu-with-free-stream f #t))
+             (x 400)
+             (y FREE-CY)
+             (down (car (menu-free-pointer s 'down x y VW)))
+             (moved (car (menu-free-pointer down 'move (- x 100) y VW)))
+             (up (car (menu-free-pointer moved 'up (- x 100) y VW)))
+             (short (car (menu-free-pointer (car (menu-free-pointer down 'move (- x 30) y VW)) 'up (- x 30) y VW))))
+        (assert-equal 0.5 (menu-free-pos moved))
+        (assert-equal 'cards (list-ref (menu-entries up) (menu-highlight up)))
+        (assert-false (menu-free-drag up))
+        (assert-equal 'stack (list-ref (menu-entries short) (menu-highlight short)))))
+    (test "a swipe right from the first tile holds at the first: the carousel does not wrap"
+      (let* ((s (menu-with-free-stream f #t))
+             (down (car (menu-free-pointer s 'down 300 FREE-CY VW)))
+             (up (car (menu-free-pointer (car (menu-free-pointer down 'move 500 FREE-CY VW)) 'up 500 FREE-CY VW))))
+        (assert-equal 'stack (list-ref (menu-entries up) (menu-highlight up)))))
+    (test "a press outside the band starts no drag"
+      (assert-false (menu-free-drag (car (menu-free-pointer (menu-with-free-stream f #t) 'down 320 (+ FREE-BAR-Y 4) VW)))))
+    (test "the record lines from the shell, per tile; none is '()"
+      (let ((r (menu-with-free-records f (list (list 'stack "BEST 3:41 HACKER" "STREAK 2")))))
+        (assert-equal (list "BEST 3:41 HACKER" "STREAK 2") (menu-free-record r 'stack))
+        (assert-equal '() (menu-free-record r 'scan))))
+    (test "each tile names the classic it keeps"
+      (assert-equal "MAHJONGG SOLITAIRE" (free-classic 'stack))
+      (assert-equal "KLONDIKE SOLITAIRE" (free-classic 'cards))
+      (assert-equal "MINESWEEPER" (free-classic 'scan))
+      (assert-equal (quote ()) (filter (lambda (t) (= 0 (string-length (free-classic t)))) FREE-TILES)))))
 
 (test-group "FREE PLAY: SCAN's screen (VERSION since P6c, and SIZE)"
   (let* ((m (menu-new TOP 'free-play))
          (f (car (step m '(return))))
-         (s (car (step (step* f 'down 'down) '(return)))))
+         (s (car (step (step* f 'right 'right) '(return)))))
     (test "SCAN opens its screen: NEW BOARD, DAILY BOARD, VERSION, SIZE, BACK"
       (assert-equal 'free-scan (menu-screen s))
       (assert-equal "SCAN" (menu-heading s))
@@ -367,14 +475,14 @@
         (assert-equal 'top (menu-screen (car (step c '(return)))))
         (assert-equal 'top (menu-screen (car (menu-step c (click-frame (cons 320 200)) VW VH))))))
     (test "SCORES opens from FREE PLAY, BACK returns to the top screen"
-      (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down 'down 'down 'down) '(return)))))
+      (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'right) '(return)))))
         (assert-equal 'scores (menu-screen sc))
         (assert-equal "HIGH SCORES" (menu-heading sc))
         (assert-equal 'top (menu-screen (car (step sc '(escape)))))))))
 
 (test-group "CODE"
   (let* ((f (car (step (menu-new TOP 'free-play) '(return))))
-         (c (car (step (step* f 'down 'down 'down 'down 'down) '(return))))
+         (c (car (step (step* f 'down) '(return))))
          (code (encode (spec-new 'cards 'original 3 'standard 'turtle 280))))
     (test "opens empty; typed letters and digits append in upper case, up to ten; the display dashes after five"
       (assert-equal 'code (menu-screen c))
@@ -450,7 +558,7 @@
       (assert-equal 124 (cadr (menu-entry-rect m 0 VW VH)))
       (assert-true (<= (+ (cadr (menu-entry-rect m 7 VW VH)) ENTRY-H) 380))))
   (test "the text screens and the overlay keep their own places"
-    (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down 'down 'down 'down 'down) '(return))))
+    (let ((sc (car (step (step* (car (step (menu-new TOP 'free-play) '(return))) 'down) '(return))))
           (o (menu-new-overlay 'stack #f (settings-defaults) #f #f)))
       (assert-equal TEXT-ROWS-Y (cadr (menu-entry-rect sc 0 VW VH)))
       (assert-equal HEADING-Y (menu-heading-y sc))
