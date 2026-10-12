@@ -22,6 +22,8 @@
 //                      ~200 ms, the release there (hold: leave the finger down,
 //                      no release, for a shot of the drag itself)
 //   key:K              a keydown/keyup pair (DOM key name)
+//   nav:QUERY          load the page again with this query (a store an eval: planted
+//                      is read by the new boot)
 // --viewport sets the emulated screen (default 844,390,3: a landscape phone;
 // a width of 1000 or more is a desktop: no touch, a fine pointer); --page
 // also writes the whole page as the screen shows it (mocks at phone and
@@ -222,6 +224,13 @@ for (const action of actions) {
     if (p[4] !== "hold") { await sleep(30); await pointer("pointerup", x2, y2); await sleep(400); } else await sleep(150);
   }
   else if (kind === "key") { await key(rest); }
+  else if (kind === "nav") {
+    const from = lines.length;
+    await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?trace&${rest}` });
+    const again = await waitLine(/^crash: page build /, from, 30000);
+    if (!again) { console.log(`SETUP-FAILED: no page line after nav:${rest}`); shutdown(2); await new Promise(() => {}); }
+    lineFrom = again.index;
+  }
   else { console.log(`SETUP-FAILED: unknown action ${action}`); shutdown(2); }
 }
 await sleep(300);
