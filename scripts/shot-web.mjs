@@ -139,7 +139,7 @@ async function tap(vx, vy) {
     return [cx, cy];
   })()`);
 }
-// a pointer event at a virtual point, on the canvas (down) or the window (move, up),
+// a pointer event at a virtual point, on the canvas (the release bubbles to the window),
 // where the page's own listeners take them
 async function pointer(type, vx, vy) {
   return evalJS(`(() => {
@@ -148,7 +148,7 @@ async function pointer(type, vx, vy) {
     const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
     const cx = r.left + (ox + ${vx} * scale) * r.width / c.width, cy = r.top + (oy + ${vy} * scale) * r.height / c.height;
     const e = new PointerEvent("${type}", { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true, pointerId: 7 });
-    ("${type}" === "pointerdown" ? c : window).dispatchEvent(e);
+    c.dispatchEvent(e);   // the page takes a touch's moves on the canvas, its release on the window (bubbled to)
     return [cx, cy];
   })()`);
 }
