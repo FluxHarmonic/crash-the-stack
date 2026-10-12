@@ -1290,7 +1290,17 @@
           (set! *menu* (menu-with-title *menu* (if (texture-for-path CARD-PATH)
                                                    (title-card-ready! t)
                                                    (title-skip-card t))))))
-      (menu-pointer-drain!)   ; FREE PLAY's carousel: the pointer's stroke since the last frame
+      ;; FREE PLAY's carousel: the pointer's stroke since the last frame. A release that
+      ;; opened a table hands the frame to it; one that opened a game's screen (or made
+      ;; any choice) takes the frame's click with it: the press and the release can land
+      ;; in one frame, and the click would otherwise pick that screen's first row
+      ;; (NEW BOARD) under the tile (the review's HIGH 2 and MED 2)
+      (let ((acted (menu-pointer-drain!)))
+        (if (not (eq? *screen* (quote menu)))
+            (tick-screen (make-input-frame (quote ()) (quote ()) #f) dt)
+            (menu-tick-step (if acted (make-input-frame (input-frame-pressed f) (input-frame-held f) #f) f) dt))))
+
+    (define (menu-tick-step f dt)
       (let* ((s0 (and *ms* (gc-snapshot)))
              (t0 (now-ms))
              ;; RUN COMPLETE closes to the top screen by itself after the hold
@@ -1996,8 +2006,10 @@
               (let ((p (or (frame->virtual (gles3-canvas-width) (gles3-canvas-height) VW VH x y) (cons -1 -1))))
                 (set! *menu-events* (cons (list kind (exact (floor (car p))) (exact (floor (cdr p)))) *menu-events*))))))))
     ;; the queue through the carousel; a release's choice (a tile opened) is chosen
+    ;; Answers #t when a release acted: made a choice or changed the menu's screen.
     (define (menu-pointer-drain!)
-      (let ((events (reverse *menu-events*)))
+      (let ((events (reverse *menu-events*))
+            (acted #f))
         (set! *menu-events* (quote ()))
         (for-each (lambda (e)
                     (when (eq? *screen* (quote menu))
@@ -2005,10 +2017,13 @@
                              (r (menu-free-pointer *menu* (car e) (cadr e) (caddr e) VW)))
                         (play-cues! (menu-cues before (car r) (cdr r)))
                         (set! *menu* (car r))
+                        (unless (eq? (menu-screen before) (menu-screen (car r))) (set! acted #t))
                         (when (cdr r)
+                          (set! acted #t)
                           (say "menu" "chose" (cdr r))
                           (choose! (cdr r))))))
-                  events)))
+                  events)
+        acted))
 
     (define (decrypt-pointer! payload)
       (let ((parts (string-split payload ",")))
@@ -2485,8 +2500,8 @@
       (cond ((pair? choice)
              (case (car choice)
                ((set) (apply-setting! (cadr choice) (cddr choice)))
-               ((version) (version! (cadr choice) (cddr choice)))   ; a game's VERSION row stepped: remembered per game (D66)
-               ((size) (scan-size! (cdr choice)))                    ; SCAN's SIZE row (0.1.3)
+               ((version) (version! (cadr choice) (cddr choice)) (set! *menu* (menu-with-free-records *menu* (free-records))))   ; a game's VERSION row stepped: remembered per game (D66); the tile's record follows it (0.3)
+               ((size) (scan-size! (cdr choice)) (set! *menu* (menu-with-free-records *menu* (free-records))))   ; SCAN's SIZE row (0.1.3); its tile's record follows it
                ;; NEWS (P4b): a post chosen; the page opens it outside the game
                ;; (window.open: the installed app shows it in browser UI, D20)
                ;;   crash: open URL

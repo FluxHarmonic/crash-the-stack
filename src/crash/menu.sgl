@@ -212,7 +212,7 @@
       (free-tile default: 'stack)  ; the table the carousel keeps (the shell remembers it across menus)
       (free-pos default: 0.0)      ; the carousel's drawn position, in tiles: eases to the selected tile
       (free-records default: '())  ; ((table line ...) ...): a tile's record lines, from the shell
-      (free-drag default: #f)      ; (x0 pos0 moved) while a pointer drags the carousel, else #f
+      (free-drag default: #f)      ; (x0 pos0 moved y0) while a pointer drags the carousel, else #f
       (free-stream default: #f))   ; the shell sends the pointer's whole stroke (menu-free-pointer): a press in the band is not a tap
 
     (define (menu-with-title m t) (menu m title: t))
@@ -419,17 +419,24 @@
     ;; the stroke's direction past a quarter tile; a release that barely
     ;; moved is a tap. Answers (cons menu choice).
     (define DRAG-SLOP 8)
+    ;; A stroke the page lost (a touch the system cancelled, the window's
+    ;; focus gone mid-press) arrives as a move and a release far off the
+    ;; screen (the page sends -1e6): that is a cancel, not a swipe to the end.
+    (define (off-screen? x y vw)
+      (or (< x (- vw)) (> x (* 2 vw)) (< y -400) (> y 800)))
     (define (menu-free-pointer m kind x y vw)
       (let ((d (menu-free-drag m)))
         (cond ((not (and (eq? (menu-screen m) 'free) (menu-live? m))) (cons m #f))
               ((eq? kind 'down)
                (if (in-carousel? y)
-                   (cons (menu m free-drag: (list x (menu-free-pos m) #f)) #f)
+                   (cons (menu m free-drag: (list x (menu-free-pos m) #f y)) #f)
                    (cons m #f)))
               ((not d) (cons m #f))
+              ((and (memq kind (list 'move 'up)) (off-screen? x y vw))
+               (cons (menu m free-drag: #f free-pos: (cadr d)) #f))   ; the cancel: back where the press found it
               ((eq? kind 'move)
                (let ((moved (or (caddr d) (> (abs (- x (car d))) DRAG-SLOP))))
-                 (cons (menu m free-drag: (list (car d) (cadr d) moved)
+                 (cons (menu m free-drag: (list (car d) (cadr d) moved (cadddr d))
                              free-pos: (if moved
                                            (max -0.4 (min (+ (- (length FREE-TILES) 1) 0.4)
                                                           (- (cadr d) (/ (- x (car d)) FREE-PITCH))))
@@ -438,7 +445,7 @@
               ((eq? kind 'up)
                (let ((m (menu m free-drag: #f)))
                  (if (not (or (caddr d) (> (abs (- x (car d))) DRAG-SLOP)))
-                     (free-tap m vw x y)
+                     (free-tap m vw (car d) (cadddr d))   ; a tap is where it was pressed (a slide onto the bar is not the bar)
                      (let* ((delta (- (menu-free-pos m) (cadr d)))
                             (i (cond ((> delta 0.25) (exact (ceiling (- (menu-free-pos m) 0.25))))
                                      ((< delta -0.25) (exact (floor (+ (menu-free-pos m) 0.25))))

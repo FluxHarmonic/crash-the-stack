@@ -1894,7 +1894,10 @@ async function dealFrom(free, table, row = "new-board") {
       if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
       if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
       // FREE PLAY (0.3) is a carousel: the tiles on one center line (124), the bar under them (306 + 12)
-      if (screen === "free" && (s.rows.stack.y !== 124 || s.rows.code.y !== 318 || s.rows.stack.x !== 320)) { detail = `FREE PLAY's middle tile is at ${s.rows.stack.x},${s.rows.stack.y} and its bar at y ${s.rows.code.y}, not 320,124 and 318`; break; }
+      // the middle one is the KEPT tile (FREE PLAY opens where it was left), not always STACK: "crash: free TILE ..." names it
+      const freeLine = screen === "free" && await waitLine(/^crash: free ([a-z-]+) (tiles|bar)$/, m0, 2000);
+      const kept = freeLine ? freeLine.m[1] : "stack";
+      if (screen === "free" && (!s.rows[kept] || s.rows[kept].y !== 124 || s.rows.code.y !== 318 || s.rows[kept].x !== 320)) { detail = `FREE PLAY's middle tile should be the kept ${kept} at 320,124 with the bar at y 318: ${s.order.map((id) => id + "@" + s.rows[id].x + "," + s.rows[id].y).join(" ")}`; break; }
       if (screen !== "free" && s.order.length && Math.abs(rowsFrom(s) - rowsWant(s)) > 1) { detail = `the ${screen} screen's first row starts at ${rowsFrom(s)}, not ${rowsWant(s)}`; break; }
       if (sub) {
         const [row, sc] = sub;

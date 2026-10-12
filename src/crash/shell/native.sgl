@@ -811,8 +811,8 @@
       (cond ((pair? choice)
              (case (car choice)
                ((set) (apply-setting a (cadr choice) (cddr choice)))
-               ((version) (version! (cadr choice) (cddr choice)) a)   ; a game's VERSION row stepped: remembered per game (D66)
-               ((size) (scan-size! (cdr choice)) a)                    ; SCAN's SIZE row (0.1.3)
+               ((version) (version! (cadr choice) (cddr choice)) (stage a menu: (menu-with-free-records (stage-menu a) (free-records))))   ; a game's VERSION row stepped: remembered per game (D66); the tile's record follows it (0.3)
+               ((size) (scan-size! (cdr choice)) (stage a menu: (menu-with-free-records (stage-menu a) (free-records))))   ; SCAN's SIZE row (0.1.3); its tile's record follows it
                ;; NEWS (P4b, D20): a post chosen opens with the platform's opener
                ;; (xdg-open, open, ShellExecute). The native build reads no feed
                ;; today (no HTTP client among the game's deps), so the row only
@@ -956,7 +956,14 @@
     (define (free-pointer m)
       (if (not (eq? (menu-screen m) 'free))
           (cons m #f)
-          (let loop ((es (scan-events)) (m m) (choice #f))
+          ;; a press frame's events in stroke order: the press, the move, the release (scan-events
+          ;; puts the move first, which would apply a lost release's stale drag before the new press)
+          (let loop ((es (let ((es (scan-events)))
+                           (append (filter (lambda (e) (eq? (car e) (quote down))) es)
+                                   (filter (lambda (e) (eq? (car e) (quote move))) es)
+                                   (filter (lambda (e) (eq? (car e) (quote up))) es))))
+                     (m m)
+                     (choice #f))
             (cond ((null? es) (cons m choice))
                   ((or choice (and (pair? (cdddr (car es))) (not (eq? (cadddr (car es)) 'left))))
                    (loop (cdr es) m choice))
@@ -1272,7 +1279,13 @@
                                (not (memq 'continue (menu-entries (stage-menu a))))))
                    (a (case (stage-screen a)
                         ((menu)
-                         (let* ((p (free-pointer (stage-menu a)))   ; FREE PLAY's carousel: the mouse's stroke first (0.3)
+                         (let* ((was (menu-screen (stage-menu a)))
+                                (p (free-pointer (stage-menu a)))   ; FREE PLAY's carousel: the mouse's stroke first (0.3)
+                                ;; a release that chose or changed the screen takes the frame's click with it:
+                                ;; press and release in one frame would otherwise pick the new screen's first row
+                                (f (if (or (cdr p) (not (eq? was (menu-screen (car p)))))
+                                       (make-input-frame (input-frame-pressed f) (input-frame-held f) #f)
+                                       f))
                                 (_ (play-cues! (menu-cues (stage-menu a) (car p) (cdr p))))
                                 (a (stage a menu: (car p)))
                                 (a (if (cdr p) (open a (cdr p)) a)))
@@ -1309,7 +1322,8 @@
                         log-keys?   ; the menu's frames too (the credits crawl's cost, 2026-09-21)
                         (lambda ()
                           (case (stage-screen a)
-                            ((menu) (free-previews! (texture-path FREE-PREVIEWS-PATH))   ; FREE PLAY's tiles (0.3)
+                            ((menu) (when (eq? (menu-screen (stage-menu a)) (quote free))   ; FREE PLAY's tiles (0.3); looked up there only, so the PNG never decodes inside the reveal
+                                      (free-previews! (texture-path FREE-PREVIEWS-PATH)))
                                     (draw-menu (stage-menu a) VW VH "NATIVE" (texture-path BACKDROP-PATH) (texture-path CARD-PATH)))   ; the title's backdrop and card strip (P3d)
                             ((entry) (draw-hub-entry VW VH (stage-background a) (lit-progress) (entry-line)))   ; P5 (D65)
                             ((hub) (hub-draw! VW VH (stage-background a))   ; P5

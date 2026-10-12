@@ -38,6 +38,7 @@ var SHELL = [
   "assets/sigil-wasm-gles3.js",
   "assets/sigil-browser.js",
   "assets/packets/portraits.png",
+  "assets/free/previews.png",   // FREE PLAY's tiles (0.3): a boot fetch, so offline needs it here
   // the soundtrack (M1, D59): every tune, so the music plays offline (1.4 MB in all,
   // against the 3.2 MB of OGG they replace; the tracker's bundled demos among them;
   // the page fetches one on the game's "crash: tune-fetch NAME" line)

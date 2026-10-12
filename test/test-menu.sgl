@@ -291,23 +291,45 @@
                (down (car (menu-free-pointer s 'down x y VW)))
                (up (menu-free-pointer down 'up (+ x 2) y VW)))
           (assert-equal 'free-stack (menu-screen (car up))))))
-    (test "a swipe left past a quarter tile settles on the next tile; a short one settles back; the drag follows the finger"
-      (let* ((s (menu-with-free-stream f #t))
+    (test "a swipe left past a quarter tile settles on the next tile; a short one settles back where it started; the drag follows the finger"
+      (let* ((s (menu-with-free-stream (car (step (menu-with-free-tile m 'scan) '(return))) #t))   ; from SCAN, the middle tile: both ways are open
              (x 400)
              (y FREE-CY)
              (down (car (menu-free-pointer s 'down x y VW)))
              (moved (car (menu-free-pointer down 'move (- x 100) y VW)))
              (up (car (menu-free-pointer moved 'up (- x 100) y VW)))
-             (short (car (menu-free-pointer (car (menu-free-pointer down 'move (- x 30) y VW)) 'up (- x 30) y VW))))
-        (assert-equal 0.5 (menu-free-pos moved))
-        (assert-equal 'cards (list-ref (menu-entries up) (menu-highlight up)))
+             (short-move (car (menu-free-pointer down 'move (- x 30) y VW)))
+             (short (car (menu-free-pointer short-move 'up (- x 30) y VW)))
+             (back (car (menu-free-pointer (car (menu-free-pointer down 'move (+ x 100) y VW)) 'up (+ x 100) y VW))))
+        (assert-equal 'scan (list-ref (menu-entries s) (menu-highlight s)))
+        (assert-equal 2.5 (menu-free-pos moved))
+        (assert-equal 'intercept (list-ref (menu-entries up) (menu-highlight up)))
         (assert-false (menu-free-drag up))
-        (assert-equal 'stack (list-ref (menu-entries short) (menu-highlight short)))))
+        (assert-true (> (menu-free-pos short-move) 2.0))   ; the short drag did move the tiles...
+        (assert-equal 'scan (list-ref (menu-entries short) (menu-highlight short)))   ; ...and settled back
+        (assert-equal 'cards (list-ref (menu-entries back) (menu-highlight back)))))
     (test "a swipe right from the first tile holds at the first: the carousel does not wrap"
       (let* ((s (menu-with-free-stream f #t))
              (down (car (menu-free-pointer s 'down 300 FREE-CY VW)))
-             (up (car (menu-free-pointer (car (menu-free-pointer down 'move 500 FREE-CY VW)) 'up 500 FREE-CY VW))))
-        (assert-equal 'stack (list-ref (menu-entries up) (menu-highlight up)))))
+             (moved (car (menu-free-pointer down 'move 500 FREE-CY VW)))
+             (up (car (menu-free-pointer moved 'up 500 FREE-CY VW))))
+        (assert-true (< (menu-free-pos moved) 0.0))   ; dragged past the start...
+        (assert-equal 'stack (list-ref (menu-entries up) (menu-highlight up)))   ; ...and held there, not wrapped to DECRYPT
+        (assert-false (menu-free-drag up))))
+    (test "a stroke the page lost (moved and released at -1e6, as a cancelled touch is sent) puts the carousel back, selecting nothing"
+      (let* ((s (menu-with-free-stream (car (step (menu-with-free-tile m 'scan) '(return))) #t))
+             (down (car (menu-free-pointer s 'down 320 FREE-CY VW)))
+             (far (car (menu-free-pointer down 'move -1000000 -1000000 VW)))
+             (gone (menu-free-pointer far 'up -1000000 -1000000 VW)))
+        (assert-false (cdr gone))
+        (assert-equal 'scan (list-ref (menu-entries (car gone)) (menu-highlight (car gone))))
+        (assert-equal 2.0 (menu-free-pos (car gone)))
+        (assert-false (menu-free-drag (car gone)))))
+    (test "a tap is judged where it was pressed: pressed on the middle tile and let go on the bar opens the tile, not the bar's item"
+      (let* ((s (menu-with-free-stream f #t))
+             (down (car (menu-free-pointer s 'down 320 FREE-CY VW)))
+             (up (menu-free-pointer down 'up 322 (+ FREE-BAR-Y 10) VW)))
+        (assert-equal 'free-stack (menu-screen (car up)))))
     (test "a key ends a drag whose release never came (a page that lost the pointer), and the carousel eases again"
       (let* ((s (menu-with-free-stream f #t))
              (down (car (menu-free-pointer s 'down 320 FREE-CY VW)))
