@@ -1782,12 +1782,71 @@ async function downTo(order, id, at = 0) {
   const n = order.length, i = order.indexOf(id);
   for (let k = 0; k < (i - at + n) % n; k++) await press("ArrowDown");
 }
-// a board from FREE PLAY (D66): the game's row opens the game's screen
+// FREE PLAY's carousel (0.3): the tables are tiles in a row (Left/Right move
+// it, clamped at the ends), the bar under them (Down from the tiles, Up back).
+// The game says "crash: free TILE tiles|bar" with each menu line on FREE PLAY.
+const FREE_TILES = ["stack", "cards", "scan", "intercept", "decrypt"];
+const FREE_BAR = ["code", "scores", "back"];
+function freeState(from = 0) {
+  for (let i = consoleLines.length - 1; i >= from; i--) {
+    const m = consoleLines[i].match(/^crash: free ([a-z-]+) (tiles|bar)$/);
+    if (m) return { tile: m[1], focus: m[2], index: i };
+  }
+  return null;
+}
+// the highlight to an entry of FREE PLAY by keys: Up to the tiles (nothing
+// when there already), then Left/Right to the tile, or Down and Right along
+// the bar; answers whether the game said the tile came to the middle
+async function freeTo(id) {
+  await press("ArrowUp");
+  await sleep(250);
+  const s = freeState();
+  if (!s) return false;
+  if (FREE_TILES.includes(id)) {
+    const d = FREE_TILES.indexOf(id) - FREE_TILES.indexOf(s.tile);
+    const m0 = consoleLines.length;
+    for (let k = 0; k < Math.abs(d); k++) await press(d > 0 ? "ArrowRight" : "ArrowLeft");
+    return d === 0 || !!(await waitLine(new RegExp(`^crash: free ${id} tiles$`), m0, 3000));
+  }
+  await press("ArrowDown");
+  for (let k = 0; k < FREE_BAR.indexOf(id); k++) await press("ArrowRight");
+  return true;
+}
+// a whole tap (press, then the release 80 ms later): FREE PLAY's carousel
+// acts on the release, as a phone's finger lifting
+async function tapUp(vx, vy) {
+  await evalJS(`(() => {
+    const c = document.getElementById("stage"); const r = c.getBoundingClientRect();
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const cx = r.left + (ox + ${vx} * scale) * r.width / c.width, cy = r.top + (oy + ${vy} * scale) * r.height / c.height;
+    const o = { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true, pointerId: 9 };
+    c.dispatchEvent(new PointerEvent("pointerdown", o));
+    setTimeout(() => window.dispatchEvent(new PointerEvent("pointerup", o)), 80);
+  })()`);
+  await sleep(200);
+}
+// a tile opened by taps: a side tile is brought to the middle first (one
+// tap), then the middle one opens (another); a bar item is one tap
+async function freeTap(free, id) {
+  if (!FREE_TILES.includes(id)) { await tap(free.rows[id].x, free.rows[id].y); return true; }
+  const s = freeState();
+  if (s && s.tile !== id) {
+    const m0 = consoleLines.length;
+    await tapUp(free.rows[id].x, free.rows[id].y);
+    if (!(await waitLine(new RegExp(`^crash: free ${id} tiles$`), m0, 3000))) return false;
+    await sleep(300);
+  }
+  const mid = freeState();
+  await tapUp(320, free.rows.stack.y);   // the middle tile's center: the tiles share their center line
+  return !!mid;
+}
+// a board from FREE PLAY (D66): the game's tile opens the game's screen
 // (free-stack, free-cards), whose NEW BOARD or DAILY BOARD deals; false
 // when the game's screen did not open
 async function dealFrom(free, table, row = "new-board") {
   const m0 = consoleLines.length;
-  await downTo(free.order, table);
+  await freeTo(table);
   await press("Enter");
   const g = await menuOn(`free-${table}`, m0);
   if (!g) return false;
@@ -1806,7 +1865,7 @@ async function dealFrom(free, table, row = "new-board") {
   else {
     const want = { free: "stack cards scan intercept decrypt code scores back",   // D66: the games first (INTERCEPT after SCAN); TRACKER sits on the top screen now (David, 2026-09-22)
                    "free-stack": "new-board daily-board version back",   // a game's screen (D66); VERSION is a value row
-                   "free-cards": "new-board daily-board version back",
+                   "free-cards": "new-board daily-board version draw scoring back",   // 0.3: DEFRAG's own settings on its screen
                    "free-scan": "new-board daily-board version size back",   // SCAN: VERSION (P6c) and SIZE, both value rows
                    settings: "music sfx volume scanlines veil background back",
                    credits: "", scores: "back", code: "back" };   // the credits crawl has no rows: Escape or a tap leaves
@@ -1834,11 +1893,13 @@ async function dealFrom(free, table, row = "new-board") {
       const s = await menuOn(screen, m0);
       if (!s) { detail = `Enter on ${id} did not open the ${screen} screen (keyboard)`; break; }
       if (s.order.join(" ") !== want[screen]) { detail = `the ${screen} screen's rows are ${s.order.join(" ")}, not ${want[screen]}`; break; }
-      if (s.order.length && Math.abs(rowsFrom(s) - rowsWant(s)) > 1) { detail = `the ${screen} screen's first row starts at ${rowsFrom(s)}, not ${rowsWant(s)}`; break; }
+      // FREE PLAY (0.3) is a carousel: the tiles on one center line (124), the bar under them (306 + 12)
+      if (screen === "free" && (s.rows.stack.y !== 124 || s.rows.code.y !== 318 || s.rows.stack.x !== 320)) { detail = `FREE PLAY's middle tile is at ${s.rows.stack.x},${s.rows.stack.y} and its bar at y ${s.rows.code.y}, not 320,124 and 318`; break; }
+      if (screen !== "free" && s.order.length && Math.abs(rowsFrom(s) - rowsWant(s)) > 1) { detail = `the ${screen} screen's first row starts at ${rowsFrom(s)}, not ${rowsWant(s)}`; break; }
       if (sub) {
         const [row, sc] = sub;
         m0 = consoleLines.length;
-        await downTo(s.order, row);
+        if (screen === "free") { if (!(await freeTo(row))) { detail = `the carousel did not bring ${row} to the middle (keys)`; break; } } else await downTo(s.order, row);
         await press("Enter");
         const s2 = await menuOn(sc, m0);
         if (!s2) { detail = `Enter on ${row} did not open the ${sc} screen (keyboard)`; break; }
@@ -1874,7 +1935,8 @@ async function dealFrom(free, table, row = "new-board") {
         if (sub) {
           const [row, sc] = sub;
           m0 = consoleLines.length;
-          await tap(s.rows[row].x, s.rows[row].y);
+          if (screen === "free") { if (!(await freeTap(s, row))) { detail = `a tap on the ${row} tile did not bring it to the middle`; break; } }
+          else await tap(s.rows[row].x, s.rows[row].y);
           const s2 = await menuOn(sc, m0);
           if (!s2) { detail = `a tap on ${row} did not open the ${sc} screen`; break; }
           seen.push(`${sc} (tap)`);
@@ -2070,7 +2132,7 @@ async function dealFrom(free, table, row = "new-board") {
       const free = await menuOn("free", m0);
       if (!free) return { error: "FREE PLAY did not open" };
       m0 = consoleLines.length;
-      await downTo(free.order, table);
+      await freeTo(table);
       await press("Enter");
       const g = await menuOn(`free-${table}`, m0);
       return g ? { g, free } : { error: `${table}'s screen did not open` };
@@ -2096,7 +2158,7 @@ async function dealFrom(free, table, row = "new-board") {
           if (!free) detail = "Escape on DEFRAG's screen did not return to FREE PLAY";
           else {
             m0 = consoleLines.length;
-            await downTo(free.order, "stack", free.order.indexOf("cards"));
+            await freeTo("stack");
             await press("Enter");
             const gs = await menuOn("free-stack", m0);
             if (!gs) detail = "STACK's screen did not open after DEFRAG's";
@@ -2564,7 +2626,7 @@ async function dealFrom(free, table, row = "new-board") {
       await press("Enter");
       const free = await menuOn("free", m0);
       m0 = consoleLines.length;
-      if (free) { await downTo(free.order, "code"); await press("Enter"); }
+      if (free) { await freeTo("code"); await press("Enter"); }
       const screen = free && await menuOn("code", m0);
       if (!screen) detail = "the CODE screen did not open";
       else {
@@ -2582,7 +2644,7 @@ async function dealFrom(free, table, row = "new-board") {
           await downTo(r2.top.order, "free-play", topAt); topAt = r2.top.order.indexOf("free-play");
           await press("Enter");
           const free2 = await menuOn("free", m0);
-          if (free2) { await downTo(free2.order, "code"); await press("Enter"); }
+          if (free2) { await freeTo("code"); await press("Enter"); }
           if (!(free2 && await menuOn("code", m0))) detail = detail || "the CODE screen did not reopen";
           m0 = consoleLines.length;
           await type(code.toLowerCase());
@@ -2671,7 +2733,7 @@ async function dealFrom(free, table, row = "new-board") {
     const free = await menuOn("free", m0);
     if (!free) return { error: "FREE PLAY did not open" };
     m0 = consoleLines.length;
-    await downTo(free.order, "scores");
+    await freeTo("scores");
     await press("Enter");
     const l = await waitLine(SCORES_RE, m0, 3000);
     return l ? { m: l.m } : { error: "the SCORES screen said no scores line" };

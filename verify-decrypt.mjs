@@ -435,7 +435,7 @@ const r1 = (x) => Math.round(x * 10) / 10;
   else if (!free) detail = "ArrowDown, Enter did not open FREE PLAY";
   else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}`;
   if (!detail) {
-    for (let i = 0; i < 4; i++) await realKey("ArrowDown");
+    for (let i = 0; i < 4; i++) await realKey("ArrowRight");   // 0.3: the carousel, DECRYPT the fifth tile
     await sleep(300); await shot("menu");
     m0 = consoleLines.length;
     await realKey("Enter");

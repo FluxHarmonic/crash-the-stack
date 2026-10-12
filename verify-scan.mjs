@@ -505,7 +505,7 @@ if (flag("--meds")) {
   else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") detail = `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt code scores back`;
   else {
     m0 = consoleLines.length;
-    await key("ArrowDown"); await key("ArrowDown"); await key("Enter");
+    await key("ArrowRight"); await key("ArrowRight"); await key("Enter");   // 0.3: the carousel, SCAN the third tile
     const game = await waitLine(/^crash: menu free-scan (.+)$/, m0, 3000);
     const grows = game ? game.m[1].split(" ").filter((_, i) => i % 3 === 0).join(" ") : "";
     if (!game) detail = "Enter on SCAN did not open SCAN's screen (no \"crash: menu free-scan\" line)";

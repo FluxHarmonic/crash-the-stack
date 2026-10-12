@@ -242,6 +242,20 @@ function timedOut(name) {
   console.log(`TIMED-OUT ${name}; did not run: ${notRun().filter((n) => n !== name).join(" ")}`);
   dump(); shutdown(2);
 }
+// a whole tap (press, then the release 80 ms later): FREE PLAY's carousel (0.3)
+// acts on the release, as a phone's finger lifting
+async function tapUp(vx, vy) {
+  await evalJS(`(() => {
+    const c = document.getElementById("stage"); const r = c.getBoundingClientRect();
+    const scale = Math.min(c.width / ${VW}, c.height / ${VH});
+    const ox = (c.width - ${VW} * scale) / 2, oy = (c.height - ${VH} * scale) / 2;
+    const cx = r.left + (ox + ${vx} * scale) * r.width / c.width, cy = r.top + (oy + ${vy} * scale) * r.height / c.height;
+    const o = { clientX: cx, clientY: cy, bubbles: true, cancelable: true, pointerType: "touch", isPrimary: true, pointerId: 9 };
+    c.dispatchEvent(new PointerEvent("pointerdown", o));
+    setTimeout(() => window.dispatchEvent(new PointerEvent("pointerup", o)), 80);
+  })()`);
+  await sleep(200);
+}
 async function tap(vx, vy) {
   return evalJS(`(() => {
     const c = document.getElementById("stage"); const r = c.getBoundingClientRect();
@@ -320,8 +334,8 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     m0 = consoleLines.length;
     await menuKey("ArrowDown"); await menuKey("Enter");
     const freeK = await waitLine(/^crash: menu free (.+)$/, m0, 3000);
-    // D66: DEFRAG opens the game's screen; its first row, NEW BOARD, deals
-    await menuKey("ArrowDown"); await menuKey("Enter");
+    // D66: DEFRAG opens the game's screen; its first row, NEW BOARD, deals (0.3: the carousel, Right to DEFRAG's tile)
+    await menuKey("ArrowRight"); await menuKey("Enter");
     const gameK = await waitLine(/^crash: menu free-cards (.+)$/, m0, 3000);
     if (gameK) await menuKey("Enter");
     const choseK = await waitLine(/^crash: menu chose (\w+)$/, m0, 3000);
@@ -329,7 +343,7 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
     await sleep(600);
     const errorsAfterKeys = consoleErrors.length + consoleLines.slice(m0).filter((l) => /^Error:/.test(l)).length;
     if (!freeK) fail("menu", "ArrowDown, Enter did not open FREE PLAY (no \"crash: menu free\" line)");
-    else if (!gameK) fail("menu", "ArrowDown, Enter on FREE PLAY did not open DEFRAG's screen (no \"crash: menu free-cards\" line)");
+    else if (!gameK) fail("menu", "ArrowRight, Enter on FREE PLAY did not open DEFRAG's screen (no \"crash: menu free-cards\" line)");
     else if (!choseK) fail("menu", "no \"crash: menu chose\" line after Enter on NEW BOARD");
     else if (choseK.m[1] !== "cards") fail("menu", `keys: expected chose cards, got ${choseK.m[0]}`);
     else if (!bootedK) fail("menu", "keys chose cards but no card-table boot line followed");
@@ -378,8 +392,12 @@ if (!menu) { fail("menu", "no \"crash: menu\" line within 20 s"); timedOut("menu
       if (lookDetail) fail("menu", lookDetail);
       else if (!free2.cards) fail("menu", "no DEFRAG row on FREE PLAY");
       else {
-        // D66: the tap on DEFRAG opens its screen; the tap on NEW BOARD deals
-        await tap(free2.cards[0], free2.cards[1]);
+        // D66: DEFRAG opens its screen, the tap on NEW BOARD deals (0.3: DEFRAG's tile is
+        // beside the middle one, so one tap brings it there and another opens it)
+        await tapUp(free2.cards[0], free2.cards[1]);
+        await waitLine(/^crash: free cards tiles$/, m0, 3000);
+        await sleep(300);
+        await tapUp(320, free2.stack[1]);
         const gameLine = await waitLine(/^crash: menu (free-cards .+)$/, m0, 3000);
         const game = gameLine ? parseMenu(gameLine.m[1]).entries : {};
         if (game["new-board"]) await tap(game["new-board"][0], game["new-board"][1]);

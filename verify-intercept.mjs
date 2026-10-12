@@ -379,7 +379,7 @@ function linesFrom(re, from) {
   else if (rows.join(" ") !== "stack cards scan intercept decrypt code scores back") fail("menu", `FREE PLAY's rows are ${rows.join(" ")}, not stack cards scan intercept decrypt code scores back`);
   else pass("menu", `FREE PLAY ${rows.join(" ")}`);
   m0 = consoleLines.length;
-  await key("ArrowDown"); await key("ArrowDown"); await key("ArrowDown"); await key("Enter");
+  await key("ArrowRight"); await key("ArrowRight"); await key("ArrowRight"); await key("Enter");   // 0.3: the carousel, INTERCEPT the fourth tile
   const sel = await waitLine(/^crash: intercept select (\S+) (\S+) (keys|touch)$/, m0, 5000);
   if (!sel) fail("select", "Enter on INTERCEPT opened no song select (no \"crash: intercept select\" line)");
   else if (sel.m[1] !== "black-glass" || sel.m[2] !== "runner" || sel.m[3] !== DEVICE) fail("select", `${sel.m[0]}: expected black-glass runner ${DEVICE} on a fresh origin`);
