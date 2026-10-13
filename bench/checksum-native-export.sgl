@@ -1,0 +1,65 @@
+;;; Pure native proof entry. The runner copies this module into src only
+;;; while compiling its separate proof executable, then restores package.sgl.
+;;; Each invocation takes explicit seeds and flushes completed dealt states.
+;;; No window/audio imports, and no witnesses are exported to the JS solver.
+
+(define-library (crash checksum proof temporary)
+  (import (sigil process)
+          (sigil io)
+          (sigil time)
+          (crash stack rules)
+          (crash checksum rules)
+          (crash checksum generate)
+          (crash checksum solve))
+  (export main)
+  (begin
+    (define (milliseconds-since start)
+      (/ (* 1000.0 (- (current-jiffy) start)) (jiffies-per-second)))
+
+    (define (diagnostic datum)
+      (write datum (current-error-port))
+      (newline (current-error-port))
+      (flush-output-port (current-error-port)))
+
+    (define (measured-deal seed)
+      (let ((g (checksum-gen-start seed))
+            (started (current-jiffy))
+            (candidate-start #f))
+        (let loop ()
+          (when (eq? (checksum-gen-status g) 'running)
+            (let ((s (checksum-gen-solver g)))
+              (cond ((not s)
+                     (set! candidate-start (current-jiffy)))
+                    ((not (eq? (checksum-solve-status s) 'running))
+                     (diagnostic
+                       (list 'candidate seed (checksum-gen-attempts g)
+                             (checksum-solve-status s)
+                             (milliseconds-since candidate-start)
+                             (checksum-solve-nodes s) (checksum-solve-failed s)
+                             (checksum-solve-draws s) (checksum-solve-needed s)))))
+              (checksum-gen-step! g)
+              (loop))))
+        (let ((b (checksum-gen-result g)))
+          (unless (and b (replay-checksum-solution b))
+            (error "CHECKSUM native generation or player replay failed" seed))
+          (diagnostic
+            (list 'accepted seed (milliseconds-since started)
+                  (checksum-gen-attempts g) (checksum-gen-nodes g)))
+          b)))
+
+    (define (export-seed argument)
+      (let ((seed (string->number argument)))
+        (unless (and seed (integer? seed) (<= 1 seed 256))
+          (error "CHECKSUM exporter needs a seed in 1..256" argument))
+        (let ((b (measured-deal seed)))
+          (write (list 'deal seed
+                       (vector->list (board-faces (cboard-pyramid b)))
+                       (cboard-stock b)))
+          (newline)
+          (flush-output-port (current-output-port)))))
+
+    (define (main . ignored)
+      (let ((arguments (cdr (command-line))))
+        (when (null? arguments)
+          (error "CHECKSUM exporter needs explicit seed arguments"))
+        (for-each export-seed arguments)))))

@@ -4,8 +4,9 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { parseDeals } from './checksum-solve.mjs';
 
-const [dealsFile, metricsFile, output] = process.argv.slice(2);
+const [dealsFile, metricsFile, output, timing = 'source'] = process.argv.slice(2);
 if (!dealsFile || !metricsFile || !output) throw new Error('Need DEALS METRICS OUTPUT');
+assert.ok(['source', 'native'].includes(timing), 'known timing provenance');
 const deals = parseDeals(fs.readFileSync(dealsFile, 'utf8'));
 const text = fs.readFileSync(metricsFile, 'utf8');
 const candidatePattern = /\(candidate (\d+) (\d+) (solved|unsolvable|inconclusive) ([\d.eE+-]+) (\d+) (\d+) (\d+) (\d+)\)/g;
@@ -41,7 +42,7 @@ function distribution(rows, field) {
 const rate = r => r.draws ? r.needed / r.draws : 0;
 const solved = candidates.filter(r => r.status === 'solved');
 const summary = {
-  method: 'Actual runtime stepper; 100k nodes/candidate, three passes, Fisher-Yates candidates. Source evaluator milliseconds, not web-frame timing. Search-order metrics, not exact minimum passes.',
+  method: `Actual runtime stepper; 100k nodes/candidate, three passes, Fisher-Yates candidates. ${timing === 'native' ? 'Compiled native' : 'Source evaluator'} milliseconds, not web-frame timing. Search-order metrics, not exact minimum passes.`,
   seeds: deals.length, candidates: candidates.length,
   acceptancePercent: 100 * winners.length / candidates.length,
   provedSolvable: solved.length,
