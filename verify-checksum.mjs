@@ -345,6 +345,7 @@ try {
   console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(audioTrace));
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
   assert.ok(Number(generation.match[2]) >= 2, 'runtime proof spans frames');
+  assert.equal(Number(audio.match[1]), 0, `generation starved audio at ${THROTTLE}x: ${audio.match[0]}`);
   const health = requireHealthyDealAudio(audioTrace);
   await wait(/^crash: music playing /, mark, 1000);
   assert.ok(Number(generation.match[9]) >= 8);
