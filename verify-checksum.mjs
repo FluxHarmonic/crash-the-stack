@@ -53,7 +53,8 @@ try {
       fs.readFile(file, (error, bytes) => {
         if (error) { res.writeHead(404).end(); return; }
         res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream',
-          'Cache-Control': 'no-store' }).end(bytes);
+          'Cache-Control': 'no-store', 'Cross-Origin-Opener-Policy': 'same-origin',
+          'Cross-Origin-Embedder-Policy': 'require-corp' }).end(bytes);
       });
     });
     await new Promise((resolve, reject) => {

@@ -15,7 +15,8 @@
   (begin
     (define PYRAMID-FULL (- (arithmetic-shift 1 28) 1))
     (define FEED-FULL (- (arithmetic-shift 1 24) 1))
-    (define MEMO-SIZE 65521)
+    (define MEMO-SIZE 16381)
+    (define PLACES (iota 28))
 
     (define BITS (list->vector (map (lambda (id) (arithmetic-shift 1 id)) (iota 28))))
     (define CHILDREN
@@ -51,6 +52,8 @@
       (limit default: 3)
       (budget default: 100000)
       (dead default: #f mutable: #t)
+      (required default: #f)
+      (available default: #f)
       (stack default: '() mutable: #t)
       (status default: 'running mutable: #t)
       (line default: '() mutable: #t)
@@ -72,6 +75,7 @@
       (search offsets: (list->vector (map card-rank (vector->list pyramid)))
               feed-offsets: (list->vector (map card-rank feed))
               budget: budget limit: limit dead: (make-vector MEMO-SIZE '())
+              required: (make-vector 14 0) available: (make-vector 14 0)
               stack: (list (frame state: (node pyramid: PYRAMID-FULL feed: FEED-FULL)))))
 
     (define (live? mask id)
@@ -121,7 +125,14 @@
 
     ;; Necessary inventory condition, independent of future accessibility.
     (define (enough-partners? s n)
-      (let ((required (make-vector 14 0)) (available (make-vector 14 0)))
+      ;; Inventory is scratch space, used only while entering one state.
+      ;; Reuse it rather than allocate two vectors at every search node.
+      (let ((required (search-required s)) (available (search-available s)))
+        (let clear ((offset 0))
+          (when (< offset 14)
+            (vector-set! required offset 0)
+            (vector-set! available offset 0)
+            (clear (+ offset 1))))
         (let loop ((id 0))
           (when (< id 28)
             (when (live? (node-pyramid n) id)
@@ -145,7 +156,7 @@
              (next (feed-next feed position))
              (offsets (search-offsets s))
              (feed-offsets (search-feed-offsets s))
-             (free (filter (lambda (id) (free? mask id)) (iota 28)))
+             (free (filter (lambda (id) (free? mask id)) PLACES))
              (choices '()))
         (define (add child action)
           (set! choices (cons (node child line: (cons action (node-line n))) choices)))
