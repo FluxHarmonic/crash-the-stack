@@ -21,6 +21,7 @@ export function solve(pyramid, initialStock, { maxNodes = 2_000_000, passLimit =
   const offsets = pyramid.map(rank);
   const dead = new Set();
   let nodes = 0;
+  let failedBranches = 0;
   let budgetExceeded = false;
   function search(mask, stock, position, waste, pass) {
     if (mask === 0) return [];
@@ -95,13 +96,15 @@ export function solve(pyramid, initialStock, { maxNodes = 2_000_000, passLimit =
     for (const [nextMask, nextStock, nextPosition, nextWaste, nextPass, action] of choices) {
       const tail = search(nextMask, nextStock, nextPosition, nextWaste, nextPass);
       if (tail !== null) return [action, ...tail];
+      failedBranches++;
       if (budgetExceeded) return null;
     }
     dead.add(key);
     return null;
   }
   const solution = search(FULL, initialStock, 0, [], 1);
-  return { solvable: solution !== null, solution, nodes, budgetExceeded };
+  return { solvable: solution !== null, solution, nodes, budgetExceeded,
+    failedBranches, memoizedDeadStates: dead.size };
 }
 
 export function parseDeals(text) {
