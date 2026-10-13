@@ -27,17 +27,19 @@ const inputPath = join(source, 'crash/input.sgl');
 const cardsInputPath = join(source, 'crash/cards/input.sgl');
 const scanTablePath = join(source, 'crash/scan/table.sgl');
 const decryptTablePath = join(source, 'crash/decrypt/table.sgl');
+const solvePath = join(source, 'crash/checksum/solve.sgl');
 const rules = readFileSync(rulePath, 'utf8');
 const layout = readFileSync(layoutPath, 'utf8');
 const generate = readFileSync(generatePath, 'utf8');
 const originals = new Map([[rulePath, rules], [layoutPath, layout], [generatePath, generate]]);
-for (const file of [tablePath, tracePath, menuPath, inputPath, cardsInputPath, scanTablePath, decryptTablePath])
+for (const file of [tablePath, tracePath, menuPath, inputPath, cardsInputPath, scanTablePath, decryptTablePath, solvePath])
   originals.set(file, readFileSync(file, 'utf8'));
 const tests = readFileSync(join(repo, 'test/test-checksum.sgl'), 'utf8')
   + '\n' + readFileSync(join(repo, 'test/test-checksum-generate.sgl'), 'utf8')
   + '\n' + readFileSync(join(repo, 'test/test-checksum-table.sgl'), 'utf8')
   + '\n' + readFileSync(join(repo, 'test/test-menu.sgl'), 'utf8')
-  + '\n' + readFileSync(join(repo, 'test/test-end-panels.sgl'), 'utf8');
+  + '\n' + readFileSync(join(repo, 'test/test-end-panels.sgl'), 'utf8')
+  + '\n' + readFileSync(join(repo, 'test/test-checksum-runtime-solve.sgl'), 'utf8');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const runFile = join(scratch, 'run.sgl');
 
@@ -75,6 +77,21 @@ const sumPlant = '\n              12)))';
 const coverageAnchor = '(and (playable? (cboard-pyramid b) place)';
 const coveragePlant = '(and (tile-present? (cboard-pyramid b) place)';
 const cases = [
+  [tablePath, "(checksum-table t requests: '(quit)))", "(checksum-table t requests: '(new)))",
+    'archive preparation holds clocks and play input; Escape still requests JACK OUT'],
+  [solvePath, '(= 13 (vector-ref (search-offsets s) id))', '(= 12 (vector-ref (search-offsets s) id))',
+    'runtime ROOTs uncover the complete pyramid; missing complements prove loss'],
+  [solvePath, '(when (and top (= 13 (+ offset (vector-ref feed-offsets top))))',
+    '(when (and top (= 12 (+ offset (vector-ref feed-offsets top))))',
+    'runtime buffer-to-PULL and buffer-to-pyramid moves replay through player doors'],
+  [solvePath, '(< (node-pass n) (search-limit s))', '(<= (node-pass n) (search-limit s))',
+    'runtime forbids a necessary fourth pass; permitting it is a positive control'],
+  [solvePath, '(< (node-pass n) (search-limit s))', '(< (node-pass n) (- (search-limit s) 1))',
+    'runtime preserves removed-feed order and clears a chain on exactly the third pass'],
+  [solvePath, "(set-search-status! s 'inconclusive)", "(set-search-status! s 'unsolvable)",
+    'runtime node exhaustion is inconclusive, with no accepted line'],
+  [solvePath, "(and (eq? (search-status s) 'running) (more?))", "(eq? (search-status s) 'running)",
+    'runtime frame slicing preserves the line, counters and unmodified dealt packets'],
   [inputPath, "(end-panel-actions (eq? (trace-phase (session-trace s)) 'cleared)",
     '(end-panel-actions #f',
     'STACK win defaults to NEW STACK; Return and Space request the next seed'],
@@ -132,11 +149,12 @@ const cases = [
     'clearing the pyramid wins even with packets left in the feed'],
   [rulePath, '(not (checksum-won? b))', '(checksum-won? b)',
     'loss requires an exhausted feed, no pass and no legal removal'],
-  [generatePath, '(vector-set! packets a (car group))', '(vector-set! packets a 0)',
+  [generatePath, '(list->vector (take cards 28))',
+    '(list->vector (map (lambda (packet) (modulo packet 13)) (take cards 28)))',
     'ten seeds use all 52 distinct packets, with 28 in the pyramid and 24 in the feed'],
-  [generatePath, '(shuffled-deck seed)', '(shuffled-deck 1)',
+  [generatePath, 'rng: (prng-seed seed)', 'rng: (prng-seed 41)',
     'a seed repeats exactly, a neighboring seed differs'],
-  [generatePath, "(list 'pull move)", "(list move 'pull)",
+  [generatePath, 'solution: (checksum-solve-line s)', 'solution: (reverse (checksum-solve-line s))',
     'ten recorded solutions clear via player controls with the feed in play'],
   [rulePath, sumAnchor, sumPlant, 'tap-click pairs and ROOTs go through the same table selection'],
   [tablePath, '(let loop ((id 27))', '(let loop ((id 0))',

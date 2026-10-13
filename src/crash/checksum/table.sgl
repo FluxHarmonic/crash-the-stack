@@ -17,6 +17,7 @@
           (substratic time clock))
 
   (export checksum-table checksum-table? checksum-open checksum-step
+          checksum-table-deal! checksum-table-dealing? checksum-table-generator
           checksum-table-board checksum-table-trace checksum-table-mode
           checksum-table-seed checksum-table-ms checksum-table-clock checksum-table-dock
           checksum-table-cursor checksum-table-cursor-shown
@@ -41,6 +42,7 @@
 
     (define-struct checksum-table
       (board default: #f)
+      (generator default: #f)
       (trace default: #f)
       (mode default: 'clean)
       (dock default: 'center)
@@ -60,14 +62,32 @@
       (requests default: '()))
 
     (define (checksum-open seed mode)
-      (let ((b (checksum-deal seed)))
-        (unless b (error "CHECKSUM: archive deal failed" seed))
+      (let ((g (checksum-gen-start seed)))
         (checksum-table
-         board: (cboard b pyramid: (board (cboard-pyramid b) rng: (cboard-seed b)))
+         generator: g
          trace: (trace-new mode)
          mode: mode
-         seed: (cboard-seed b)
+         seed: seed
          clock: (clock-new))))
+
+    (define (checksum-table-dealing? t)
+      (and (checksum-table-generator t)
+           (eq? (checksum-gen-status (checksum-table-generator t)) 'running)))
+
+    (define (checksum-table-deal! t more?)
+      (let ((g (checksum-table-generator t)))
+        (if (not (checksum-table-dealing? t))
+            t
+            (begin
+              (checksum-gen-run! g more?)
+              (case (checksum-gen-status g)
+                ((done)
+                 (let ((b (checksum-gen-result g)))
+                   (checksum-table t
+                                   board: (cboard b pyramid: (board (cboard-pyramid b) rng: (cboard-seed b)))
+                                   last-now: #f)))
+                ((failed) (checksum-table t outcome: 'deal-failed panel: 0))
+                (else t))))))
 
     (define (checksum-place-rect place . options)
       (let ((dock (if (pair? options) (car options) 'center)))
@@ -133,6 +153,7 @@
 
     (define (checksum-panel-title t)
       (cond ((checksum-table-paused t) "PAUSED")
+            ((eq? (checksum-table-outcome t) 'deal-failed) "ARCHIVE UNAVAILABLE")
             ((eq? (checksum-table-outcome t) 'cleared) "SEAL BROKEN")
             ((eq? (checksum-table-outcome t) 'severed) "LINK SEVERED")
             (else "SEAL HOLDS")))
@@ -249,6 +270,15 @@
             t)))
 
     (define (checksum-step before f)
+      (if (not (checksum-table-board before))
+          (let ((t (checksum-table before last-now: #f cues: '() requests: '())))
+            (cond ((checksum-table-outcome t) (panel t f))
+                  ((memq 'escape (checksum-frame-pressed f))
+                   (checksum-table t requests: '(quit)))
+                  (else t)))
+          (checksum-play-step before f)))
+
+    (define (checksum-play-step before f)
       (let* ((now (checksum-frame-now f))
              (dt (if (checksum-table-last-now before)
                      (max 0.0 (min 250.0 (- now (checksum-table-last-now before))))

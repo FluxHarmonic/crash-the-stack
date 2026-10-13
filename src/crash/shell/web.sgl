@@ -155,6 +155,10 @@
           (only (crash decrypt draw) draw-decrypt)
           (crash checksum table)
           (crash checksum rules)
+          (only (crash checksum generate) CHECKSUM-GEN-BUDGET-MS checksum-gen-attempts
+                checksum-gen-nodes checksum-gen-inconclusive checksum-gen-easy checksum-gen-unsolvable
+                checksum-gen-solver)
+          (only (crash checksum solve) checksum-solve-draws checksum-solve-needed checksum-solve-failed)
           (only (crash checksum draw) draw-checksum)
           (only (crash decrypt record) record->datum datum->record)
           (only (crash intercept preview) preview-set-say!)
@@ -1963,6 +1967,9 @@
     (define *checksum-door* #f)
     (define *checksum-dock* 'center)
     (define *checksum-deals* 0)
+    (define *checksum-gen-started* 0.0)
+    (define *checksum-gen-frames* 0)
+    (define *checksum-gen-max-ms* 0.0)
 
     (define (open-checksum! seed . modes)
       (let* ((version (cdr (assq 'checksum (versions-in-force))))
@@ -1981,11 +1988,10 @@
         (set! *overlay* #f)
         (set! *checksum-events* '())
         (set! *checksum* (checksum-table (checksum-open seed mode) dock: *checksum-dock*))
-        (say "checksum" "open" mode seed)
-        (let ((b (checksum-table-board *checksum*)))
-          (say "checksum" "deal" seed
-               (vector->list (board-faces (cboard-pyramid b)))
-               (cboard-stock b)))))
+        (set! *checksum-gen-started* (now-ms))
+        (set! *checksum-gen-frames* 0)
+        (set! *checksum-gen-max-ms* 0.0)
+        (say "checksum" "open" mode seed)))
 
     (define (checksum-pointer! payload)
       (let ((parts (string-split payload ",")))
@@ -2005,12 +2011,19 @@
 
     (define (checksum-tick f dt)
       (let* ((before *checksum*)
-             (t (checksum-step before
-                               (make-checksum-frame (input-frame-pressed f)
-                                                    (reverse *checksum-events*)
-                                                    (now-ms))))
+             (dealing? (checksum-table-dealing? before))
+             (stepped (checksum-step before
+                                    (make-checksum-frame (input-frame-pressed f)
+                                                         (reverse *checksum-events*)
+                                                         (now-ms))))
+             (t0 (now-ms))
+             (t (checksum-table-deal! stepped
+                                     (lambda () (< (- (now-ms) t0) CHECKSUM-GEN-BUDGET-MS))))
              (requests (checksum-table-requests t))
              (b (checksum-table-board t)))
+        (when dealing?
+          (set! *checksum-gen-frames* (+ 1 *checksum-gen-frames*))
+          (set! *checksum-gen-max-ms* (max *checksum-gen-max-ms* (- (now-ms) t0))))
         (set! *checksum-events* '())
         (set! *checksum* t)
         (play-cues! (checksum-table-cues t))
@@ -2018,13 +2031,25 @@
           (set! *bg* (bg-advance *bg* (clock-steps (checksum-table-clock t))
                                  (checksum-table-trace before)
                                  (checksum-table-trace t))))
-        (unless (eq? b (checksum-table-board before))
+        (when (and b (not (checksum-table-board before)))
+          (say "checksum" "deal" (checksum-table-seed t)
+               (vector->list (board-faces (cboard-pyramid b))) (cboard-stock b))
+          (let* ((g (checksum-table-generator t)) (s (checksum-gen-solver g)))
+            (say "checksum" "generation"
+                 "ms" (- (now-ms) *checksum-gen-started*)
+                 "frames" *checksum-gen-frames* "max-frame-ms" *checksum-gen-max-ms*
+                 "candidates" (checksum-gen-attempts g) "nodes" (checksum-gen-nodes g)
+                 "inconclusive" (checksum-gen-inconclusive g) "easy" (checksum-gen-easy g)
+                 "unsolvable" (checksum-gen-unsolvable g)
+                 "draws" (checksum-solve-draws s) "needed" (checksum-solve-needed s)
+                 "failed" (checksum-solve-failed s))))
+        (when (and b (not (eq? b (checksum-table-board before))))
           (say "checksum" "state" (checksum-count b)
                "selected" (or (cboard-selected b) '-)
                "cursor" (checksum-table-cursor t)
                "stock" (length (cboard-stock b)) "pass" (cboard-passes b)))
         (when (and (checksum-table-outcome t) (not (checksum-table-outcome before)))
-          (say "checksum" "over" (checksum-table-outcome t) (checksum-count b)))
+          (say "checksum" "over" (checksum-table-outcome t) (if b (checksum-count b) 0)))
         (cond ((memq 'quit requests) (set! *checksum* #f) (open-menu!))
               ((memq 'new requests) (open-checksum! #f (checksum-table-mode t)))
               ((memq 'retry requests)

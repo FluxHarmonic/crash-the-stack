@@ -7,14 +7,14 @@
         (crash checksum rules)
         (crash checksum table)
         (crash checksum trace)
-        (only (substratic time clock) clock-steps))
+        (only (substratic time clock) clock-new clock-steps))
 
 (define (table-fixture ranks stock)
   (let ((packets (make-vector 28 (make-card 0 2))))
     (for-each (lambda (edit)
                 (vector-set! packets (car edit) (make-card 0 (cdr edit))))
               ranks)
-    (checksum-table (checksum-open 1 'clean)
+    (checksum-table trace: (trace-new 'clean) clock: (clock-new)
                     board: (checksum-board packets
                                            (map (lambda (rank) (make-card 1 rank)) stock)))))
 
@@ -29,6 +29,18 @@
                                         now))))
 
 (test-group "checksum: table controls"
+  (test "archive preparation holds clocks and play input; Escape still requests JACK OUT"
+    (let* ((opened (checksum-open 1 'twist))
+           (held (checksum-step opened (make-checksum-frame '(p space) '((down 284 342 0)) 500)))
+           (held (checksum-table-deal! held (lambda () #f)))
+           (quit (table-key held 'escape 750)))
+      (assert-true (checksum-table-dealing? held))
+      (assert-false (checksum-table-board held))
+      (assert-equal 0.0 (checksum-table-ms held))
+      (assert-equal 0 (trace-ticks (checksum-table-trace held)))
+      (assert-equal 0 (clock-steps (checksum-table-clock held)))
+      (assert-equal 21 (checksum-table-cursor held))
+      (assert-equal '(quit) (checksum-table-requests quit))))
   (test "both horizontal docks keep packet-sized targets below the base and real taps draw then select"
     (for-each
      (lambda (option)
@@ -142,7 +154,7 @@
       (assert-equal "RESTART" (cadar (checksum-panel-rows after)))
       (assert-equal '(retry) (checksum-table-requests (table-key after 'return 266)))))
   (test "HACKER runs the shared trace phases and severs; CLASSIC never severs"
-    (let* ((t (checksum-open 1 'twist))
+    (let* ((t (checksum-table (table-fixture '() '(3)) mode: 'twist trace: (trace-new 'twist)))
            (t (checksum-table t trace: (trace-with-thresholds (checksum-table-trace t) 1 1)))
            (t (checksum-step t (make-checksum-frame '() '() 0)))
            (after (let loop ((t t) (frame 1))
@@ -150,7 +162,7 @@
                         t
                         (loop (checksum-step t (make-checksum-frame '() '() (* frame 100)))
                               (+ frame 1)))))
-           (clean (checksum-open 1 'clean))
+           (clean (table-fixture '() '(3)))
            (clean (checksum-table clean
                                   trace: (trace-with-thresholds (checksum-table-trace clean) 0 0)))
            (clean (checksum-step clean (make-checksum-frame '() '() 0)))
