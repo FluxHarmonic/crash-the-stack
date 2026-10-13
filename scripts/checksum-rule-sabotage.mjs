@@ -8,7 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const [sigil, testSource, substraticSource] = process.argv.slice(2);
-const focusedNames = process.argv.slice(5);
+const preflightOnly = process.argv.includes('--check-anchors');
+const focusedNames = process.argv.slice(5).filter(arg => arg !== '--check-anchors');
 if (!sigil || !testSource || !substraticSource)
   throw new Error('Need SIGIL, SIGIL_TEST_SOURCE and SUBSTRATIC_SOURCE');
 const repo = resolve('.');
@@ -82,8 +83,8 @@ const cases = [
     'archive preparation holds clocks and play input; Escape still requests JACK OUT'],
   [solvePath, '(= 13 (vector-ref (search-offsets s) id))', '(= 12 (vector-ref (search-offsets s) id))',
     'runtime ROOTs uncover the complete pyramid; missing complements prove loss'],
-  [solvePath, '(when (and top (= 13 (+ offset (vector-ref feed-offsets top))))',
-    '(when (and top (= 12 (+ offset (vector-ref feed-offsets top))))',
+  [solvePath, '(when (and top (= 13 (+ offset (vector-ref feed-offsets top))))\n                   (add (node drawn',
+    '(when (and top (= 12 (+ offset (vector-ref feed-offsets top))))\n                   (add (node drawn',
     'runtime buffer-to-PULL and buffer-to-pyramid moves replay through player doors'],
   [solvePath, '(< (node-pass n) (search-limit s))', '(<= (node-pass n) (search-limit s))',
     'runtime forbids a necessary fourth pass; permitting it is a positive control'],
@@ -195,6 +196,12 @@ if (!selectedCases.length || (focusedNames.length && selectedCases.length !== fo
   throw new Error('Every focused name must identify one sabotage case');
 
 try {
+  for (const [file, anchor, , target] of selectedCases)
+    if (originals.get(file).split(anchor).length !== 2)
+      throw new Error(`Anchor must occur once (${target}): ${anchor}`);
+  if (preflightOnly) {
+    console.log(`ANCHORS: ${selectedCases.length}/${selectedCases.length} unique; no source evaluation or plant ran`);
+  } else {
   const clean = run();
   if (clean.status !== 0 || !clean.stdout.includes(`TEST-COUNT: ${selectedCases.length}`))
     throw new Error(`Clean test failed: rc=${clean.status}, signal=${clean.signal}, error=${clean.error || ''}\n${clean.stdout}${clean.stderr}`);
@@ -220,6 +227,7 @@ try {
   const restored = run();
   if (restored.status !== 0) throw new Error(`Restored test failed: ${restored.stdout}${restored.stderr}`);
   console.log(`RESTORED: ${selectedCases.length}/${selectedCases.length}; ${selectedCases.length} verified behavioral plants`);
+  }
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

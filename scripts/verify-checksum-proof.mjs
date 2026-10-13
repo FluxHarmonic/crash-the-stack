@@ -28,13 +28,14 @@ function run(name, command, argv, timeout = 180_000) {
 }
 const version = run('version.log', sigil, ['--version']);
 if (!/\b0\.22\.10\b/.test(version)) throw new Error(`Wrong Sigil version: ${version}`);
-console.log(run('sabotage.log', 'node', ['scripts/checksum-rule-sabotage.mjs', sigil, testSource, substraticSource], 7_200_000).trim());
+console.log(run('anchors.log', 'node', ['scripts/checksum-rule-sabotage.mjs', sigil, testSource, substraticSource, '--check-anchors']).trim());
 console.log(run('controls.log', 'node', ['test/test-checksum-solver.mjs']).trim());
 const deals = run('deals.scm', sigil, ['-L', 'src', 'eval', '-q', '-f', 'bench/checksum-deals.sgl'], 7_200_000);
 if (!deals.includes('(deal 256 ')) throw new Error('Incomplete deal export');
 console.log(run('proof.log', 'node', ['scripts/checksum-solve.mjs', path.join(out, 'deals.scm')], 600_000).trim());
 console.log(run('runtime-metrics.log', 'node', ['scripts/checksum-runtime-metrics.mjs',
   path.join(out, 'deals.scm'), path.join(out, 'runtime-metrics.scm'), path.join(out, 'runtime-metrics.json')]).trim());
+console.log(run('sabotage.log', 'node', ['scripts/checksum-rule-sabotage.mjs', sigil, testSource, substraticSource], 7_200_000).trim());
 const sha = run('source-sha.txt', 'git', ['rev-parse', 'HEAD']).trim();
 fs.writeFileSync(path.join(out, 'complete'), `CHECKSUM-PROOF-COMPLETE ${sha}\n`);
 console.log(`PASS checksum proof: source ${sha}; artifacts ${out}`);
