@@ -6,6 +6,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { parseDeals, solve } from './scripts/checksum-solve.mjs';
+import { BrowserBoard, packetCenter } from './scripts/checksum-browser-model.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
@@ -13,6 +14,7 @@ const ROOT = path.resolve(args[0] || 'build/web');
 const PORTRAIT = args.includes('--portrait');
 const PHONE = args.includes('--phone') || PORTRAIT;
 const DOCK = opt('--dock', 'center');
+const THROTTLE = Number(opt('--throttle', '4'));
 assert.ok(['center', 'right'].includes(DOCK), 'recognized horizontal dock');
 const PORT = Number(opt('--port', '8115'));
 const CDP = Number(opt('--cdp', '9335'));
@@ -36,7 +38,7 @@ const watchdog = setTimeout(() => {
   console.error('TIMED-OUT CHECKSUM browser arm');
   console.error(lines.slice(-25).join('\n'));
   cleanup(); process.exit(2);
-}, 360_000);
+}, 900_000);
 watchdog.unref();
 
 try {
@@ -154,11 +156,7 @@ try {
     await sleep(100);
   }
   function center(place) {
-    if (place === 'pull') return [DOCK === 'right' ? 468 : 284, 342];
-    if (place === 'waste') return [DOCK === 'right' ? 540 : 356, 342];
-    let row = 0; while ((row + 1) * (row + 2) / 2 <= place) row++;
-    const col = place - row * (row + 1) / 2;
-    return [320 - 32 * row + 64 * col, 70 + 32 * row];
+    return packetCenter(place, DOCK);
   }
   const packet = place => press(...center(place));
   function passed(name, detail) { results.push(name); console.log(`PASS ${name}: ${detail}`); }
@@ -216,35 +214,59 @@ try {
   mark = lines.length; await key('Enter'); await wait(/^crash: checksum open clean /, mark);
   passed('menu', 'FREE PLAY -> CHECKSUM (Pyramid) -> NEW BOARD, CLASSIC default');
 
-  await open(2); mark = lines.length;
-  await packet(21); await wait(/^crash: checksum state 0 selected 21 /, mark);
-  await packet(22); await wait(/^crash: checksum state 2 selected - /, mark);
-  await shot('play'); passed('pair', PHONE ? 'two real touches' : 'two real mouse clicks');
-  await open(1); mark = lines.length;
-  await packet(22); await wait(/^crash: checksum state 1 selected - /, mark);
-  passed('root', 'one tap removes a free ROOT');
-  await open(2); mark = lines.length;
-  await key(' '); await key('ArrowRight'); await key('Enter');
-  await wait(/^crash: checksum state 2 selected - /, mark);
-  passed('keyboard', 'Space, cursor arrow, Enter remove the pair');
-  mark = lines.length; await key('u'); await wait(/^crash: checksum state 0 /, mark);
-  passed('undo', 'U restores the pair');
-
-  const deal = await open(2), verdict = solve(deal.pyramid, deal.stock);
-  assert.equal(verdict.solvable, true, 'independent solver found a path');
-  let removed = 0, pulls = 0;
+  let deal, verdict, dealMark;
+  for (const seed of [2, 1, 3, 4, 5, 6, 7, 8]) {
+    dealMark = lines.length; deal = await open(seed);
+    verdict = solve(deal.pyramid, deal.stock, { passLimit: 1 });
+    if (!verdict.solvable) verdict = solve(deal.pyramid, deal.stock, { maxNodes: 5_000_000 });
+    assert.equal(verdict.solvable, true, 'independent solver found a path');
+    const hasPair = verdict.solution.some((m, index) => index < verdict.solution.length - 1
+      && Array.isArray(m) && Number.isInteger(m[0]) && Number.isInteger(m[1]));
+    const hasRoot = verdict.solution.some(m => Array.isArray(m) && Number.isInteger(m[0]) && m[1] === null);
+    if (hasPair && hasRoot) break;
+    verdict = null;
+  }
+  assert.ok(verdict, 'actual independently solved deal exercises a pyramid pair and ROOT');
+  const model = new BrowserBoard(deal);
+  let removed = 0, pulls = 0, pairSeen = false, rootSeen = false;
+  async function cursorTo(target) {
+    const state = lines.slice(dealMark).findLast(line => /^crash: checksum state /.test(line));
+    const cursor = state ? Number(state.match(/ cursor (\d+|pull|waste) /)[1]) : 21;
+    const start = Number.isNaN(cursor) ? state.match(/ cursor (\d+|pull|waste) /)[1] : cursor;
+    for (const arrow of model.cursorRoute(start, target, DOCK)) await key(arrow);
+  }
+  await shot('play');
   for (const move of verdict.solution) {
     mark = lines.length;
     if (move === 'pull' || move === 'rollback') { await packet('pull'); pulls++; }
     else {
       const [a, b] = move;
+      if (!pairSeen && model.live.size > 2 && Number.isInteger(a) && Number.isInteger(b)) {
+        await cursorTo(a); await key(' ');
+        await wait(new RegExp(`^crash: checksum state ${removed} selected ${a} `), mark);
+        await cursorTo(b); await key('Enter');
+        await wait(new RegExp(`^crash: checksum state ${removed + 2} selected - `), mark);
+        passed('keyboard', 'real arrows, Space and Enter remove an independently derived pair');
+        mark = lines.length; await key('u');
+        await wait(new RegExp(`^crash: checksum state ${removed} selected - `), mark);
+        passed('undo', 'U restores that real pair');
+        mark = lines.length;
+      }
       await packet(a);
       if (b !== null) await packet(b);
       if (Number.isInteger(a)) removed++;
       if (Number.isInteger(b)) removed++;
+      if (!pairSeen && Number.isInteger(a) && Number.isInteger(b)) {
+        pairSeen = true; passed('pair', PHONE ? 'two real touches' : 'two real mouse clicks');
+      }
+      if (!rootSeen && Number.isInteger(a) && b === null) {
+        rootSeen = true; passed('root', 'one real tap removes an independently free ROOT');
+      }
     }
+    model.apply(move);
     await wait(new RegExp(`^crash: checksum state ${removed} `), mark);
   }
+  assert.equal(model.live.size, 0, 'independent real-input model clears');
   assert.ok(pulls > 0, 'solution exercised the feed');
   await wait(/^crash: checksum over cleared 28$/, mark);
   await sleep(450); await shot('panel');
@@ -252,15 +274,36 @@ try {
   mark = lines.length; await packet('pull'); await sleep(300);
   assert.equal(lines.slice(mark).filter(line => /^crash: checksum state /.test(line)).length, 0,
     'ended table refuses board input');
-  mark = lines.length; await press(320, 228); await wait(/^crash: menu top /, mark);
-  passed('jack-out', 'shared panel returns to the menu');
+  // The next archive proves slicing while real music is already playing.
+  assert.ok(lines.slice(dealMark).some(line => /^crash: audio resumed$/.test(line)), 'real gestures resumed audio on this page');
+  assert.ok(lines.slice(dealMark).some(line => /^crash: music open /.test(line)), 'music is active on this page for the starvation check');
+  await sleep(1500);
+  await send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
+  mark = lines.length; await key('Enter');
+  const fresh = await wait(/^crash: checksum open clean (\d+)$/, mark);
+  assert.notEqual(Number(fresh.match[1]), deal.seed, 'win default starts another seed');
+  await wait(dealPattern, mark, 120_000);
+  const generation = await wait(/^crash: checksum generation ms ([\d.eE+-]+) frames (\d+) max-frame-ms ([\d.eE+-]+) candidates (\d+) nodes (\d+) inconclusive (\d+) easy (\d+) unsolvable (\d+) draws (\d+) needed (\d+) failed (\d+)$/, mark);
+  const audio = await wait(/^crash: checksum deal-audio underruns (\d+) worst (\d+)$/, generation.index, 15_000);
+  await send('Emulation.setCPUThrottlingRate', { rate: 1 });
+  assert.ok(Number(generation.match[2]) >= 2, 'runtime proof spans frames');
+  assert.equal(Number(audio.match[1]), 0, `generation starved audio at ${THROTTLE}x: ${audio.match[0]}`);
+  assert.ok(Number(generation.match[9]) >= 8);
+  assert.ok(Number(generation.match[11]) >= 20);
+  assert.ok(100 * Number(generation.match[10]) <= 55 * Number(generation.match[9]));
+  passed('audio', `${THROTTLE}x: ${generation.match[0]}; ${audio.match[0]}`);
+  passed('win-default', 'Enter on the win panel starts NEW ARCHIVE');
+  mark = lines.length; await key('Escape');
+  await key('ArrowDown'); await key('ArrowDown'); await key('ArrowDown'); await key('Enter');
+  await wait(/^crash: menu top /, mark);
+  passed('jack-out', 'shared pause panel returns to the menu after the next deal');
   const raced = errors.filter(error => /image fetch failed/i.test(error));
   const unexpected = errors.filter(error => !/image fetch failed/i.test(error));
   assert.equal(unexpected.length, 0, unexpected.join('\n'));
   assert.equal(lines.filter(line => /crash: texture missing|boot-error|FATAL/.test(line)).length, 0);
   if (raced.length) console.log(`NOTE: ${raced.length} loader image fetch races; no missing textures after retry`);
   passed('console', 'no game exception, missing texture or unexpected console error');
-  console.log(`VERDICT: ${results.length}/8 passed (${PHONE ? 'phone' : 'desktop'})`);
+  console.log(`VERDICT: ${results.length}/10 passed (${PORTRAIT ? 'portrait phone' : PHONE ? 'phone' : 'desktop'}, ${DOCK})`);
 } catch (error) {
   console.error('FAIL CHECKSUM:', error.stack);
   console.error(lines.slice(-40).join('\n')); console.error(errors.join('\n'));
