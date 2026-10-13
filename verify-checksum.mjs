@@ -315,7 +315,8 @@ try {
       trace.finalSinks = sinks;
       const signature = JSON.stringify(sinks.map(s => [s.id, s.underruns, s.sounding]));
       if (signature !== previous || now - last > 150) {
-        if (trace.samples.length < 200) trace.samples.push({ at: now, gap: now - last, sinks });
+        trace.samples.push({ at: now, gap: now - last, sinks });
+        if (trace.samples.length > 200) trace.samples.shift();
         previous = signature;
       }
       last = now;
@@ -323,8 +324,13 @@ try {
     trace.record();
     trace.timer = setInterval(trace.record, 100);
     trace.observer = new PerformanceObserver(list => {
-      for (const entry of list.getEntries()) if (trace.longTasks.length < 200)
-        trace.longTasks.push({ at: entry.startTime, duration: entry.duration });
+      for (const entry of list.getEntries()) {
+        const task = { at: entry.startTime, duration: entry.duration };
+        trace.longTasks.push(task);
+        if (trace.longTasks.length > 200) trace.longTasks.shift();
+        if (!trace.worstLongTask || task.duration > trace.worstLongTask.duration)
+          trace.worstLongTask = task;
+      }
     });
     trace.observer.observe({ entryTypes: ['longtask'] });
   })()`);
@@ -343,13 +349,21 @@ try {
     clearInterval(trace.timer); trace.observer.disconnect();
     trace.record();
     return { isolated: crossOriginIsolated, baseline: trace.baseline, maxima: Object.values(trace.maxima),
-      finalSinks: trace.finalSinks, samples: trace.samples, longTasks: trace.longTasks };
+      finalSinks: trace.finalSinks, samples: trace.samples, longTasks: trace.longTasks,
+      worstLongTask: trace.worstLongTask };
   })()`);
   console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(audioTrace));
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
   assert.ok(Number(generation.match[2]) >= 2, 'runtime proof spans frames');
   assert.equal(Number(audio.match[1]), 0, `generation starved audio at ${THROTTLE}x: ${audio.match[0]}`);
   const health = requireHealthyDealAudio(audioTrace);
+  assert.ok(lines.slice(mark).includes('crash: checksum audio reserve cue 32768 source 31744'),
+    'generation reserves the existing cue and music rings');
+  assert.ok(lines.slice(generation.index).includes('crash: checksum audio restored cue 12288 source 16384'),
+    'playable board restores the ordinary audio targets');
+  for (const sink of audioTrace.finalSinks)
+    assert.ok(sink.depth <= (sink.capacity === 65536 ? 12288 : 16384),
+      `temporary generation reserve drains before playable-board audio check: ${JSON.stringify(sink)}`);
   await wait(/^crash: music playing /, mark, 1000);
   assert.ok(Number(generation.match[9]) >= 8);
   assert.ok(Number(generation.match[11]) >= 20);

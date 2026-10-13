@@ -1416,6 +1416,7 @@
       (set! *frame-ms* (* 1000.0 dt))
       ;; the pump first: the ring is fed for the frame before the boot's steps and the
       ;; draw can run long (it was last, after everything); PUMP is both pumps' time
+      (checksum-audio-reserve!)
       (let ((t0 (now-ms)))
         (unless (skip? (quote audio)) (audio-pump!))
         (set! *pump-ms* (- (now-ms) t0)))
@@ -1972,6 +1973,29 @@
     (define *checksum-gen-max-ms* 0.0)
     (define *checksum-gen-u0* 0)
     (define *checksum-audio-until* #f)
+    (define *checksum-audio-targets* #f)
+
+    ;; A 457 ms generation step at 4x exhausted the ordinary cue and music
+    ;; queues late in a long search. Reserve existing ring headroom while
+    ;; board input is unavailable, and restore the prior targets on exit.
+    (define (checksum-audio-reserve!)
+      (let ((generating?
+             (and (eq? *screen* 'checksum)
+                  *checksum*
+                  (checksum-table-dealing? *checksum*))))
+        (cond ((and generating? (not *checksum-audio-targets*))
+               (set! *checksum-audio-targets*
+                     (cons (audio-depth) (audio-source-target)))
+               (audio-set-depth! (max 32768 (car *checksum-audio-targets*)))
+               (audio-set-source-depth! (- SOURCE-BUFFER 1024))
+               (say "checksum" "audio reserve" "cue" (audio-depth)
+                    "source" (audio-source-target)))
+              ((and (not generating?) *checksum-audio-targets*)
+               (audio-set-depth! (car *checksum-audio-targets*))
+               (audio-set-source-depth! (cdr *checksum-audio-targets*))
+               (set! *checksum-audio-targets* #f)
+               (say "checksum" "audio restored" "cue" (audio-depth)
+                    "source" (audio-source-target))))))
 
     (define (open-checksum! seed . modes)
       (let* ((version (cdr (assq 'checksum (versions-in-force))))

@@ -38,6 +38,7 @@
           audio-voices audio-underruns audio-preroll! audio-stall-begin! audio-stall-end! audio-known-starved audio-known-stalls audio-cue-at
           mix-cues-into add-voices!
           audio-set-source! audio-source? audio-source-depth audio-source-underruns audio-source-pump!
+          audio-source-target audio-set-source-depth!
           SOURCE-DEPTH SOURCE-BUFFER SOURCE-PUSH-MAX
           audio-state
           CUE-GAIN PUSH-MAX TARGET-DEPTH BUFFER-FRAMES)
@@ -90,6 +91,7 @@
     ;; closes with it (an idle sink counts starved frames).
     (define SOURCE-BUFFER 32768)   ; the ring: 683 ms at 48 kHz
     (define SOURCE-DEPTH 16384)    ; kept ahead: 341 ms at 48 kHz (743 at 22050)
+    (define *source-depth* SOURCE-DEPTH)
     (define SOURCE-PUSH-MAX 4096)  ; frames per pump at most: ~4 ms of synth at 1 ms per 1024
     (define *source* #f)
     (define *source-gain* 0.0)
@@ -103,6 +105,11 @@
     (define (audio-depth) *target-depth*)
     (define (audio-set-depth! frames)
       (set! *target-depth* (max 1024 (min (- BUFFER-FRAMES 1024) frames))))
+    ;; Temporarily reserve more source audio for noninteractive work. The
+    ;; actual queue remains audio-source-depth, which the music clock uses.
+    (define (audio-source-target) *source-depth*)
+    (define (audio-set-source-depth! frames)
+      (set! *source-depth* (max 1024 (min (- SOURCE-BUFFER 1024) frames))))
     ;; The context's state: running | suspended | closed, or #f without one.
     (define (audio-state)
       (and *ctx*
@@ -133,7 +140,8 @@
     (define (audio-source-depth) (if *src-stream* (audio-stream-depth *src-stream*) 0))
     ;; The source sink's cumulative starved frames (the music ran dry).
     (define (audio-source-underruns) (+ *src-underruns* (if *src-stream* (audio-stream-underruns *src-stream*) 0)))
-    ;; The source's pump: toward SOURCE-DEPTH, at most SOURCE-PUSH-MAX frames
+    ;; The source's pump: toward its target (initially SOURCE-DEPTH), at most
+    ;; SOURCE-PUSH-MAX frames
     ;; per pump, or SOURCE-PUSH-RAMP while the sink holds under SOURCE-RAMP-BELOW
     ;; (a fresh sink, or one that ran dry): the fill then spreads over
     ;; pumps of ~43 ms of audio each instead of four of 85 ms in the first
@@ -149,7 +157,7 @@
           (let* ((depth (audio-stream-depth *src-stream*))
                  (n (min (if (< depth SOURCE-RAMP-BELOW) SOURCE-PUSH-RAMP SOURCE-PUSH-MAX)
                          (audio-stream-room *src-stream*)
-                         (- SOURCE-DEPTH depth))))
+                         (- *source-depth* depth))))
             (cond ((<= n 0) 0)
                   ((*source* *src* 0 n) (push-audio-samples *src-stream* *src* n))
                   (else (set! *source* #f) (close-source-stream!) 0)))
