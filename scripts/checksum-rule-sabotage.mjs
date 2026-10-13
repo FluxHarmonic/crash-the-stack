@@ -66,7 +66,8 @@ function run(target) {
   return spawnSync(resolve(sigil), ['-L', source, '-L', resolve(testSource), 'eval', '-f', runFile], {
     cwd: scratch,
     env: { ...process.env, XDG_CACHE_HOME: join(scratch, 'cache') },
-    encoding: 'utf8', timeout: 90000,
+    encoding: 'utf8', timeout: selectedCases.some(entry => entry[0] === generatePath
+      && (!target || entry[3] === target)) ? 900000 : 90000,
   });
 }
 

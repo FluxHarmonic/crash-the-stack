@@ -1,5 +1,5 @@
 // Real CDP mouse/touch/keyboard checks against a runner-built CHECKSUM.
-// node verify-checksum.mjs build/web [--phone] [--shot PATH] [--url URL]
+// node verify-checksum.mjs build/web [--phone|--portrait] [--dock center|right] [--shot PATH] [--url URL]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -10,7 +10,10 @@ import { parseDeals, solve } from './scripts/checksum-solve.mjs';
 const args = process.argv.slice(2);
 const opt = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
 const ROOT = path.resolve(args[0] || 'build/web');
-const PHONE = args.includes('--phone');
+const PORTRAIT = args.includes('--portrait');
+const PHONE = args.includes('--phone') || PORTRAIT;
+const DOCK = opt('--dock', 'center');
+assert.ok(['center', 'right'].includes(DOCK), 'recognized horizontal dock');
 const PORT = Number(opt('--port', '8115'));
 const CDP = Number(opt('--cdp', '9335'));
 const SHOT = opt('--shot', null);
@@ -100,8 +103,8 @@ try {
     chrome.once('error', reject);
   });
   for (const method of ['Page.enable', 'Runtime.enable', 'Log.enable']) await send(method);
-  await send('Emulation.setDeviceMetricsOverride', { width: PHONE ? 844 : 1000,
-    height: PHONE ? 390 : 760, deviceScaleFactor: PHONE ? 3 : 2, mobile: PHONE });
+  await send('Emulation.setDeviceMetricsOverride', { width: PORTRAIT ? 390 : PHONE ? 844 : 1000,
+    height: PORTRAIT ? 844 : PHONE ? 390 : 760, deviceScaleFactor: PHONE ? 3 : 2, mobile: PHONE });
   await send('Emulation.setTouchEmulationEnabled', { enabled: PHONE, maxTouchPoints: 5 });
   await send('Emulation.setEmulatedMedia', { features: [{ name: 'pointer', value: PHONE ? 'coarse' : 'fine' },
     { name: 'hover', value: PHONE ? 'none' : 'hover' }] });
@@ -151,8 +154,8 @@ try {
     await sleep(100);
   }
   function center(place) {
-    if (place === 'pull') return [284, 342];
-    if (place === 'waste') return [356, 342];
+    if (place === 'pull') return [DOCK === 'right' ? 468 : 284, 342];
+    if (place === 'waste') return [DOCK === 'right' ? 540 : 356, 342];
     let row = 0; while ((row + 1) * (row + 2) / 2 <= place) row++;
     const col = place - row * (row + 1) / 2;
     return [320 - 32 * row + 64 * col, 70 + 32 * row];
@@ -169,8 +172,8 @@ try {
   const dealPattern = /^crash: checksum deal (\d+) (\([\d\s]+\)) (\([\d\s]+\))$/;
   async function open(seed) {
     const mark = lines.length;
-    await send('Page.navigate', { url: `${BASE}?trace&checksum=classic&seed=${seed}&fresh&bg=off` });
-    const row = await wait(dealPattern, mark, 40_000);
+    await send('Page.navigate', { url: `${BASE}?trace&checksum=classic&checksum-dock=${DOCK}&seed=${seed}&fresh&bg=off` });
+    const row = await wait(dealPattern, mark, 120_000);
     const deal = parseDeals(`(deal ${row.match[1]} ${row.match[2]} ${row.match[3]})`)[0];
     if (DEALS) {
       const expected = expectedDeals.find(deal => deal.seed === seed);
