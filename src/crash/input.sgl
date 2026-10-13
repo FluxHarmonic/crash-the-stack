@@ -67,6 +67,7 @@
           (crash stack generate)
           (crash trace)
           (crash geometry)
+          (crash panel end)
           (crash look)
           (crash hud))
 
@@ -80,7 +81,7 @@
           session-trace session-refused session-advance session-with-trace-mode
           session-update session-with-update session-update-version session-update-summary session-with-update-info
           session-best session-with-best session-restore
-          session-retry session-next
+          session-retry session-next session-panel-rows
           session-tools session-tools-list session-with-tools-touch
           session-hud session-with-hud session-keys-shown
           session-device frame-device session-moves session-note
@@ -724,7 +725,19 @@
       (let ((face (find (lambda (x) x) (map key->face (input-frame-pressed f)))))
         (if face (hint-jump s face) s)))
 
-    ;; On a severed board the three choices are the end panel's rows
+    (define (session-panel-rows s)
+      (end-panel-actions (eq? (trace-phase (session-trace s)) 'cleared)
+                         '(next "NEW STACK") '(retry "RESTART")
+                         '((jack-out "JACK OUT"))))
+
+    (define (session-pick-panel s index)
+      (case (car (list-ref (session-panel-rows s) index))
+        ((next) (session-next s))
+        ((retry) (session-retry s))
+        ((jack-out) (session s request: 'jack-out))
+        (else s)))
+
+    ;; On a finished board the three choices are the end panel's rows
     ;; ((crash geometry) panel-row-rect, t-6a2d35; the board area's thirds
     ;; before P6c): RETRY LINK (the same stack again), NEW STACK, JACK OUT
     ;; (the shell answers it: (crash shell) jack-out?).
@@ -732,12 +745,9 @@
       (let ((click (input-frame-click f)))
         (cond ((not click) s)
               ((and (session-update s) (step-update s click g)) => (lambda (s) s))
-              ((severed? s)
-               (case (panel-row-hit 3 (car click) (cdr click))
-                 ((0) (session-retry s))
-                 ((1) (session-next s))
-                 ((2) (session s message: MSG-NO-MENU))
-                 (else s)))
+              ((finished? s)
+               (let ((row (panel-row-hit 3 (car click) (cdr click))))
+                 (if row (session-pick-panel s row) s)))
               (else
                (let ((id (hit-slot g (session-board s) (car click) (cdr click))))
                  (if id (session-pick s id) s))))))
@@ -745,13 +755,11 @@
     ;; The severed board's end panel by key ((crash geometry) panel-keys,
     ;; shared with DEFRAG and SCAN): up/down move the highlight; Return picks
     ;; RETRY LINK, NEW STACK, or JACK OUT (a request the shell answers).
-    (define (step-severed-panel s f)
+    (define (step-end-panel s f)
       (let ((r (panel-keys (session-panel s) 3 (input-frame-pressed f))))
-        (case (cdr r)
-          ((0) (session-retry s))
-          ((1) (session-next s))
-          ((2) (session s panel: (car r) request: 'jack-out))
-          (else (session s panel: (car r))))))
+        (if (cdr r)
+            (session-pick-panel (session s panel: (car r)) (cdr r))
+            (session s panel: (car r)))))
 
     ;; --- commands -----------------------------------------------------------
 
@@ -888,6 +896,13 @@
     ;; found the bar's rewrite swallowing such taps); only a frame the
     ;; stack left alone is rewritten by the bar's controls.
     (define (session-step s f0 g)
+      (if (and (finished? s)
+               (not (held? f0 'ctrl))
+               (panel-key? (input-frame-pressed f0)))
+          (step-end-panel s f0)
+          (session-play-step s f0 g)))
+
+    (define (session-play-step s f0 g)
       (let* ((s (let ((d (frame-device f0 (tools-touch (session-tools s)))))
                   (if (and d (not (eq? d (session-device s)))) (session s device: d) s)))
              (was-open (tools-open? (session-tools s)))
@@ -906,8 +921,8 @@
               ((tools-open? (car r))
                (session s typed: ""))
               ;; a severed board's end panel takes the arrows and Return
-              ((and (severed? s) (not (held? f 'ctrl)) (panel-key? (input-frame-pressed f)))
-               (step-severed-panel s f))
+              ((and (finished? s) (not (held? f 'ctrl)) (panel-key? (input-frame-pressed f)))
+               (step-end-panel s f))
               ((step-commands s f) => (lambda (s) s))
               ((session-hint-armed s) (step-armed-hint s f))
               (else

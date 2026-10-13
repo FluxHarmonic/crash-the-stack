@@ -1,0 +1,94 @@
+;;; Real table actions from each terminal outcome, including the shared keys.
+(import (sigil test)
+        (crash stack layout)
+        (crash stack rules)
+        (crash geometry)
+        (crash input)
+        (crash trace)
+        (crash cards deck)
+        (crash cards rules)
+        (crash cards geometry)
+        (crash cards input)
+        (crash scan input)
+        (crash scan table)
+        (crash decrypt table)
+        (crash decrypt record))
+
+(define (small-stack)
+  (session-new (slots->layout (list (slot layer: 0 hx: 0 hy: 0)
+                                   (slot layer: 0 hx: 4 hy: 0)))
+               11))
+
+(define (stack-key s key)
+  (session-step s (make-input-frame (list key) '() #f)
+                (make-geometry (board-layout (session-board s)) 640 400)))
+
+(define (finished-cards)
+  (deal-restore
+   11
+   (game tableau: (make-vector 7 '())
+         foundations: (list->vector
+                       (map (lambda (suit)
+                              (map (lambda (index) (make-card suit (- 13 index))) (iota 13)))
+                            (iota 4))))
+   #t))
+
+(define (cards-key d key)
+  (deal-step d (make-input-frame (list key) '() #f) (make-card-geometry 640 400)))
+
+(test-group "end panels: win starts new, loss restarts"
+  (test "STACK win defaults to NEW STACK; Return and Space request the next seed"
+    (let* ((s (small-stack))
+           (won (session-demo-finish s)))
+      (assert-true (board-cleared? (session-board won)))
+      (assert-equal "NEW STACK" (cadar (session-panel-rows won)))
+      (for-each (lambda (key)
+                  (let ((next (stack-key won key)))
+                    (assert-equal 'next (session-request next))
+                    (assert-equal (+ 1 (session-seed won)) (session-seed next))))
+                '(return space))))
+  (test "STACK loss defaults to RESTART; Return and Space retain the seed"
+    (let* ((s (small-stack))
+           (lost (session s trace: (trace (session-trace s) phase: 'severed))))
+      (assert-equal "RESTART" (cadar (session-panel-rows lost)))
+      (for-each (lambda (key)
+                  (let ((retry (stack-key lost key)))
+                    (assert-equal 'retry (session-request retry))
+                    (assert-equal (session-seed lost) (session-seed retry))))
+                '(return space))))
+  (test "DEFRAG win defaults to NEW DUMP; Return and Space request another deal"
+    (let ((won (finished-cards)))
+      (assert-true (deal-won? won))
+      (assert-equal "NEW DUMP" (cadar (deal-panel-rows won)))
+      (for-each (lambda (key)
+                  (assert-equal 'next (deal-request (cards-key won key))))
+                '(return space))))
+  (test "DEFRAG loss defaults to RESTART; Return and Space retain the seed"
+    (let* ((d (deal-new 11 1))
+           (lost (deal d trace: (trace (deal-trace d) phase: 'severed))))
+      (assert-equal "RESTART" (cadar (deal-panel-rows lost)))
+      (for-each (lambda (key)
+                  (let ((retry (cards-key lost key)))
+                    (assert-equal 'retry (deal-request retry))
+                    (assert-equal (deal-seed lost) (deal-seed retry))))
+                '(return space))))
+  (test "SCAN win defaults to NEW SEGMENT; Return starts another"
+    (let* ((won (scan-table over: 'won over-ms: PANEL-WAIT-MS))
+           (picked (scan-table-step won (make-scan-frame '(return) '() '() 16))))
+      (assert-equal 'new (car (scan-table-panel-rows won)))
+      (assert-equal '(new) (scan-table-requests picked))))
+  (test "SCAN loss defaults to RESTART; Return requests retry"
+    (let* ((lost (scan-table over: 'lost over-ms: PANEL-WAIT-MS))
+           (picked (scan-table-step lost (make-scan-frame '(return) '() '() 16))))
+      (assert-equal "RESTART" (cadr (assq (car (scan-table-panel-rows lost)) PANEL-ROWS)))
+      (assert-equal '(retry) (scan-table-requests picked))))
+  (test "DECRYPT completed DAILY defaults to NEW BOARD; Return starts TIMED"
+    (let* ((t (decrypt-table (decrypt-open 'daily 555 100 (drecord)) phase: 'over panel: 0))
+           (picked (decrypt-step t (make-decrypt-frame '(return) '() 250))))
+      (assert-equal "NEW BOARD" (cadar (decrypt-panel-rows t)))
+      (assert-true (and (memq 'timed (decrypt-requests picked)) #t))))
+  (test "DECRYPT TIME'S UP defaults to RESTART; Return restarts TIMED"
+    (let* ((t (decrypt-table (decrypt-open 'timed 555 100 (drecord)) phase: 'over panel: 0))
+           (picked (decrypt-step t (make-decrypt-frame '(return) '() 250))))
+      (assert-equal "RESTART" (cadar (decrypt-panel-rows t)))
+      (assert-true (and (memq 'timed (decrypt-requests picked)) #t)))))

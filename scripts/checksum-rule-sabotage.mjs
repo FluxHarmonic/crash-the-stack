@@ -23,15 +23,21 @@ const generatePath = join(source, 'crash/checksum/generate.sgl');
 const tablePath = join(source, 'crash/checksum/table.sgl');
 const tracePath = join(source, 'crash/checksum/trace.sgl');
 const menuPath = join(source, 'crash/menu.sgl');
+const inputPath = join(source, 'crash/input.sgl');
+const cardsInputPath = join(source, 'crash/cards/input.sgl');
+const scanTablePath = join(source, 'crash/scan/table.sgl');
+const decryptTablePath = join(source, 'crash/decrypt/table.sgl');
 const rules = readFileSync(rulePath, 'utf8');
 const layout = readFileSync(layoutPath, 'utf8');
 const generate = readFileSync(generatePath, 'utf8');
 const originals = new Map([[rulePath, rules], [layoutPath, layout], [generatePath, generate]]);
-for (const file of [tablePath, tracePath, menuPath]) originals.set(file, readFileSync(file, 'utf8'));
+for (const file of [tablePath, tracePath, menuPath, inputPath, cardsInputPath, scanTablePath, decryptTablePath])
+  originals.set(file, readFileSync(file, 'utf8'));
 const tests = readFileSync(join(repo, 'test/test-checksum.sgl'), 'utf8')
   + '\n' + readFileSync(join(repo, 'test/test-checksum-generate.sgl'), 'utf8')
   + '\n' + readFileSync(join(repo, 'test/test-checksum-table.sgl'), 'utf8')
-  + '\n' + readFileSync(join(repo, 'test/test-menu.sgl'), 'utf8');
+  + '\n' + readFileSync(join(repo, 'test/test-menu.sgl'), 'utf8')
+  + '\n' + readFileSync(join(repo, 'test/test-end-panels.sgl'), 'utf8');
 const hash = value => createHash('sha256').update(value).digest('hex');
 const runFile = join(scratch, 'run.sgl');
 
@@ -58,7 +64,7 @@ function run(target) {
   return spawnSync(resolve(sigil), ['-L', source, '-L', resolve(testSource), 'eval', '-f', runFile], {
     cwd: scratch,
     env: { ...process.env, XDG_CACHE_HOME: join(scratch, 'cache') },
-    encoding: 'utf8', timeout: 30000,
+    encoding: 'utf8', timeout: 90000,
   });
 }
 
@@ -69,13 +75,31 @@ const sumPlant = '\n              12)))';
 const coverageAnchor = '(and (playable? (cboard-pyramid b) place)';
 const coveragePlant = '(and (tile-present? (cboard-pyramid b) place)';
 const cases = [
+  [inputPath, "(end-panel-actions (eq? (trace-phase (session-trace s)) 'cleared)",
+    '(end-panel-actions #f',
+    'STACK win defaults to NEW STACK; Return and Space request the next seed'],
+  [inputPath, "(end-panel-actions (eq? (trace-phase (session-trace s)) 'cleared)",
+    '(end-panel-actions #t',
+    'STACK loss defaults to RESTART; Return and Space retain the seed'],
+  [cardsInputPath, '(end-panel-actions (deal-won? d)', '(end-panel-actions #f',
+    'DEFRAG win defaults to NEW DUMP; Return and Space request another deal'],
+  [cardsInputPath, '(end-panel-actions (deal-won? d)', '(end-panel-actions #t',
+    'DEFRAG loss defaults to RESTART; Return and Space retain the seed'],
+  [scanTablePath, '(panel default: 0)', '(panel default: 1)',
+    'SCAN win defaults to NEW SEGMENT; Return starts another'],
+  [scanTablePath, '(panel default: 0)', '(panel default: 1)',
+    'SCAN loss defaults to RESTART; Return requests retry'],
+  [decryptTablePath, '(end-panel-actions #t', '(end-panel-actions #f',
+    'DECRYPT completed DAILY defaults to NEW BOARD; Return starts TIMED'],
+  [decryptTablePath, '(end-panel-actions #f', '(end-panel-actions #t',
+    "DECRYPT TIME'S UP defaults to RESTART; Return restarts TIMED"],
   [tablePath, '440 256', '256 256',
     'both horizontal docks keep packet-sized targets below the base and real taps draw then select'],
-  [tablePath, "'((new \"NEW ARCHIVE\") (retry \"RESTART\") (quit \"JACK OUT\"))",
-    "'((retry \"RESTART\") (new \"NEW ARCHIVE\") (quit \"JACK OUT\"))",
+  [tablePath, "(end-panel-actions (eq? (checksum-table-outcome t) 'cleared)",
+    '(end-panel-actions #f',
     'a win defaults to NEW ARCHIVE and Return requests a fresh board'],
-  [tablePath, "'((retry \"RESTART\") (new \"NEW ARCHIVE\") (quit \"JACK OUT\"))",
-    "'((new \"NEW ARCHIVE\") (retry \"RESTART\") (quit \"JACK OUT\"))",
+  [tablePath, "(end-panel-actions (eq? (checksum-table-outcome t) 'cleared)",
+    '(end-panel-actions #t',
     'a loss defaults to RESTART and Return retries its seed'],
   [layoutPath, "left: '()\n                                              right: '()",
     'left: (neighborhood-left (layout-neighborhood lay id))\n                                              right: (neighborhood-right (layout-neighborhood lay id))',
@@ -154,7 +178,7 @@ if (!selectedCases.length || (focusedNames.length && selectedCases.length !== fo
 try {
   const clean = run();
   if (clean.status !== 0 || !clean.stdout.includes(`TEST-COUNT: ${selectedCases.length}`))
-    throw new Error(`Clean test failed: ${clean.stdout}${clean.stderr}`);
+    throw new Error(`Clean test failed: rc=${clean.status}, signal=${clean.signal}, error=${clean.error || ''}\n${clean.stdout}${clean.stderr}`);
   console.log(`CLEAN: ${selectedCases.length}/${selectedCases.length}`);
   for (const [file, anchor, plant, target] of selectedCases) {
     const original = originals.get(file);

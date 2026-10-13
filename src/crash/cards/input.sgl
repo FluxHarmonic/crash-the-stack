@@ -46,6 +46,7 @@
           (crash cards deck)
           (crash cards rules)
           (crash cards geometry)
+          (crash panel end)
           (only (crash geometry) panel-row-hit panel-keys panel-key?)   ; the shared end panel (t-6a2d35)
           (crash trace)
           (crash cards trace)
@@ -56,7 +57,7 @@
           (crash hud))
 
   (export deal deal? deal-new deal-restore
-          deal-game deal-seed deal-message deal-won?
+          deal-game deal-seed deal-message deal-won? deal-panel-rows
           deal-marks deal-with-marks deal-extracted? deal-marks-home mark-cards mark-text
           deal-labels deal-labels-shown deal-typed deal-auto deal-bank
           deal-trace deal-severed? deal-finished? deal-with-trace deal-retry
@@ -722,29 +723,37 @@
     (define (jack-out-tap? d f g)
       (let ((click (input-frame-click f)))
         (and click
-             (deal-severed? d)
+             (or (deal-severed? d) (deal-won? d))
              (eqv? 2 (panel-row-hit 3 (car click) (cdr click))))))
 
     ;; The severed table's end panel by key ((crash geometry) panel-keys,
     ;; shared with STACK and SCAN): up/down move the highlight; Return picks
     ;; RETRY LINK, NEW DUMP, or JACK OUT (a request the shell answers).
-    (define (step-severed-panel d f)
+    (define (deal-panel-rows d)
+      (end-panel-actions (deal-won? d)
+                         '(next "NEW DUMP") '(retry "RESTART")
+                         '((jack-out "JACK OUT"))))
+
+    (define (deal-pick-panel d index)
+      (case (car (list-ref (deal-panel-rows d) index))
+        ((next) (deal-next d))
+        ((retry) (deal-retry d))
+        ((jack-out) (deal d request: 'jack-out))
+        (else d)))
+
+    (define (step-end-panel d f)
       (let ((r (panel-keys (deal-panel d) 3 (input-frame-pressed f))))
-        (case (cdr r)
-          ((0) (deal-retry d))
-          ((1) (deal-next d))
-          ((2) (deal d panel: (car r) request: 'jack-out))
-          (else (deal d panel: (car r))))))
+        (if (cdr r)
+            (deal-pick-panel (deal d panel: (car r)) (cdr r))
+            (deal d panel: (car r)))))
 
     (define (step-pointer d f g)
       (let ((click (input-frame-click f)))
         (cond ((not click) d)
-              ((deal-severed? d)
-               (case (panel-row-hit 3 (car click) (cdr click))
-                 ((0) (deal-retry d))
-                 ((1) (deal-next d))
-                 ((2) d)
-                 (else
+              ((or (deal-severed? d) (deal-won? d))
+               (let ((row (panel-row-hit 3 (car click) (cdr click))))
+                 (if row
+                     (deal-pick-panel d row)
                   (let ((name (hit-card-control g (deal-hud d) (car click) (cdr click))))
                     (if (eq? name 'keys) (step-control d name) d)))))
               ((hit-card-control g (deal-hud d) (car click) (cdr click))
@@ -756,6 +765,13 @@
     ;; --- one frame ----------------------------------------------------------------
 
     (define (deal-step d f g)
+      (if (and (or (deal-severed? d) (deal-won? d))
+               (not (held? f 'ctrl))
+               (panel-key? (input-frame-pressed f)))
+          (step-end-panel d f)
+          (deal-play-step d f g)))
+
+    (define (deal-play-step d f g)
       (let* ((d (let ((dev (frame-device f (tools-touch (deal-tools d)))))
                   (if (and dev (not (eq? dev (deal-device d)))) (deal d device: dev) d)))
              (was-open (tools-open? (deal-tools d)))
@@ -771,8 +787,9 @@
               ((tools-open? (car r))
                (deal d typed: ""))
               ;; a severed table's end panel takes the arrows and Return
-              ((and (deal-severed? d) (not (held? f 'ctrl)) (panel-key? (input-frame-pressed f)))
-               (step-severed-panel d f))
+              ((and (or (deal-severed? d) (deal-won? d))
+                    (not (held? f 'ctrl)) (panel-key? (input-frame-pressed f)))
+               (step-end-panel d f))
               ((step-commands d f) => (lambda (d) d))
               ((held? f 'ctrl) (step-pointer d f g))
               (else
