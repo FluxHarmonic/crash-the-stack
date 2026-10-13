@@ -15,9 +15,10 @@
   (begin
     (define PYRAMID-FULL (- (arithmetic-shift 1 28) 1))
     (define FEED-FULL (- (arithmetic-shift 1 24) 1))
-    ;; Exact open-addressed keys in an atomic buffer. A 100k-node search
-    ;; cannot fill these 262147 slots; no failed state is evicted.
-    ;; Avoid a long-lived cons cell for every remembered state.
+    ;; Exact open-addressed keys in an atomic buffer; no state is evicted.
+    ;; Store the 28-bit pyramid and 31-bit remainder as separate doubles:
+    ;; both integers are exactly representable. Two native reads replace
+    ;; decoding eight bytes, without a cons cell per remembered state.
     (define MEMO-SIZE 262147)
     (define PLACES (iota 28))
 
@@ -80,7 +81,7 @@
         (search offsets: (list->vector (map card-rank (vector->list pyramid)))
                 feed-offsets: (list->vector (map card-rank feed))
                 budget: budget limit: limit memo-size: capacity
-                dead: (make-bytevector (* 8 capacity) 0)
+                dead: (make-bytevector (* 16 capacity) 0)
                 required: (make-vector 14 0) available: (make-vector 14 0)
                 stack: (list (frame state: (node pyramid: PYRAMID-FULL feed: FEED-FULL))))))
 
@@ -122,32 +123,33 @@
          (arithmetic-shift (node-position n) 52)
          (arithmetic-shift (- (node-pass n) 1) 57)))
 
-    (define (memo-key bytes slot)
-      (let ((start (* slot 8)))
-        (let loop ((offset 7) (key 0))
-          (if (< offset 0)
-              key
-              (loop (- offset 1)
-                    (+ (arithmetic-shift key 8)
-                       (bytevector-u8-ref bytes (+ start offset))))))))
+    (define (memo-low bytes slot)
+      (bytevector-ieee-double-ref bytes (* slot 16) 'little))
+
+    (define (memo-high bytes slot)
+      (bytevector-ieee-double-ref bytes (+ (* slot 16) 8) 'little))
 
     (define (memo-slot s key)
-      (let loop ((slot (modulo key (search-memo-size s))))
-        (let ((stored (memo-key (search-dead s) slot)))
-          (if (or (= stored 0) (= stored key))
-              slot
-              (loop (if (= (+ slot 1) (search-memo-size s)) 0 (+ slot 1)))))))
+      (let ((bytes (search-dead s))
+            (low (bitwise-and key PYRAMID-FULL))
+            (high (arithmetic-shift key -28)))
+        (let loop ((slot (modulo key (search-memo-size s))))
+          (let ((stored (memo-low bytes slot)))
+            (if (or (= stored 0)
+                    (and (= stored low) (= (memo-high bytes slot) high)))
+                slot
+                (loop (if (= (+ slot 1) (search-memo-size s)) 0 (+ slot 1))))))))
 
     (define (dead? s key)
-      (= key (memo-key (search-dead s) (memo-slot s key))))
+      (let ((slot (memo-slot s key)) (bytes (search-dead s)))
+        (and (= (memo-low bytes slot) (bitwise-and key PYRAMID-FULL))
+             (= (memo-high bytes slot) (arithmetic-shift key -28)))))
 
     (define (remember-dead! s key)
       ;; An empty slot is zero; a failed state's live pyramid is nonzero.
-      (let ((bytes (search-dead s)) (start (* 8 (memo-slot s key))))
-        (let loop ((offset 0) (remaining key))
-          (when (< offset 8)
-            (bytevector-u8-set! bytes (+ start offset) (bitwise-and remaining 255))
-            (loop (+ offset 1) (arithmetic-shift remaining -8))))))
+      (let ((bytes (search-dead s)) (start (* 16 (memo-slot s key))))
+        (bytevector-ieee-double-set! bytes start (bitwise-and key PYRAMID-FULL) 'little)
+        (bytevector-ieee-double-set! bytes (+ start 8) (arithmetic-shift key -28) 'little)))
 
     ;; Necessary inventory condition, independent of future accessibility.
     (define (enough-partners? s n)
