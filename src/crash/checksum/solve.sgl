@@ -1,0 +1,218 @@
+;;; A resumable search over a dealt Pyramid, separate from player rules.
+;;; Feed removals preserve original relative order through every recycle:
+;;; a live mask plus cursor therefore names both stock and buffer exactly.
+;;; Each step enters one state, visits one branch, or returns from one state.
+;;; Only solved is a proof. A node cap yields inconclusive, never unsolvable.
+
+(define-library (crash checksum solve)
+  (import (sigil struct)
+          (sigil math)
+          (sigil list)
+          (crash cards deck))
+  (export checksum-solve-start checksum-solve-step! checksum-solve-run!
+          checksum-solve-status checksum-solve-line checksum-solve-nodes
+          checksum-solve-failed checksum-solve-draws checksum-solve-needed)
+  (begin
+    (define PYRAMID-FULL (- (arithmetic-shift 1 28) 1))
+    (define FEED-FULL (- (arithmetic-shift 1 24) 1))
+    (define MEMO-SIZE 65521)
+
+    (define BITS (list->vector (map (lambda (id) (arithmetic-shift 1 id)) (iota 28))))
+    (define CHILDREN
+      (let ((v (make-vector 28 0)))
+        (let row-loop ((row 0))
+          (when (< row 6)
+            (let col-loop ((col 0))
+              (when (<= col row)
+                (let ((id (+ (quotient (* row (+ row 1)) 2) col))
+                      (left (+ (quotient (* (+ row 1) (+ row 2)) 2) col)))
+                  (vector-set! v id (+ (vector-ref BITS left) (vector-ref BITS (+ left 1)))))
+                (col-loop (+ col 1))))
+            (row-loop (+ row 1))))
+        v))
+
+    (define-struct node
+      (pyramid default: 0)
+      (feed default: 0)
+      (position default: 0)
+      (pass default: 1)
+      (line default: '())                 ; reversed player actions
+      (draws default: 0)
+      (needed default: 0))
+
+    (define-struct frame
+      (state default: #f)
+      (key default: #f mutable: #t)
+      (choices default: #f mutable: #t))
+
+    (define-struct search
+      (offsets default: #f)
+      (feed-offsets default: #f)
+      (limit default: 3)
+      (budget default: 100000)
+      (dead default: #f)
+      (stack default: '() mutable: #t)
+      (status default: 'running mutable: #t)
+      (line default: '() mutable: #t)
+      (nodes default: 0 mutable: #t)
+      (failed default: 0 mutable: #t)
+      (draws default: 0 mutable: #t)
+      (needed default: 0 mutable: #t))
+
+    (define checksum-solve-status search-status)
+    (define checksum-solve-line search-line)
+    (define checksum-solve-nodes search-nodes)
+    (define checksum-solve-failed search-failed)
+    (define checksum-solve-draws search-draws)
+    (define checksum-solve-needed search-needed)
+
+    (define (checksum-solve-start pyramid feed budget limit)
+      (unless (and (= (vector-length pyramid) 28) (= (length feed) 24))
+        (error "CHECKSUM solve: expected 28 pyramid and 24 feed packets"))
+      (search offsets: (list->vector (map card-rank (vector->list pyramid)))
+              feed-offsets: (list->vector (map card-rank feed))
+              budget: budget limit: limit dead: (make-vector MEMO-SIZE '())
+              stack: (list (frame state: (node pyramid: PYRAMID-FULL feed: FEED-FULL)))))
+
+    (define (live? mask id)
+      (not (= 0 (bitwise-and mask (vector-ref BITS id)))))
+
+    (define (remove-bit mask id)
+      (bitwise-and mask (bitwise-not (vector-ref BITS id))))
+
+    (define (free? mask id)
+      (and (live? mask id) (= 0 (bitwise-and mask (vector-ref CHILDREN id)))))
+
+    (define (feed-next mask position)
+      (let loop ((id position))
+        (cond ((>= id 24) #f)
+              ((live? mask id) id)
+              (else (loop (+ id 1))))))
+
+    (define (feed-top mask position)
+      (let loop ((id (- position 1)))
+        (cond ((< id 0) #f)
+              ((live? mask id) id)
+              (else (loop (- id 1))))))
+
+    ;; Free ROOT removal cannot obstruct any other removal. Fold those
+    ;; harmless permutations into one state before memoizing it.
+    (define (without-roots s n)
+      (let loop ((id 27) (mask (node-pyramid n)) (line (node-line n)))
+        (cond ((< id 0) (node n pyramid: mask line: line))
+              ((and (free? mask id) (= 13 (vector-ref (search-offsets s) id)))
+               (loop (- id 1) (remove-bit mask id) (cons (cons id #f) line)))
+              (else (loop (- id 1) mask line)))))
+
+    ;; 28 + 24 + 5 + 2 bits, safely within Sigil's exact fixnum range.
+    (define (state-key n)
+      (+ (node-pyramid n)
+         (arithmetic-shift (node-feed n) 28)
+         (arithmetic-shift (node-position n) 52)
+         (arithmetic-shift (- (node-pass n) 1) 57)))
+
+    (define (dead? s key)
+      (memv key (vector-ref (search-dead s) (modulo key MEMO-SIZE))))
+
+    (define (remember-dead! s key)
+      (let ((bucket (modulo key MEMO-SIZE)))
+        (vector-set! (search-dead s) bucket
+                     (cons key (vector-ref (search-dead s) bucket)))))
+
+    ;; Necessary inventory condition, independent of future accessibility.
+    (define (enough-partners? s n)
+      (let ((required (make-vector 14 0)) (available (make-vector 14 0)))
+        (let loop ((id 0))
+          (when (< id 28)
+            (when (live? (node-pyramid n) id)
+              (let ((offset (vector-ref (search-offsets s) id)))
+                (vector-set! required offset (+ 1 (vector-ref required offset)))
+                (vector-set! available offset (+ 1 (vector-ref available offset)))))
+            (when (and (< id 24) (live? (node-feed n) id))
+              (let ((offset (vector-ref (search-feed-offsets s) id)))
+                (vector-set! available offset (+ 1 (vector-ref available offset)))))
+            (loop (+ id 1))))
+        (let loop ((offset 1))
+          (or (= offset 13)
+              (and (<= (vector-ref required offset) (vector-ref available (- 13 offset)))
+                   (loop (+ offset 1)))))))
+
+    (define (branches s n)
+      (let* ((mask (node-pyramid n))
+             (feed (node-feed n))
+             (position (node-position n))
+             (top (feed-top feed position))
+             (next (feed-next feed position))
+             (offsets (search-offsets s))
+             (feed-offsets (search-feed-offsets s))
+             (free (filter (lambda (id) (free? mask id)) (iota 28)))
+             (choices '()))
+        (define (add child action)
+          (set! choices (cons (node child line: (cons action (node-line n))) choices)))
+        (let loop ((rest free))
+          (unless (null? rest)
+            (let* ((a (car rest)) (offset (vector-ref offsets a)))
+              (for-each (lambda (b)
+                          (when (= 13 (+ offset (vector-ref offsets b)))
+                            (add (node n pyramid: (remove-bit (remove-bit mask a) b)) (cons a b))))
+                        (cdr rest))
+              (when (and top (= 13 (+ offset (vector-ref feed-offsets top))))
+                (add (node n pyramid: (remove-bit mask a) feed: (remove-bit feed top))
+                     (cons a 'waste))))
+            (loop (cdr rest))))
+        (when (and top (= 13 (vector-ref feed-offsets top)))
+          (add (node n feed: (remove-bit feed top)) (cons 'waste #f)))
+        (cond (next
+               (let* ((offset (vector-ref feed-offsets next))
+                      (needed? (or (= offset 13)
+                                   (and top (= 13 (+ offset (vector-ref feed-offsets top))))
+                                   (any (lambda (id) (= 13 (+ offset (vector-ref offsets id)))) free)))
+                      (drawn (node n position: (+ next 1)
+                                   draws: (+ 1 (node-draws n))
+                                   needed: (+ (node-needed n) (if needed? 1 0)))))
+                 (when (and top (= 13 (+ offset (vector-ref feed-offsets top))))
+                   (add (node drawn feed: (remove-bit (remove-bit feed top) next))
+                        (cons 'waste 'pull)))
+                 (add drawn 'pull)))
+              ((and (> feed 0) (< (node-pass n) (search-limit s)))
+               (add (node n position: 0 pass: (+ 1 (node-pass n))) 'rollback)))
+        (reverse choices)))
+
+    (define (reject-frame! s)
+      (set-search-failed! s (+ 1 (search-failed s)))
+      (set-search-stack! s (cdr (search-stack s)))
+      (when (null? (search-stack s)) (set-search-status! s 'unsolvable)))
+
+    (define (checksum-solve-step! s)
+      (when (eq? (search-status s) 'running)
+        (let* ((f (car (search-stack s))) (choices (frame-choices f)))
+          (cond ((not choices)
+                 (let* ((n (without-roots s (frame-state f))) (key (state-key n)))
+                   (cond ((= 0 (node-pyramid n))
+                          (set-search-line! s (reverse (node-line n)))
+                          (set-search-draws! s (node-draws n))
+                          (set-search-needed! s (node-needed n))
+                          (set-search-status! s 'solved))
+                         ((>= (search-nodes s) (search-budget s))
+                          (set-search-status! s 'inconclusive))
+                         (else
+                          (set-search-nodes! s (+ 1 (search-nodes s)))
+                          (if (or (dead? s key) (not (enough-partners? s n)))
+                              (reject-frame! s)
+                              (begin
+                                (set-frame-key! f key)
+                                (set-frame-choices! f (branches s n))))))))
+                ((null? choices)
+                 (remember-dead! s (frame-key f))
+                 (reject-frame! s))
+                (else
+                 (set-frame-choices! f (cdr choices))
+                 (set-search-stack! s (cons (frame state: (car choices)) (search-stack s)))))))
+      s)
+
+    (define (checksum-solve-run! s more?)
+      (let loop ()
+        (when (and (eq? (search-status s) 'running) (more?))
+          (checksum-solve-step! s)
+          (loop)))
+      s)))
