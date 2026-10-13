@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { parseDeals, solve } from './scripts/checksum-solve.mjs';
 import { BrowserBoard, packetCenter } from './scripts/checksum-browser-model.mjs';
+import { requireHealthyDealAudio } from './scripts/checksum-audio-gate.mjs';
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
@@ -21,6 +22,14 @@ const CDP = Number(opt('--cdp', '9335'));
 const SHOT = opt('--shot', null);
 const DEALS = opt('--deals', null);
 const expectedDeals = DEALS ? parseDeals(fs.readFileSync(DEALS, 'utf8')) : [];
+const audioNegative = opt('--audio-negative', null);
+if (audioNegative) {
+  const captured = fs.readFileSync(audioNegative, 'utf8').split('\n').find(line => line.startsWith('AUDIO-DIAGNOSTIC: '));
+  assert.ok(captured, 'actual captured audible failure exists');
+  assert.throws(() => requireHealthyDealAudio(JSON.parse(captured.slice('AUDIO-DIAGNOSTIC: '.length))),
+    /no stream may lose sounding output frames|active music ring may not run dry/);
+  console.log('AUDIO-CONTROL: captured 431365a audible failure still rejected');
+}
 const BASE = opt('--url', `http://127.0.0.1:${PORT}/`);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const lines = [], errors = [], results = [];
@@ -283,23 +292,36 @@ try {
   // Retain counter changes and timer gaps, so music-open stalls can be
   // distinguished from search slices without discounting either one.
   await js(`(() => {
-    const trace = window.__checksumAudioTrace = { samples: [], longTasks: [] };
+    const trace = window.__checksumAudioTrace = { samples: [], longTasks: [], maxima: {} };
     let previous = '', last = performance.now();
-    trace.timer = setInterval(() => {
-      const now = performance.now(), sinks = [];
+    const read = () => {
+      const sinks = [];
       for (let id = 1; id <= 32; id++) {
         const capacity = SigilWasmAudio.sinkCapacity(id);
         if (capacity > 0) sinks.push({ id, capacity, mode: SigilWasmAudio.sinkMode(id),
           depth: SigilWasmAudio.sinkDepth(id), underruns: SigilWasmAudio.sinkUnderruns(id),
           sounding: SigilWasmAudio.sinkUnderrunsSounding(id) });
       }
+      return sinks;
+    };
+    trace.baseline = read();
+    trace.record = () => {
+      const now = performance.now(), sinks = read();
+      for (const s of sinks) {
+        const old = trace.maxima[s.id];
+        trace.maxima[s.id] = { ...s, underruns: Math.max(s.underruns, old?.underruns || 0),
+          sounding: Math.max(s.sounding, old?.sounding || 0) };
+      }
+      trace.finalSinks = sinks;
       const signature = JSON.stringify(sinks.map(s => [s.id, s.underruns, s.sounding]));
       if (signature !== previous || now - last > 150) {
         if (trace.samples.length < 200) trace.samples.push({ at: now, gap: now - last, sinks });
         previous = signature;
       }
       last = now;
-    }, 100);
+    };
+    trace.record();
+    trace.timer = setInterval(trace.record, 100);
     trace.observer = new PerformanceObserver(list => {
       for (const entry of list.getEntries()) if (trace.longTasks.length < 200)
         trace.longTasks.push({ at: entry.startTime, duration: entry.duration });
@@ -313,18 +335,22 @@ try {
   await wait(dealPattern, mark, 600_000);
   const generation = await wait(/^crash: checksum generation ms ([\d.eE+-]+) frames (\d+) max-frame-ms ([\d.eE+-]+) candidates (\d+) nodes (\d+) inconclusive (\d+) easy (\d+) unsolvable (\d+) draws (\d+) needed (\d+) failed (\d+)$/, mark);
   const audio = await wait(/^crash: checksum deal-audio underruns (\d+) worst (\d+)$/, generation.index, 15_000);
-  console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(await js(`(() => {
+  const audioTrace = await js(`(() => {
     const trace = window.__checksumAudioTrace;
     clearInterval(trace.timer); trace.observer.disconnect();
-    return { isolated: crossOriginIsolated, samples: trace.samples, longTasks: trace.longTasks };
-  })()`)));
+    trace.record();
+    return { isolated: crossOriginIsolated, baseline: trace.baseline, maxima: Object.values(trace.maxima),
+      finalSinks: trace.finalSinks, samples: trace.samples, longTasks: trace.longTasks };
+  })()`);
+  console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(audioTrace));
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
   assert.ok(Number(generation.match[2]) >= 2, 'runtime proof spans frames');
-  assert.equal(Number(audio.match[1]), 0, `generation starved audio at ${THROTTLE}x: ${audio.match[0]}`);
+  const health = requireHealthyDealAudio(audioTrace);
+  await wait(/^crash: music playing /, mark, 1000);
   assert.ok(Number(generation.match[9]) >= 8);
   assert.ok(Number(generation.match[11]) >= 20);
   assert.ok(100 * Number(generation.match[10]) <= 55 * Number(generation.match[9]));
-  passed('audio', `${THROTTLE}x: ${generation.match[0]}; ${audio.match[0]}`);
+  passed('audio', `${THROTTLE}x: sounding starvation ${health.sounding}, music dry ${health.music}; raw cue counters retained: ${audio.match[0]}; ${generation.match[0]}`);
   passed('win-default', 'Enter on the win panel starts NEW ARCHIVE');
   mark = lines.length; await key('Escape');
   await key('ArrowDown'); await key('ArrowDown'); await key('ArrowDown'); await key('Enter');
