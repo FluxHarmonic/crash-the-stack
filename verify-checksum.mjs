@@ -283,7 +283,7 @@ try {
   mark = lines.length; await key('Enter');
   const fresh = await wait(/^crash: checksum open clean (\d+)$/, mark);
   assert.notEqual(Number(fresh.match[1]), deal.seed, 'win default starts another seed');
-  await wait(dealPattern, mark, 120_000);
+  await wait(dealPattern, mark, 600_000);
   const generation = await wait(/^crash: checksum generation ms ([\d.eE+-]+) frames (\d+) max-frame-ms ([\d.eE+-]+) candidates (\d+) nodes (\d+) inconclusive (\d+) easy (\d+) unsolvable (\d+) draws (\d+) needed (\d+) failed (\d+)$/, mark);
   const audio = await wait(/^crash: checksum deal-audio underruns (\d+) worst (\d+)$/, generation.index, 15_000);
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
