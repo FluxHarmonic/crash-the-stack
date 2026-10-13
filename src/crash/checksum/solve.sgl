@@ -15,7 +15,10 @@
   (begin
     (define PYRAMID-FULL (- (arithmetic-shift 1 28) 1))
     (define FEED-FULL (- (arithmetic-shift 1 24) 1))
-    (define MEMO-SIZE 16381)
+    ;; Exact open-addressed keys in an atomic buffer. A 100k-node search
+    ;; cannot fill these 262147 slots; no failed state is evicted.
+    ;; Avoid a long-lived cons cell for every remembered state.
+    (define MEMO-SIZE 262147)
     (define PLACES (iota 28))
 
     (define BITS (list->vector (map (lambda (id) (arithmetic-shift 1 id)) (iota 28))))
@@ -37,7 +40,7 @@
       (feed default: 0)
       (position default: 0)
       (pass default: 1)
-      (line default: '())                 ; reversed player actions
+      (line default: '() mutable: #t)     ; reversed player actions
       (draws default: 0)
       (needed default: 0))
 
@@ -51,6 +54,7 @@
       (feed-offsets default: #f)
       (limit default: 3)
       (budget default: 100000)
+      (memo-size default: MEMO-SIZE)
       (dead default: #f mutable: #t)
       (required default: #f)
       (available default: #f)
@@ -72,11 +76,13 @@
     (define (checksum-solve-start pyramid feed budget limit)
       (unless (and (= (vector-length pyramid) 28) (= (length feed) 24))
         (error "CHECKSUM solve: expected 28 pyramid and 24 feed packets"))
-      (search offsets: (list->vector (map card-rank (vector->list pyramid)))
-              feed-offsets: (list->vector (map card-rank feed))
-              budget: budget limit: limit dead: (make-vector MEMO-SIZE '())
-              required: (make-vector 14 0) available: (make-vector 14 0)
-              stack: (list (frame state: (node pyramid: PYRAMID-FULL feed: FEED-FULL)))))
+      (let ((capacity (max MEMO-SIZE (+ 1 (* 2 budget)))))
+        (search offsets: (list->vector (map card-rank (vector->list pyramid)))
+                feed-offsets: (list->vector (map card-rank feed))
+                budget: budget limit: limit memo-size: capacity
+                dead: (make-bytevector (* 8 capacity) 0)
+                required: (make-vector 14 0) available: (make-vector 14 0)
+                stack: (list (frame state: (node pyramid: PYRAMID-FULL feed: FEED-FULL))))))
 
     (define (live? mask id)
       (not (= 0 (bitwise-and mask (vector-ref BITS id)))))
@@ -103,7 +109,8 @@
     ;; harmless permutations into one state before memoizing it.
     (define (without-roots s n)
       (let loop ((id 27) (mask (node-pyramid n)) (line (node-line n)))
-        (cond ((< id 0) (node n pyramid: mask line: line))
+        (cond ((< id 0)
+               (if (= mask (node-pyramid n)) n (node n pyramid: mask line: line)))
               ((and (free? mask id) (= 13 (vector-ref (search-offsets s) id)))
                (loop (- id 1) (remove-bit mask id) (cons (cons id #f) line)))
               (else (loop (- id 1) mask line)))))
@@ -115,13 +122,32 @@
          (arithmetic-shift (node-position n) 52)
          (arithmetic-shift (- (node-pass n) 1) 57)))
 
+    (define (memo-key bytes slot)
+      (let ((start (* slot 8)))
+        (let loop ((offset 7) (key 0))
+          (if (< offset 0)
+              key
+              (loop (- offset 1)
+                    (+ (arithmetic-shift key 8)
+                       (bytevector-u8-ref bytes (+ start offset))))))))
+
+    (define (memo-slot s key)
+      (let loop ((slot (modulo key (search-memo-size s))))
+        (let ((stored (memo-key (search-dead s) slot)))
+          (if (or (= stored 0) (= stored key))
+              slot
+              (loop (if (= (+ slot 1) (search-memo-size s)) 0 (+ slot 1)))))))
+
     (define (dead? s key)
-      (memv key (vector-ref (search-dead s) (modulo key MEMO-SIZE))))
+      (= key (memo-key (search-dead s) (memo-slot s key))))
 
     (define (remember-dead! s key)
-      (let ((bucket (modulo key MEMO-SIZE)))
-        (vector-set! (search-dead s) bucket
-                     (cons key (vector-ref (search-dead s) bucket)))))
+      ;; An empty slot is zero; a failed state's live pyramid is nonzero.
+      (let ((bytes (search-dead s)) (start (* 8 (memo-slot s key))))
+        (let loop ((offset 0) (remaining key))
+          (when (< offset 8)
+            (bytevector-u8-set! bytes (+ start offset) (bitwise-and remaining 255))
+            (loop (+ offset 1) (arithmetic-shift remaining -8))))))
 
     ;; Necessary inventory condition, independent of future accessibility.
     (define (enough-partners? s n)
@@ -159,7 +185,10 @@
              (free (filter (lambda (id) (free? mask id)) PLACES))
              (choices '()))
         (define (add child action)
-          (set! choices (cons (node child line: (cons action (node-line n))) choices)))
+          ;; Every child is freshly constructed below. Set its line once
+          ;; instead of allocating a second copy of the entire node.
+          (set-node-line! child (cons action (node-line n)))
+          (set! choices (cons child choices)))
         (let loop ((rest free))
           (unless (null? rest)
             (let* ((a (car rest)) (offset (vector-ref offsets a)))
