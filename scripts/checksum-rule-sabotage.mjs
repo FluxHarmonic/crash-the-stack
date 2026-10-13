@@ -1,5 +1,5 @@
 // Light source-evaluation tests, with a behavioral plant for every test.
-// Usage: node scripts/checksum-rule-sabotage.mjs SIGIL SIGIL_TEST_SOURCE SUBSTRATIC_SOURCE
+// Usage: node scripts/checksum-rule-sabotage.mjs SIGIL SIGIL_TEST_SOURCE SUBSTRATIC_SOURCE [TEST NAME ...]
 import { mkdtempSync, mkdirSync, cpSync, readFileSync, writeFileSync,
          rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
 const [sigil, testSource, substraticSource] = process.argv.slice(2);
+const focusedNames = process.argv.slice(5);
 if (!sigil || !testSource || !substraticSource)
   throw new Error('Need SIGIL, SIGIL_TEST_SOURCE and SUBSTRATIC_SOURCE');
 const repo = resolve('.');
@@ -38,7 +39,7 @@ function run(target) {
   const predicate = target
     ? `(lambda (td) (string=? (test-descriptor-name td) ${JSON.stringify(target)}))`
     : `(lambda (td) (member (test-descriptor-name td)
-         (list ${cases.map(c => JSON.stringify(c[3])).join(' ')})))`;
+         (list ${selectedCases.map(c => JSON.stringify(c[3])).join(' ')})))`;
   writeFileSync(runFile, `${tests}\n
 (let ((summary (run-tests-filtered ${predicate})))
   (for-each (lambda (r)
@@ -68,6 +69,14 @@ const sumPlant = '\n              12)))';
 const coverageAnchor = '(and (playable? (cboard-pyramid b) place)';
 const coveragePlant = '(and (tile-present? (cboard-pyramid b) place)';
 const cases = [
+  [tablePath, '440 256', '256 256',
+    'both horizontal docks keep packet-sized targets below the base and real taps draw then select'],
+  [tablePath, "'((new \"NEW ARCHIVE\") (retry \"RESTART\") (quit \"JACK OUT\"))",
+    "'((retry \"RESTART\") (new \"NEW ARCHIVE\") (quit \"JACK OUT\"))",
+    'a win defaults to NEW ARCHIVE and Return requests a fresh board'],
+  [tablePath, "'((retry \"RESTART\") (new \"NEW ARCHIVE\") (quit \"JACK OUT\"))",
+    "'((new \"NEW ARCHIVE\") (retry \"RESTART\") (quit \"JACK OUT\"))",
+    'a loss defaults to RESTART and Return retries its seed'],
   [layoutPath, "left: '()\n                                              right: '()",
     'left: (neighborhood-left (layout-neighborhood lay id))\n                                              right: (neighborhood-right (layout-neighborhood lay id))',
     'all seven leaves are free, all other packets covered'],
@@ -137,13 +146,17 @@ const cases = [
   [menuPath, "((free-checksum) 'checksum)", "((free-checksum) 'stack)",
     "CHECKSUM's version stays independent and Back returns to its kept tile"],
 ];
+const selectedCases = focusedNames.length
+  ? cases.filter(entry => focusedNames.includes(entry[3])) : cases;
+if (!selectedCases.length || (focusedNames.length && selectedCases.length !== focusedNames.length))
+  throw new Error('Every focused name must identify one sabotage case');
 
 try {
   const clean = run();
-  if (clean.status !== 0 || !clean.stdout.includes(`TEST-COUNT: ${cases.length}`))
+  if (clean.status !== 0 || !clean.stdout.includes(`TEST-COUNT: ${selectedCases.length}`))
     throw new Error(`Clean test failed: ${clean.stdout}${clean.stderr}`);
-  console.log(`CLEAN: ${cases.length}/${cases.length}`);
-  for (const [file, anchor, plant, target] of cases) {
+  console.log(`CLEAN: ${selectedCases.length}/${selectedCases.length}`);
+  for (const [file, anchor, plant, target] of selectedCases) {
     const original = originals.get(file);
     if (original.split(anchor).length !== 2) throw new Error(`Anchor must occur once: ${anchor}`);
     const planted = original.replace(anchor, plant);
@@ -163,7 +176,7 @@ try {
   }
   const restored = run();
   if (restored.status !== 0) throw new Error(`Restored test failed: ${restored.stdout}${restored.stderr}`);
-  console.log(`RESTORED: ${cases.length}/${cases.length}; ${cases.length} verified behavioral plants`);
+  console.log(`RESTORED: ${selectedCases.length}/${selectedCases.length}; ${selectedCases.length} verified behavioral plants`);
 } finally {
   rmSync(scratch, { recursive: true, force: true });
 }

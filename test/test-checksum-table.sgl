@@ -22,13 +22,33 @@
   (checksum-step t (make-checksum-frame (list key) '() now)))
 
 (define (table-tap t place now)
-  (let ((r (checksum-place-rect place)))
+  (let ((r (checksum-place-rect place (checksum-table-dock t))))
     (checksum-step t
                    (make-checksum-frame '()
                                         (list (list 'down (+ (car r) 28) (+ (cadr r) 38) 0))
                                         now))))
 
 (test-group "checksum: table controls"
+  (test "both horizontal docks keep packet-sized targets below the base and real taps draw then select"
+    (for-each
+     (lambda (option)
+       (let* ((dock (car option))
+              (pull-x (cadr option))
+              (waste-x (caddr option))
+              (t (checksum-table (table-fixture '() '(5 8 3)) dock: dock))
+              (pull (checksum-place-rect 'pull dock))
+              (waste (checksum-place-rect 'waste dock))
+              (one (checksum-step t (make-checksum-frame '() (list (list 'down pull-x 342 0)) 0)))
+              (selected (checksum-step one (make-checksum-frame '() (list (list 'down waste-x 342 0)) 16))))
+         (assert-equal (cadr pull) (cadr waste))
+         (assert-true (>= (cadr pull) 300))
+         (assert-true (>= (caddr pull) 56))
+         (assert-true (>= (cadddr pull) 76))
+         (assert-equal (cddr pull) (cddr waste))
+         (assert-true (>= (car waste) (+ (car pull) (caddr pull) 8)))
+         (assert-equal '(5) (map card-rank (cboard-waste (checksum-table-board one))))
+         (assert-equal 'waste (cboard-selected (checksum-table-board selected)))))
+     '((center 284 356) (right 468 540))))
   (test "tap-click pairs and ROOTs go through the same table selection"
     (let* ((t (table-fixture '((21 . 5) (22 . 8) (23 . 13)) '(3)))
            (one (table-tap t 21 0))
@@ -85,6 +105,20 @@
       (assert-false (checksum-table-paused resumed)))))
 
 (test-group "checksum: panels and trace"
+  (test "a win defaults to NEW ARCHIVE and Return requests a fresh board"
+    (let* ((t (table-fixture '() '(3)))
+           (b (checksum-table-board t))
+           (t (checksum-table t board: (cboard b pyramid: (board-extract (cboard-pyramid b)))))
+           (over (checksum-step t (make-checksum-frame '() '() 0))))
+      (assert-equal "NEW ARCHIVE" (cadar (checksum-panel-rows over)))
+      (assert-equal '(new) (checksum-table-requests (table-key over 'return 250)))))
+  (test "a loss defaults to RESTART and Return retries its seed"
+    (let* ((t (table-fixture '() '()))
+           (over (checksum-step t (make-checksum-frame '() '() 0)))
+           (picked (table-key over 'return 250)))
+      (assert-equal "RESTART" (cadar (checksum-panel-rows over)))
+      (assert-equal '(retry) (checksum-table-requests picked))
+      (assert-equal (checksum-table-seed t) (checksum-table-seed picked))))
   (test "clear freezes trace, keeps the panel fade clock running and offers retry/new/quit"
     (let* ((t (table-fixture '() '(3)))
            (b (checksum-table-board t))
@@ -94,16 +128,19 @@
            (faded (checksum-step over (make-checksum-frame '() '() 250))))
       (assert-equal 'cleared (checksum-table-outcome over))
       (assert-equal "SEAL BROKEN" (checksum-panel-title over))
-      (assert-equal '(retry new quit) (map car (checksum-panel-rows over)))
+      (assert-equal '(new retry quit) (map car (checksum-panel-rows over)))
       (assert-equal 250.0 (- (checksum-table-ms faded) (checksum-table-panel-at faded)))
       (assert-equal (trace-ticks (checksum-table-trace over))
                     (trace-ticks (checksum-table-trace faded)))
-      (assert-equal '(retry) (checksum-table-requests (table-key faded 'return 266)))))
+      (assert-equal '(new) (checksum-table-requests (table-key faded 'return 266)))))
   (test "no legal removals at the final feed shows SEAL HOLDS"
     (let* ((t (table-fixture '() '()))
            (after (checksum-step t (make-checksum-frame '() '() 0))))
       (assert-equal 'stalled (checksum-table-outcome after))
-      (assert-equal "SEAL HOLDS" (checksum-panel-title after))))
+      (assert-equal "SEAL HOLDS" (checksum-panel-title after))
+      (assert-equal '(retry new quit) (map car (checksum-panel-rows after)))
+      (assert-equal "RESTART" (cadar (checksum-panel-rows after)))
+      (assert-equal '(retry) (checksum-table-requests (table-key after 'return 266)))))
   (test "HACKER runs the shared trace phases and severs; CLASSIC never severs"
     (let* ((t (checksum-open 1 'twist))
            (t (checksum-table t trace: (trace-with-thresholds (checksum-table-trace t) 1 1)))

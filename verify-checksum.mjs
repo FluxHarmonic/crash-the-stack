@@ -151,8 +151,8 @@ try {
     await sleep(100);
   }
   function center(place) {
-    if (place === 'pull') return [48, 70];
-    if (place === 'waste') return [48, 212];
+    if (place === 'pull') return [284, 342];
+    if (place === 'waste') return [356, 342];
     let row = 0; while ((row + 1) * (row + 2) / 2 <= place) row++;
     const col = place - row * (row + 1) / 2;
     return [320 - 32 * row + 64 * col, 70 + 32 * row];
