@@ -103,7 +103,7 @@ for (const viewport of ['portrait', 'desktop']) for (const dock of ['center', 'r
   const label = `${viewport}-${dock}`;
   await run(label, 'node', ['verify-checksum.mjs', web,
     ...(viewport === 'portrait' ? ['--portrait'] : []), '--dock', dock,
-    '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 1_000_000);
+    '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 1_900_000);
 }
 if (results.every(r => r.rc === 0 && !r.error && !r.expired))
   marker('ready-for-host', 'BROWSER-AUDIO-CAPTURES-REGRESSIONS-PASS; proof running');

@@ -366,28 +366,41 @@
     ;; the new rate first, so (resampling?) here would describe the player
     ;; being opened, not the one whose counters are being read: the
     ;; reviewer's LOW 5, 2026-09-22).
+    ;; Adaptive opens measured 295 ms at 4x, beyond the ordinary cue
+    ;; reserve. Pre-roll the same bounded headroom as a fresh tune open;
+    ;; close the diagnostic bracket even if player construction throws.
     (define (reopen! unread)
-      (let* ((old *player*)
-             (old-rate (player-rate-of old))
-             (head (- (player-rendered old) unread))
-             (entry (let loop ((es (player-timeline old)))   ; newest first: #(pos row start)
-                      (cond ((null? es) #f)
-                            ((<= (vector-ref (car es) 2) head) (car es))
-                            (else (loop (cdr es))))))
-             (pos (if entry (cons (vector-ref entry 0) (vector-ref entry 1)) (or (live-music-position) (cons 0 0))))
-             (skip (if entry (max 0 (exact (round (* (- head (vector-ref entry 2)) (/ (live-music-rate) (* 1.0 old-rate)))))) 0))
-             (t0 (current-milliseconds))
-             (p (open-player *tune* pos)))
-        (player-close! old)
-        (set! *player* p)
-        (set! *player-rate* (live-music-rate))
-        (apply-region! p)
-        (when *pending* (player-jump-to-mark! p *pending*))   ; a jump asked and not landed survives the reopen
-        (discard! p skip)
-        (set! *landed-seen* #f)
-        (set! *opened-at* #f)
-        (apply-gain! (current-fade-gain))
-        (*say* "music" "reopen" (car pos) (cdr pos) "skip" skip "head" head "ms" (- (current-milliseconds) t0))))
+      (dynamic-wind
+        audio-stall-begin!
+        (lambda ()
+          (let* ((old *player*)
+                 (old-rate (player-rate-of old))
+                 (head (- (player-rendered old) unread))
+                 (entry (let loop ((es (player-timeline old)))   ; newest first: #(pos row start)
+                          (cond ((null? es) #f)
+                                ((<= (vector-ref (car es) 2) head) (car es))
+                                (else (loop (cdr es))))))
+                 (pos (if entry
+                          (cons (vector-ref entry 0) (vector-ref entry 1))
+                          (or (live-music-position) (cons 0 0))))
+                 (skip (if entry
+                           (max 0 (exact (round (* (- head (vector-ref entry 2))
+                                                  (/ (live-music-rate) (* 1.0 old-rate))))))
+                           0))
+                 (t0 (current-milliseconds))
+                 (p (open-player *tune* pos)))
+            (player-close! old)
+            (set! *player* p)
+            (set! *player-rate* (live-music-rate))
+            (apply-region! p)
+            (when *pending* (player-jump-to-mark! p *pending*))   ; a jump asked and not landed survives the reopen
+            (discard! p skip)
+            (set! *landed-seen* #f)
+            (set! *opened-at* #f)
+            (apply-gain! (current-fade-gain))
+            (*say* "music" "reopen" (car pos) (cdr pos)
+                   "skip" skip "head" head "ms" (- (current-milliseconds) t0))))
+        audio-stall-end!))
     (define *player-rate* #f)   ; the rate the player was opened at
     (define (player-rate-of p) (or *player-rate* (audio-rate)))
 
