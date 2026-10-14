@@ -20,9 +20,9 @@ sha256sum "$web/crash-the-stack.wasm" > "$out/wasm.sha256"
 sha256sum "$verifier" > "$out/verifier.sha256"
 rc=0
 for viewport in portrait landscape desktop; do
-  for dock in center right; do
-    label="$viewport-$dock"
-    args=("$web" --dock "$dock" --port 8117 --cdp 9337
+  for repetition in 1 2 3; do
+    label="$viewport-$repetition"
+    args=("$web" --throttle 4 --port 8117 --cdp 9337
           --deals "$root/bench/checksum-reference/deals.scm"
           --shot "$out/screens/$label.png")
     if [ "$viewport" = portrait ]; then args+=(--portrait); fi
@@ -34,7 +34,10 @@ for viewport in portrait landscape desktop; do
     arm_rc=$?
     printf 'RESULT checksum-browser %s rc=%s\n' "$label" "$arm_rc"
     printf '%s %s\n' "$label" "$arm_rc" >> "$out/results.txt"
-    if [ "$arm_rc" != 0 ]; then rc=1; fi
+    if [ "$arm_rc" != 0 ]; then
+      printf '1\n' > "$out/rc"
+      exit 1
+    fi
   done
 done
 printf '%s\n' "$rc" > "$out/rc"

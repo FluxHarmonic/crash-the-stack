@@ -1,5 +1,5 @@
 // Real CDP mouse/touch/keyboard checks against a runner-built CHECKSUM.
-// node verify-checksum.mjs build/web [--phone|--portrait] [--visible] [--dock center|right] [--shot PATH] [--url URL]
+// node verify-checksum.mjs build/web [--phone|--portrait] [--visible] [--shot PATH] [--url URL]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,11 +14,13 @@ const opt = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 
 const ROOT = path.resolve(args[0] || 'build/web');
 const PORTRAIT = args.includes('--portrait');
 const PHONE = args.includes('--phone') || PORTRAIT;
-const DOCK = opt('--dock', 'center');
 const VISIBLE = args.includes('--visible');
 const PLAYABLE_LIMIT_MS = 2000;
 const THROTTLE = Number(opt('--throttle', '4'));
-assert.ok(['center', 'right'].includes(DOCK), 'recognized horizontal dock');
+const knownFlags = new Set(['--phone', '--portrait', '--visible', '--shot', '--url',
+  '--throttle', '--port', '--cdp', '--deals', '--audio-negative']);
+for (const arg of args.slice(1))
+  if (arg.startsWith('--')) assert.ok(knownFlags.has(arg), `unknown verifier option: ${arg}`);
 const PORT = Number(opt('--port', '8115'));
 const CDP = Number(opt('--cdp', '9335'));
 const SHOT = opt('--shot', null);
@@ -176,7 +178,7 @@ try {
     await sleep(100);
   }
   function center(place) {
-    return packetCenter(place, DOCK);
+    return packetCenter(place);
   }
   const packet = place => press(...center(place));
   function passed(name, detail) { results.push(name); console.log(`PASS ${name}: ${detail}`); }
@@ -197,7 +199,7 @@ try {
       const ox=(c.width-640*s)/2, oy=(c.height-400*s)/2;
       const p=(x,y)=>({x:r.left+(ox+x*s)*r.width/c.width,
         y:r.top+(oy+y*s)*r.height/c.height});
-      const x=${DOCK === 'right' ? 440 : 256};
+      const x=256;
       return {viewport:{width:innerWidth,height:innerHeight},
         canvas:{width:c.width,height:c.height,cssWidth:r.width,cssHeight:r.height},
         scaleX:s*r.width/c.width,scaleY:s*r.height/c.height,
@@ -205,7 +207,7 @@ try {
         target:p(x,356),fieldBottom:p(0,400)};
     })()`);
     const { viewport, canvas, scaleX, scaleY, base, pile, pileBottom, target, fieldBottom } = snapshot;
-    const evidence = { viewport, canvas, dock: DOCK, scale: scaleY, scaleX, scaleY,
+    const evidence = { viewport, canvas, layout: 'center', scale: scaleY, scaleX, scaleY,
       pyramidToPilesCss: pile.y - base.y,
       pilesToPlayfieldEdgeCss: fieldBottom.y - pileBottom.y,
       pilesToScreenEdgeCss: viewport.height - pileBottom.y,
@@ -269,7 +271,7 @@ try {
   }
   async function open(seed, mode = 'classic') {
     const mark = lines.length;
-    await send('Page.navigate', { url: `${BASE}?trace&checksum=${mode}&checksum-dock=${DOCK}&seed=${seed}&fresh&bg=off` });
+    await send('Page.navigate', { url: `${BASE}?trace&checksum=${mode}&seed=${seed}&fresh&bg=off` });
     // Fetch/instantiate precedes a shortcut start; measure the logged start,
     // plus the engine's own clock, rather than counting network boot as play.
     const opened = await wait(new RegExp(`^crash: checksum open ${mode === 'classic' ? 'clean' : 'twist'} (\\d+)$`), mark, 40_000);
@@ -354,7 +356,7 @@ try {
     const state = lines.slice(dealMark).findLast(line => /^crash: checksum state /.test(line));
     const cursor = state ? Number(state.match(/ cursor (\d+|pull|waste) /)[1]) : 21;
     const start = Number.isNaN(cursor) ? state.match(/ cursor (\d+|pull|waste) /)[1] : cursor;
-    for (const arrow of model.cursorRoute(start, target, DOCK)) await key(arrow);
+    for (const arrow of model.cursorRoute(start, target)) await key(arrow);
   }
   await shot('play');
   await measureLayout();
@@ -509,7 +511,7 @@ try {
   const required = ['menu', 'latency-control', 'keyboard', 'undo', 'pair', 'root',
     'clear', 'audio', 'win-default', 'jack-out', 'console'];
   assert.deepEqual([...results].sort(), [...required].sort(), 'every browser arm reached its required checks');
-  console.log(`VERDICT: ${results.length}/${required.length} passed (${PORTRAIT ? 'portrait phone' : PHONE ? 'phone' : 'desktop'}, ${DOCK}, ${VISIBLE ? 'visible' : 'headless'})`);
+  console.log(`VERDICT: ${results.length}/${required.length} passed (${PORTRAIT ? 'portrait phone' : PHONE ? 'phone' : 'desktop'}, center, ${VISIBLE ? 'visible' : 'headless'})`);
 } catch (error) {
   console.error('FAIL CHECKSUM:', error.stack);
   console.error(lines.slice(-40).join('\n')); console.error(errors.join('\n'));

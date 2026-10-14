@@ -7,8 +7,10 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-const [binary, testLibrary, substraticLibrary] = process.argv.slice(2).map(p => path.resolve(p));
+const [binary, testLibrary, substraticLibrary] = process.argv.slice(2, 5).map(p => path.resolve(p));
 assert.equal(os.getPriority(), 19, 'source checks inherit nice19');
+const remote = process.argv.includes('--remote');
+if (!remote) assert.ok(os.loadavg()[0] < 8, 'local light checks require load1<8');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'checksum-layout-'));
 const source = path.join(scratch, 'src');
 fs.mkdirSync(source);
@@ -16,9 +18,10 @@ fs.cpSync('src/crash', path.join(source, 'crash'), { recursive: true });
 const table = path.join(source, 'crash/checksum/table.sgl');
 const original = fs.readFileSync(table, 'utf8');
 const tests = fs.readFileSync('test/test-checksum-table.sgl', 'utf8');
-const target = 'both horizontal docks keep packet-sized targets below the base and real taps draw then select';
+const target = 'center packets stay below the base and real taps draw then select';
 const hash = text => createHash('sha256').update(text).digest('hex');
 function run(filtered) {
+  if (!remote) assert.ok(os.loadavg()[0] < 8, 'local light checks require load1<8');
   const entry = path.join(scratch, 'run.sgl');
   const predicate = filtered
     ? `(lambda (td) (string=? (test-descriptor-name td) ${JSON.stringify(target)}))`
@@ -50,9 +53,9 @@ function requireResult(result, rc, count) {
 try {
   requireResult(run(false), 0, 17);
   console.log('LAYOUT CLEAN: 17/17 table controls');
-  const anchor = '(if (eq? dock \'right) 440 256) 280 56 76';
+  const anchor = '(list 256 280 56 76)';
   assert.equal(original.split(anchor).length, 2, 'unique pull spacing anchor');
-  const planted = original.replace(anchor, '(if (eq? dock \'right) 440 256) 258 56 76');
+  const planted = original.replace(anchor, '(list 256 258 56 76)');
   fs.writeFileSync(table, planted);
   const red = run(true);
   fs.writeFileSync(table, original);

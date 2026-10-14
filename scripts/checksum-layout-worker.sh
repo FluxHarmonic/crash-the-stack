@@ -16,7 +16,7 @@ git rev-parse HEAD > "$out/BUILD-SHA"
 nice -n19 sigil deps install > "$out/deps.log" 2>&1
 test "$(sha256sum sigil.lock | cut -d' ' -f1)" = "$lock"
 nice -n19 node scripts/checksum-layout-check.mjs "$(command -v sigil)" \
-  .sigil/deps/sigil-test/src .sigil/deps/substratic/src > "$out/table.log" 2>&1
+  .sigil/deps/sigil-test/src .sigil/deps/substratic/src --remote > "$out/table.log" 2>&1
 cat "$out/table.log"
 nice -n19 timeout 7200 scripts/dev sigil build --config web > "$out/build.log" 2>&1
 test -z "$(git status --porcelain --untracked-files=no)"
@@ -24,6 +24,10 @@ sha=$(cat "$out/BUILD-SHA")
 node -e 'const fs=require("fs"),assert=require("assert");assert.equal(fs.readFileSync("build/web/index.html","utf8").match(/version: "([^"]+)"/)[1],process.argv[1].slice(0,12));' "$sha"
 cp "$out/BUILD-SHA" build/web/BUILD-SHA
 sha256sum build/web/crash-the-stack.wasm > "$out/wasm.sha256"
+if [ "${CHECKSUM_BUILD_ONLY:-0}" = 1 ]; then
+  printf 'RESULT checksum-layout build-only rc=0; runner release proof pending\n' | tee "$out/build-complete"
+  exit 0
+fi
 if ! command -v google-chrome >/dev/null; then
   chrome=$(command -v chromium)
   mkdir -p "$out/shim"

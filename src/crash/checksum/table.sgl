@@ -18,7 +18,7 @@
 
   (export checksum-table checksum-table? checksum-open checksum-step
           checksum-table-board checksum-table-trace checksum-table-mode
-          checksum-table-seed checksum-table-ms checksum-table-clock checksum-table-dock
+          checksum-table-seed checksum-table-ms checksum-table-clock
           checksum-table-cursor checksum-table-cursor-shown
           checksum-table-paused checksum-table-outcome checksum-table-panel
           checksum-table-panel-at checksum-table-toast checksum-table-toast-at
@@ -43,7 +43,6 @@
       (board default: #f)
       (trace default: #f)
       (mode default: 'clean)
-      (dock default: 'center)
       (seed default: 1)
       (clock default: #f)
       (ms default: 0.0)
@@ -68,59 +67,56 @@
          seed: (cboard-seed b)
          clock: (clock-new))))
 
-    (define (checksum-place-rect place . options)
-      (let ((dock (if (pair? options) (car options) 'center)))
-        ;; Keep full packet faces with 26 pixels exposed between rows.
-        ;; The last row ends at 254, leaving 26 pixels before the piles.
-        (cond
-         ((eq? place 'pull)
-          (list (if (eq? dock 'right) 440 256) 280 56 76))
-         ((eq? place 'waste)
-          (list (if (eq? dock 'right) 512 328) 280 56 76))
-         (else
-          (let* ((slot (layout-slot (pyramid-layout) place))
-                 (row (slot-layer slot)))
-            (list (+ 100 (* 32 (slot-hx slot)))
-                  (+ 22 (* 26 row))
-                  56 76))))))
+    (define (checksum-place-rect place)
+      ;; Keep full packet faces with 26 pixels exposed between rows.
+      ;; The last row ends at 254, leaving 26 pixels before the piles.
+      (cond
+       ((eq? place 'pull)
+        (list 256 280 56 76))
+       ((eq? place 'waste)
+        (list 328 280 56 76))
+       (else
+        (let* ((slot (layout-slot (pyramid-layout) place))
+               (row (slot-layer slot)))
+          (list (+ 100 (* 32 (slot-hx slot)))
+                (+ 22 (* 26 row))
+                56 76)))))
 
     ;; Shared meter dimensions, below both piles in every viewport. The
     ;; fixed virtual stage letterboxes; keeping this lane preserves input
     ;; positions through rotation and leaves the side readout unobstructed.
-    (define (checksum-meter-rect dock)
-      (list (if (eq? dock 'right) 404 220) 374 METER-W METER-H))
+    (define (checksum-meter-rect)
+      (list 220 374 METER-W METER-H))
 
     ;; Reverse draw order: the visible child wins a tap in any overlap.
-    (define (checksum-hit b x y . options)
-      (let ((dock (if (pair? options) (car options) 'center)))
-      (cond ((rect-contains? (checksum-place-rect 'pull dock) x y) 'pull)
-            ((rect-contains? (checksum-place-rect 'waste dock) x y) 'waste)
+    (define (checksum-hit b x y)
+      (cond ((rect-contains? (checksum-place-rect 'pull) x y) 'pull)
+            ((rect-contains? (checksum-place-rect 'waste) x y) 'waste)
             (else
              (let loop ((id 27))
                (cond ((< id 0) #f)
                      ((and (tile-present? (cboard-pyramid b) id)
                            (rect-contains? (checksum-place-rect id) x y))
                       id)
-                     (else (loop (- id 1)))))))))
+                     (else (loop (- id 1))))))))
 
     (define (checksum-cursor-places b)
       (append (filter (lambda (id) (checksum-free? b id)) (iota 28))
               (if (pair? (cboard-waste b)) '(waste) '())
               (if (or (pair? (cboard-stock b)) (checksum-rollback? b)) '(pull) '())))
 
-    (define (center place dock)
-      (let ((r (checksum-place-rect place dock)))
+    (define (center place)
+      (let ((r (checksum-place-rect place)))
         (cons (+ (car r) 28) (+ (cadr r) 38))))
 
     (define (move-cursor t key)
       (let* ((places (checksum-cursor-places (checksum-table-board t)))
              (current (checksum-table-cursor t))
-             (dock (checksum-table-dock t))
-             (origin (center current dock))
+             (origin (center current))
              (horizontal? (memq key '(left h right l)))
              (sign (if (memq key '(left h up k)) -1 1)))
         (define (distance place)
-          (let* ((target (center place dock))
+          (let* ((target (center place))
                  (dx (- (car target) (car origin)))
                  (dy (- (cdr target) (cdr origin)))
                  (along (if horizontal? dx dy))
@@ -205,8 +201,7 @@
             (cond ((rect-contains? CHECKSUM-PAUSE-RECT x y) (pause t))
                   ((rect-contains? CHECKSUM-UNDO-RECT x y) (undo t))
                   (else
-                   (let ((place (checksum-hit (checksum-table-board t) x y
-                                              (checksum-table-dock t))))
+                   (let ((place (checksum-hit (checksum-table-board t) x y)))
                      (if place
                          (act (checksum-table t cursor-shown: #f) place)
                          t)))))))

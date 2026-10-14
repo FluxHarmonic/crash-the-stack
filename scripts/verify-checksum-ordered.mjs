@@ -94,6 +94,16 @@ fs.writeFileSync(path.join(out, 'wasm.sha256'),
   createHash('sha256').update(fs.readFileSync(path.join(web, 'crash-the-stack.wasm'))).digest('hex') + '\n');
 
 // Check player-facing behavior before compiling the separate pure pool exporter.
+for (const viewport of ['portrait', 'landscape', 'desktop']) for (const repetition of [1, 2, 3]) {
+  const label = `${viewport}-${repetition}`;
+  const ok = await run(label, 'node', ['verify-checksum.mjs', web,
+    ...(viewport === 'portrait' ? ['--portrait'] : viewport === 'landscape' ? ['--phone'] : []),
+    '--throttle', '4', '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 610_000);
+  if (!ok) {
+    marker('browser-gates-failed', 'CENTER-REPETITION-FAILED; STOP; DO-NOT-HOST');
+    process.exit(1);
+  }
+}
 for (const [label, script] of [['stack', 'verify.mjs'], ['defrag', 'verify-cards.mjs'],
   ['scan', 'verify-scan.mjs'], ['intercept', 'verify-intercept.mjs'], ['decrypt', 'verify-decrypt.mjs']])
   await run(label, 'node', [script, web, '--phone']);
@@ -106,12 +116,6 @@ for (const [label, file, filter] of [
     const r = JSON.parse(fs.readFileSync(report, 'utf8'));
     assert.equal(r.summary.total, 1); assert.equal(r.summary.passed, 1);
   }
-}
-for (const viewport of ['portrait', 'desktop']) for (const dock of ['center', 'right']) {
-  const label = `${viewport}-${dock}`;
-  await run(label, 'node', ['verify-checksum.mjs', web,
-    ...(viewport === 'portrait' ? ['--portrait'] : []), '--dock', dock,
-    '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 610_000);
 }
 if (results.every(r => r.rc === 0 && !r.error && !r.expired))
   marker('browser-complete', 'BROWSER-AUDIO-CAPTURES-REGRESSIONS-PASS; pool proof pending');
@@ -171,6 +175,7 @@ const plants = fs.readFileSync('scripts/checksum-rule-sabotage.mjs', 'utf8');
 const offlineFocused = [...plants.matchAll(/^  \[(?:solvePath|generatePath),[\s\S]*?\n\s+'([^']+)'\]/gm)].map(m => m[1]);
 assert.equal(offlineFocused.length, 9, 'six runtime plus three generator controls');
 const focused = offlineFocused.concat([
+  'center packets stay below the base and real taps draw then select',
   'opening an archive provides a playable board immediately and clocks advance on play',
   'CHECKSUM tile opens its own screen and NEW BOARD selects CHECKSUM',
   "CHECKSUM's version stays independent and Back returns to its kept tile",

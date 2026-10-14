@@ -7,9 +7,9 @@ for (let row = 0; row < 6; row++) for (let col = 0; col <= row; col++) {
   children[row * (row + 1) / 2 + col] = [
     (row + 1) * (row + 2) / 2 + col, (row + 1) * (row + 2) / 2 + col + 1];
 }
-export function packetCenter(place, dock) {
-  if (place === 'pull') return [dock === 'right' ? 468 : 284, 318];
-  if (place === 'waste') return [dock === 'right' ? 540 : 356, 318];
+export function packetCenter(place) {
+  if (place === 'pull') return [284, 318];
+  if (place === 'waste') return [356, 318];
   let row = 0; while ((row + 1) * (row + 2) / 2 <= place) row++;
   const col = place - row * (row + 1) / 2;
   return [320 - 32 * row + 64 * col, 60 + 26 * row];
@@ -26,20 +26,20 @@ export class BrowserBoard {
       .concat(this.waste.length ? ['waste'] : [],
         this.stock.length || (this.waste.length && this.pass < 3) ? ['pull'] : []);
   }
-  cursorRoute(start, target, dock) {
+  cursorRoute(start, target) {
     const places = this.places();
     assert.ok(places.includes(target), 'keyboard target is available');
     const queue = [[start, []]], seen = new Set([start]);
     for (let index = 0; index < queue.length; index++) {
       const [current, route] = queue[index];
       if (current === target) return route;
-      const [x, y] = packetCenter(current, dock);
+      const [x, y] = packetCenter(current);
       for (const key of ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown']) {
         const horizontal = key === 'ArrowLeft' || key === 'ArrowRight';
         const sign = key === 'ArrowLeft' || key === 'ArrowUp' ? -1 : 1;
         let next = current, best = Infinity;
         for (const place of places) {
-          const [tx, ty] = packetCenter(place, dock);
+          const [tx, ty] = packetCenter(place);
           const along = horizontal ? tx - x : ty - y;
           const across = horizontal ? ty - y : tx - x;
           const score = Math.abs(along) + 3 * Math.abs(across);
@@ -48,7 +48,7 @@ export class BrowserBoard {
         if (!seen.has(next)) { seen.add(next); queue.push([next, [...route, key]]); }
       }
     }
-    throw new Error(`No keyboard route from ${start} to ${target} (${dock})`);
+    throw new Error(`No keyboard route from ${start} to ${target}`);
   }
   apply(action) {
     if (action === 'pull') {
