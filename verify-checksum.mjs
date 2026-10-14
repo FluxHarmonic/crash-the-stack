@@ -8,6 +8,9 @@ import assert from 'node:assert/strict';
 import { parseDeals, solve } from './scripts/checksum-solve.mjs';
 import { BrowserBoard, packetCenter } from './scripts/checksum-browser-model.mjs';
 import { requireHealthyDealAudio } from './scripts/checksum-audio-gate.mjs';
+import { createProcessStopGuard } from './scripts/process-stop-guard.mjs';
+
+const stopGuard = createProcessStopGuard();
 
 const args = process.argv.slice(2);
 const opt = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
@@ -40,7 +43,7 @@ const lines = [], receivedAt = [], errors = [], results = [];
 let chrome, profile, server, ws;
 let currentThrottle = 1;
 function cleanup() {
-  if (chrome?.pid) { try { process.kill(-chrome.pid, 'SIGKILL'); } catch {} }
+  if (chrome?.pid) stopGuard.stopGroup(chrome.pid, 'SIGKILL');
   try { ws?.close(); } catch {}
   try { server?.close(); } catch {}
   if (profile) { try { fs.rmSync(profile, { recursive: true, force: true }); } catch {} }

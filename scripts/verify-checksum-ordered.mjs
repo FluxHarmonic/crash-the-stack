@@ -6,6 +6,9 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { parseDeals } from './checksum-solve.mjs';
+import { createProcessStopGuard } from './process-stop-guard.mjs';
+
+const stopGuard = createProcessStopGuard();
 
 const args = process.argv.slice(2);
 const web = path.resolve(args[0] || 'build/web');
@@ -45,11 +48,12 @@ async function run(label, command, argv, timeout = 1_800_000, separate = false) 
   console.log(`CHECKSUM-ORDERED START ${label}`);
   const row = await new Promise(resolve => {
     const child = spawn(command, argv, { env, stdio: ['ignore', fd, errorFd], detached: true });
+    stopGuard.admit();
     let expired = false, killTimer;
     const timer = setTimeout(() => {
       expired = true;
-      try { process.kill(-child.pid, 'SIGTERM'); } catch {}
-      killTimer = setTimeout(() => { try { process.kill(-child.pid, 'SIGKILL'); } catch {} }, 10_000);
+      stopGuard.stopGroup(child.pid, 'SIGTERM');
+      killTimer = setTimeout(() => stopGuard.stopGroup(child.pid, 'SIGKILL'), 10_000);
     }, timeout);
     let error = '';
     child.on('error', e => { error = String(e); });

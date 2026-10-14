@@ -39,6 +39,8 @@ import fs from "node:fs";
 import zlib from "node:zlib";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createProcessStopGuard } from './scripts/process-stop-guard.mjs';
+const stopGuard = createProcessStopGuard();
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -123,11 +125,9 @@ const chrome = spawn("google-chrome", [
 ], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// The one way out. chrome was spawned detached, so -chrome.pid is its
-// process group: the browser and every helper (GPU, renderers) go
-// together, whether or not the browser process is still there.
+// Print and validate the complete admitted descendant list before signaling.
 function killChromeGroup(sig) {
-  try { process.kill(-chrome.pid, sig); } catch { /* already gone */ }
+  stopGuard.stopGroup(chrome.pid, sig);
 }
 let exiting = false;
 function shutdown(code) {

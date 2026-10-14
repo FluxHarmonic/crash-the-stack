@@ -100,6 +100,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import zlib from "node:zlib";
+import { createProcessStopGuard } from './scripts/process-stop-guard.mjs';
+const stopGuard = createProcessStopGuard();
 
 const args = process.argv.slice(2);
 const flag = (name) => args.includes(name);
@@ -237,7 +239,7 @@ function leakedVerifyChromes() {
 
 const udd = fs.mkdtempSync("/tmp/crash-verify-chrome-");
 const chrome = spawn("google-chrome", [
-  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage",
+  "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   // NEWS opens a post with window.open a frame after the key that chose it;
   // a real browser's transient activation covers that, headless's popup
   // blocker does not (2026-09-22): the leg proves the wiring, not the blocker
@@ -252,11 +254,9 @@ const chrome = spawn("google-chrome", [
 ], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null", PIPEWIRE_NODE: "worker-null" } });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// The one way out. chrome was spawned detached, so -chrome.pid is its
-// process group: the browser and every helper (GPU, renderers) go
-// together, whether or not the browser process is still there.
+// Print and validate the complete admitted descendant list before signaling.
 function killChromeGroup(sig) {
-  try { process.kill(-chrome.pid, sig); } catch { /* already gone */ }
+  stopGuard.stopGroup(chrome.pid, sig);
 }
 let exiting = false;
 function shutdown(code) {

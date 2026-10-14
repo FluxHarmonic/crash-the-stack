@@ -23,9 +23,11 @@ function replace(before, after) {
 }
 // Keep the qualification verifier untouched: instrument a scratch copy only.
 source = source.replaceAll("from './scripts/", "from '../scripts/");
-replace("import http from 'node:http';", "import http from 'node:http';\nimport { createProcessStopGuard } from '../scripts/process-stop-guard.mjs';\nconst stopGuard = createProcessStopGuard();");
-replace("if (chrome?.pid) { try { process.kill(-chrome.pid, 'SIGKILL'); } catch {} }",
-  "if (chrome?.pid) { stopGuard.stopGroup(chrome.pid, 'SIGKILL'); }");
+if (!source.includes('const stopGuard = createProcessStopGuard();')) {
+  replace("import http from 'node:http';", "import http from 'node:http';\nimport { createProcessStopGuard } from '../scripts/process-stop-guard.mjs';\nconst stopGuard = createProcessStopGuard();");
+  replace("if (chrome?.pid) { try { process.kill(-chrome.pid, 'SIGKILL'); } catch {} }",
+    "if (chrome?.pid) { stopGuard.stopGroup(chrome.pid, 'SIGKILL'); }");
+}
 replace("if (signature !== previous || now - last > 150) {", "if (true) {");
 replace("await send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });",
   "await send('Performance.enable');\n  const clockMetrics = await send('Performance.getMetrics');\n  await send('Profiler.enable');\n  await send('Profiler.setSamplingInterval', { interval: 1000 });\n  await send('Profiler.start');\n  await send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });\n  const profileStarted = await js('performance.now()');\n  const profileLineStart = lines.length;");
