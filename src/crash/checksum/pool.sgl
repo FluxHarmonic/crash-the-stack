@@ -1,0 +1,86 @@
+;;; Instant player boards from offline-proved, difficulty-filtered deals.
+;;; A cycle shuffles once and consumes every entry before reshuffling.
+
+(define-library (crash checksum pool)
+  (import (sigil struct)
+          (sigil list)
+          (crash stack prng)
+          (crash stack rules)
+          (crash checksum rules)
+          (crash checksum pool data))
+  (export checksum-pool-size checksum-pool-seed checksum-pool-board
+          checksum-pool-metrics checksum-pool-cycle checksum-pool-pick!)
+  (begin
+    (define (checksum-pool-size)
+      (vector-length CHECKSUM-POOL-DEALS))
+
+    (define (checksum-pool-seed seed)
+      (+ 1 (modulo (- (prng-seed seed) 1) (checksum-pool-size))))
+
+    (define (entry seed)
+      (vector-ref CHECKSUM-POOL-DEALS (- (checksum-pool-seed seed) 1)))
+
+    (define (checksum-pool-board seed)
+      (let* ((data (entry seed))
+             (actual (vector-ref data 0))
+             (b (checksum-board (vector-ref data 1)
+                                (map (lambda (packet) packet) (vector-ref data 2)))))
+        ;; board-new copies the packet vector; every play owns its state.
+        (cboard b
+                seed: actual
+                pyramid: (board (cboard-pyramid b) rng: actual))))
+
+    (define (checksum-pool-metrics seed)
+      (let ((data (entry seed)))
+        (map (lambda (index) (vector-ref data index)) '(3 4 5 6 7))))
+
+    (define-struct cycle
+      (rng default: 1 mutable: #t)
+      (bag default: #f mutable: #t)
+      (next default: 0 mutable: #t)
+      (last default: #f mutable: #t))
+
+    (define (checksum-pool-cycle entropy)
+      (cycle rng: (prng-seed entropy)))
+
+    (define (swap! bag a b)
+      (let ((held (vector-ref bag a)))
+        (vector-set! bag a (vector-ref bag b))
+        (vector-set! bag b held)))
+
+    (define (shuffle! c)
+      (let* ((size (checksum-pool-size))
+             (bag (list->vector (iota size))))
+        (let loop ((at (- size 1)))
+          (when (> at 0)
+            (let ((rng (prng-next (cycle-rng c))))
+              (set-cycle-rng! c rng)
+              (swap! bag at (prng-index rng (+ at 1)))
+              (loop (- at 1)))))
+        ;; Also avoid an immediate repeat across the exhaustion boundary.
+        (when (and (> size 1) (cycle-last c)
+                   (= (+ 1 (vector-ref bag 0)) (cycle-last c)))
+          (swap! bag 0 1))
+        (set-cycle-bag! c bag)
+        (set-cycle-next! c 0)))
+
+    (define (consume! c at)
+      (swap! (cycle-bag c) (cycle-next c) at)
+      (set-cycle-next! c (+ 1 (cycle-next c))))
+
+    ;; An explicit seed is a deterministic retry/linked board. Remove it
+    ;; from the remaining bag when present, so NEW never repeats it early.
+    (define (checksum-pool-pick! c seed)
+      (when (or (not (cycle-bag c))
+                (= (cycle-next c) (checksum-pool-size)))
+        (shuffle! c))
+      (let ((chosen (if seed
+                        (checksum-pool-seed seed)
+                        (+ 1 (vector-ref (cycle-bag c) (cycle-next c))))))
+        (let find ((at (cycle-next c)))
+          (when (< at (checksum-pool-size))
+            (if (= (+ 1 (vector-ref (cycle-bag c) at)) chosen)
+                (consume! c at)
+                (find (+ at 1)))))
+        (set-cycle-last! c chosen)
+        chosen))))

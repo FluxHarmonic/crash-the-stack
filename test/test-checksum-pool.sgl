@@ -1,0 +1,56 @@
+;;; No runtime search: independent pool cycles and fresh player state.
+(import (sigil test)
+        (sigil list)
+        (crash stack rules)
+        (crash checksum rules)
+        (crash checksum pool))
+
+(define (pick-many c count)
+  (let loop ((left count) (seen '()))
+    (if (= left 0)
+        (reverse seen)
+        (loop (- left 1) (cons (checksum-pool-pick! c #f) seen)))))
+
+(test-group "checksum: instant pool"
+  (test "two complete cycles each contain every pool seed exactly once"
+    (let* ((size (checksum-pool-size))
+           (c (checksum-pool-cycle 4194303))
+           (first (pick-many c size))
+           (second (pick-many c size)))
+      (assert-true (>= size 200))
+      (assert-equal (iota size 1) (list-sort < first))
+      (assert-equal (iota size 1) (list-sort < second))
+      (assert-false (= (car (reverse first)) (car second)))))
+  (test "explicit starts and retries do not consume or repeat another pending board"
+    (let* ((c (checksum-pool-cycle 43))
+           (start (checksum-pool-pick! c 2))
+           (retry (checksum-pool-pick! c 2))
+           (rest (pick-many c (- (checksum-pool-size) 1))))
+      (assert-equal 2 start)
+      (assert-equal start retry)
+      (assert-false (member start rest))
+      (assert-equal (iota (checksum-pool-size) 1) (list-sort < (cons start rest)))))
+  (test "equal cycle entropy preserves the selection order"
+    (assert-equal (pick-many (checksum-pool-cycle 91) 20)
+                  (pick-many (checksum-pool-cycle 91) 20)))
+  (test "a pool board owns its packets and starts with untouched player state"
+    (let* ((one (checksum-pool-board 2))
+           (faces (board-faces (cboard-pyramid one)))
+           (original (vector-ref faces 0)))
+      (assert-equal 0 (checksum-count one))
+      (assert-equal 24 (length (cboard-stock one)))
+      (assert-equal 1 (cboard-passes one))
+      (assert-equal 2 (cboard-seed one))
+      (vector-set! faces 0 -1)
+      (assert-equal original (vector-ref (board-faces (cboard-pyramid (checksum-pool-board 2))) 0))))
+  (test "pool difficulty records keep the runtime acceptance filter"
+    (for-each
+      (lambda (seed)
+        (let* ((metrics (checksum-pool-metrics seed))
+               (draws (car metrics))
+               (needed (cadr metrics))
+               (failed (caddr metrics)))
+          (assert-true (>= draws 8))
+          (assert-true (>= failed 20))
+          (assert-true (<= (* 100 needed) (* 55 draws)))))
+      '(1 2 3 4 5))))
