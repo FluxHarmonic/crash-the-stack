@@ -79,8 +79,8 @@ const sumPlant = '\n              12)))';
 const coverageAnchor = '(and (playable? (cboard-pyramid b) place)';
 const coveragePlant = '(and (tile-present? (cboard-pyramid b) place)';
 const cases = [
-  [tablePath, "(checksum-table t requests: '(quit)))", "(checksum-table t requests: '(new)))",
-    'archive preparation holds clocks and play input; Escape still requests JACK OUT'],
+  [tablePath, 'board: b\n         trace:', 'board: #f\n         trace:',
+    'opening an archive provides a playable board immediately and clocks advance on play'],
   [solvePath, '(= 13 (vector-ref (search-offsets s) id))', '(= 12 (vector-ref (search-offsets s) id))',
     'runtime ROOTs uncover the complete pyramid; missing complements prove loss'],
   [solvePath, '(when (and top (= 13 (+ offset (vector-ref feed-offsets top))))\n                   (add (node drawn',
