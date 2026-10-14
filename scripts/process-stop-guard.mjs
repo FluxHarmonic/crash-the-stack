@@ -41,6 +41,9 @@ export function createProcessStopGuard({ root = process.pid, read = processes,
   const timer = setInterval(admit, 100);
   timer.unref();
   function stopGroup(group, kind = 'SIGTERM') {
+    // A renderer can be born after the last timer tick. Admit it only while
+    // its complete original ancestry is still present, then recheck below.
+    admit();
     const rows = read();
     const targets = [...rows.values()].filter(row => row.group === group);
     print('STOP-LIST ' + JSON.stringify({ root, group, signal: kind, targets }));
@@ -76,7 +79,12 @@ export function createProcessStopGuard({ root = process.pid, read = processes,
             || now.group !== row.group || parent?.start !== rows.get(row.parent)?.start;
         })) return reject('process list changed before signaling');
     // Children first, using only positive admitted PIDs, never a broadcast/group kill.
-    for (const row of targets.sort((a, b) => (a.pid === group) - (b.pid === group))) {
+    function depth(row) {
+      let n = 0;
+      for (let cursor = row; cursor.pid !== root; cursor = rows.get(cursor.parent)) n++;
+      return n;
+    }
+    for (const row of targets.sort((a, b) => depth(b) - depth(a))) {
       try { signal(row.pid, kind); } catch (error) {
         if (error.code !== 'ESRCH') throw error;
       }

@@ -26,7 +26,7 @@ for (const [label, mutate, group] of [
   ['PID 1 in target list', f => f.rows.set(1, { pid: 1, parent: 0, group: 20, start: '1' }), 20],
   ['group zero', () => {}, 0],
   ['group one', () => {}, 1],
-  ['unadmitted member', f => f.rows.set(22, { pid: 22, parent: 20, group: 20, start: '202' }), 20],
+  ['unadmitted member outside the root', f => f.rows.set(22, { pid: 22, parent: 999, group: 20, start: '202' }), 20],
   ['PID reuse', f => f.rows.get(21).start = '999', 20],
   ['orphaned parent', f => f.rows.get(21).parent = 1, 20],
   ['absent group leader', f => f.rows.delete(20), 20],
@@ -38,5 +38,13 @@ for (const [label, mutate, group] of [
     assert.equal(f.guard.stopGroup(group), false);
     assert.deepEqual(f.calls, []);
     assert.ok(f.printed.at(-1).startsWith('STOP-REFUSED '));
+  } finally { f.guard.close(); }
+});
+test('admits a late descendant and stops grandchildren before their live parents', () => {
+  const f = fixture();
+  try {
+    f.rows.set(22, { pid: 22, parent: 21, group: 20, start: '202' });
+    assert.equal(f.guard.stopGroup(20), true);
+    assert.deepEqual(f.calls, [[22, 'SIGTERM'], [21, 'SIGTERM'], [20, 'SIGTERM']]);
   } finally { f.guard.close(); }
 });
