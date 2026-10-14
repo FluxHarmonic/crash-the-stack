@@ -371,7 +371,13 @@
     ;; close the diagnostic bracket even if player construction throws.
     (define (reopen! unread)
       (dynamic-wind
-        audio-stall-begin!
+        (lambda ()
+          (let ((started (current-milliseconds))
+                (voices (length (audio-voices))))
+            (audio-stall-begin!)
+            (*say* "music" "start-stage" "reopen-preroll"
+                   "ms" (- (current-milliseconds) started)
+                   "voices" voices)))
         (lambda ()
           (let* ((old *player*)
                  (old-rate (player-rate-of old))
@@ -601,8 +607,12 @@
             ;; starved frame after it is folded into the known count (the
             ;; reviewer's LOW 4, 2026-09-22).
             (guard (e (#t (audio-stall-end!) (refuse! name text e) 'failed))
-            (let* ((stall (audio-stall-begin!))
+            (let* ((started (current-milliseconds))
+                   (voices (length (audio-voices)))
+                   (stall (audio-stall-begin!))
+                   (prerolled-at (current-milliseconds))
                    (t (read-tune-string text))
+                   (parsed-at (current-milliseconds))
                    (calm (or (tune-mark t 'calm) 0))
                    (left (assq name *positions*))
                    (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
@@ -623,6 +633,11 @@
               (set! *landed-seen* #f)
               (set! *opened-at* start)
               (apply-region! p)
+              (*say* "music" "start-stage" (symbol->string name)
+                     "preroll-ms" (- prerolled-at started)
+                     "read-ms" (- parsed-at prerolled-at)
+                     "player-ms" open-ms
+                     "voices" voices)
               (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
               (fade! 0.0 1.0 FADE-IN-MS #f)
               (audio-stall-end!)
