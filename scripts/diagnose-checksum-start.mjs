@@ -1,18 +1,45 @@
 // Bounded isolated-profile start diagnosis; no build, solver or speaker output.
-// node scripts/diagnose-checksum-start.mjs --url URL [--out PREFIX] [--cdp PORT]
+// node scripts/diagnose-checksum-start.mjs (--url URL | --web DIR) [--out PREFIX] [--cdp PORT]
 import fs from 'node:fs';
 import path from 'node:path';
+import http from 'node:http';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 
 const args = process.argv.slice(2);
 const option = (name, fallback) => args.includes(name) ? args[args.indexOf(name) + 1] : fallback;
-const base = option('--url', null);
-assert.ok(base && /^https?:\/\//.test(base), 'pass the authorized draft URL with --url');
+let base = option('--url', null);
+const web = option('--web', null);
+assert.ok(!!base !== !!web, 'pass either the authorized draft URL or its immutable build directory');
+let server;
+if (web) {
+  const root = path.resolve(web);
+  assert.ok(fs.existsSync(path.join(root, 'index.html')), 'immutable served artifact exists');
+  const types = { '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
+    '.wasm': 'application/wasm', '.png': 'image/png', '.json': 'application/json', '.css': 'text/css' };
+  server = http.createServer((req, res) => {
+    const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
+    const file = path.resolve(root, '.' + (pathname === '/' ? '/index.html' : pathname));
+    if (!file.startsWith(root + path.sep)) { res.writeHead(403).end(); return; }
+    fs.readFile(file, (error, bytes) => {
+      if (error) { res.writeHead(404).end(); return; }
+      res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream',
+        'Cache-Control': 'no-store', 'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp' }).end(bytes);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject); server.listen(0, '127.0.0.1', resolve);
+  });
+  base = 'http://127.0.0.1:' + server.address().port + '/';
+}
+assert.match(base, /^https?:\/\//);
 const out = option('--out', 'build/checksum-start-diagnostic');
 fs.mkdirSync(path.dirname(path.resolve(out)), { recursive: true });
 let phase = 'launch', windowInfo, blankFrames, menuFrames, opened, playableAfterMs = null;
 let cpuProfile;
+let navigation, pageState;
+const requests = new Map(), network = [];
 const profile = fs.mkdtempSync('/tmp/checksum-visible-profile-');
 const port = Number(option('--cdp', '9339'));
 const log = [], errors = [], samples = [];
@@ -26,14 +53,18 @@ const browser = spawn('google-chrome', flags, { detached: true, stdio: ['ignore'
   env: { ...process.env, PULSE_SINK: 'worker-null', PIPEWIRE_NODE: 'worker-null' } });
 let ws, completed = false, rc = 1, commandLine;
 function cleanup() {
+  try { server?.close(); } catch {}
   try { ws?.close(); } catch {}
   try { process.kill(-browser.pid, 'SIGKILL'); } catch {}
 }
 process.on('exit', cleanup);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const watchdog = setTimeout(() => { cleanup(); process.exit(2); }, 75_000);
+const watchdog = setTimeout(() => { cleanup(); process.exit(2); }, 100_000);
 process.on('exit', code => {
-  if (!completed) fs.writeFileSync(out + '.json', JSON.stringify({ phase, rc: code, flags, profile, windowInfo, blankFrames, menuFrames, commandLine, errors, samples, log }, null, 2));
+  if (!completed) fs.writeFileSync(out + '.json', JSON.stringify({ phase, rc: code, base,
+    headless: true, muted: true, flags, profile, windowInfo, blankFrames, menuFrames,
+    commandLine, navigation, pageState, network, pendingRequests: [...requests.values()],
+    errors, samples, log }, null, 2));
   fs.writeFileSync(out + '.rc', String(code) + '\n');
 });
 try {
@@ -87,8 +118,19 @@ try {
     } else if (m.method === 'Runtime.exceptionThrown') {
       errors.push(m.params.exceptionDetails.exception?.description || m.params.exceptionDetails.text);
     } else if (m.method === 'Log.entryAdded' && m.params.entry.level === 'error') errors.push(m.params.entry.text);
+    else if (m.method === 'Network.requestWillBeSent') {
+      requests.set(m.params.requestId, { url: m.params.request.url, started: m.params.timestamp });
+    } else if (m.method === 'Network.responseReceived') {
+      const r = m.params.response;
+      network.push({ event: 'response', url: r.url, status: r.status, mime: r.mimeType });
+    } else if (m.method === 'Network.loadingFinished' || m.method === 'Network.loadingFailed') {
+      const r = requests.get(m.params.requestId);
+      network.push({ event: m.method.split('.')[1], ...r, bytes: m.params.encodedDataLength,
+        seconds: r ? m.params.timestamp - r.started : undefined, error: m.params.errorText });
+      requests.delete(m.params.requestId);
+    }
   });
-  for (const method of ['Page.enable', 'Runtime.enable', 'Log.enable']) await send(method);
+  for (const method of ['Page.enable', 'Runtime.enable', 'Log.enable', 'Network.enable']) await send(method);
   async function js(expression) {
     const r = await send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
     if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
@@ -113,6 +155,7 @@ try {
   const counter = `window.__checksumRaf = { count: 0, last: 0 };
     requestAnimationFrame(function probe(at) { window.__checksumRaf.count++; window.__checksumRaf.last = at; requestAnimationFrame(probe); });`;
   try { commandLine = (await send('Browser.getBrowserCommandLine')).arguments; } catch (e) { errors.push('command-line: ' + e.message); }
+  assert.ok(commandLine?.includes('--user-data-dir=' + profile), 'DevTools target belongs to our isolated profile');
   windowInfo = await send('Browser.getWindowForTarget');
   await send('Browser.setWindowBounds', { windowId: windowInfo.windowId, bounds: { windowState: 'normal' } });
   await send('Page.bringToFront');
@@ -128,9 +171,10 @@ try {
   await send('Page.addScriptToEvaluateOnNewDocument', { source: counter });
   phase = 'warm-menu';
   let mark = log.length;
-  await send('Page.navigate', { url: base + '?trace&fresh&bg=off&ms' });
+  navigation = await send('Page.navigate', { url: base + '?trace&fresh&bg=off&ms' });
+  assert.ok(!navigation.errorText, 'navigation succeeded: ' + navigation.errorText);
   await send('Page.bringToFront');
-  await wait(/^crash: menu top /, mark);
+  await wait(/^crash: menu top /, mark, 40_000);
   await sleep(1000);
   for (let attempt = 0; attempt < 3 && !log.slice(mark).some(row => /^crash: boot done /.test(row.text)); attempt++) {
     await key('ArrowUp'); await sleep(700);
@@ -172,9 +216,24 @@ try {
   phase = 'done'; rc = 0;
 } catch (e) {
   errors.push(e.stack || String(e)); console.error('PROBE-FAIL', phase, e.message);
+  if (ws?.readyState === WebSocket.OPEN) {
+    try {
+      const r = await send('Runtime.evaluate', { returnByValue: true, expression: `({
+        url: location.href, readyState: document.readyState, visible: document.visibilityState,
+        raf: window.__checksumRaf, appStarted: window.SigilWebApp?.started,
+        hasInstance: !!window.SigilWebApp?.instance, pendingDispatches: window.SigilWebApp?.pending?.length,
+        loaderText: document.getElementById('status')?.textContent,
+        text: document.body?.innerText?.slice(0, 1200), stats: window.crashPageStats?.()
+      })` });
+      pageState = r.result?.value;
+      const capture = await send('Page.captureScreenshot', { format: 'png' });
+      fs.writeFileSync(out + '.failure.png', Buffer.from(capture.data, 'base64'));
+    } catch (snapshotError) { errors.push('failure snapshot: ' + snapshotError.message); }
+  }
 } finally {
   fs.writeFileSync(out + '.json', JSON.stringify({ phase, rc, base, headless: true, muted: true, flags, profile, commandLine, windowInfo,
-    blankFrames, menuFrames, opened, playableAfterMs, samples, errors, log }, null, 2));
+    blankFrames, menuFrames, navigation, pageState, network, pendingRequests: [...requests.values()],
+    opened, playableAfterMs, samples, errors, log }, null, 2));
   fs.writeFileSync(out + '.log', log.map(row => row.text).join('\n') + '\n');
   fs.writeFileSync(out + '.rc', String(rc) + '\n');
   completed = true; clearTimeout(watchdog); cleanup(); fs.closeSync(browserLog);
