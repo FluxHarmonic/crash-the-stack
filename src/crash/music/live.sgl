@@ -36,6 +36,7 @@
 
 (define-library (crash music live)
   (import (sigil math)
+          (sigil struct)
           (sigil time)
           (sigil list)
           (motif tune)
@@ -72,6 +73,14 @@
     (define *fresh* #f)           ; a new deal was dealt: the next pick is fresh and starts from the top
     (define *restart* #f)         ; the wanted track is the playing one but a fresh deal wants it from the top
     (define *texts* '())          ; ((name . text) ...): tune texts that landed
+    (define *parsed-tunes* '())   ; at most three immutable tunes: menu and recent tables
+    (define *opening* #f)         ; parsed this frame, player constructed on a later frame
+    (define-struct music-opening
+      (name)
+      (text)
+      (tune)
+      (start)
+      (top))
     (define *refused* '())        ; names whose text would not read: never opened again this session
     (define *loader* #f)          ; (proc name) -> text | #f; #f asks the page (a fetch line)
     (define *asked* '())          ; names asked of the page
@@ -545,7 +554,15 @@
         (set! *tune* #f)
         (set! *fade* #f)))
 
-    (define (live-music-stop!) (close-player!) (set! *want* #f))
+    (define (cancel-opening!)
+      (when *opening*
+        (set! *opening* #f)
+        (set! *want* #f)
+        (audio-stall-end!)))
+    (define (live-music-stop!)
+      (cancel-opening!)
+      (close-player!)
+      (set! *want* #f))
     (define (live-music-fresh!) (set! *fresh* #t))
     (define (live-music-off!) (live-music-stop!))
 
@@ -563,6 +580,9 @@
     ;; the file and on the web the page's fetch (#f until it lands).
     (define (live-music-text name) (text-for name))
     (define (live-music-provide! name text)
+      ;; An edited/replaced text must never reuse its old parsed value.
+      (set! *parsed-tunes*
+            (filter (lambda (entry) (not (eq? (car entry) name))) *parsed-tunes*))
       (set! *asked* (filter (lambda (n) (not (eq? n name))) *asked*))
       (set! *texts* (cons (cons name text) (filter (lambda (e) (not (eq? (car e) name))) *texts*))))
 
@@ -601,47 +621,91 @@
       (let ((text (text-for name)))
         (if (or (not text) (refused? name))
             (if (refused? name) 'failed 'pending)
-            ;; The parse and the open stall the frame: a known stall, the cues
-            ;; pre-rolled and its starvation counted apart. A tune that fails
-            ;; to read or validate must still close the bracket, or every
-            ;; starved frame after it is folded into the known count (the
-            ;; reviewer's LOW 4, 2026-09-22).
-            (guard (e (#t (audio-stall-end!) (refuse! name text e) 'failed))
-            (let* ((started (current-milliseconds))
-                   (voices (length (audio-voices)))
-                   (stall (audio-stall-begin!))
-                   (prerolled-at (current-milliseconds))
-                   (t (read-tune-string text))
-                   (parsed-at (current-milliseconds))
-                   (calm (or (tune-mark t 'calm) 0))
-                   (left (assq name *positions*))
-                   (start (if (or fresh? (not left)) (cons calm 0) (cdr left)))
-                   (t0 (current-milliseconds))
-                   (p (open-player t start))
-                   (open-ms (- (current-milliseconds) t0)))
-              (set! *player* p)
-              (set! *name* name)
-              (set! *tune* t)
-              (set! *section* 'calm)
-              (set! *in-tense* #f)
-              (set! *pending* #f)
-              (set! *timing* (tune-timing t))
-              ;; a resume inside tense (a return from the menu under the ICE) stays there
-              (when (and (timing-tense-pos) (>= (car start) (timing-tense-pos)))
-                (set! *section* 'tense)
-                (set! *in-tense* #t))
-              (set! *landed-seen* #f)
-              (set! *opened-at* start)
-              (apply-region! p)
-              (*say* "music" "start-stage" (symbol->string name)
-                     "preroll-ms" (- prerolled-at started)
-                     "read-ms" (- parsed-at prerolled-at)
-                     "player-ms" open-ms
-                     "voices" voices)
-              (*say* "music" "open" (symbol->string name) (if (or fresh? (not left)) "top" "resume") (car start) (cdr start) "ms" open-ms)
-              (fade! 0.0 1.0 FADE-IN-MS #f)
-              (audio-stall-end!)
-              'open)))))
+            ;; Keep one bounded cue reserve across both opening stages. Yield
+            ;; after parsing so drawing/input and the audio pump can run before
+            ;; player validation and voice construction; do not refill the cue
+            ;; ring with a second full reserve at the stage boundary.
+            (guard (e (#t
+                       (set! *opening* #f)
+                       (audio-stall-end!)
+                       (refuse! name text e)
+                       'failed))
+              (if (and *opening*
+                       (eq? name (music-opening-name *opening*))
+                       (eq? text (music-opening-text *opening*)))
+                  (finish-opening! *opening*)
+                  (let ((top? (or fresh?
+                                  (and *opening*
+                                       (eq? name (music-opening-name *opening*))
+                                       (music-opening-top *opening*))
+                                  (not (assq name *positions*)))))
+                    (cancel-opening!)
+                    (prepare-opening! name text top?)))))))
+
+    (define (cache-parsed-tune! name text t)
+      (set! *parsed-tunes*
+            (cons (cons name (cons text t))
+                  (filter (lambda (entry) (not (eq? (car entry) name)))
+                          *parsed-tunes*)))
+      (when (> (length *parsed-tunes*) 3)
+        (set! *parsed-tunes*
+              (list (car *parsed-tunes*)
+                    (cadr *parsed-tunes*)
+                    (caddr *parsed-tunes*)))))
+
+    (define (prepare-opening! name text top?)
+      (let* ((started (current-milliseconds))
+             (voices (length (audio-voices)))
+             (stall (audio-stall-begin!))
+             (prerolled-at (current-milliseconds))
+             (cached (assq name *parsed-tunes*))
+             (hit? (and cached (eq? text (cadr cached))))
+             (t (if hit? (cddr cached) (read-tune-string text)))
+             (parsed-at (current-milliseconds))
+             (calm (or (tune-mark t 'calm) 0))
+             (left (assq name *positions*))
+             (start (if top? (cons calm 0) (cdr left))))
+        (cache-parsed-tune! name text t)
+        (set! *opening*
+              (music-opening name: name text: text tune: t start: start top: top?))
+        (*say* "music" "start-stage" (symbol->string name)
+               "phase" "read"
+               "preroll-ms" (- prerolled-at started)
+               "read-ms" (- parsed-at prerolled-at)
+               "cached" (and hit? #t)
+               "voices" voices)
+        'preparing))
+
+    (define (finish-opening! opening)
+      (let* ((name (music-opening-name opening))
+             (t (music-opening-tune opening))
+             (start (music-opening-start opening))
+             (t0 (current-milliseconds))
+             (p (open-player t start))
+             (open-ms (- (current-milliseconds) t0)))
+        (set! *player* p)
+        (set! *name* name)
+        (set! *tune* t)
+        (set! *section* 'calm)
+        (set! *in-tense* #f)
+        (set! *pending* #f)
+        (set! *timing* (tune-timing t))
+        ;; A resume inside tense keeps its section.
+        (when (and (timing-tense-pos) (>= (car start) (timing-tense-pos)))
+          (set! *section* 'tense)
+          (set! *in-tense* #t))
+        (set! *landed-seen* #f)
+        (set! *opened-at* start)
+        (apply-region! p)
+        (*say* "music" "start-stage" (symbol->string name)
+               "phase" "player" "player-ms" open-ms)
+        (*say* "music" "open" (symbol->string name)
+               (if (music-opening-top opening) "top" "resume")
+               (car start) (cdr start) "ms" open-ms)
+        (fade! 0.0 1.0 FADE-IN-MS #f)
+        (set! *opening* #f)
+        (audio-stall-end!)
+        'open))
 
     ;; --- the frame ---------------------------------------------------------------------
     ;; screen: menu | stack | cards; phase: trace | counter | severed | cleared | #f;
@@ -655,6 +719,8 @@
                          ((memq phase '(cleared severed)) #f)
                          (else (pick-for table seed fresh?)))))
         (when fresh? (set! *fresh* #f) (set! *restart* #t))
+        (when (and *opening* (not (eq? want (music-opening-name *opening*))))
+          (cancel-opening!))
         (cond
           ;; silence wanted: fade the playing track out
           ((and (not want) *player* (not (fading-out?)))
@@ -672,7 +738,7 @@
                  ((not *player*)
                   (let ((r (open! want *restart*)))
                     (set! *restart* #f)
-                    (set! *want* (cond ((eq? r 'pending) 'pending)
+                    (set! *want* (cond ((memq r '(pending preparing)) 'pending)
                                        ((eq? r 'failed) #f)
                                        (else want))))))))
         ;; the first pull past the open position: the track is heard (once per open)

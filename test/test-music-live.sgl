@@ -282,6 +282,54 @@
           (assert-equal 'calm section)
           (assert-true (symbol? name)))))))
 
+;; Preparing an opening gives the shell a frame to respond before player
+;; construction. An intervening stop or new screen must cancel that work.
+(test-group "music live: responsive opening and cancellation"
+  (test "a cold opening yields; a stop closes its bracket and never installs the old player"
+    (dynamic-wind
+      (lambda ()
+        (live-music-stop!)
+        (live-music-set-tune-door! 'demo-columns)
+        (live-music-provide! 'demo-columns (tune-text 'demo-columns)))
+      (lambda ()
+        (let ((stalls (audio-known-stalls)))
+          (live-music-fresh!)
+          (live-music-frame! 'stack 'trace 600000.0 'stack SEED)
+          (assert-false (live-music-playing?))
+          (assert-true (live-music-pending?))
+          (assert-equal stalls (audio-known-stalls))
+          (live-music-stop!)
+          (assert-false (live-music-pending?))
+          (assert-equal (+ stalls 1) (audio-known-stalls))
+          ;; Cleared asks for silence: the canceled player must stay absent.
+          (live-music-frame! 'stack 'cleared #f 'stack SEED)
+          (assert-false (live-music-playing?))))
+      (lambda ()
+        (live-music-stop!)
+        (live-music-set-tune-door! #f))))
+  (test "the following frame installs the prepared tune and a screen change cancels stale work"
+    (dynamic-wind
+      (lambda ()
+        (live-music-stop!)
+        (live-music-set-tune-door! 'demo-columns))
+      (lambda ()
+        (live-music-fresh!)
+        (live-music-frame! 'stack 'trace 600000.0 'stack SEED)
+        (assert-false (live-music-playing?))
+        (live-music-frame! 'stack 'trace 600000.0 'stack SEED)
+        (assert-true (live-music-playing?))
+        (assert-equal 'demo-columns (live-music-name))
+        (live-music-stop!)
+        (live-music-frame! 'stack 'trace 600000.0 'stack SEED)
+        (assert-false (live-music-playing?))
+        (live-music-frame! 'menu #f #f 'stack SEED)
+        (assert-false (live-music-playing?))
+        (live-music-frame! 'menu #f #f 'stack SEED)
+        (assert-equal MENU-THEME (live-music-name)))
+      (lambda ()
+        (live-music-stop!)
+        (live-music-set-tune-door! #f)))))
+
 ;; A ladder step reopens the player mid-run-up: the pending jump and the
 ;; section must survive it (the reviewer's MEDIUM 3: the rate was pinned in
 ;; every other case here, so no reopen ran).

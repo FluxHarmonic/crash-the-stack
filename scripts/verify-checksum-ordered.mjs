@@ -121,6 +121,17 @@ for (const [label, file, filter] of [
     assert.equal(r.summary.total, 1); assert.equal(r.summary.passed, 1);
   }
 }
+
+// The opening fix is shared by the soundtrack: exercise its real player,
+// fresh/resume, cancellation, changed-text refusal and adaptive reopen paths.
+const musicReport = path.join(out, 'music-live.json');
+await requireRun('music-live', 'scripts/dev', ['sigil', 'test', '--report', musicReport,
+  'test/test-music-live.sgl']);
+const musicResult = JSON.parse(fs.readFileSync(musicReport, 'utf8'));
+assert.ok(musicResult.summary.total > 0);
+assert.equal(musicResult.summary.passed, musicResult.summary.total);
+assert.equal(musicResult.summary.failed, 0);
+assert.equal(musicResult.summary.skipped, 0);
 if (results.every(r => r.rc === 0 && !r.error && !r.expired))
   marker('browser-complete', 'BROWSER-AUDIO-CAPTURES-REGRESSIONS-PASS; pool proof pending');
 else marker('browser-gates-failed', 'DO-NOT-HOST');

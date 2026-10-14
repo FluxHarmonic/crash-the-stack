@@ -16,6 +16,8 @@ git rev-parse HEAD > "$out/BUILD-SHA"
 cat /proc/loadavg > "$out/build-load.txt"
 nice -n19 sigil deps install > "$out/deps.log" 2>&1
 test "$(sha256sum sigil.lock | cut -d' ' -f1)" = "$lock"
+nice -n19 scripts/dev sigil test --report "$out/music-live.json" test/test-music-live.sgl > "$out/music-live.log" 2>&1
+nice -n19 node -e 'const fs=require("fs"),assert=require("assert");const r=JSON.parse(fs.readFileSync(process.argv[1]));assert.ok(r.summary.total>0);assert.equal(r.summary.passed,r.summary.total);assert.equal(r.summary.failed,0);assert.equal(r.summary.skipped,0);' "$out/music-live.json"
 nice -n19 scripts/dev sigil build --config web > "$out/build.log" 2>&1
 test -z "$(git status --porcelain --untracked-files=no)"
 sha=$(cat "$out/BUILD-SHA")
