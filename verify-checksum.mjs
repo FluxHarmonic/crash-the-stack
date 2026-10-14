@@ -187,6 +187,28 @@ try {
     fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true });
     fs.writeFileSync(file, Buffer.from(capture.data, 'base64'));
   }
+  async function measureLayout() {
+    // Hand-derived screen positions, independent of the game's hit helper.
+    const base = await point(100, 254), pile = await point(256, 280);
+    const pileBottom = await point(312, 356), target = await point(256, 356);
+    const fieldBottom = await point(0, 400), fieldTop = await point(0, 0);
+    const viewport = await js('({width:innerWidth,height:innerHeight})');
+    const scale = (fieldBottom.y - fieldTop.y) / 400;
+    const evidence = { viewport, dock: DOCK, scale,
+      pyramidToPilesCss: pile.y - base.y,
+      pilesToPlayfieldEdgeCss: fieldBottom.y - pileBottom.y,
+      pilesToScreenEdgeCss: viewport.height - pileBottom.y,
+      targetCss: { width: pileBottom.x - target.x, height: target.y - pile.y },
+      exposedIndexCss: 26 * scale, meterCss: { width: 200 * scale, height: 18 * scale },
+      meterPlacement: 'under the piles; shared 640x400 stage preserves positions on rotation' };
+    assert.ok(evidence.pyramidToPilesCss >= 24 * scale - 0.01, 'clear lower pyramid gap');
+    assert.ok(evidence.pilesToPlayfieldEdgeCss >= 40 * scale - 0.01, 'bottom meter lane');
+    assert.ok(evidence.pilesToScreenEdgeCss >= evidence.pilesToPlayfieldEdgeCss - 0.01);
+    assert.ok(Math.abs(evidence.targetCss.width - 56 * scale) < 0.01);
+    assert.ok(Math.abs(evidence.targetCss.height - 76 * scale) < 0.01);
+    console.log('LAYOUT-DIAGNOSTIC:', JSON.stringify(evidence));
+    if (SHOT) fs.writeFileSync(SHOT.replace(/\.png$/, '') + '-layout.json', JSON.stringify(evidence, null, 2));
+  }
   const dealPattern = /^crash: checksum deal (\d+) (\([\d\s]+\)) (\([\d\s]+\))$/;
   const readyPattern = /^crash: checksum ready (\d+) ms ([\d.eE+-]+)$/;
   const poolPattern = /^crash: checksum pool size (\d+) draws (\d+) needed (\d+) failed (\d+)$/;
@@ -234,12 +256,12 @@ try {
     await action();
     return playable(mark, started);
   }
-  async function open(seed) {
+  async function open(seed, mode = 'classic') {
     const mark = lines.length;
-    await send('Page.navigate', { url: `${BASE}?trace&checksum=classic&checksum-dock=${DOCK}&seed=${seed}&fresh&bg=off` });
+    await send('Page.navigate', { url: `${BASE}?trace&checksum=${mode}&checksum-dock=${DOCK}&seed=${seed}&fresh&bg=off` });
     // Fetch/instantiate precedes a shortcut start; measure the logged start,
     // plus the engine's own clock, rather than counting network boot as play.
-    const opened = await wait(/^crash: checksum open clean (\d+)$/, mark, 40_000);
+    const opened = await wait(new RegExp(`^crash: checksum open ${mode === 'classic' ? 'clean' : 'twist'} (\\d+)$`), mark, 40_000);
     const deal = await playable(mark, receivedAt[opened.index]);
     assert.equal(deal.seed, seed); return deal;
   }
@@ -322,6 +344,7 @@ try {
     for (const arrow of model.cursorRoute(start, target, DOCK)) await key(arrow);
   }
   await shot('play');
+  await measureLayout();
   for (const move of verdict.solution) {
     mark = lines.length;
     if (move === 'pull' || move === 'rollback') { await packet('pull'); pulls++; }
@@ -462,6 +485,8 @@ try {
   await key('ArrowDown'); await key('ArrowDown'); await key('ArrowDown'); await key('Enter');
   await wait(/^crash: menu top /, mark);
   passed('jack-out', 'shared pause panel returns to the menu after the next deal');
+  await open(2, 'hacker');
+  await shot('trace');
   const raced = errors.filter(error => /image fetch failed/i.test(error));
   const unexpected = errors.filter(error => !/image fetch failed/i.test(error));
   assert.equal(unexpected.length, 0, unexpected.join('\n'));

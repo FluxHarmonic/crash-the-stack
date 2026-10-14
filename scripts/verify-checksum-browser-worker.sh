@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Recheck the four browser arms against an immutable, already built artifact.
+# Recheck all three viewports against an immutable, already built artifact.
 set -uo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 web=${1:?need served artifact directory}
@@ -19,13 +19,14 @@ fi
 sha256sum "$web/crash-the-stack.wasm" > "$out/wasm.sha256"
 sha256sum "$verifier" > "$out/verifier.sha256"
 rc=0
-for viewport in portrait desktop; do
+for viewport in portrait landscape desktop; do
   for dock in center right; do
     label="$viewport-$dock"
     args=("$web" --dock "$dock" --port 8117 --cdp 9337
           --deals "$root/bench/checksum-reference/deals.scm"
           --shot "$out/screens/$label.png")
     if [ "$viewport" = portrait ]; then args+=(--portrait); fi
+    if [ "$viewport" = landscape ]; then args+=(--phone); fi
     if [ -n "${CHECKSUM_AUDIO_NEGATIVE:-}" ]; then
       args+=(--audio-negative "$CHECKSUM_AUDIO_NEGATIVE")
     fi

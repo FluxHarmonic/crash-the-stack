@@ -8,11 +8,11 @@ for (let row = 0; row < 6; row++) for (let col = 0; col <= row; col++) {
     (row + 1) * (row + 2) / 2 + col, (row + 1) * (row + 2) / 2 + col + 1];
 }
 export function packetCenter(place, dock) {
-  if (place === 'pull') return [dock === 'right' ? 468 : 284, 342];
-  if (place === 'waste') return [dock === 'right' ? 540 : 356, 342];
+  if (place === 'pull') return [dock === 'right' ? 468 : 284, 318];
+  if (place === 'waste') return [dock === 'right' ? 540 : 356, 318];
   let row = 0; while ((row + 1) * (row + 2) / 2 <= place) row++;
   const col = place - row * (row + 1) / 2;
-  return [320 - 32 * row + 64 * col, 70 + 32 * row];
+  return [320 - 32 * row + 64 * col, 60 + 26 * row];
 }
 export class BrowserBoard {
   constructor(deal) {
