@@ -1,5 +1,6 @@
 // Focused light source checks. Plants run only in hash-verified scratch copies.
 // Usage: nice -n19 node scripts/checksum-pool-sabotage.mjs SIGIL SIGIL_TEST_SOURCE [--check-anchors]
+// --remote skips the desktop load threshold on an authorized worker only.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,7 @@ import { createHash } from 'node:crypto';
 const [binary, testSource] = process.argv.slice(2);
 assert.ok(binary && testSource, 'need pinned binary and test library source');
 const sigil = path.resolve(binary), library = path.resolve(testSource);
+const remote = process.argv.includes('--remote');
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'checksum-pool-sabotage-'));
 const source = path.join(scratch, 'src');
 fs.mkdirSync(source);
@@ -32,7 +34,7 @@ const cases = [
     'pool difficulty records keep the runtime acceptance filter'],
 ];
 function run(target) {
-  assert.ok(os.loadavg()[0] < 8, 'local source checks require load1<8');
+  if (!remote) assert.ok(os.loadavg()[0] < 8, 'local source checks require load1<8');
   assert.equal(os.getPriority(), 19, 'evaluator inherits nice19 from the harness');
   const predicate = target
     ? `(lambda (td) (string=? (test-descriptor-name td) ${JSON.stringify(target)}))`

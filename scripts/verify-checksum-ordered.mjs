@@ -186,7 +186,7 @@ for (const [label, file, total] of [
   assert.equal(summary.failed, 0); assert.equal(summary.skipped, 0);
 }
 await requireRun('pool-plants', 'nice', ['-n19', 'node', 'scripts/checksum-pool-sabotage.mjs',
-  sigil, '.sigil/deps/sigil-test/src']);
+  sigil, '.sigil/deps/sigil-test/src', '--remote']);
 const plantPass = await run('affected-plants', 'node', ['scripts/checksum-rule-sabotage.mjs',
   sigil, '.sigil/deps/sigil-test/src', '.sigil/deps/substratic/src', ...focused], 3_600_000);
 assert.equal(fs.readFileSync('package.sgl', 'utf8').includes("entry: '(crash main)"), true);
