@@ -1,5 +1,5 @@
 // Real CDP mouse/touch/keyboard checks against a runner-built CHECKSUM.
-// node verify-checksum.mjs build/web [--phone|--portrait] [--dock center|right] [--shot PATH] [--url URL]
+// node verify-checksum.mjs build/web [--phone|--portrait] [--visible] [--dock center|right] [--shot PATH] [--url URL]
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -15,12 +15,14 @@ const ROOT = path.resolve(args[0] || 'build/web');
 const PORTRAIT = args.includes('--portrait');
 const PHONE = args.includes('--phone') || PORTRAIT;
 const DOCK = opt('--dock', 'center');
+const VISIBLE = args.includes('--visible');
+const PLAYABLE_LIMIT_MS = 2000;
 const THROTTLE = Number(opt('--throttle', '4'));
 assert.ok(['center', 'right'].includes(DOCK), 'recognized horizontal dock');
 const PORT = Number(opt('--port', '8115'));
 const CDP = Number(opt('--cdp', '9335'));
 const SHOT = opt('--shot', null);
-const DEALS = opt('--deals', null);
+const DEALS = opt('--deals', 'bench/checksum-reference/deals.scm');
 const expectedDeals = DEALS ? parseDeals(fs.readFileSync(DEALS, 'utf8')) : [];
 const audioNegative = opt('--audio-negative', null);
 if (audioNegative) {
@@ -32,8 +34,9 @@ if (audioNegative) {
 }
 const BASE = opt('--url', `http://127.0.0.1:${PORT}/`);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const lines = [], errors = [], results = [];
+const lines = [], receivedAt = [], errors = [], results = [];
 let chrome, profile, server, ws;
+let currentThrottle = 1;
 function cleanup() {
   if (chrome?.pid) { try { process.kill(-chrome.pid, 'SIGKILL'); } catch {} }
   try { ws?.close(); } catch {}
@@ -47,7 +50,7 @@ const watchdog = setTimeout(() => {
   console.error('TIMED-OUT CHECKSUM browser arm');
   console.error(lines.slice(-25).join('\n'));
   cleanup(); process.exit(2);
-}, 1_800_000);
+}, 600_000);
 watchdog.unref();
 
 try {
@@ -71,8 +74,9 @@ try {
     });
   }
   profile = fs.mkdtempSync('/tmp/crash-verify-checksum-');
-  chrome = spawn('google-chrome', ['--headless=new', '--no-sandbox', '--disable-dev-shm-usage',
-    '--mute-audio', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader',
+  chrome = spawn('google-chrome', [...(VISIBLE ? ['--new-window'] : ['--headless=new',
+    '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']),
+    '--no-sandbox', '--disable-dev-shm-usage', '--mute-audio',
     '--enable-webgl', '--ignore-gpu-blocklist', '--ignore-certificate-errors',
     '--autoplay-policy=no-user-gesture-required', `--remote-debugging-port=${CDP}`,
     `--user-data-dir=${profile}`, '--window-size=1000,760', 'about:blank'],
@@ -83,6 +87,10 @@ try {
     try {
       const pages = await (await fetch(`http://127.0.0.1:${CDP}/json/list`)).json();
       target = pages.find(page => page.type === 'page')?.webSocketDebuggerUrl;
+      if (!target && attempt > 2) {
+        const page = await (await fetch(`http://127.0.0.1:${CDP}/json/new?about:blank`, { method: 'PUT' })).json();
+        target = page.webSocketDebuggerUrl;
+      }
     } catch {}
     if (!target) await sleep(200);
   }
@@ -103,7 +111,8 @@ try {
       if (message.error) task.reject(new Error(JSON.stringify(message.error))); else task.resolve(message.result);
     } else if (message.method === 'Runtime.consoleAPICalled') {
       const text = message.params.args.map(arg => arg.value ?? arg.description ?? '').join(' ');
-      lines.push(text); if (message.params.type === 'error') errors.push(text);
+      lines.push(text); receivedAt.push(performance.now());
+      if (message.params.type === 'error') errors.push(text);
     } else if (message.method === 'Runtime.exceptionThrown') {
       errors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
     } else if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error') {
@@ -115,6 +124,7 @@ try {
     chrome.once('error', reject);
   });
   for (const method of ['Page.enable', 'Runtime.enable', 'Log.enable']) await send(method);
+  await send('Page.bringToFront');
   await send('Emulation.setDeviceMetricsOverride', { width: PORTRAIT ? 390 : PHONE ? 844 : 1000,
     height: PORTRAIT ? 844 : PHONE ? 390 : 760, deviceScaleFactor: PHONE ? 3 : 2, mobile: PHONE });
   await send('Emulation.setTouchEmulationEnabled', { enabled: PHONE, maxTouchPoints: 5 });
@@ -178,18 +188,60 @@ try {
     fs.writeFileSync(file, Buffer.from(capture.data, 'base64'));
   }
   const dealPattern = /^crash: checksum deal (\d+) (\([\d\s]+\)) (\([\d\s]+\))$/;
+  const readyPattern = /^crash: checksum ready (\d+) ms ([\d.eE+-]+)$/;
+  const poolPattern = /^crash: checksum pool size (\d+) draws (\d+) needed (\d+) failed (\d+)$/;
+  function checkedDeal(row) {
+    const deal = parseDeals(`(deal ${row.match[1]} ${row.match[2]} ${row.match[3]})`)[0];
+    const expected = expectedDeals.find(entry => entry.seed === deal.seed);
+    assert.ok(expected, 'independent proof contains the selected pool seed');
+    assert.deepEqual(deal.pyramid, expected.pyramid, 'wasm pyramid matches the proved pool deal');
+    assert.deepEqual(deal.stock, expected.stock, 'wasm feed matches the proved pool deal');
+    return deal;
+  }
+  async function playable(mark, started) {
+    let row;
+    try { row = await wait(readyPattern, mark, Math.max(1, PLAYABLE_LIMIT_MS - (performance.now() - started))); }
+    catch (error) {
+      if (!error.message.startsWith('No ')) throw error;
+      assert.fail('first playable frame missing within 2000 ms');
+    }
+    assert.ok(receivedAt[row.index] - started <= PLAYABLE_LIMIT_MS,
+      `first playable frame took ${(receivedAt[row.index] - started).toFixed(1)} ms, limit 2000 ms`);
+    assert.ok(Number(row.match[2]) <= PLAYABLE_LIMIT_MS, 'first playable frame exceeded the engine start budget');
+    // The marker is emitted after draw submission. Require the browser to
+    // advance again, so a stopped/occluded frame loop cannot pass on logs alone.
+    const frameAdvanced = await js(`new Promise(resolve => {
+      const timer = setTimeout(() => resolve(false), ${Math.max(1, PLAYABLE_LIMIT_MS - (performance.now() - started))});
+      requestAnimationFrame(() => { clearTimeout(timer); resolve(true); });
+    })`);
+    assert.equal(frameAdvanced, true, 'first playable frame requires a live browser frame loop within 2000 ms');
+    assert.ok(performance.now() - started <= PLAYABLE_LIMIT_MS, 'first playable frame did not reach the browser within 2000 ms');
+    const dealRow = await wait(dealPattern, mark, 1);
+    const deal = checkedDeal(dealRow);
+    assert.equal(Number(row.match[1]), deal.seed, 'ready belongs to this actual deal');
+    const pool = await wait(poolPattern, mark, 1);
+    assert.equal(Number(pool.match[1]), expectedDeals.length, 'bundled pool count matches the proven corpus');
+    assert.ok(Number(pool.match[2]) >= 8 && Number(pool.match[4]) >= 20);
+    assert.ok(100 * Number(pool.match[3]) <= 55 * Number(pool.match[2]), 'pool retains difficulty filter');
+    console.log('PLAYABLE-DIAGNOSTIC:', JSON.stringify({ seed: deal.seed,
+      observedMs: performance.now() - started, engineMs: Number(row.match[2]),
+      limitMs: PLAYABLE_LIMIT_MS, visible: VISIBLE, throttle: currentThrottle,
+      poolSize: Number(pool.match[1]) }));
+    return deal;
+  }
+  async function startArchive(action) {
+    const mark = lines.length, started = performance.now();
+    await action();
+    return playable(mark, started);
+  }
   async function open(seed) {
     const mark = lines.length;
     await send('Page.navigate', { url: `${BASE}?trace&checksum=classic&checksum-dock=${DOCK}&seed=${seed}&fresh&bg=off` });
-    const row = await wait(dealPattern, mark, 600_000);
-    const deal = parseDeals(`(deal ${row.match[1]} ${row.match[2]} ${row.match[3]})`)[0];
-    if (DEALS) {
-      const expected = expectedDeals.find(deal => deal.seed === seed);
-      assert.ok(expected, 'independent proof contains this seed');
-      assert.deepEqual(deal.pyramid, expected.pyramid, 'wasm pyramid matches proved source deal');
-      assert.deepEqual(deal.stock, expected.stock, 'wasm feed matches proved source deal');
-    }
-    assert.equal(deal.seed, seed); await sleep(800); return deal;
+    // Fetch/instantiate precedes a shortcut start; measure the logged start,
+    // plus the engine's own clock, rather than counting network boot as play.
+    const opened = await wait(/^crash: checksum open clean (\d+)$/, mark, 40_000);
+    const deal = await playable(mark, receivedAt[opened.index]);
+    assert.equal(deal.seed, seed); return deal;
   }
 
   // Warm the service worker before checking the title/menu boot path.
@@ -221,8 +273,32 @@ try {
   await sleep(600); await shot('menu');
   mark = lines.length; await key('Enter');
   await wait(/^crash: menu free-checksum /, mark);
-  mark = lines.length; await key('Enter'); await wait(/^crash: checksum open clean /, mark);
-  passed('menu', 'FREE PLAY -> CHECKSUM -> NEW BOARD, CLASSIC default');
+  await startArchive(() => key('Enter'));
+  passed('menu', 'FREE PLAY -> CHECKSUM -> NEW BOARD, CLASSIC default, playable within 2s');
+
+  // Real behavioral sabotage: block the next trusted start key before the
+  // game handles it. A fast engine marker alone must not hide that delay.
+  await key('Escape'); await key('ArrowDown'); await key('ArrowDown');
+  await js(`(() => {
+    window.__checksumStartDelay = event => {
+      if (event.key !== 'Enter') return;
+      window.removeEventListener('keydown', window.__checksumStartDelay, true);
+      const began = performance.now();
+      while (performance.now() - began < 3000) {}
+      window.__checksumDelayEvidence = { trusted: event.isTrusted, elapsed: performance.now() - began };
+    };
+    window.addEventListener('keydown', window.__checksumStartDelay, true);
+  })()`);
+  mark = lines.length;
+  await assert.rejects(() => startArchive(() => key('Enter')),
+    { name: 'AssertionError', message: /first playable frame/ });
+  const delay = await js('window.__checksumDelayEvidence');
+  assert.ok(delay?.trusted && delay.elapsed >= 3000, 'real start event hit the delay plant');
+  await wait(readyPattern, mark);
+  await js("window.removeEventListener('keydown', window.__checksumStartDelay, true)");
+  await key('Escape'); await key('ArrowDown'); await key('ArrowDown');
+  await startArchive(() => key('Enter'));
+  passed('latency-control', '3s trusted start-key stall rejected; removing plant restores <=2s NEW ARCHIVE');
 
   let deal, verdict, dealMark;
   for (const seed of [2, 1, 3, 4, 5, 6, 7, 8]) {
@@ -284,7 +360,7 @@ try {
   mark = lines.length; await packet('pull'); await sleep(300);
   assert.equal(lines.slice(mark).filter(line => /^crash: checksum state /.test(line)).length, 0,
     'ended table refuses board input');
-  // The next archive proves slicing while real music is already playing.
+  // The next instant archive runs while real music is already playing.
   assert.ok(lines.slice(dealMark).some(line => /^crash: audio resumed$/.test(line)), 'real gestures resumed audio on this page');
   assert.ok(lines.slice(dealMark).some(line => /^crash: music open /.test(line)), 'music is active on this page for the starvation check');
   await sleep(1500);
@@ -335,15 +411,11 @@ try {
     trace.observer.observe({ entryTypes: ['longtask'] });
   })()`);
   await send('Emulation.setCPUThrottlingRate', { rate: THROTTLE });
-  mark = lines.length; await key('Enter');
-  const fresh = await wait(/^crash: checksum open clean (\d+)$/, mark);
-  assert.notEqual(Number(fresh.match[1]), deal.seed, 'win default starts another seed');
-  // A fresh untouched deal may reject many capped candidates. The actual
-  // desktop-right population exceeded 600s at 4x; keep measuring that work
-  // without weakening the gameplay, raw-underrun or music assertions.
-  await wait(dealPattern, mark, 1_200_000);
-  const generation = await wait(/^crash: checksum generation ms ([\d.eE+-]+) frames (\d+) max-frame-ms ([\d.eE+-]+) candidates (\d+) nodes (\d+) inconclusive (\d+) easy (\d+) unsolvable (\d+) draws (\d+) needed (\d+) failed (\d+)$/, mark);
-  const audio = await wait(/^crash: checksum deal-audio underruns (\d+) worst (\d+)$/, generation.index, 15_000);
+  currentThrottle = THROTTLE;
+  mark = lines.length;
+  const fresh = await startArchive(() => key('Enter'));
+  assert.notEqual(fresh.seed, deal.seed, 'win default starts another seed');
+  const audio = await wait(/^crash: checksum deal-audio underruns (\d+) source (\d+)$/, mark, 15_000);
   const audioTrace = await js(`(() => {
     const trace = window.__checksumAudioTrace;
     clearInterval(trace.timer); trace.observer.disconnect();
@@ -354,21 +426,13 @@ try {
   })()`);
   console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(audioTrace));
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
-  assert.ok(Number(generation.match[2]) >= 2, 'runtime proof spans frames');
-  assert.equal(Number(audio.match[1]), 0, `generation starved audio at ${THROTTLE}x: ${audio.match[0]}`);
+  currentThrottle = 1;
   const health = requireHealthyDealAudio(audioTrace);
-  assert.ok(lines.slice(mark).includes('crash: checksum audio reserve cue 32768 source 31744'),
-    'generation reserves the existing cue and music rings');
-  assert.ok(lines.slice(generation.index).includes('crash: checksum audio restored cue 12288 source 16384'),
-    'playable board restores the ordinary audio targets');
   for (const sink of audioTrace.finalSinks)
     assert.ok(sink.depth <= (sink.capacity === 65536 ? 12288 : 16384),
-      `temporary generation reserve drains before playable-board audio check: ${JSON.stringify(sink)}`);
+      `normal audio targets stay in force: ${JSON.stringify(sink)}`);
   await wait(/^crash: music playing /, mark, 1000);
-  assert.ok(Number(generation.match[9]) >= 8);
-  assert.ok(Number(generation.match[11]) >= 20);
-  assert.ok(100 * Number(generation.match[10]) <= 55 * Number(generation.match[9]));
-  passed('audio', `${THROTTLE}x: sounding starvation ${health.sounding}, music dry ${health.music}; raw cue counters retained: ${audio.match[0]}; ${generation.match[0]}`);
+  passed('audio', `${THROTTLE}x instant start: sounding starvation ${health.sounding}, music dry ${health.music}; raw counters retained: ${audio.match[0]}`);
   passed('win-default', 'Enter on the win panel starts NEW ARCHIVE');
   mark = lines.length; await key('Escape');
   await key('ArrowDown'); await key('ArrowDown'); await key('ArrowDown'); await key('Enter');
@@ -380,7 +444,10 @@ try {
   assert.equal(lines.filter(line => /crash: texture missing|boot-error|FATAL/.test(line)).length, 0);
   if (raced.length) console.log(`NOTE: ${raced.length} loader image fetch races; no missing textures after retry`);
   passed('console', 'no game exception, missing texture or unexpected console error');
-  console.log(`VERDICT: ${results.length}/10 passed (${PORTRAIT ? 'portrait phone' : PHONE ? 'phone' : 'desktop'}, ${DOCK})`);
+  const required = ['menu', 'latency-control', 'keyboard', 'undo', 'pair', 'root',
+    'clear', 'audio', 'win-default', 'jack-out', 'console'];
+  assert.deepEqual([...results].sort(), [...required].sort(), 'every browser arm reached its required checks');
+  console.log(`VERDICT: ${results.length}/${required.length} passed (${PORTRAIT ? 'portrait phone' : PHONE ? 'phone' : 'desktop'}, ${DOCK}, ${VISIBLE ? 'visible' : 'headless'})`);
 } catch (error) {
   console.error('FAIL CHECKSUM:', error.stack);
   console.error(lines.slice(-40).join('\n')); console.error(errors.join('\n'));
