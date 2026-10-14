@@ -1,8 +1,7 @@
-// One runner lease: compiled regressions and browser/audio/captures first;
-// then one pure compiled exporter partitioned across cores. Never hosts.
+// One runner lease: browser/audio/captures and compiled regressions, then
+// independent proof of actual bundled player states. Never hosts.
 import fs from 'node:fs';
 import path from 'node:path';
-import os from 'node:os';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -11,7 +10,7 @@ import { parseDeals } from './checksum-solve.mjs';
 const args = process.argv.slice(2);
 const web = path.resolve(args[0] || 'build/web');
 const at = args.indexOf('--out');
-const out = path.resolve(at < 0 ? '../out/checksum-ordered' : args[at + 1]);
+const out = path.resolve(at < 0 ? '../out/checksum-proof/ordered' : args[at + 1]);
 fs.mkdirSync(out, { recursive: true });
 const sha = spawnSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
 assert.match(sha, /^[a-f0-9]{40}$/);
@@ -62,8 +61,6 @@ async function run(label, command, argv, timeout = 1_800_000, separate = false) 
   fs.closeSync(fd); if (separate) fs.closeSync(errorFd);
   results.push(row); save();
   console.log(`CHECKSUM-ORDERED RESULT ${JSON.stringify(row)}`);
-  if (label.startsWith('population/') && (row.rc !== 0 || row.error || row.expired))
-    marker('proof-failed', `${label}-FAILED; TAKE-PROVISIONAL-HOST-DOWN`);
   return row.rc === 0 && !row.error && !row.expired;
 }
 async function requireRun(...argv) {
@@ -73,7 +70,18 @@ const reference = path.resolve('bench/checksum-reference/deals.scm');
 assert.equal(createHash('sha256').update(fs.readFileSync(reference)).digest('hex'),
   '8a1914f39f6ed1f888d59252cc0ad618cd487bd64c65d6344be9054b0d0f0da1');
 const cohort = parseDeals(fs.readFileSync(reference, 'utf8'));
-assert.equal(cohort.length, 254);
+const manifestFile = 'bench/checksum-reference/pool-manifest.json';
+const metricsFile = 'bench/checksum-reference/runtime-metrics.scm';
+const dataFile = 'src/crash/checksum/pool/data.sgl';
+const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+const hash = file => createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+assert.equal(cohort.length, manifest.count);
+assert.ok(cohort.length >= 200, '200+ bundled, independently provable states');
+assert.equal(hash(reference), manifest.dealsSha256);
+assert.equal(hash(metricsFile), manifest.metricsSha256);
+assert.equal(hash(dataFile), manifest.dataSha256);
+for (const file of [reference, metricsFile, manifestFile, dataFile])
+  fs.copyFileSync(file, path.join(out, path.basename(file)));
 const sigil = process.env.PATH.split(path.delimiter).map(dir => path.join(dir, 'sigil'))
   .find(file => fs.existsSync(file));
 assert.ok(sigil, 'pinned Sigil available');
@@ -85,7 +93,7 @@ fs.writeFileSync(path.join(out, 'web/BUILD-SHA'), sha + '\n');
 fs.writeFileSync(path.join(out, 'wasm.sha256'),
   createHash('sha256').update(fs.readFileSync(path.join(web, 'crash-the-stack.wasm'))).digest('hex') + '\n');
 
-// All of these precede both native compilation and the long population.
+// Check player-facing behavior before compiling the separate pure pool exporter.
 for (const [label, script] of [['stack', 'verify.mjs'], ['defrag', 'verify-cards.mjs'],
   ['scan', 'verify-scan.mjs'], ['intercept', 'verify-intercept.mjs'], ['decrypt', 'verify-decrypt.mjs']])
   await run(label, 'node', [script, web, '--phone']);
@@ -103,10 +111,10 @@ for (const viewport of ['portrait', 'desktop']) for (const dock of ['center', 'r
   const label = `${viewport}-${dock}`;
   await run(label, 'node', ['verify-checksum.mjs', web,
     ...(viewport === 'portrait' ? ['--portrait'] : []), '--dock', dock,
-    '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 1_900_000);
+    '--deals', reference, '--shot', path.join(out, 'screens', `${label}.png`)], 610_000);
 }
 if (results.every(r => r.rc === 0 && !r.error && !r.expired))
-  marker('ready-for-host', 'BROWSER-AUDIO-CAPTURES-REGRESSIONS-PASS; proof running');
+  marker('browser-complete', 'BROWSER-AUDIO-CAPTURES-REGRESSIONS-PASS; pool proof pending');
 else marker('browser-gates-failed', 'DO-NOT-HOST');
 
 let proofPassed = false;
@@ -116,11 +124,11 @@ try {
   assert.notEqual(changed, packageSource);
   const fixture = path.resolve('src/crash/checksum/proof/temporary.sgl');
   assert.ok(!fs.existsSync(fixture), 'temporary entry absent');
-  const nativeSource = fs.readFileSync('bench/checksum-native-export.sgl', 'utf8');
-  fs.writeFileSync(path.join(out, 'native-population-source.sgl'), nativeSource);
+  const nativeSource = fs.readFileSync('bench/checksum-pool-export.sgl', 'utf8');
+  fs.writeFileSync(path.join(out, 'native-pool-source.sgl'), nativeSource);
   fs.mkdirSync(path.dirname(fixture), { recursive: true });
   fs.writeFileSync(fixture, nativeSource);
-  const binary = path.join(out, 'checksum-native-export');
+  const binary = path.join(out, 'checksum-pool-export');
   try {
     fs.writeFileSync('package.sgl', changed);
     await requireRun('native-build', 'scripts/dev', ['sigil', 'build', '--config', 'release'], 3_600_000);
@@ -132,41 +140,27 @@ try {
   }
   fs.writeFileSync(path.join(out, 'native-binary.sha256'),
     createHash('sha256').update(fs.readFileSync(binary)).digest('hex') + '\n');
-  await requireRun('population/seed-2', binary, ['2'], 1_800_000, true);
-  assert.deepEqual(parseDeals(fs.readFileSync(path.join(out, 'population/seed-2.scm'), 'utf8')), [cohort[1]],
-    'compiled command-line dispatch and actual state smoke');
-  const workers = Math.min(os.availableParallelism(), 8);
-  fs.writeFileSync(path.join(out, 'partition.json'), JSON.stringify({
-    workers, runnerCores: os.availableParallelism(), seeds: 256,
-    method: 'One compiled pure binary, explicit per-seed invocations; one worker per core up to eight. All seeds 1..256, fresh state, files flushed incrementally.',
-  }, null, 2));
-  const pending = Array.from({ length: 256 }, (_, i) => i + 1).filter(seed => seed !== 2);
-  await Promise.all(Array.from({ length: workers }, async () => {
-    while (pending.length) {
-      const seed = pending.shift();
-      await run(`population/seed-${seed}`, binary, [String(seed)], 1_800_000, true);
-    }
-  }));
-  const fresh = [], metrics = [];
-  for (let seed = 1; seed <= 256; seed++) {
-    const row = results.find(r => r.label === `population/seed-${seed}`);
-    assert.ok(row?.rc === 0 && !row.error && !row.expired, `seed ${seed} completed`);
-    const text = fs.readFileSync(path.join(out, `population/seed-${seed}.scm`), 'utf8');
-    const dealt = parseDeals(text);
-    assert.equal(dealt.length, 1); assert.equal(dealt[0].seed, seed);
-    if (seed <= 254) assert.deepEqual(dealt[0], cohort[seed - 1], `fresh reference state ${seed}`);
-    fresh.push(text);
-    metrics.push(fs.readFileSync(path.join(out, `population/seed-${seed}.metrics.scm`), 'utf8'));
-  }
-  const deals = path.join(out, 'fresh-deals.scm');
-  const diagnostics = path.join(out, 'runtime-metrics.scm');
-  fs.writeFileSync(deals, fresh.join(''));
-  fs.writeFileSync(diagnostics, metrics.join(''));
+  await requireRun('pool-export', binary, cohort.map(deal => String(deal.seed)), 30_000, true);
+  const deals = path.join(out, 'pool-export.scm');
+  const emitted = parseDeals(fs.readFileSync(deals, 'utf8'));
+  assert.deepEqual(emitted, cohort, 'compiled player packets exactly match every bundled reference');
+  const metadata = fs.readFileSync(path.join(out, 'pool-export.metrics.scm'), 'utf8');
+  const pattern = /\(pool-entry (\d+) (\d+) (\d+) (\d+) (\d+) (\d+)\)/g;
+  const rows = [...metadata.matchAll(pattern)].map(row => row.slice(1).map(Number));
+  assert.equal(metadata.replace(pattern, '').trim(), '', 'only recognized compiled pool metadata');
+  assert.deepEqual(rows, manifest.entries.map(r => [r.seed, r.draws, r.needed, r.failed, r.attempts, r.totalNodes]),
+    'compiled difficulty metadata matches the archived acceptance ledger');
+  await requireRun('pool-repackage', 'node', ['scripts/checksum-pool-data.mjs',
+    '--deals', reference, '--metrics', metricsFile, '--expect', String(cohort.length),
+    '--producer', manifest.producer, '--backend', manifest.backend,
+    '--data', path.join(out, 'repacked-data.sgl'), '--manifest', path.join(out, 'repacked-manifest.json')]);
+  assert.equal(hash(path.join(out, 'repacked-data.sgl')), manifest.dataSha256, 'metadata repack reproduces committed data bytes');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(out, 'repacked-manifest.json'), 'utf8')), manifest);
   await requireRun('independent-controls', 'node', ['test/test-checksum-solver.mjs']);
-  await requireRun('independent-proof', 'node', ['scripts/checksum-solve.mjs', deals], 1_800_000);
-  await requireRun('runtime-metrics', 'node', ['scripts/checksum-runtime-metrics.mjs', deals,
-    diagnostics, path.join(out, 'runtime-metrics.json'), 'native']);
-  marker('population-complete', '256-FRESH-STATES-INDEPENDENTLY-PROVED; negative control passed');
+  await requireRun('independent-proof', 'node', ['scripts/checksum-solve.mjs', deals], 600_000);
+  await requireRun('difficulty-ledger', 'node', ['scripts/checksum-runtime-metrics.mjs', deals,
+    metricsFile, path.join(out, 'runtime-metrics.json'), manifest.backend]);
+  marker('population-complete', `${cohort.length}-ACTUAL-BUNDLED-STATES-INDEPENDENTLY-PROVED; negative control passed`);
   proofPassed = true;
 } catch (error) {
   fs.writeFileSync(path.join(out, 'proof-error.txt'), String(error.stack || error) + '\n');
@@ -174,15 +168,34 @@ try {
   console.error(error);
 }
 const plants = fs.readFileSync('scripts/checksum-rule-sabotage.mjs', 'utf8');
-const focused = [...plants.matchAll(/^  \[(?:solvePath|generatePath),[\s\S]*?\n\s+'([^']+)'\]/gm)].map(m => m[1]);
-assert.equal(focused.length, 9, 'six runtime plus three generator controls');
+const offlineFocused = [...plants.matchAll(/^  \[(?:solvePath|generatePath),[\s\S]*?\n\s+'([^']+)'\]/gm)].map(m => m[1]);
+assert.equal(offlineFocused.length, 9, 'six runtime plus three generator controls');
+const focused = offlineFocused.concat([
+  'opening an archive provides a playable board immediately and clocks advance on play',
+  'CHECKSUM tile opens its own screen and NEW BOARD selects CHECKSUM',
+  "CHECKSUM's version stays independent and Back returns to its kept tile",
+]);
+for (const [label, file, total] of [
+  ['compiled-table', 'test/test-checksum-table.sgl', 17],
+  ['compiled-pool', 'test/test-checksum-pool.sgl', 5],
+]) {
+  const report = path.join(out, `${label}.json`);
+  await requireRun(label, 'scripts/dev', ['sigil', 'test', '--report', report, file]);
+  const summary = JSON.parse(fs.readFileSync(report, 'utf8')).summary;
+  assert.equal(summary.total, total); assert.equal(summary.passed, total);
+  assert.equal(summary.failed, 0); assert.equal(summary.skipped, 0);
+}
+await requireRun('pool-plants', 'nice', ['-n19', 'node', 'scripts/checksum-pool-sabotage.mjs',
+  sigil, '.sigil/deps/sigil-test/src']);
 const plantPass = await run('affected-plants', 'node', ['scripts/checksum-rule-sabotage.mjs',
   sigil, '.sigil/deps/sigil-test/src', '.sigil/deps/substratic/src', ...focused], 3_600_000);
 assert.equal(fs.readFileSync('package.sgl', 'utf8').includes("entry: '(crash main)"), true);
 assert.equal(spawnSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).stdout.trim(), '',
   'proof and sabotage restore all tracked files');
-if (proofPassed && plantPass && results.every(r => r.rc === 0 && !r.error && !r.expired))
+if (proofPassed && plantPass && results.every(r => r.rc === 0 && !r.error && !r.expired)) {
+  marker('ready-for-host', 'ALL-BROWSER-AUDIO-REGRESSION-POOL-PROOF-PLANT-GATES-PASS');
   marker('complete', 'ALL-GATES-PASS');
+}
 else {
   marker('failed', 'INCOMPLETE-OR-FAILED-GATES; DO-NOT-HOST');
   if (!plantPass) marker('proof-failed', 'AFFECTED-PLANTS-FAILED; TAKE-PROVISIONAL-HOST-DOWN');
