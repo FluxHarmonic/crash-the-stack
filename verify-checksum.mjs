@@ -189,25 +189,36 @@ try {
   }
   async function measureLayout() {
     // Hand-derived screen positions, independent of the game's hit helper.
-    const base = await point(100, 254), pile = await point(256, 280);
-    const pileBottom = await point(312, 356), target = await point(256, 356);
-    const fieldBottom = await point(0, 400), fieldTop = await point(0, 0);
-    const viewport = await js('({width:innerWidth,height:innerHeight})');
-    const scale = (fieldBottom.y - fieldTop.y) / 400;
-    const evidence = { viewport, dock: DOCK, scale,
+    // Read one DOM snapshot. CSS-to-backing ratios can differ by axis;
+    // integer backing dimensions must not be mistaken for a tiny target.
+    const snapshot = await js(`(() => {
+      const c=document.getElementById('stage'), r=c.getBoundingClientRect();
+      const s=Math.min(c.width/640,c.height/400);
+      const ox=(c.width-640*s)/2, oy=(c.height-400*s)/2;
+      const p=(x,y)=>({x:r.left+(ox+x*s)*r.width/c.width,
+        y:r.top+(oy+y*s)*r.height/c.height});
+      const x=${DOCK === 'right' ? 440 : 256};
+      return {viewport:{width:innerWidth,height:innerHeight},
+        canvas:{width:c.width,height:c.height,cssWidth:r.width,cssHeight:r.height},
+        scaleX:s*r.width/c.width,scaleY:s*r.height/c.height,
+        base:p(100,254),pile:p(x,280),pileBottom:p(x+56,356),
+        target:p(x,356),fieldBottom:p(0,400)};
+    })()`);
+    const { viewport, canvas, scaleX, scaleY, base, pile, pileBottom, target, fieldBottom } = snapshot;
+    const evidence = { viewport, canvas, dock: DOCK, scale: scaleY, scaleX, scaleY,
       pyramidToPilesCss: pile.y - base.y,
       pilesToPlayfieldEdgeCss: fieldBottom.y - pileBottom.y,
       pilesToScreenEdgeCss: viewport.height - pileBottom.y,
       targetCss: { width: pileBottom.x - target.x, height: target.y - pile.y },
-      exposedIndexCss: 26 * scale, meterCss: { width: 200 * scale, height: 18 * scale },
+      exposedIndexCss: 26 * scaleY, meterCss: { width: 200 * scaleX, height: 18 * scaleY },
       meterPlacement: 'under the piles; shared 640x400 stage preserves positions on rotation' };
-    assert.ok(evidence.pyramidToPilesCss >= 24 * scale - 0.01, 'clear lower pyramid gap');
-    assert.ok(evidence.pilesToPlayfieldEdgeCss >= 40 * scale - 0.01, 'bottom meter lane');
-    assert.ok(evidence.pilesToScreenEdgeCss >= evidence.pilesToPlayfieldEdgeCss - 0.01);
-    assert.ok(Math.abs(evidence.targetCss.width - 56 * scale) < 0.01);
-    assert.ok(Math.abs(evidence.targetCss.height - 76 * scale) < 0.01);
     console.log('LAYOUT-DIAGNOSTIC:', JSON.stringify(evidence));
     if (SHOT) fs.writeFileSync(SHOT.replace(/\.png$/, '') + '-layout.json', JSON.stringify(evidence, null, 2));
+    assert.ok(evidence.pyramidToPilesCss >= 24 * scaleY - 0.01, 'clear lower pyramid gap');
+    assert.ok(evidence.pilesToPlayfieldEdgeCss >= 40 * scaleY - 0.01, 'bottom meter lane');
+    assert.ok(evidence.pilesToScreenEdgeCss >= evidence.pilesToPlayfieldEdgeCss - 0.01);
+    assert.ok(Math.abs(evidence.targetCss.width - 56 * scaleX) < 0.01);
+    assert.ok(Math.abs(evidence.targetCss.height - 76 * scaleY) < 0.01);
   }
   const dealPattern = /^crash: checksum deal (\d+) (\([\d\s]+\)) (\([\d\s]+\))$/;
   const readyPattern = /^crash: checksum ready (\d+) ms ([\d.eE+-]+)$/;
@@ -286,7 +297,9 @@ try {
   }
   await key('ArrowUp');
   await wait(/^crash: boot done /, mark, 40_000);
-  await wait(/^crash: title settled /, mark, 15_000);
+  // This cosmetic animation shares the boot allowance. Actual archive
+  // starts still require <=2000 ms, including the trusted delay control.
+  await wait(/^crash: title settled /, mark, 40_000);
   mark = lines.length; await key('ArrowDown'); await key('Enter');
   const free = await wait(/^crash: menu free (.+)$/, mark);
   const ids = free.match[1].split(' ').filter((_, index) => index % 3 === 0).map(id => id.split('=')[0]);
