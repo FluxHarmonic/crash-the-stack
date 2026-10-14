@@ -186,7 +186,7 @@ const cases = [
     'ICE cuts undo history; temporary locks cannot cause an immediate loss'],
   [menuPath, "'free-checksum \"CHECKSUM\" 'new-board 'version 'back",
     "'free-checksum \"CHECKSUM\" 'version 'new-board 'back",
-    'CHECKSUM (Pyramid) tile opens its own screen and NEW BOARD selects CHECKSUM'],
+    'CHECKSUM tile opens its own screen and NEW BOARD selects CHECKSUM'],
   [menuPath, "((free-checksum) 'checksum)", "((free-checksum) 'stack)",
     "CHECKSUM's version stays independent and Back returns to its kept tile"],
 ];

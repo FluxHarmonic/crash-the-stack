@@ -222,7 +222,7 @@ try {
   mark = lines.length; await key('Enter');
   await wait(/^crash: menu free-checksum /, mark);
   mark = lines.length; await key('Enter'); await wait(/^crash: checksum open clean /, mark);
-  passed('menu', 'FREE PLAY -> CHECKSUM (Pyramid) -> NEW BOARD, CLASSIC default');
+  passed('menu', 'FREE PLAY -> CHECKSUM -> NEW BOARD, CLASSIC default');
 
   let deal, verdict, dealMark;
   for (const seed of [2, 1, 3, 4, 5, 6, 7, 8]) {
