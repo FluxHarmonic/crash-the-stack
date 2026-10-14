@@ -29,7 +29,8 @@ if [ "${CHECKSUM_PROBE_EMIT_ONLY:-0}" = 1 ]; then
 fi
 test -f "$sdk/include/sigil/sigil.h"
 nice -n 19 timeout 180 guix shell gcc-toolchain -- \
-  gcc -std=c99 -O2 -I"$sdk/include" -c "$out/pool.c" -o "$out/pool.o" \
+  gcc -std=c99 -O2 -I"$sdk/include" -I"$sdk/src" \
+  -c "$out/pool.c" -o "$out/pool.o" \
   > "$out/compile.log" 2>&1
 stat -c '%n %s bytes' "$out/pool.o"
 echo 'PROBE-COMPLETE: single native pool module compiled; full web gate still required'
