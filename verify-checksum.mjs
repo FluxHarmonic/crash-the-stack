@@ -416,6 +416,27 @@ try {
   const fresh = await startArchive(() => key('Enter'));
   assert.notEqual(fresh.seed, deal.seed, 'win default starts another seed');
   const audio = await wait(/^crash: checksum deal-audio underruns (\d+) source (\d+)$/, mark, 15_000);
+  // Tune-open stall protection pre-rolls the cue ring beyond its ordinary
+  // pump target. An instant board can precede that queue draining. Keep the
+  // full health trace running and require a bounded, sustained return to
+  // normal depths; the separate first-playable limit remains 2000 ms.
+  const queueSettle = await js(`(async () => {
+    const trace = window.__checksumAudioTrace;
+    const started = performance.now(), deadline = started + 2000;
+    let normalSince = null;
+    while (performance.now() < deadline) {
+      trace.record();
+      const normal = trace.finalSinks.length > 0 && trace.finalSinks.every(s =>
+        s.depth <= (s.capacity === 65536 ? 12288 : 16384));
+      const now = performance.now();
+      if (!normal) normalSince = null;
+      else if (normalSince === null) normalSince = now;
+      if (normalSince !== null && now - normalSince >= 300)
+        return { settled: true, elapsedMs: now - started, stableMs: now - normalSince };
+      await new Promise(resolve => setTimeout(resolve, 75));
+    }
+    return { settled: false, elapsedMs: performance.now() - started, stableMs: 0 };
+  })()`);
   const audioTrace = await js(`(() => {
     const trace = window.__checksumAudioTrace;
     clearInterval(trace.timer); trace.observer.disconnect();
@@ -425,9 +446,12 @@ try {
       worstLongTask: trace.worstLongTask };
   })()`);
   console.log('AUDIO-DIAGNOSTIC:', JSON.stringify(audioTrace));
+  console.log('AUDIO-SETTLE-DIAGNOSTIC:', JSON.stringify(queueSettle));
   await send('Emulation.setCPUThrottlingRate', { rate: 1 });
   currentThrottle = 1;
   const health = requireHealthyDealAudio(audioTrace);
+  assert.equal(queueSettle.settled, true,
+    'audio queues must return to ordinary depths for 300 ms within the 2000 ms settle window');
   for (const sink of audioTrace.finalSinks)
     assert.ok(sink.depth <= (sink.capacity === 65536 ? 12288 : 16384),
       `normal audio targets stay in force: ${JSON.stringify(sink)}`);
