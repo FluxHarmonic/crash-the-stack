@@ -1,6 +1,6 @@
 // plausible-check.mjs - the Plausible Analytics tag, for the site gates of
-// the three Flux Harmonic game sites (the same file in Phantom Burn,
-// Harkfell and Crash The Stack; each passes its own site's script ID).
+// the four Flux Harmonic game sites (the same file in Phantom Burn,
+// Harkfell, Crash The Stack and Signal Overdrive; each passes its own site's script ID).
 //
 //   import { auditTree, plausibleStub, PRIVACY } from "./plausible-check.mjs";
 //   node scripts/plausible-check.mjs --live ID    (needs the internet)
@@ -22,7 +22,7 @@
 // response then takes Chrome's real network path, so COEP judges it: a
 // response made up in CDP (Fetch.fulfillRequest) is NOT judged, and a stub
 // without CORP loaded on a require-corp page that way (measured 2026-09-30).
-//   mode "stub"    the script, for the three known IDs (any other ID is a
+//   mode "stub"    the script, for the four known IDs (any other ID is a
 //                  404, as plausible.io answers), with plausible.io's own
 //                  headers (measured 2026-09-30: CORP cross-origin, ACAO *);
 //                  an event POST answers 202 with ACAO *, and is recorded
@@ -70,6 +70,7 @@ export const SITES = {
   "pa-5iTMFNFjYxMn3THin-cwJ": "crashthestack.com",
   "pa-N4Ba55rWhDJmIzpZceg0x": "harkfell.com",
   "pa-GxdOlotIbYY0LzO4WRsIV": "phantomburn.net",
+  "pa-GCzY0KZPnFuB1DEsbPead": "signaloverdrive.net",
 };
 export const PRIVACY = "Privacy-friendly analytics by Plausible: no cookies, no personal data.";
 export const EVENT_URL = "https://plausible.io/api/event";
